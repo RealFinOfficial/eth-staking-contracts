@@ -58,6 +58,7 @@ contract StakingPool is Ownable, ReentrancyGuard {
     event RewardsAdded(uint256 amount, uint256 totalRewards);
     event StakeUpdated(address indexed user, uint256 amount, uint256 accumulatedWeight);
     event GlobalUpdated(uint256 totalStaked, uint256 totalAccumulatedWeight, uint256 totalForfeitedWeight, uint256 timestamp);
+    event PoolInitialized(address indexed stakingToken, address indexed rewardToken, uint256 activationEpoch, uint256 endEpoch);
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -78,6 +79,8 @@ contract StakingPool is Ownable, ReentrancyGuard {
         endEpoch = _endEpoch;
         poolDuration = _endEpoch - _activationEpoch;
         globalLastUpdateTime = _activationEpoch;
+
+        emit PoolInitialized(_stakingToken, _rewardToken, _activationEpoch, _endEpoch);
     }
 
     // ──────────────────────── Internal helpers ─────────────────
