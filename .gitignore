@@ -5,4 +5,3 @@ typechain-types/
 coverage/
 coverage.json
 .env
-public-release/
