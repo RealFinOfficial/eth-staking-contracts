@@ -118,6 +118,7 @@ contract StakingPool is Ownable, ReentrancyGuard {
     }
 
     function _calculatePenalty(uint256 amount) internal view returns (uint256) {
+        if (owner() == address(0)) return 0;
         if (block.timestamp < activationEpoch) return 0;
         if (block.timestamp >= endEpoch) return 0;
         uint256 remaining = endEpoch - block.timestamp;
@@ -128,6 +129,7 @@ contract StakingPool is Ownable, ReentrancyGuard {
 
     /// @notice Stake tokens. Allowed any time before endEpoch.
     function stake(uint256 amount) external nonReentrant {
+        require(owner() != address(0), "Staking disabled");
         require(block.timestamp < endEpoch, "Pool has ended");
         require(amount > 0, "Amount must be > 0");
 
