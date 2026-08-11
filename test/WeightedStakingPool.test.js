@@ -42,6 +42,16 @@ describe("WeightedStakingPool", function () {
     return (opts.signer ?? weightSigner).signTypedData(domain, types, value);
   }
 
+  async function stakeSigned(user, amount, weight = BASE) {
+    const sig = await signWeight("Stake", user, amount, weight);
+    return staking.connect(user).stake(amount, weight, FAR_DEADLINE, sig);
+  }
+
+  async function withdrawSigned(user, amount, weight = BASE) {
+    const sig = await signWeight("Withdraw", user, amount, weight);
+    return staking.connect(user).withdraw(amount, weight, FAR_DEADLINE, sig);
+  }
+
   async function setupRewards(amount) {
     await rewardToken.approve(await staking.getAddress(), amount);
     await staking.addRewards(amount);
@@ -93,62 +103,58 @@ describe("WeightedStakingPool", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("Staking without signature (base weight)", function () {
-    it("accepts first stake with weight == BASE and empty signature", async function () {
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
-      const info = await staking.stakes(alice.address);
-      expect(info.amount).to.equal(TOKENS(100));
-      expect(info.weight).to.equal(BASE);
-      expect(await staking.totalWeightedStaked()).to.equal(TOKENS(100) * BASE);
-    });
-
-    it("rejects first stake with weight != BASE and empty signature", async function () {
+  describe("Signature is mandatory", function () {
+    it("rejects stake with empty signature, even at base weight", async function () {
       await expect(
-        staking.connect(alice).stake(TOKENS(100), 1500, 0, NO_SIG)
+        staking.connect(alice).stake(TOKENS(100), BASE, FAR_DEADLINE, NO_SIG)
       ).to.be.revertedWith("Signature required");
     });
 
-    it("keeps current weight on subsequent unsigned stakes (weight param ignored)", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), 1500);
-      await staking.connect(alice).stake(TOKENS(100), 1500, FAR_DEADLINE, sig);
+    it("allows unsigned withdraw as the only exception (permissionless exit)", async function () {
+      await stakeSigned(alice, TOKENS(100));
+      await staking.connect(alice).withdraw(TOKENS(50), 0, 0, NO_SIG);
+      expect((await staking.stakes(alice.address)).amount).to.equal(TOKENS(50));
+    });
 
-      // weight param is arbitrary and ignored when signature is empty
-      await staking.connect(alice).stake(TOKENS(50), 123456789, 0, NO_SIG);
-      const info = await staking.stakes(alice.address);
-      expect(info.amount).to.equal(TOKENS(150));
-      expect(info.weight).to.equal(1500n);
-      expect(await staking.totalWeightedStaked()).to.equal(TOKENS(150) * 1500n);
+    it("rejects updateWeight with empty signature, even at base weight", async function () {
+      await stakeSigned(alice, TOKENS(100), MAX);
+      await expect(
+        staking.connect(alice).updateWeight(BASE, FAR_DEADLINE, NO_SIG)
+      ).to.be.revertedWith("Signature required");
+    });
+
+    it("rejects base-weight stake with a wrong-signer signature", async function () {
+      const sig = await signWeight("Stake", alice, TOKENS(100), BASE, { signer: bob });
+      await expect(
+        staking.connect(alice).stake(TOKENS(100), BASE, FAR_DEADLINE, sig)
+      ).to.be.revertedWith("Invalid signature");
     });
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("Staking with signed weight", function () {
+  describe("Staking", function () {
+    it("accepts a signed base-weight stake", async function () {
+      await stakeSigned(alice, TOKENS(100));
+      const info = await staking.stakes(alice.address);
+      expect(info.amount).to.equal(TOKENS(100));
+      expect(info.weight).to.equal(BASE);
+      expect(await staking.totalWeightedStaked()).to.equal(TOKENS(100) * BASE);
+      expect(await staking.nonces(alice.address)).to.equal(1n);
+    });
+
     it("sets a boosted weight with a valid signature", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await expect(staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig))
+      await expect(stakeSigned(alice, TOKENS(100), MAX))
         .to.emit(staking, "WeightUpdated")
         .withArgs(alice.address, 0, MAX);
       expect((await staking.stakes(alice.address)).weight).to.equal(MAX);
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(100) * MAX);
-      expect(await staking.nonces(alice.address)).to.equal(1n);
     });
 
     it("replaces the old weight on a subsequent signed stake", async function () {
-      let sig = await signWeight("Stake", alice, TOKENS(100), 1500);
-      await staking.connect(alice).stake(TOKENS(100), 1500, FAR_DEADLINE, sig);
-
-      sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
-
+      await stakeSigned(alice, TOKENS(100), 1500n);
+      await stakeSigned(alice, TOKENS(100), MAX);
       expect((await staking.stakes(alice.address)).weight).to.equal(MAX);
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(200) * MAX);
-    });
-
-    it("rejects a signature from a non-signer", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), 1500, { signer: bob });
-      await expect(
-        staking.connect(alice).stake(TOKENS(100), 1500, FAR_DEADLINE, sig)
-      ).to.be.revertedWith("Invalid signature");
     });
 
     it("rejects a signature bound to a different amount", async function () {
@@ -193,63 +199,40 @@ describe("WeightedStakingPool", function () {
       ).to.be.revertedWith("Invalid weight");
     });
 
-    it("skips signature verification when weight == BASE", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), 1500);
-      await staking.connect(alice).stake(TOKENS(100), 1500, FAR_DEADLINE, sig);
-      // downgrade to base with a garbage signature — allowed, no verification
-      await staking.connect(alice).stake(TOKENS(10), BASE, 0, "0x01");
-      expect((await staking.stakes(alice.address)).weight).to.equal(BASE);
-      expect(await staking.nonces(alice.address)).to.equal(1n);
-    });
-
-    it("emits NonceUsed exactly when a nonce is consumed", async function () {
-      // unsigned base stake — no nonce consumed
-      await expect(staking.connect(alice).stake(TOKENS(10), BASE, 0, NO_SIG))
-        .to.not.emit(staking, "NonceUsed");
-
-      // signed boosted stake — nonce 0 consumed
-      let sig = await signWeight("Stake", alice, TOKENS(10), 1500);
-      await expect(staking.connect(alice).stake(TOKENS(10), 1500, FAR_DEADLINE, sig))
-        .to.emit(staking, "NonceUsed")
-        .withArgs(alice.address, 0n);
-
-      // base-weight stake with garbage signature — verification skipped, no nonce
-      await expect(staking.connect(alice).stake(TOKENS(10), BASE, 0, "0x01"))
-        .to.not.emit(staking, "NonceUsed");
-
-      // signed updateWeight — nonce 1 consumed (no Staked/Withdrawn here)
-      sig = await signWeight("UpdateWeight", alice, TOKENS(30), 1500);
-      await expect(staking.connect(alice).updateWeight(1500, FAR_DEADLINE, sig))
-        .to.emit(staking, "NonceUsed")
-        .withArgs(alice.address, 1n);
-
-      // unsigned withdraw — resets to base, no nonce
-      await expect(staking.connect(alice).withdraw(TOKENS(5), 0, 0, NO_SIG))
-        .to.not.emit(staking, "NonceUsed");
-
-      // signed withdraw — nonce 2 consumed
-      sig = await signWeight("Withdraw", alice, TOKENS(5), 1500);
-      await expect(staking.connect(alice).withdraw(TOKENS(5), 1500, FAR_DEADLINE, sig))
-        .to.emit(staking, "NonceUsed")
-        .withArgs(alice.address, 2n);
-
-      expect(await staking.nonces(alice.address)).to.equal(3n);
-    });
-
     it("does not accept a Withdraw-typed signature for stake", async function () {
       const sig = await signWeight("Withdraw", alice, TOKENS(100), 1500);
       await expect(
         staking.connect(alice).stake(TOKENS(100), 1500, FAR_DEADLINE, sig)
       ).to.be.revertedWith("Invalid signature");
     });
+
+    it("emits NonceUsed with the consumed nonce on every signed call", async function () {
+      await expect(stakeSigned(alice, TOKENS(10)))
+        .to.emit(staking, "NonceUsed")
+        .withArgs(alice.address, 0n);
+
+      await expect(stakeSigned(alice, TOKENS(10), 1500n))
+        .to.emit(staking, "NonceUsed")
+        .withArgs(alice.address, 1n);
+
+      const updSig = await signWeight("UpdateWeight", alice, TOKENS(20), MAX);
+      await expect(staking.connect(alice).updateWeight(MAX, FAR_DEADLINE, updSig))
+        .to.emit(staking, "NonceUsed")
+        .withArgs(alice.address, 2n);
+
+      await expect(withdrawSigned(alice, TOKENS(5)))
+        .to.emit(staking, "NonceUsed")
+        .withArgs(alice.address, 3n);
+
+      expect(await staking.nonces(alice.address)).to.equal(4n);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
   describe("Weighted reward distribution", function () {
     it("gives a x2 staker twice the reward of a x1 staker (equal amounts)", async function () {
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
-      const sig = await signWeight("Stake", bob, TOKENS(100), MAX);
-      await staking.connect(bob).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
+      await stakeSigned(alice, TOKENS(100), BASE);
+      await stakeSigned(bob, TOKENS(100), MAX);
 
       await setupRewards(TOKENS(3000));
       await time.increaseTo(endEpoch + 1);
@@ -257,17 +240,15 @@ describe("WeightedStakingPool", function () {
       await staking.connect(alice).unstake();
       await staking.connect(bob).unstake();
 
-      const aliceReward = await staking.claimedRewards(alice.address);
-      const bobReward = await staking.claimedRewards(bob.address);
-      expect(aliceReward).to.be.closeTo(TOKENS(1000), TOKENS(1));
-      expect(bobReward).to.be.closeTo(TOKENS(2000), TOKENS(1));
+      expect(await staking.claimedRewards(alice.address)).to.be.closeTo(TOKENS(1000), TOKENS(1));
+      expect(await staking.claimedRewards(bob.address)).to.be.closeTo(TOKENS(2000), TOKENS(1));
     });
 
     it("checkpoints accrual at the old weight when the weight changes mid-period", async function () {
       // alice: x1 for first half, x2 for second half => 1.5x average
       // bob:   x1 for the whole period
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
-      await staking.connect(bob).stake(TOKENS(100), BASE, 0, NO_SIG);
+      await stakeSigned(alice, TOKENS(100), BASE);
+      await stakeSigned(bob, TOKENS(100), BASE);
 
       await time.increaseTo(activationEpoch + POOL_DURATION / 2);
       const sig = await signWeight("UpdateWeight", alice, TOKENS(100), MAX);
@@ -287,65 +268,64 @@ describe("WeightedStakingPool", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Withdraw", function () {
-    it("resets the weight to BASE on partial unsigned withdraw", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(200), 1500);
-      await staking.connect(alice).stake(TOKENS(200), 1500, FAR_DEADLINE, sig);
+    it("resets the weight to BASE on partial unsigned withdraw (weight param ignored)", async function () {
+      await stakeSigned(alice, TOKENS(200), 1500n);
 
-      await expect(staking.connect(alice).withdraw(TOKENS(50), 0, 0, NO_SIG))
+      await expect(staking.connect(alice).withdraw(TOKENS(50), 123456789, 0, NO_SIG))
         .to.emit(staking, "WeightUpdated")
         .withArgs(alice.address, 1500n, BASE);
       const info = await staking.stakes(alice.address);
       expect(info.amount).to.equal(TOKENS(150));
       expect(info.weight).to.equal(BASE);
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(150) * BASE);
+      expect(await staking.nonces(alice.address)).to.equal(1n); // no nonce consumed
     });
 
     it("cannot keep a boosted weight by withdrawing most of the stake unsigned", async function () {
       // attested x2 for 1000 tokens, then free pre-activation withdraw of 999
-      const sig = await signWeight("Stake", alice, TOKENS(1000), MAX);
-      await staking.connect(alice).stake(TOKENS(1000), MAX, FAR_DEADLINE, sig);
+      await stakeSigned(alice, TOKENS(1000), MAX);
 
       await staking.connect(alice).withdraw(TOKENS(999), 0, 0, NO_SIG);
       expect((await staking.stakes(alice.address)).weight).to.equal(BASE);
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(1) * BASE);
     });
 
-    it("applies a signed new weight on withdraw", async function () {
-      const stakeSig = await signWeight("Stake", alice, TOKENS(200), MAX);
-      await staking.connect(alice).stake(TOKENS(200), MAX, FAR_DEADLINE, stakeSig);
+    it("applies the signed weight to the remaining stake", async function () {
+      await stakeSigned(alice, TOKENS(200), MAX);
 
-      const wSig = await signWeight("Withdraw", alice, TOKENS(100), 1500);
-      await staking.connect(alice).withdraw(TOKENS(100), 1500, FAR_DEADLINE, wSig);
-
+      await withdrawSigned(alice, TOKENS(100), 1500n);
       const info = await staking.stakes(alice.address);
       expect(info.amount).to.equal(TOKENS(100));
       expect(info.weight).to.equal(1500n);
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(100) * 1500n);
     });
 
-    it("resets the weight on full withdraw; next stake is a first stake again", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
+    it("rejects a withdraw signature bound to a different amount", async function () {
+      await stakeSigned(alice, TOKENS(200), MAX);
+      const sig = await signWeight("Withdraw", alice, TOKENS(100), BASE);
+      await expect(
+        staking.connect(alice).withdraw(TOKENS(150), BASE, FAR_DEADLINE, sig)
+      ).to.be.revertedWith("Invalid signature");
+    });
 
-      await staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG);
+    it("resets the weight on full withdraw; a new stake sets it fresh", async function () {
+      await stakeSigned(alice, TOKENS(100), MAX);
+
+      await withdrawSigned(alice, TOKENS(100), BASE);
       expect((await staking.stakes(alice.address)).weight).to.equal(0n);
       expect(await staking.totalWeightedStaked()).to.equal(0n);
 
-      // cannot reclaim the boosted weight without a fresh signature
-      await expect(
-        staking.connect(alice).stake(TOKENS(1), MAX, 0, NO_SIG)
-      ).to.be.revertedWith("Signature required");
-      await staking.connect(alice).stake(TOKENS(1), BASE, 0, NO_SIG);
-      expect((await staking.stakes(alice.address)).weight).to.equal(BASE);
+      await stakeSigned(alice, TOKENS(50), 1500n);
+      expect((await staking.stakes(alice.address)).weight).to.equal(1500n);
+      expect(await staking.totalWeightedStaked()).to.equal(TOKENS(50) * 1500n);
     });
 
     it("still applies penalty and weight forfeiture during the active period", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
+      await stakeSigned(alice, TOKENS(100), MAX);
 
       await time.increaseTo(activationEpoch + POOL_DURATION / 2);
       const balBefore = await token.balanceOf(alice.address);
-      await staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG);
+      await withdrawSigned(alice, TOKENS(100), BASE);
       const received = (await token.balanceOf(alice.address)) - balBefore;
 
       // ~25% penalty at half-time
@@ -358,7 +338,7 @@ describe("WeightedStakingPool", function () {
   // ─────────────────────────────────────────────────────────────
   describe("updateWeight", function () {
     it("updates the weight with a valid signature and no token movement", async function () {
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
+      await stakeSigned(alice, TOKENS(100), BASE);
       const sig = await signWeight("UpdateWeight", alice, TOKENS(100), 1500);
       await expect(staking.connect(alice).updateWeight(1500, FAR_DEADLINE, sig))
         .to.emit(staking, "WeightUpdated")
@@ -366,26 +346,15 @@ describe("WeightedStakingPool", function () {
       expect(await staking.totalWeightedStaked()).to.equal(TOKENS(100) * 1500n);
     });
 
-    it("allows unsigned downgrade to BASE", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
-      await staking.connect(alice).updateWeight(BASE, 0, NO_SIG);
-      expect((await staking.stakes(alice.address)).weight).to.equal(BASE);
-    });
-
-    it("reverts without a stake or without a signature for boosted weight", async function () {
+    it("reverts without a stake", async function () {
+      const sig = await signWeight("UpdateWeight", alice, 0, 1500);
       await expect(
-        staking.connect(alice).updateWeight(BASE, 0, NO_SIG)
+        staking.connect(alice).updateWeight(1500, FAR_DEADLINE, sig)
       ).to.be.revertedWith("Nothing staked");
-
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
-      await expect(
-        staking.connect(alice).updateWeight(1500, 0, NO_SIG)
-      ).to.be.revertedWith("Signature required");
     });
 
     it("binds the signature to the user's current staked amount", async function () {
-      await staking.connect(alice).stake(TOKENS(100), BASE, 0, NO_SIG);
+      await stakeSigned(alice, TOKENS(100), BASE);
       const sig = await signWeight("UpdateWeight", alice, TOKENS(999), 1500);
       await expect(
         staking.connect(alice).updateWeight(1500, FAR_DEADLINE, sig)
@@ -420,10 +389,9 @@ describe("WeightedStakingPool", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("Unstake and emergency unstake", function () {
+  describe("Unstake and emergency unstake (no signature needed)", function () {
     it("clears weight state on unstake", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
+      await stakeSigned(alice, TOKENS(100), MAX);
       await setupRewards(TOKENS(1000));
       await time.increaseTo(endEpoch + 1);
 
@@ -436,8 +404,7 @@ describe("WeightedStakingPool", function () {
     });
 
     it("clears weight state on emergencyUnstake and forfeits rewards", async function () {
-      const sig = await signWeight("Stake", alice, TOKENS(100), MAX);
-      await staking.connect(alice).stake(TOKENS(100), MAX, FAR_DEADLINE, sig);
+      await stakeSigned(alice, TOKENS(100), MAX);
       await setupRewards(TOKENS(1000));
       await time.increaseTo(endEpoch + 1);
 

@@ -16,16 +16,16 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  *  Weight multiplier:
  *    - Each user has a single multiplier for their entire stake, in BASE_WEIGHT units
  *      (1000 = x1.0, 2000 = x2.0). Effective weight accrues as amount * multiplier * seconds.
- *    - A multiplier above BASE_WEIGHT requires an EIP-712 signature from `signer` over
- *      (user, amount, weight, nonce, deadline). weight == BASE_WEIGHT never needs a signature.
- *    - signature == 0x on stake means "no weight change" (weight param is ignored),
- *      except on a user's first stake where the weight param is always read and must
- *      be BASE_WEIGHT when unsigned.
- *    - signature == 0x on withdraw resets the multiplier to BASE_WEIGHT — the boost is
- *      tied to the attested amount, so reducing the stake without a fresh attestation
- *      drops the boost.
+ *    - Every stake and updateWeight call must carry a weight in
+ *      [BASE_WEIGHT, MAX_WEIGHT] and a valid EIP-712 attestation from `signer` over
+ *      (user, amount, weight, nonce, deadline). The attested weight becomes the
+ *      user's multiplier from that point on.
+ *    - withdraw is always possible without a signature (permissionless early exit),
+ *      but then resets the multiplier to BASE_WEIGHT — the boost was attested for
+ *      the pre-withdraw amount. A signed withdraw sets the attested weight instead.
  *    - On every multiplier change the accrued weight is checkpointed at the old
  *      multiplier before the new one takes effect.
+ *    - unstake() and emergencyUnstake() (after endEpoch) need no signature.
  *
  *  Lifecycle (same as StakingPool):
  *    1. Deploy with activationEpoch & endEpoch — staking possible immediately
@@ -166,7 +166,8 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         return (amount * remaining) / (poolDuration * 2);
     }
 
-    /// @dev Verifies an EIP-712 weight attestation and consumes the user's nonce.
+    /// @dev Validates the weight bounds, verifies the EIP-712 attestation and
+    ///      consumes the user's nonce. Required for every stake/withdraw/updateWeight.
     function _verifyWeightSignature(
         bytes32 typehash,
         address user,
@@ -175,6 +176,8 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         uint256 deadline,
         bytes calldata signature
     ) internal {
+        require(weight >= BASE_WEIGHT && weight <= MAX_WEIGHT, "Invalid weight");
+        require(signature.length != 0, "Signature required");
         require(block.timestamp <= deadline, "Signature expired");
         uint256 nonce = nonces[user]++;
         bytes32 digest = _hashTypedDataV4(
@@ -184,33 +187,6 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         // Emitted exactly when a nonce is consumed, across stake/withdraw/updateWeight —
         // lets the backend track the next nonce from events instead of eth_call.
         emit NonceUsed(user, nonce);
-    }
-
-    /// @dev Resolves the multiplier that applies after this call.
-    ///      - empty signature: keep current weight ("no change"); on first stake the
-    ///        weight param is read and must equal BASE_WEIGHT
-    ///      - weight == BASE_WEIGHT: no signature verification needed
-    ///      - otherwise: valid signer attestation over (user, amount, weight, nonce, deadline)
-    function _resolveWeight(
-        bytes32 typehash,
-        address user,
-        uint256 amount,
-        uint256 weight,
-        uint256 deadline,
-        bytes calldata signature
-    ) internal returns (uint256) {
-        uint256 current = stakes[user].weight;
-        if (signature.length == 0) {
-            if (current == 0) {
-                require(weight == BASE_WEIGHT, "Signature required");
-                return BASE_WEIGHT;
-            }
-            return current;
-        }
-        require(weight >= BASE_WEIGHT && weight <= MAX_WEIGHT, "Invalid weight");
-        if (weight == BASE_WEIGHT) return BASE_WEIGHT;
-        _verifyWeightSignature(typehash, user, amount, weight, deadline, signature);
-        return weight;
     }
 
     /// @dev Applies a new multiplier. Caller must have checkpointed accruals
@@ -230,10 +206,9 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
 
     /// @notice Stake tokens. Allowed any time before endEpoch.
     /// @param amount   Tokens to stake.
-    /// @param weight   Multiplier in BASE_WEIGHT units. Ignored when signature is empty,
-    ///                 except on first stake (must then be BASE_WEIGHT).
-    /// @param deadline Signature expiry timestamp. Ignored when signature is empty.
-    /// @param signature EIP-712 signer attestation, or 0x for no weight change.
+    /// @param weight   Multiplier in BASE_WEIGHT units, becomes the user's multiplier.
+    /// @param deadline Signature expiry timestamp.
+    /// @param signature Mandatory EIP-712 signer attestation over (user, amount, weight, nonce, deadline).
     function stake(uint256 amount, uint256 weight, uint256 deadline, bytes calldata signature)
         external
         nonReentrant
@@ -245,25 +220,25 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         _updateGlobal();
         _updateUser(msg.sender);
 
-        uint256 newWeight = _resolveWeight(STAKE_TYPEHASH, msg.sender, amount, weight, deadline, signature);
-        _applyWeight(msg.sender, newWeight);
+        _verifyWeightSignature(STAKE_TYPEHASH, msg.sender, amount, weight, deadline, signature);
+        _applyWeight(msg.sender, weight);
 
         stakingToken.safeTransferFrom(msg.sender, address(this), amount);
 
         stakes[msg.sender].amount += amount;
         totalStaked += amount;
-        totalWeightedStaked += amount * newWeight;
+        totalWeightedStaked += amount * weight;
 
-        emit Staked(msg.sender, amount, newWeight, totalStaked);
+        emit Staked(msg.sender, amount, weight, totalStaked);
         emit StakeUpdated(msg.sender, stakes[msg.sender].amount, stakes[msg.sender].accumulatedWeight);
         emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
     }
 
     /// @notice Withdraw before endEpoch. Before activation: free. During active: forfeit weight + penalty.
     /// @param amount   Tokens to withdraw.
-    /// @param weight   New multiplier for the remaining stake (signed), ignored when signature is empty.
+    /// @param weight   New multiplier for the remaining stake. Ignored when signature is empty.
     /// @param deadline Signature expiry timestamp. Ignored when signature is empty.
-    /// @param signature EIP-712 signer attestation; 0x resets the multiplier to BASE_WEIGHT.
+    /// @param signature EIP-712 signer attestation; 0x is allowed and resets the multiplier to BASE_WEIGHT.
     function withdraw(uint256 amount, uint256 weight, uint256 deadline, bytes calldata signature)
         external
         nonReentrant
@@ -278,11 +253,16 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         require(info.amount > 0, "Nothing to withdraw");
         require(amount <= info.amount, "Amount exceeds stake");
 
-        // Unsigned withdraw resets the boost: the multiplier was attested for the
-        // pre-withdraw amount, so keeping it on a smaller stake needs a fresh signature.
-        uint256 newWeight = signature.length == 0
-            ? BASE_WEIGHT
-            : _resolveWeight(WITHDRAW_TYPEHASH, msg.sender, amount, weight, deadline, signature);
+        // Unsigned withdraw is always possible (users can exit without the backend),
+        // but resets the boost: the multiplier was attested for the pre-withdraw amount,
+        // so keeping it on a smaller stake needs a fresh signature.
+        uint256 newWeight;
+        if (signature.length == 0) {
+            newWeight = BASE_WEIGHT;
+        } else {
+            _verifyWeightSignature(WITHDRAW_TYPEHASH, msg.sender, amount, weight, deadline, signature);
+            newWeight = weight;
+        }
         _applyWeight(msg.sender, newWeight);
 
         uint256 forfeitedWeight = 0;
@@ -330,14 +310,8 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         _updateGlobal();
         _updateUser(msg.sender);
 
-        uint256 newWeight;
-        if (signature.length == 0) {
-            require(weight == BASE_WEIGHT, "Signature required");
-            newWeight = BASE_WEIGHT;
-        } else {
-            newWeight = _resolveWeight(UPDATE_WEIGHT_TYPEHASH, msg.sender, info.amount, weight, deadline, signature);
-        }
-        _applyWeight(msg.sender, newWeight);
+        _verifyWeightSignature(UPDATE_WEIGHT_TYPEHASH, msg.sender, info.amount, weight, deadline, signature);
+        _applyWeight(msg.sender, weight);
 
         emit StakeUpdated(msg.sender, info.amount, info.accumulatedWeight);
         emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
