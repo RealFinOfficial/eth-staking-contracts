@@ -148,6 +148,12 @@
         {
           "indexed": false,
           "internalType": "uint256",
+          "name": "totalWeightedStaked",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
           "name": "totalAccumulatedWeight",
           "type": "uint256"
         },
@@ -155,6 +161,18 @@
           "indexed": false,
           "internalType": "uint256",
           "name": "totalForfeitedWeight",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "totalPenalized",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "totalRewardsClaimed",
           "type": "uint256"
         },
         {
@@ -292,7 +310,19 @@
         {
           "indexed": false,
           "internalType": "uint256",
+          "name": "weight",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
           "name": "accumulatedWeight",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "timestamp",
           "type": "uint256"
         }
       ],
@@ -349,6 +379,12 @@
           "indexed": false,
           "internalType": "uint256",
           "name": "reward",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "claimedRewards",
           "type": "uint256"
         },
         {
@@ -1083,4 +1119,4 @@
       "stateMutability": "nonpayable",
       "type": "function"
     }
-  ]
+]

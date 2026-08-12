@@ -87,14 +87,22 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
 
     event Staked(address indexed user, uint256 amount, uint256 weight, uint256 totalStaked);
     event Withdrawn(address indexed user, uint256 amount, uint256 forfeitedWeight, uint256 penalty);
-    event Unstaked(address indexed user, uint256 amount, uint256 reward, uint256 userWeight, uint256 totalEffectiveWeight);
+    event Unstaked(address indexed user, uint256 amount, uint256 reward, uint256 claimedRewards, uint256 userWeight, uint256 totalEffectiveWeight);
     event EmergencyUnstaked(address indexed user, uint256 amount);
     event RewardsAdded(uint256 amount, uint256 totalRewards);
-    event StakeUpdated(address indexed user, uint256 amount, uint256 accumulatedWeight);
+    event StakeUpdated(address indexed user, uint256 amount, uint256 weight, uint256 accumulatedWeight, uint256 timestamp);
     event WeightUpdated(address indexed user, uint256 oldWeight, uint256 newWeight);
     event NonceUsed(address indexed user, uint256 nonce);
     event SignerChanged(address indexed oldSigner, address indexed newSigner);
-    event GlobalUpdated(uint256 totalStaked, uint256 totalAccumulatedWeight, uint256 totalForfeitedWeight, uint256 timestamp);
+    event GlobalUpdated(
+        uint256 totalStaked,
+        uint256 totalWeightedStaked,
+        uint256 totalAccumulatedWeight,
+        uint256 totalForfeitedWeight,
+        uint256 totalPenalized,
+        uint256 totalRewardsClaimed,
+        uint256 timestamp
+    );
     event PoolInitialized(address indexed stakingToken, address indexed rewardToken, uint256 activationEpoch, uint256 endEpoch);
 
     // ──────────────────────── Constructor ──────────────────────
@@ -230,8 +238,16 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         totalWeightedStaked += amount * weight;
 
         emit Staked(msg.sender, amount, weight, totalStaked);
-        emit StakeUpdated(msg.sender, stakes[msg.sender].amount, stakes[msg.sender].accumulatedWeight);
-        emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
+        emit StakeUpdated(msg.sender, stakes[msg.sender].amount, stakes[msg.sender].weight, stakes[msg.sender].accumulatedWeight, _effectiveTime());
+        emit GlobalUpdated(
+            totalStaked,
+            totalWeightedStaked,
+            totalAccumulatedWeight,
+            totalForfeitedWeight,
+            totalPenalized,
+            totalRewardsClaimed,
+            _effectiveTime()
+        );
     }
 
     /// @notice Withdraw before endEpoch. Before activation: free. During active: forfeit weight + penalty.
@@ -293,8 +309,16 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         stakingToken.safeTransfer(msg.sender, userReceives);
 
         emit Withdrawn(msg.sender, amount, forfeitedWeight, penalty);
-        emit StakeUpdated(msg.sender, info.amount, info.accumulatedWeight);
-        emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
+        emit StakeUpdated(msg.sender, info.amount, info.weight, info.accumulatedWeight, _effectiveTime());
+        emit GlobalUpdated(
+            totalStaked,
+            totalWeightedStaked,
+            totalAccumulatedWeight,
+            totalForfeitedWeight,
+            totalPenalized,
+            totalRewardsClaimed,
+            _effectiveTime()
+        );
     }
 
     /// @notice Update the caller's weight multiplier without moving tokens.
@@ -313,8 +337,16 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         _verifyWeightSignature(UPDATE_WEIGHT_TYPEHASH, msg.sender, info.amount, weight, deadline, signature);
         _applyWeight(msg.sender, weight);
 
-        emit StakeUpdated(msg.sender, info.amount, info.accumulatedWeight);
-        emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
+        emit StakeUpdated(msg.sender, info.amount, info.weight, info.accumulatedWeight, _effectiveTime());
+        emit GlobalUpdated(
+            totalStaked,
+            totalWeightedStaked,
+            totalAccumulatedWeight,
+            totalForfeitedWeight,
+            totalPenalized,
+            totalRewardsClaimed,
+            _effectiveTime()
+        );
     }
 
     /// @notice Unstake after endEpoch. Returns full stake + proportional USDC rewards.
@@ -348,9 +380,17 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
             rewardToken.safeTransfer(msg.sender, userReward);
         }
 
-        emit Unstaked(msg.sender, amount, userReward, userWeight, totalEffective);
-        emit StakeUpdated(msg.sender, 0, 0);
-        emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
+        emit Unstaked(msg.sender, amount, userReward, claimedRewards[msg.sender], userWeight, totalEffective);
+        emit StakeUpdated(msg.sender, 0, 0, 0, _effectiveTime());
+        emit GlobalUpdated(
+            totalStaked,
+            totalWeightedStaked,
+            totalAccumulatedWeight,
+            totalForfeitedWeight,
+            totalPenalized,
+            totalRewardsClaimed,
+            _effectiveTime()
+        );
     }
 
     /// @notice Emergency unstake after endEpoch. Returns full stake but forfeits all rewards.
@@ -374,8 +414,16 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         stakingToken.safeTransfer(msg.sender, amount);
 
         emit EmergencyUnstaked(msg.sender, amount);
-        emit StakeUpdated(msg.sender, 0, 0);
-        emit GlobalUpdated(totalStaked, totalAccumulatedWeight, totalForfeitedWeight, _effectiveTime());
+        emit StakeUpdated(msg.sender, 0, 0, 0, _effectiveTime());
+        emit GlobalUpdated(
+            totalStaked,
+            totalWeightedStaked,
+            totalAccumulatedWeight,
+            totalForfeitedWeight,
+            totalPenalized,
+            totalRewardsClaimed,
+            _effectiveTime()
+        );
     }
 
     // ──────────────────────── Owner functions ──────────────────

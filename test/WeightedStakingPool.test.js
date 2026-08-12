@@ -415,4 +415,93 @@ describe("WeightedStakingPool", function () {
       expect(await rewardToken.balanceOf(alice.address)).to.equal(0n);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Event checkpoints (offchain indexing)", function () {
+    // StakeUpdated(user, amount, weight, accumulatedWeight, timestamp) and
+    // GlobalUpdated(totalStaked, totalWeightedStaked, totalAccumulatedWeight,
+    //               totalForfeitedWeight, totalPenalized, totalRewardsClaimed, timestamp)
+    // must be full state overwrites; timestamps are clamped to [activationEpoch, endEpoch].
+
+    it("stake emits full user and global checkpoints (pre-activation timestamp clamped)", async function () {
+      await expect(stakeSigned(alice, TOKENS(100), MAX))
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, TOKENS(100), MAX, 0n, activationEpoch)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(TOKENS(100), TOKENS(100) * MAX, 0n, 0n, 0n, 0n, activationEpoch);
+    });
+
+    it("unsigned withdraw checkpoints the reset weight; full exit checkpoints weight 0", async function () {
+      await stakeSigned(alice, TOKENS(200), MAX);
+
+      await expect(staking.connect(alice).withdraw(TOKENS(50), 0, 0, NO_SIG))
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, TOKENS(150), BASE, 0n, activationEpoch)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(TOKENS(150), TOKENS(150) * BASE, 0n, 0n, 0n, 0n, activationEpoch);
+
+      await expect(staking.connect(alice).withdraw(TOKENS(150), 0, 0, NO_SIG))
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, 0n, 0n, 0n, activationEpoch)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(0n, 0n, 0n, 0n, 0n, 0n, activationEpoch);
+    });
+
+    it("penalized mid-period withdraw carries absolute totalPenalized and forfeited weight", async function () {
+      await stakeSigned(alice, TOKENS(100), BASE);
+
+      const mid = activationEpoch + POOL_DURATION / 2;
+      await time.setNextBlockTimestamp(mid);
+      const accrued = TOKENS(100) * BASE * BigInt(POOL_DURATION / 2);
+
+      // full exit at half-time: 25% penalty, entire accrued weight forfeited
+      await expect(staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG))
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, 0n, 0n, 0n, mid)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(0n, 0n, accrued, accrued, TOKENS(25), 0n, mid);
+    });
+
+    it("updateWeight checkpoints accrual at the old weight and reports the new multiplier", async function () {
+      await stakeSigned(alice, TOKENS(100), BASE);
+
+      const mid = activationEpoch + POOL_DURATION / 2;
+      const sig = await signWeight("UpdateWeight", alice, TOKENS(100), MAX);
+      await time.setNextBlockTimestamp(mid);
+      const accrued = TOKENS(100) * BASE * BigInt(POOL_DURATION / 2);
+
+      await expect(staking.connect(alice).updateWeight(MAX, FAR_DEADLINE, sig))
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, TOKENS(100), MAX, accrued, mid)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(TOKENS(100), TOKENS(100) * MAX, accrued, 0n, 0n, 0n, mid);
+    });
+
+    it("unstake emits absolute claimedRewards and zeroed user checkpoint at endEpoch", async function () {
+      await stakeSigned(alice, TOKENS(100), MAX);
+      await setupRewards(TOKENS(1000));
+      await time.increaseTo(endEpoch + 1);
+
+      const userW = TOKENS(100) * MAX * BigInt(POOL_DURATION);
+      await expect(staking.connect(alice).unstake())
+        .to.emit(staking, "Unstaked")
+        .withArgs(alice.address, TOKENS(100), TOKENS(1000), TOKENS(1000), userW, userW)
+        .and.to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, 0n, 0n, 0n, endEpoch)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(0n, 0n, userW, 0n, 0n, TOKENS(1000), endEpoch);
+    });
+
+    it("emergencyUnstake emits zeroed checkpoints clamped to endEpoch", async function () {
+      await stakeSigned(alice, TOKENS(100), MAX);
+      await time.increaseTo(endEpoch + 5);
+
+      const userW = TOKENS(100) * MAX * BigInt(POOL_DURATION);
+      await expect(staking.connect(alice).emergencyUnstake())
+        .to.emit(staking, "StakeUpdated")
+        .withArgs(alice.address, 0n, 0n, 0n, endEpoch)
+        .and.to.emit(staking, "GlobalUpdated")
+        .withArgs(0n, 0n, userW, 0n, 0n, 0n, endEpoch);
+    });
+  });
 });
