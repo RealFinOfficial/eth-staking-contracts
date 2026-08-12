@@ -1,7 +1,7 @@
 const hre = require("hardhat");
 
-const CONTRACT_ADDRESS = "0xce6Fc294ed168FFa04C8eBA189dC3060562cdE63";
-const AMOUNT = hre.ethers.parseEther("150");
+const CONTRACT_ADDRESS = "0xF65326EbF16195890730cAd411786374c4D9E314";
+const AMOUNT = hre.ethers.parseEther("100");
 
 async function main() {
   const [signer] = await hre.ethers.getSigners();
