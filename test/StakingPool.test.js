@@ -470,6 +470,7 @@ describe("StakingPool", function () {
 
     it("should unstake full amount and return tokens", async function () {
       const balBefore = await token.balanceOf(alice.address);
+      await setupRewards(TOKENS(1000));
       await staking.connect(alice).stake(TOKENS(100));
       await advancePastEnd();
       await staking.connect(alice).unstake();
@@ -478,11 +479,28 @@ describe("StakingPool", function () {
     });
 
     it("should reject unstake with no stake", async function () {
+      await setupRewards(TOKENS(1000));
       await advancePastEnd();
       await expect(staking.connect(alice).unstake()).to.be.revertedWith("Nothing to unstake");
     });
 
+    it("should reject unstake before rewards are funded", async function () {
+      await staking.connect(alice).stake(TOKENS(100));
+      await advancePastEnd();
+      await expect(staking.connect(alice).unstake()).to.be.revertedWith("Rewards not funded");
+    });
+
+    it("should allow unstake once rewards are funded after endEpoch", async function () {
+      await staking.connect(alice).stake(TOKENS(100));
+      await advancePastEnd();
+      await expect(staking.connect(alice).unstake()).to.be.revertedWith("Rewards not funded");
+      await setupRewards(TOKENS(1000));
+      await staking.connect(alice).unstake();
+      expect(await staking.totalStaked()).to.equal(0);
+    });
+
     it("should zero out user stake data", async function () {
+      await setupRewards(TOKENS(1000));
       await staking.connect(alice).stake(TOKENS(100));
       await advancePastEnd();
       await staking.connect(alice).unstake();
@@ -568,14 +586,13 @@ describe("StakingPool", function () {
       expect(reward).to.equal(TOKENS(1000));
     });
 
-    it("should return zero reward when no rewards added", async function () {
+    it("should revert unstake when no rewards added (emergencyUnstake still exits)", async function () {
       await staking.connect(alice).stake(TOKENS(100));
       await advancePastEnd();
 
-      const rewardBefore = await rewardToken.balanceOf(alice.address);
-      await staking.connect(alice).unstake();
-      const reward = (await rewardToken.balanceOf(alice.address)) - rewardBefore;
-      expect(reward).to.equal(0n);
+      await expect(staking.connect(alice).unstake()).to.be.revertedWith("Rewards not funded");
+      await staking.connect(alice).emergencyUnstake();
+      expect(await staking.totalStaked()).to.equal(0n);
     });
 
     it("should emit Unstaked with correct reward info", async function () {
@@ -678,6 +695,7 @@ describe("StakingPool", function () {
     });
 
     it("should not allow calling unstake after emergencyUnstake", async function () {
+      await setupRewards(TOKENS(1000));
       await staking.connect(alice).stake(TOKENS(100));
       await advancePastEnd();
 
@@ -835,6 +853,7 @@ describe("StakingPool", function () {
     });
 
     it("should apply 0% penalty after pool ends", async function () {
+      await setupRewards(TOKENS(1000));
       await staking.connect(alice).stake(TOKENS(1000));
       await advancePastEnd();
       await staking.connect(alice).unstake();

@@ -350,8 +350,11 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
     }
 
     /// @notice Unstake after endEpoch. Returns full stake + proportional USDC rewards.
+    ///         Reverts until the pool is funded via addRewards — use emergencyUnstake
+    ///         to exit without rewards before that.
     function unstake() external nonReentrant returns (uint256 userReward) {
         require(block.timestamp >= endEpoch, "Pool not ended yet");
+        require(totalRewards > 0, "Rewards not funded");
 
         _updateGlobal();
         _updateUser(msg.sender);
