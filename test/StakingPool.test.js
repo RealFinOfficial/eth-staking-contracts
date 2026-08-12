@@ -22,7 +22,10 @@ describe("StakingPool", function () {
     const elapsed = BigInt(elapsedSinceActivation);
     if (elapsed >= POOL_DURATION_BN) return 0n;
     const remaining = POOL_DURATION_BN - elapsed;
-    return (amount * remaining) / (POOL_DURATION_BN * 2n);
+    // decays 50% -> 5% floor across the active period
+    return (
+      (amount * (4500n * remaining + 500n * POOL_DURATION_BN)) / (POOL_DURATION_BN * 10000n)
+    );
   }
 
   async function setupRewards(amount) {
@@ -842,14 +845,14 @@ describe("StakingPool", function () {
       expect(await staking.totalPenalized()).to.equal(penalty);
     });
 
-    it("should apply ~25% penalty at midpoint", async function () {
+    it("should apply ~27.5% penalty at midpoint", async function () {
       await advanceToActivation();
       await staking.connect(alice).stake(TOKENS(1000));
       await time.increase(POOL_DURATION / 2);
 
       const tW = await txTs(staking.connect(alice).withdraw(TOKENS(1000)));
       const penalty = expectedPenalty(TOKENS(1000), tW - BigInt(activationEpoch));
-      expect(penalty).to.be.closeTo(TOKENS(250), TOKENS(1));
+      expect(penalty).to.be.closeTo(TOKENS(275), TOKENS(1));
     });
 
     it("should apply 0% penalty after pool ends", async function () {
@@ -925,6 +928,31 @@ describe("StakingPool", function () {
       await staking.connect(alice).withdraw(TOKENS(1000));
       expect(await staking.totalPenalized()).to.equal(0n);
     });
+
+    it("should hold the 5% floor at the very end of the active period", async function () {
+      await advanceToActivation();
+      await staking.connect(alice).stake(TOKENS(1000));
+
+      await time.setNextBlockTimestamp(endEpoch - 1);
+      await staking.connect(alice).withdraw(TOKENS(1000));
+
+      // remaining = 1s, so a hair above the floor rather than exactly on it
+      expect(await staking.totalPenalized()).to.be.closeTo(TOKENS(50), TOKENS(0.1));
+    });
+
+    it("should zero the penalty and its view once ownership is renounced", async function () {
+      await advanceToActivation();
+      await staking.connect(alice).stake(TOKENS(1000));
+      await staking.renounceOwnership();
+
+      expect(await staking.getCurrentPenaltyPct()).to.equal(0n);
+      expect(await staking.getCurrentPenalty(alice.address)).to.equal(0n);
+
+      const balBefore = await token.balanceOf(alice.address);
+      await staking.connect(alice).withdraw(TOKENS(1000));
+      expect((await token.balanceOf(alice.address)) - balBefore).to.equal(TOKENS(1000));
+      expect(await staking.totalPenalized()).to.equal(0n);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -973,9 +1001,9 @@ describe("StakingPool", function () {
       expect(await staking.getCurrentPenaltyPct()).to.be.closeTo(5000n, 2n);
     });
 
-    it("getCurrentPenaltyPct should return ~2500 at midpoint", async function () {
+    it("getCurrentPenaltyPct should return ~2750 at midpoint", async function () {
       await time.increaseTo(activationEpoch + POOL_DURATION / 2);
-      expect(await staking.getCurrentPenaltyPct()).to.be.closeTo(2500n, 2n);
+      expect(await staking.getCurrentPenaltyPct()).to.be.closeTo(2750n, 2n);
     });
 
     it("getCurrentPenaltyPct should return 0 after endEpoch", async function () {
@@ -998,10 +1026,10 @@ describe("StakingPool", function () {
       expect(await staking.getCurrentPenalty(alice.address)).to.be.closeTo(TOKENS(500), TOKENS(1));
     });
 
-    it("getCurrentPenalty should return ~25% at midpoint", async function () {
+    it("getCurrentPenalty should return ~27.5% at midpoint", async function () {
       await staking.connect(alice).stake(TOKENS(1000));
       await time.increaseTo(activationEpoch + POOL_DURATION / 2);
-      expect(await staking.getCurrentPenalty(alice.address)).to.be.closeTo(TOKENS(250), TOKENS(1));
+      expect(await staking.getCurrentPenalty(alice.address)).to.be.closeTo(TOKENS(275), TOKENS(1));
     });
 
     it("getCurrentPenalty should return 0 after endEpoch", async function () {
@@ -1013,6 +1041,25 @@ describe("StakingPool", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Constructor validation", function () {
+    it("should emit PoolInitialized carrying the penalty curve constants", async function () {
+      await expect(staking.deploymentTransaction())
+        .to.emit(staking, "PoolInitialized")
+        .withArgs(
+          await token.getAddress(),
+          await rewardToken.getAddress(),
+          activationEpoch,
+          endEpoch,
+          5000n,
+          500n,
+          10000n
+        );
+
+      // the emitted bounds must match the public constants an indexer could also read
+      expect(await staking.MAX_PENALTY_BPS()).to.equal(5000n);
+      expect(await staking.MIN_PENALTY_BPS()).to.equal(500n);
+      expect(await staking.BPS_DENOMINATOR()).to.equal(10000n);
+    });
+
     it("should reject invalid staking token", async function () {
       const Staking = await ethers.getContractFactory("StakingPool");
       await expect(

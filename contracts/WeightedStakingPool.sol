@@ -50,6 +50,12 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
     uint256 public constant BASE_WEIGHT = 1000; // x1.0
     uint256 public constant MAX_WEIGHT = 2000; // x2.0
 
+    // Withdrawal penalty decays linearly from MAX_PENALTY_BPS at activationEpoch
+    // to MIN_PENALTY_BPS as endEpoch is approached; early exit is never free.
+    uint256 public constant MAX_PENALTY_BPS = 5000; // 50%
+    uint256 public constant MIN_PENALTY_BPS = 500; // 5%
+    uint256 public constant BPS_DENOMINATOR = 10000;
+
     bytes32 public constant STAKE_TYPEHASH =
         keccak256("Stake(address user,uint256 amount,uint256 weight,uint256 nonce,uint256 deadline)");
     bytes32 public constant WITHDRAW_TYPEHASH =
@@ -103,7 +109,17 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         uint256 totalRewardsClaimed,
         uint256 timestamp
     );
-    event PoolInitialized(address indexed stakingToken, address indexed rewardToken, uint256 activationEpoch, uint256 endEpoch);
+    /// @dev Carries the penalty curve constants so an indexer can reproduce
+    ///      `_calculatePenalty` off-chain from logs alone.
+    event PoolInitialized(
+        address indexed stakingToken,
+        address indexed rewardToken,
+        uint256 activationEpoch,
+        uint256 endEpoch,
+        uint256 maxPenaltyBps,
+        uint256 minPenaltyBps,
+        uint256 bpsDenominator
+    );
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -128,7 +144,15 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         globalLastUpdateTime = _activationEpoch;
         signer = _signer;
 
-        emit PoolInitialized(_stakingToken, _rewardToken, _activationEpoch, _endEpoch);
+        emit PoolInitialized(
+            _stakingToken,
+            _rewardToken,
+            _activationEpoch,
+            _endEpoch,
+            MAX_PENALTY_BPS,
+            MIN_PENALTY_BPS,
+            BPS_DENOMINATOR
+        );
         emit SignerChanged(address(0), _signer);
     }
 
@@ -171,7 +195,10 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         if (block.timestamp < activationEpoch) return 0;
         if (block.timestamp >= endEpoch) return 0;
         uint256 remaining = endEpoch - block.timestamp;
-        return (amount * remaining) / (poolDuration * 2);
+        uint256 spread = MAX_PENALTY_BPS - MIN_PENALTY_BPS;
+        return
+            (amount * (spread * remaining + MIN_PENALTY_BPS * poolDuration)) /
+            (poolDuration * BPS_DENOMINATOR);
     }
 
     /// @dev Validates the weight bounds, verifies the EIP-712 attestation and
@@ -504,12 +531,14 @@ contract WeightedStakingPool is Ownable, ReentrancyGuard, EIP712 {
         return (totalRewards * w) / totalEffective;
     }
 
-    /// @notice Current withdrawal penalty in basis points (0-5000). 0 before activation and after end.
+    /// @notice Current withdrawal penalty in basis points (500-5000). 0 before activation,
+    ///         after end, and once ownership has been renounced.
     function getCurrentPenaltyPct() external view returns (uint256) {
+        if (owner() == address(0)) return 0;
         if (block.timestamp < activationEpoch) return 0;
         if (block.timestamp >= endEpoch) return 0;
         uint256 remaining = endEpoch - block.timestamp;
-        return (5000 * remaining) / poolDuration;
+        return MIN_PENALTY_BPS + ((MAX_PENALTY_BPS - MIN_PENALTY_BPS) * remaining) / poolDuration;
     }
 
     /// @notice Current withdrawal penalty in wei for a user's full stake.

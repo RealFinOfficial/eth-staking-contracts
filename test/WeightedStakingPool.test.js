@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("WeightedStakingPool", function () {
   let staking, token, rewardToken;
@@ -86,6 +86,25 @@ describe("WeightedStakingPool", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Deployment", function () {
+    it("emits PoolInitialized carrying the penalty curve constants", async function () {
+      await expect(staking.deploymentTransaction())
+        .to.emit(staking, "PoolInitialized")
+        .withArgs(
+          await token.getAddress(),
+          await rewardToken.getAddress(),
+          activationEpoch,
+          endEpoch,
+          5000n,
+          500n,
+          10000n
+        );
+
+      // the emitted bounds must match the public constants an indexer could also read
+      expect(await staking.MAX_PENALTY_BPS()).to.equal(5000n);
+      expect(await staking.MIN_PENALTY_BPS()).to.equal(500n);
+      expect(await staking.BPS_DENOMINATOR()).to.equal(10000n);
+    });
+
     it("sets the signer and reverts on zero signer", async function () {
       expect(await staking.signer()).to.equal(weightSigner.address);
 
@@ -328,10 +347,57 @@ describe("WeightedStakingPool", function () {
       await withdrawSigned(alice, TOKENS(100), BASE);
       const received = (await token.balanceOf(alice.address)) - balBefore;
 
-      // ~25% penalty at half-time
-      expect(received).to.be.closeTo(TOKENS(75), TOKENS(1));
+      // ~27.5% penalty at half-time (50% -> 5% decay)
+      expect(received).to.be.closeTo(TOKENS(72.5), TOKENS(1));
       expect(await staking.totalForfeitedWeight()).to.be.gt(0n);
       expect(await staking.getUserWeight(alice.address)).to.equal(0n);
+    });
+
+    it("decays the penalty from 50% to a 5% floor across the active period", async function () {
+      expect(await staking.getCurrentPenaltyPct()).to.equal(0n); // before activation
+
+      await time.setNextBlockTimestamp(activationEpoch);
+      await mine();
+      expect(await staking.getCurrentPenaltyPct()).to.equal(5000n);
+
+      await time.setNextBlockTimestamp(activationEpoch + POOL_DURATION / 2);
+      await mine();
+      expect(await staking.getCurrentPenaltyPct()).to.equal(2750n);
+
+      // one second before the end the floor still applies — exiting early is never free
+      await time.setNextBlockTimestamp(endEpoch - 1);
+      await mine();
+      expect(await staking.getCurrentPenaltyPct()).to.equal(500n);
+
+      await time.setNextBlockTimestamp(endEpoch);
+      await mine();
+      expect(await staking.getCurrentPenaltyPct()).to.equal(0n); // withdraw closed, unstake is free
+    });
+
+    it("charges the 5% floor on a withdraw at the very end of the active period", async function () {
+      await stakeSigned(alice, TOKENS(100), BASE);
+
+      const balBefore = await token.balanceOf(alice.address);
+      await time.setNextBlockTimestamp(endEpoch - 1);
+      await staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG);
+
+      // remaining = 1s, so the rate is a hair above the 5% floor rather than exactly on it
+      expect((await token.balanceOf(alice.address)) - balBefore).to.be.closeTo(TOKENS(95), TOKENS(0.01));
+      expect(await staking.totalPenalized()).to.be.closeTo(TOKENS(5), TOKENS(0.01));
+    });
+
+    it("zeroes the penalty and its view once ownership is renounced", async function () {
+      await stakeSigned(alice, TOKENS(100), BASE);
+      await time.increaseTo(activationEpoch + POOL_DURATION / 2);
+      await staking.renounceOwnership();
+
+      expect(await staking.getCurrentPenaltyPct()).to.equal(0n);
+      expect(await staking.getCurrentPenalty(alice.address)).to.equal(0n);
+
+      const balBefore = await token.balanceOf(alice.address);
+      await staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG);
+      expect((await token.balanceOf(alice.address)) - balBefore).to.equal(TOKENS(100));
+      expect(await staking.totalPenalized()).to.equal(0n);
     });
   });
 
@@ -454,12 +520,12 @@ describe("WeightedStakingPool", function () {
       await time.setNextBlockTimestamp(mid);
       const accrued = TOKENS(100) * BASE * BigInt(POOL_DURATION / 2);
 
-      // full exit at half-time: 25% penalty, entire accrued weight forfeited
+      // full exit at half-time: 27.5% penalty, entire accrued weight forfeited
       await expect(staking.connect(alice).withdraw(TOKENS(100), 0, 0, NO_SIG))
         .to.emit(staking, "StakeUpdated")
         .withArgs(alice.address, 0n, 0n, 0n, mid)
         .and.to.emit(staking, "GlobalUpdated")
-        .withArgs(0n, 0n, accrued, accrued, TOKENS(25), 0n, mid);
+        .withArgs(0n, 0n, accrued, accrued, TOKENS(27.5), 0n, mid);
     });
 
     it("updateWeight checkpoints accrual at the old weight and reports the new multiplier", async function () {
