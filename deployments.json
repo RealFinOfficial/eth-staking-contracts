@@ -1,0 +1,13 @@
+{
+  "1": {
+    "WeightedStakingPool": {
+      "address": "0xE570E438C1278A15305dE03f67E095fAcbF35A86",
+      "deployTx": "0xc612a64bbf5f54c0abae5f05f7cf9ffb6365ee99074e48e393f6c479077853ec",
+      "block": 25740118,
+      "deployedAt": "2026-08-12T16:29:35Z",
+      "activationEpoch": 1786554000,
+      "endEpoch": 1794330000
+    }
+  },
+  "11155111": {}
+}

@@ -40,17 +40,25 @@ contracts/           — Solidity source files
   MockERC20.sol             — Test-only 18-decimal ERC20 mock
   MockERC20Decimals.sol     — Test-only ERC20 mock with configurable decimals (6-dec USDC-like)
 test/                — Hardhat test files (Mocha + Chai)
-  StakingPool.test.js         — 85 tests
-  WeightedStakingPool.test.js — 36 tests
-scripts/             — Deployment and interaction scripts
+  StakingPool.test.js         — 88 tests
+  WeightedStakingPool.test.js — 40 tests
+scripts/             — Deployment and interaction scripts (see scripts/README.md)
+  lib/pools.js              — Shared: address resolution, pool-kind detection,
+                              mainnet CONFIRM guard, Ledger nonce workaround
 abi/                 — Checked-in ABIs for both pools
+deployments.json     — Deployed addresses keyed by chain id
 ```
+
+Every script is network- and pool-agnostic: the address comes from
+`deployments.json` or `POOL=0x…`, the kind is detected on-chain by probing
+`BASE_WEIGHT()`, and token decimals are read from the token. State-changing
+scripts refuse to run on chain 1 without `CONFIRM=yes`.
 
 ## Commands
 
 ```bash
 npx hardhat compile      # Compile contracts
-npx hardhat test         # Run all tests (121)
+npx hardhat test         # Run all tests (128)
 npx hardhat coverage     # Run tests with coverage report
 ```
 
@@ -69,7 +77,7 @@ npx hardhat coverage     # Run tests with coverage report
 - **On-chain reward distribution** — USDC rewards are paid out during `unstake()`, calculated as `totalRewards × userWeight / totalEffectiveWeight`
 - **Forfeiture mechanism** — early withdrawers lose their weight, automatically increasing remaining stakers' reward shares
 - **`_effectiveTime()`** clamps to `[activationEpoch, endEpoch]` — no weight accumulation outside the active period
-- **Withdrawal penalty** — linearly decays from 50% to 0% over the active period (`activationEpoch` → `endEpoch`). Penalized tokens go to `PENALTY_RECEIVER`. No penalty before activation
+- **Withdrawal penalty** — linearly decays from `MAX_PENALTY_BPS` (5000 = 50%) to a floor of `MIN_PENALTY_BPS` (500 = 5%) over the active period (`activationEpoch` → `endEpoch`); early exit is never free, and the floor holds until `endEpoch` rather than tapering to zero. Penalized tokens go to `PENALTY_RECEIVER`. No penalty before activation, after `endEpoch`, or once ownership is renounced — `getCurrentPenaltyPct` mirrors all three cases. `MAX_PENALTY_BPS`, `MIN_PENALTY_BPS` and `BPS_DENOMINATOR` are public constants and are also emitted in `PoolInitialized`, so the indexer can compute the penalty from logs alone or read them back over `eth_call`
 - **Reward funding** — `addRewards(amount)` transfers USDC from the caller via `safeTransferFrom` and increases the reward counter
 - **`unstake()` requires funding** — reverts with `Rewards not funded` while `totalRewards == 0`; `emergencyUnstake()` is the unfunded escape hatch
 - **`recoverExcessRewards()`** — owner can recover overfunded or unclaimed USDC after pool ends

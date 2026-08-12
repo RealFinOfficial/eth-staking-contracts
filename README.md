@@ -148,18 +148,23 @@ There are three ways to exit, depending on timing:
 
 ### Withdrawal Penalty
 
-Early withdrawals via `withdraw()` during the active period incur a penalty that **linearly decays from 50% to 0%** over the pool duration:
+Early withdrawals via `withdraw()` during the active period incur a penalty that **linearly decays from 50% to a 5% floor** over the pool duration — an early exit is never free. Both pools use the same curve:
 
 ```
-penalty = amount * remaining_time / (pool_duration * 2)
+penalty = amount * (4500 * remaining_time + 500 * pool_duration) / (pool_duration * 10000)
 ```
 
 | When | Penalty |
 |------|---------|
-| At `activationEpoch` | 50% |
-| Midway through active period | 25% |
-| At `endEpoch` | 0% |
 | Before `activationEpoch` | 0% (free withdrawal) |
+| At `activationEpoch` | 50% |
+| Midway through active period | 27.5% |
+| Just before `endEpoch` | 5% (floor) |
+| At/after `endEpoch` | `withdraw()` is closed — use `unstake()`, which is free |
+
+The floor holds right up until `endEpoch`; it does not taper to zero. The curve constants are public — `MAX_PENALTY_BPS` (5000), `MIN_PENALTY_BPS` (500) and `BPS_DENOMINATOR` (10000) — and are also emitted in `PoolInitialized`, so an indexer can reproduce the curve from logs alone or read it back over `eth_call`.
+
+Once ownership is renounced the penalty drops to 0 — both `_calculatePenalty` and `getCurrentPenaltyPct` honour this, so the view never disagrees with what a withdrawal actually charges.
 
 Penalized tokens are sent to a fixed `PENALTY_RECEIVER` address. The penalty is calculated on the token amount only — the multiplier does not affect it.
 
@@ -206,22 +211,40 @@ In both cases the staking token and reward token must be different, non-zero add
 
 ### Scripts
 
-All scripts read configuration from `.env` / environment variables:
+Every script runs on any configured network and against either pool. No addresses
+are hardcoded: the pool comes from `deployments.json` (written by the deploy
+scripts, keyed by chain id) or an explicit `POOL=0x…`, and its kind is detected
+on-chain. `POOL_KIND` picks between `StakingPool` and `WeightedStakingPool` when
+resolving from the registry; it defaults to `WeightedStakingPool`.
 
-| Script | Env vars | Purpose |
-|--------|----------|---------|
-| `deploy-weighted.js` | `STAKING_TOKEN`, `REWARD_TOKEN`, `ACTIVATION_EPOCH`, `END_EPOCH`, `WEIGHT_SIGNER` (optional, defaults to deployer) | Deploy `WeightedStakingPool` |
-| `deploy.js` | `STAKING_TOKEN`, `REWARD_TOKEN`, `ACTIVATION_EPOCH`, `END_EPOCH` | Deploy the plain `StakingPool` |
-| `deploy-mock-usd.js` | — | Deploy a 6-decimal USDC-like mock reward token for testnets |
-| `fund-rewards.js` | `POOL`, `REWARD_AMOUNT`, `REWARD_DECIMALS` (optional) | Approve + `addRewards()` on any pool |
-| `add-rewards.js`, `stake.js`, `withdraw.js`, `unstake.js`, `emergency-unstake.js`, `check-weights.js` | see each file | Ad-hoc interaction helpers (hardcoded pool addresses) |
+| Script | Pools | Purpose |
+|--------|-------|---------|
+| `deploy.js` / `deploy-weighted.js` | — | Deploy a pool and record it in `deployments.json` |
+| `deploy-mock-usd.js` | — | 6-decimal mock reward token; refuses to run on mainnet |
+| `stake.js` | both | Approve + stake; Weighted needs a weight attestation |
+| `withdraw.js` | both | Early exit with penalty; attestation optional on Weighted |
+| `unstake.js` | both | Full exit with rewards after `endEpoch` |
+| `emergency-unstake.js` | both | Exit forfeiting all rewards |
+| `update-weight.js` | Weighted | Change the multiplier without moving tokens |
+| `fund-rewards.js` | both | Owner: approve + `addRewards()` |
+| `set-signer.js` | Weighted | Owner: rotate the attestation signer |
+| `recover-excess.js` | both | Owner: sweep unclaimed rewards after the pool ends |
+| `status.js` | both | Read-only overview; `USERS=0x…,0x…` adds per-user detail |
+| `post-deploy-check.js` | both | Assert every constructor-set value after deploying |
+| `token-check.js` / `ledger-check.js` | — | Pre-deploy checks for token addresses, epochs and the Ledger |
+
+Scripts that send a transaction refuse to run on mainnet unless `CONFIRM=yes` is
+set, after printing what they are about to do.
 
 ```bash
-npx hardhat run scripts/deploy-weighted.js --network sepolia
-POOL=0x... REWARD_AMOUNT=100 npx hardhat run scripts/fund-rewards.js --network sepolia
+npx hardhat run scripts/status.js --network mainnet
+AMOUNT=100 WEIGHT=1500 WEIGHT_SIGNER_KEY=0x… npx hardhat run scripts/stake.js --network sepolia
+REWARD_AMOUNT=50000 CONFIRM=yes npx hardhat run scripts/fund-rewards.js --network mainnet
 ```
 
-Compiled ABIs for both pools are checked in under `abi/`.
+`scripts/README.md` documents every variable, the attestation options and the
+historical Sepolia addresses. Compiled ABIs for both pools are checked in under
+`abi/`.
 
 ## Functions
 
@@ -277,7 +300,7 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 | `NonceUsed(user, nonce)` | every signature verification | |
 | `SignerChanged(oldSigner, newSigner)` | constructor and `setSigner` | |
 | `RewardsAdded(amount, totalRewards)` | `addRewards` | |
-| `PoolInitialized(stakingToken, rewardToken, activationEpoch, endEpoch)` | constructor | |
+| `PoolInitialized(stakingToken, rewardToken, activationEpoch, endEpoch, maxPenaltyBps, minPenaltyBps, bpsDenominator)` | constructor | Carries the penalty curve constants so an indexer can compute the penalty off-chain from logs alone |
 
 ## Tech Stack
 
@@ -291,6 +314,6 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 ```bash
 npm install               # Install dependencies
 npx hardhat compile       # Compile contracts
-npx hardhat test          # Run tests (121: 85 StakingPool + 36 WeightedStakingPool)
+npx hardhat test          # Run tests (128: 88 StakingPool + 40 WeightedStakingPool)
 npx hardhat coverage      # Coverage report
 ```
