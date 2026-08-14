@@ -62,7 +62,7 @@ const pools = require("./lib/pools");
 // The script prints the human price this value decodes back to before sending
 // anything, so a wrong sort order or a missing 1e12 is visible before the tx.
 
-const CANONICAL_FACTORY = "0x1F98431c8ad98523631AE4a59f267346ea31F984";
+const CANONICAL_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const CANONICAL_POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
 
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];

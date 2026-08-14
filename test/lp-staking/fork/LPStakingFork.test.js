@@ -22,14 +22,10 @@ const { takeSnapshot } = require("@nomicfoundation/hardhat-network-helpers");
 
 // ─────────────────────────── Mainnet constants ───────────────────────────
 
-/**
- * Verified mainnet addresses. `ethers.getAddress` is applied to the pool because the
- * address as written in docs/specs/00-architecture-overview.md is mixed-case but is NOT a
- * valid EIP-55 checksum — ethers rejects that string outright.
- */
+/** Verified mainnet addresses, in canonical EIP-55 checksummed form. */
 const NPM_ADDR = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
 const ROUTER_ADDR = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
-const POOL_ADDR = ethers.getAddress("0xe76532bae172876b6c7170ce02309715502c360b");
+const POOL_ADDR = "0xe76532bae172876B6c7170Ce02309715502c360B";
 const ASSET_ADDR = "0x99E980265Bf36516C442be982df1772a6cCb3233"; // "REAL", 18 decimals, EIP-2612 v"1"
 const USDC_ADDR = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"; // 6 decimals, EIP-2612 v"2"
 
