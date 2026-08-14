@@ -214,6 +214,15 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @notice Returns a staked position NFT to its staker.
      * @dev Permissionless by design: never gated by the pause switch, a signature, or
      *      backend liveness. Off-chain this is the early-exit signal.
+     *
+     *      The exit uses a plain `transferFrom`, not `safeTransferFrom`, and that is
+     *      deliberate. The recipient is `msg.sender` — the recorded staker, who explicitly
+     *      asked for the exit in this very call — so the NFT always lands back at the
+     *      address that put it in. A `safeTransferFrom` would additionally demand an
+     *      `onERC721Received` hook on that address: a contract staker without one could
+     *      deposit (the receipt check on the deposit leg is on the vault, not on the
+     *      depositor) but could never withdraw, and its position would be locked here
+     *      forever. A plain transfer keeps the exit unconditional, as the header claims.
      * @param tokenId The staked position NFT to withdraw.
      */
     function unstake(uint256 tokenId) external nonReentrant {
@@ -222,7 +231,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
 
         delete _stakers[tokenId];
 
-        positionManager.safeTransferFrom(address(this), msg.sender, tokenId);
+        positionManager.transferFrom(address(this), msg.sender, tokenId);
 
         emit Unstaked(msg.sender, tokenId, block.timestamp);
     }

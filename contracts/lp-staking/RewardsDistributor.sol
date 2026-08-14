@@ -103,6 +103,7 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
     event SignerChanged(address previousSigner, address newSigner);
     event Paused(bool paused);
     event AssetClaimsEnabled(bool enabled);
+    event ExcessAssetRecovered(address to, uint256 amount);
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -231,8 +232,11 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
     /// @notice Move ASSET out of this contract to the owner — overfunding, a retired
     ///         reward leg, or a wind-down. Operational cleanup only.
     /// @param amount ASSET amount to transfer to the owner.
+    /// @dev Emits {ExcessAssetRecovered}, like every other owner action, so a treasury
+    ///      withdrawal is followable from logs alone rather than only from ERC-20 transfers.
     function recoverExcessAsset(uint256 amount) external onlyOwner {
         if (amount == 0) revert ZeroAmount();
         asset.safeTransfer(owner(), amount);
+        emit ExcessAssetRecovered(owner(), amount);
     }
 }
