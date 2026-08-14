@@ -31,6 +31,74 @@ Two pool contracts live side by side:
 
 `StakingPool` exposes the same set minus `updateWeight`/`setSigner`, with `stake(amount)` and `withdraw(amount)`.
 
+## LP Staking (V1)
+
+A second stack, independent of the pools above: users provide Uniswap V3 ASSET-USDC
+liquidity and are rewarded in TokenX. It shares no contract, no owner and no token with
+`StakingPool` / `WeightedStakingPool`.
+
+- **`LPStakingVault.sol`** — custody only. Holds staked position NFTs, records who staked
+  each one, and lets the staker `rebalance` (pull all liquidity and fees, optional swap,
+  mint a new range, refund dust, burn the emptied NFT) without ever losing custody. It
+  computes no rewards and stores no dollar values — scoring is off-chain, from the
+  full-state events. `unstake` and `rebalance` are never gated by the pause switch, a
+  signature or backend liveness; only new deposits can be paused
+- **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
+  `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
+  no funds and no NFTs between transactions. The vault must whitelist it with `setZapper`
+  before zapping works. Zap-out is out of scope for V1 — `unstake` returns the NFT
+- **`TokenX.sol`** — the reward token. 18 decimals, EIP-2612 permit, burnable. Exactly one
+  `minter` (the distributor), re-pointable by the owner as the escape hatch, plus a
+  per-epoch mint cap the token enforces itself. That cap is defense in depth: a
+  compromised or broken distributor can never mint past what the owner armed for the
+  running epoch
+- **`RewardsDistributor.sol`** — cumulative-voucher claims. `claimTokenX` mints the
+  difference between the voucher's lifetime figure and what the user already claimed;
+  `claimAsset` pays ASSET out of a pre-funded balance and stays off until the owner
+  enables it. One typehash per leg so a voucher cannot be spent on the other, and the
+  signed `user` is always `msg.sender`, never an argument
+
+Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
+deviates from the pool TWAP by more than `maxTwapDeviationBps`. Callers still carry their
+own `amountOutMin` / `amount0Min` / `amount1Min` — the guard is a manipulation circuit
+breaker, not a pricing oracle.
+
+### Deploy order
+
+`scripts/deploy-lp-staking.js` does all of it in one run:
+
+1. `TokenX(name, symbol, deployer)`
+2. `RewardsDistributor(tokenX, asset, signer, deployer)`
+3. `LPStakingVault(positionManager, pool, token0, token1, fee, router, deployer, twapWindow, maxDeviationBps)`
+4. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationBps)`
+5. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
+6. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
+7. `transferOwnership(multisig)` on all four
+8. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
+
+The deployer owns all four through steps 5–6 because that wiring is `onlyOwner`; ownership
+moves only at step 7. Etherscan verification replays the **deployer** address, not the
+multisig — that is what the constructors actually saw.
+
+The script fails before spending gas when `pool.token0/token1/fee` disagree with the sorted
+`(LP_ASSET, LP_USDC, LP_FEE)`, or when the token decimals are not ASSET 18 / USDC 6. The
+decimals check exists because the zapper cannot tell the two roles apart on-chain — both
+are just "one side of the pair" — so a swapped pair would deploy and mint with the legs
+reversed without reverting anywhere.
+
+### Operational gotchas
+
+- **Arm an epoch before the first claim.** TokenX starts on `currentEpochId = 0` with a
+  zero cap, so every `claimTokenX` reverts with `EpochMintCapExceeded` until the owner
+  calls `setEpochCap(epochId, cap)`. Tallies are keyed by epoch id and are never reset, so
+  re-selecting an earlier id keeps that epoch's existing total
+- **Grow the oracle, then wait.** `increaseObservationCardinalityNext` only allocates
+  observation slots; they fill one per block that trades. Until the pool holds `twapWindow`
+  seconds of history, `observe()` reverts with `OLD` and every TWAP-guarded path (`zapIn`,
+  and any `rebalance` carrying a swap leg) reverts with it. Paths without a swap work from
+  block one. A pool at cardinality 1 therefore needs roughly a window's worth of trading
+  after the bump before the guarded paths become usable
+
 ## Project Structure
 
 ```
@@ -39,14 +107,32 @@ contracts/           — Solidity source files
   WeightedStakingPool.sol   — Staking with EIP-712 attested weight multipliers
   MockERC20.sol             — Test-only 18-decimal ERC20 mock
   MockERC20Decimals.sol     — Test-only ERC20 mock with configurable decimals (6-dec USDC-like)
+  lp-staking/          — The LP staking stack; imports stay relative inside this folder
+    LPStakingVault.sol        — Custody and atomic re-ranging for Uniswap V3 LP positions
+    LPZapper.sol              — USDC in, staked position out; replaceable periphery
+    TokenX.sol                — LP reward token; one minter, per-epoch mint cap
+    RewardsDistributor.sol    — EIP-712 cumulative-voucher claims (TokenX and ASSET legs)
+    interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
+    libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
+    mocks/                    — Test-only Uniswap doubles, permit token and reentrancy attackers
 test/                — Hardhat test files (Mocha + Chai)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
+  lp-staking/
+    LPStakingVault.test.js      — 56 tests
+    RewardsDistributor.test.js  — 44 tests
+    LPZapper.test.js            — 31 tests
+    TokenX.test.js              — 29 tests
+    fork/LPStakingFork.test.js  — 16 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, Ledger nonce workaround
-abi/                 — Checked-in ABIs for both pools
+  deploy-lp-staking.js      — Deploys and wires the whole LP stack, then hands it to the multisig
+  create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
+abi/                 — Checked-in ABIs for both pools and the four LP contracts
 deployments.json     — Deployed addresses keyed by chain id
+.env.example         — Every variable hardhat.config.js and the scripts read
+.github/workflows/ci.yml — Compile and test on push and pull request
 ```
 
 Every script is network- and pool-agnostic: the address comes from
@@ -58,7 +144,7 @@ scripts refuse to run on chain 1 without `CONFIRM=yes`.
 
 ```bash
 npx hardhat compile      # Compile contracts
-npx hardhat test         # Run all tests (128)
+npx hardhat test         # Run all tests (288)
 npx hardhat coverage     # Run tests with coverage report
 ```
 

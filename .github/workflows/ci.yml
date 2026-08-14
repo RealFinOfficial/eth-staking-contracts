@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same ref makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: compile + test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Compile
+        run: npx hardhat compile
+
+      # No MAINNET_RPC_URL is configured here on purpose: no repository secret is
+      # needed to keep this job green. The fork tests read that variable and skip
+      # themselves when it is unset, so CI runs the unit suite only. Run the fork
+      # tests locally with MAINNET_RPC_URL pointing at an archive node.
+      - name: Test
+        run: npx hardhat test
