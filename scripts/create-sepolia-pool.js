@@ -14,9 +14,9 @@ const pools = require("./lib/pools");
 //   LP_INITIAL_SQRT_PRICE_X96 — starting price, only used when the pool is created
 //
 // Optional env (defaults in parentheses)
-//   LP_FEE    — fee tier in hundredths of a bip (3000)
-//   LP_NPM    — NonfungiblePositionManager (canonical address, same on Sepolia)
-//   LP_FACTORY — UniswapV3Factory (canonical address, same on Sepolia)
+//   LP_FEE     — fee tier in hundredths of a bip (3000)
+//   LP_NPM     — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
+//   LP_FACTORY — UniswapV3Factory (per-chain default, see UNISWAP_BY_CHAIN)
 //
 // ──────────────────────── computing LP_INITIAL_SQRT_PRICE_X96 ────────────────────────
 //
@@ -62,8 +62,22 @@ const pools = require("./lib/pools");
 // The script prints the human price this value decodes back to before sending
 // anything, so a wrong sort order or a missing 1e12 is visible before the tx.
 
-const CANONICAL_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
-const CANONICAL_POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
+// Uniswap V3 is NOT at one address across chains. Sepolia got its own deployment,
+// and the mainnet addresses have zero code there — using them makes getPool()
+// return garbage instead of reverting. Keyed by chain id; a chain that is not
+// listed has no default, so LP_FACTORY / LP_NPM become required for it.
+const UNISWAP_BY_CHAIN = {
+  // mainnet
+  1: {
+    factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+  },
+  // sepolia
+  11155111: {
+    factory: "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
+    positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
+  },
+};
 
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 
@@ -105,10 +119,14 @@ async function main() {
     throw new Error("Refusing to create a pool on mainnet — the mainnet pool already exists");
   }
 
+  // A local fork reports its own chain id (31337), not the forked one, so it
+  // lands here with no default and must pass LP_FACTORY / LP_NPM explicitly.
+  const uniswap = UNISWAP_BY_CHAIN[chainId] || {};
+
   const asset = readAddress("LP_ASSET");
   const usdc = readAddress("LP_USDC");
-  const factoryAddress = readAddress("LP_FACTORY", CANONICAL_FACTORY);
-  const positionManagerAddress = readAddress("LP_NPM", CANONICAL_POSITION_MANAGER);
+  const factoryAddress = readAddress("LP_FACTORY", uniswap.factory);
+  const positionManagerAddress = readAddress("LP_NPM", uniswap.positionManager);
   const fee = Number(process.env.LP_FEE || 3000);
 
   if (asset === usdc) throw new Error("LP_ASSET and LP_USDC must be different tokens");
@@ -131,9 +149,11 @@ async function main() {
   console.log(`factory:  ${factoryAddress}`);
   console.log(`NPM:      ${positionManagerAddress}`);
 
-  // Decimals are only a warning here: the Sepolia mUSDC mock reports 18 while
-  // being used as a 6-decimal token, and the integration environment depends on
-  // that. deploy-lp-staking.js enforces the real thing before it deploys.
+  // Decimals are only a warning here so an odd mock can still get a pool created;
+  // deploy-lp-staking.js enforces 18/6 before it deploys against one. For LP
+  // staking on Sepolia that means tREAL (18) and tUSDC (6) — the older mUSDC mock
+  // reports 18 decimals and is rejected, since it would put the sqrt price out by
+  // 1e24 while every call still succeeds.
   const assetDecimals = Number(await (await pools.getErc20(asset)).decimals());
   const usdcDecimals = Number(await (await pools.getErc20(usdc)).decimals());
   console.log(`decimals: ASSET ${assetDecimals}, USDC ${usdcDecimals}`);

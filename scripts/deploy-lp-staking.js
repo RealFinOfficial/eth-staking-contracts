@@ -19,8 +19,8 @@ const pools = require("./lib/pools");
 //   LP_TOKENX_NAME / LP_TOKENX_SYMBOL — TokenX branding, decided at deploy time
 //
 // Optional env (defaults in parentheses)
-//   LP_NPM                    — NonfungiblePositionManager (canonical mainnet address)
-//   LP_ROUTER                 — SwapRouter02 (canonical mainnet address)
+//   LP_NPM                    — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
+//   LP_ROUTER                 — SwapRouter02 (per-chain default, see UNISWAP_BY_CHAIN)
 //   LP_FEE                    — pool fee tier in hundredths of a bip (3000)
 //   LP_TWAP_WINDOW            — TWAP lookback in seconds, >= 300 (1800)
 //   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in bps, <= 2000 (500)
@@ -30,9 +30,23 @@ const pools = require("./lib/pools");
 //
 // Mainnet needs CONFIRM=yes, like every other state-changing script here.
 
-// Same addresses on every chain Uniswap deployed V3 to, Sepolia included.
-const CANONICAL_POSITION_MANAGER = "0xC36442b4a4522E871399CD717aBDD847Ab11FE88";
-const CANONICAL_SWAP_ROUTER_02 = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45";
+// Uniswap V3 is NOT at one address across chains. Sepolia got its own deployment,
+// and the mainnet addresses have zero code there. Keyed by chain id; a chain that
+// is not listed has no default, so LP_NPM / LP_ROUTER become required for it —
+// including a local fork, which reports 31337 rather than the forked chain id.
+// The getCode() check below is the backstop: a wrong address here fails there.
+const UNISWAP_BY_CHAIN = {
+  // mainnet
+  1: {
+    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
+    swapRouter02: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+  },
+  // sepolia
+  11155111: {
+    positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
+    swapRouter02: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+  },
+};
 
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 const MIN_TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW
@@ -79,11 +93,13 @@ async function main() {
 
   // ──────────────────────── config ────────────────────────
 
+  const uniswap = UNISWAP_BY_CHAIN[chainId] || {};
+
   const asset = readAddress("LP_ASSET");
   const usdc = readAddress("LP_USDC");
   const poolAddress = readAddress("LP_POOL");
-  const positionManager = readAddress("LP_NPM", CANONICAL_POSITION_MANAGER);
-  const swapRouter = readAddress("LP_ROUTER", CANONICAL_SWAP_ROUTER_02);
+  const positionManager = readAddress("LP_NPM", uniswap.positionManager);
+  const swapRouter = readAddress("LP_ROUTER", uniswap.swapRouter02);
   const signer = readAddress("LP_SIGNER");
   const multisig = readAddress("LP_MULTISIG");
 
