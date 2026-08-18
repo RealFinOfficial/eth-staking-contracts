@@ -60,6 +60,11 @@ describe("RewardsDistributor", function () {
     );
   }
 
+  async function txTimestamp(tx) {
+    const receipt = await tx.wait();
+    return (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
+  }
+
   async function claimTokenX(user, cumulativeAmount, opts = {}) {
     const sig = opts.signature ?? (await signVoucher("TokenXClaim", user, cumulativeAmount, opts));
     return distributor
@@ -160,9 +165,12 @@ describe("RewardsDistributor", function () {
   // ─────────────────────────────────────────────────────────────
   describe("claimTokenX", function () {
     it("mints the full cumulative amount on a first claim", async function () {
-      await expect(claimTokenX(alice, TOKENS(100)))
+      const tx = await claimTokenX(alice, TOKENS(100));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(alice.address, tokenXAddr, TOKENS(100), TOKENS(100));
+        .withArgs(alice.address, tokenXAddr, TOKENS(100), TOKENS(100), ts);
 
       expect(await tokenX.balanceOf(alice.address)).to.equal(TOKENS(100));
       expect(await distributor.claimedTokenX(alice.address)).to.equal(TOKENS(100));
@@ -178,9 +186,12 @@ describe("RewardsDistributor", function () {
     it("pays only the difference on the next voucher", async function () {
       await claimTokenX(alice, TOKENS(100));
 
-      await expect(claimTokenX(alice, TOKENS(150)))
+      const tx = await claimTokenX(alice, TOKENS(150));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(alice.address, tokenXAddr, TOKENS(150), TOKENS(50));
+        .withArgs(alice.address, tokenXAddr, TOKENS(150), TOKENS(50), ts);
 
       expect(await tokenX.balanceOf(alice.address)).to.equal(TOKENS(150));
       expect(await distributor.claimedTokenX(alice.address)).to.equal(TOKENS(150));
@@ -206,9 +217,12 @@ describe("RewardsDistributor", function () {
     });
 
     it("lets a user who skipped epochs collect everything in one call", async function () {
-      await expect(claimTokenX(alice, TOKENS(420)))
+      const tx = await claimTokenX(alice, TOKENS(420));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(alice.address, tokenXAddr, TOKENS(420), TOKENS(420));
+        .withArgs(alice.address, tokenXAddr, TOKENS(420), TOKENS(420), ts);
       expect(await tokenX.balanceOf(alice.address)).to.equal(TOKENS(420));
     });
 
@@ -417,9 +431,12 @@ describe("RewardsDistributor", function () {
     it("pays out of the pre-funded balance by transfer, not by minting", async function () {
       await enableAssetLeg(USDC(1000));
 
-      await expect(claimAsset(alice, USDC(600)))
+      const tx = await claimAsset(alice, USDC(600));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(alice.address, assetAddr, USDC(600), USDC(600));
+        .withArgs(alice.address, assetAddr, USDC(600), USDC(600), ts);
 
       expect(await asset.balanceOf(alice.address)).to.equal(USDC(600));
       expect(await asset.balanceOf(distributorAddr)).to.equal(USDC(400));
@@ -430,9 +447,12 @@ describe("RewardsDistributor", function () {
       await enableAssetLeg(USDC(1000));
       await claimAsset(alice, USDC(600));
 
-      await expect(claimAsset(alice, USDC(900)))
+      const tx = await claimAsset(alice, USDC(900));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(alice.address, assetAddr, USDC(900), USDC(300));
+        .withArgs(alice.address, assetAddr, USDC(900), USDC(300), ts);
       expect(await asset.balanceOf(alice.address)).to.equal(USDC(900));
 
       await expect(claimAsset(alice, USDC(900)))
@@ -596,9 +616,12 @@ describe("RewardsDistributor", function () {
     it("emits ExcessAssetRecovered with the owner and the amount", async function () {
       await asset.transfer(distributorAddr, USDC(1000));
 
-      await expect(distributor.recoverExcessAsset(USDC(400)))
+      const tx = await distributor.recoverExcessAsset(USDC(400));
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
         .to.emit(distributor, "ExcessAssetRecovered")
-        .withArgs(owner.address, USDC(400));
+        .withArgs(owner.address, USDC(400), ts);
     });
 
     it("cannot pull more than the contract holds", async function () {

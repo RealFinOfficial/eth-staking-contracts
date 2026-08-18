@@ -99,11 +99,17 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
 
     // ──────────────────────── Events ───────────────────────────
 
-    event Claimed(address indexed user, address indexed token, uint256 cumulativeAmount, uint256 paidAmount);
+    event Claimed(
+        address indexed user,
+        address indexed token,
+        uint256 cumulativeAmount,
+        uint256 paidAmount,
+        uint256 timestamp
+    );
     event SignerChanged(address previousSigner, address newSigner);
     event Paused(bool paused);
     event AssetClaimsEnabled(bool enabled);
-    event ExcessAssetRecovered(address to, uint256 amount);
+    event ExcessAssetRecovered(address to, uint256 amount, uint256 timestamp);
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -177,7 +183,7 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
 
         tokenX.mint(msg.sender, paidAmount);
 
-        emit Claimed(msg.sender, address(tokenX), cumulativeAmount, paidAmount);
+        emit Claimed(msg.sender, address(tokenX), cumulativeAmount, paidAmount, block.timestamp);
     }
 
     /// @notice Claim the ASSET leg. Transfers `cumulativeAmount - claimedAsset[msg.sender]`
@@ -201,7 +207,7 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
 
         asset.safeTransfer(msg.sender, paidAmount);
 
-        emit Claimed(msg.sender, address(asset), cumulativeAmount, paidAmount);
+        emit Claimed(msg.sender, address(asset), cumulativeAmount, paidAmount, block.timestamp);
     }
 
     // ──────────────────────── Owner functions ──────────────────
@@ -237,6 +243,6 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
     function recoverExcessAsset(uint256 amount) external onlyOwner {
         if (amount == 0) revert ZeroAmount();
         asset.safeTransfer(owner(), amount);
-        emit ExcessAssetRecovered(owner(), amount);
+        emit ExcessAssetRecovered(owner(), amount, block.timestamp);
     }
 }
