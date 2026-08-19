@@ -29,8 +29,10 @@ jobs:
         run: npx hardhat compile
 
       # No MAINNET_RPC_URL is configured here on purpose: no repository secret is
-      # needed to keep this job green. The fork tests read that variable and skip
-      # themselves when it is unset, so CI runs the unit suite only. Run the fork
-      # tests locally with MAINNET_RPC_URL pointing at an archive node.
+      # needed to run this job. With the variable unset the fork suite falls back to
+      # public archive endpoints and skips itself only if none of them can serve the
+      # pinned block. Anything that fails after a fork is established fails the job —
+      # the suite never converts a real defect into a skip. Set MAINNET_RPC_URL to a
+      # dedicated archive node to make the fork tests mandatory.
       - name: Test
         run: npx hardhat test

@@ -10,9 +10,34 @@
  * `hardhat_reset` inside `before` and resets back to a clean local network in `after`, so
  * running it alongside the unit suite is order-independent.
  *
- * No RPC, no problem: when the fork cannot be established (no endpoint reachable, archive
- * state gated, rate limit) the whole suite is skipped, not failed, so `npx hardhat test`
- * stays green on a machine with no .env.
+ * ── Skip vs fail: a deliberate, one-sided boundary ────────────────────────────────────
+ *
+ * `before` runs in two phases and only the first one may ever skip.
+ *
+ *   Phase 1 — establish the fork. The only legitimate reason to skip: no endpoint could
+ *   serve archive state at the pinned block (nothing reachable, archive gated, rate
+ *   limited). That is an environment fact, not a defect, so `npx hardhat test` stays green
+ *   on a machine with no .env. If MAINNET_RPC_URL (or INFURA_API_KEY) is set, the operator
+ *   has explicitly asked for these tests, so even this phase fails instead of skipping.
+ *
+ *   Phase 2 — build the world on the established fork: whale funding, oracle warm-up,
+ *   deployments, wiring. Nothing here is caught. Every failure is a real defect and fails
+ *   the run.
+ *
+ * The regression this encodes: CI run 32128029867 connected to a public endpoint, then
+ * failed whale funding with "maxFeePerGas (57813572) is too low for the next block
+ * (baseFeePerGas 80979456)". A catch-all around the whole setup turned that into
+ * `this.skip()` and the job reported "288 passing, 16 pending" — green, and wrong.
+ *
+ * ── Fees are pinned, never estimated ──────────────────────────────────────────────────
+ *
+ * That base-fee failure was not a fluke of one endpoint: the node's default fee for a
+ * transaction is derived from the block base fee it knows about, which on a pinned fork
+ * can be stale by the time the transaction is validated for the next block. Every signer
+ * the suite uses is therefore wrapped so its transactions carry explicit EIP-1559 fields
+ * derived from the forked block's own baseFeePerGas with 100x headroom. No transaction in
+ * this file depends on fee estimation, so the whole failure class is gone rather than
+ * merely reported honestly.
  */
 
 const { expect } = require("chai");
@@ -79,6 +104,32 @@ const USDC_WHALES = [
 
 const USDC = (n) => BigInt(Math.round(n * 1e6));
 const ASSET = (n) => ethers.parseUnits(String(n), 18);
+/** TokenX is 18 decimals like ASSET; a separate name keeps reward amounts readable as such. */
+const TOKENS = (n) => ethers.parseUnits(String(n), 18);
+
+/**
+ * Fee pinning. `maxFeePerGas` is `baseFeePerGas * FEE_HEADROOM` at the forked block, never
+ * below {@link MIN_MAX_FEE_PER_GAS}. EIP-1559 lets the base fee grow by at most 12.5% per
+ * block, so 100x survives ~40 consecutive full blocks — and this fork's blocks carry one
+ * transaction each, so its base fee falls rather than rises. The headroom costs nothing:
+ * only `baseFee + priority` is ever charged, `maxFeePerGas` is just the ceiling the sender
+ * accepts, and 10 gwei against a 30M gas limit is 0.3 ETH out of each signer's 10,000.
+ */
+const FEE_HEADROOM = 100n;
+const MIN_MAX_FEE_PER_GAS = ethers.parseUnits("10", "gwei");
+const PRIORITY_FEE_PER_GAS = ethers.parseUnits("1", "gwei");
+
+/** TokenX branding is a deploy-time decision; the unit suite's placeholder is reused here. */
+const TOKENX_NAME = "Token X";
+const TOKENX_SYMBOL = "TKX";
+
+/** Epoch ids and caps armed on TokenX for the reward-leg tests. */
+const EPOCH_ONE = 1n;
+const EPOCH_TWO = 2n;
+const EPOCH_ONE_CAP = TOKENS(1_000_000);
+const EPOCH_TWO_CAP = TOKENS(500_000);
+/** How far ahead of the arming the scheduled epoch is due. */
+const EPOCH_ROLLOVER_DELAY = 3600;
 
 /** Total USDC the suite needs the whale to be able to hand out and to trade with. */
 const WHALE_BUDGET = USDC(1_000_000);
@@ -156,11 +207,18 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
   let chainId;
   let snapshot;
 
-  let deployer, alice, bob, carol, dave;
+  let deployer, alice, bob, carol, dave, backOffice, multisig;
   let whale, whaleAddr;
 
   let pool, npm, npmRead, router, asset, usdc;
   let vault, zapper, vaultAddr, zapperAddr;
+  let tokenX, distributor, tokenXAddr, distributorAddr;
+
+  /** EIP-712 domain read back from the deployed distributor, never assumed. */
+  let voucherDomain;
+
+  /** Explicit EIP-1559 fields every signer's transactions carry. See the file header. */
+  let pinnedFees;
 
   // Reported by the manipulation test, printed at the end of the run.
   const notes = [];
@@ -173,6 +231,49 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
   async function resetToLocal() {
     await rpcSend("hardhat_reset", []);
+  }
+
+  /**
+   * Reads the forked block's own base fee and derives the ceiling every transaction in
+   * this file will carry. Must run once the fork is up and before any signer is used.
+   */
+  async function derivePinnedFees() {
+    const block = await ethers.provider.getBlock("latest");
+    const baseFee = block.baseFeePerGas;
+    if (baseFee === null || baseFee === undefined) {
+      throw new Error(`forked block ${block.number} reports no baseFeePerGas`);
+    }
+    const headroom = baseFee * FEE_HEADROOM;
+    const maxFeePerGas = headroom > MIN_MAX_FEE_PER_GAS ? headroom : MIN_MAX_FEE_PER_GAS;
+    return {
+      baseFee,
+      maxFeePerGas,
+      maxPriorityFeePerGas:
+        PRIORITY_FEE_PER_GAS < maxFeePerGas ? PRIORITY_FEE_PER_GAS : maxFeePerGas,
+    };
+  }
+
+  /**
+   * Wraps a signer so every transaction it sends carries {@link pinnedFees}, unless the
+   * call site states its own. Applied to every signer the suite touches — the test
+   * accounts, the impersonated whale, and the deployer handed to each contract factory —
+   * which is what makes "no transaction here depends on fee estimation" true rather than
+   * aspirational. Hardhat's signer funnels everything through `sendTransaction`, so this
+   * one seam covers plain calls, `.connect(...)` calls and contract deployments alike.
+   */
+  function pinFees(signer) {
+    if (signer.__feesPinned) return signer;
+    const send = signer.sendTransaction.bind(signer);
+    signer.sendTransaction = (tx) => {
+      if (!pinnedFees) throw new Error("pinFees used before the fork's fees were derived");
+      return send({
+        maxFeePerGas: pinnedFees.maxFeePerGas,
+        maxPriorityFeePerGas: pinnedFees.maxPriorityFeePerGas,
+        ...tx,
+      });
+    };
+    signer.__feesPinned = true;
+    return signer;
   }
 
   /** Forks at the pinned block and proves archive state really is served. */
@@ -198,7 +299,15 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
   async function impersonate(addr) {
     await rpcSend("hardhat_impersonateAccount", [addr]);
     await rpcSend("hardhat_setBalance", [addr, "0x21e19e0c9bab2400000"]); // 10_000 ETH for gas
-    return ethers.getSigner(addr);
+    return pinFees(await ethers.getSigner(addr));
+  }
+
+  async function blockTimestamp() {
+    return (await ethers.provider.getBlock("latest")).timestamp;
+  }
+
+  async function receiptTimestamp(receipt) {
+    return (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
   }
 
   async function advance(seconds) {
@@ -376,6 +485,38 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
     return ethers.Signature.from(sig);
   }
 
+  /**
+   * The EIP-712 domain a deployed contract reports for itself (ERC-5267). The distributor
+   * is deployed by this run, so its domain — chain id included, which is the fork's, not
+   * mainnet's — is only knowable at runtime. Reading it back is also the check that the
+   * back office and the contract agree on `name` and `version`.
+   */
+  async function readEip712Domain(contract) {
+    const d = await contract.eip712Domain();
+    return {
+      name: d.name,
+      version: d.version,
+      chainId: d.chainId,
+      verifyingContract: d.verifyingContract,
+    };
+  }
+
+  /** Field list of both claim legs; order and names must match the on-chain type strings. */
+  const CLAIM_FIELDS = [
+    { name: "user", type: "address" },
+    { name: "cumulativeAmount", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ];
+
+  /** The back office attesting a lifetime TokenX entitlement, as it would in production. */
+  async function signTokenXVoucher(user, cumulativeAmount, deadline = FAR_DEADLINE) {
+    return backOffice.signTypedData(
+      voucherDomain,
+      { TokenXClaim: CLAIM_FIELDS },
+      { user: user.address, cumulativeAmount, deadline }
+    );
+  }
+
   /** What the vault would pull out of a position: principal, then accrued fees. */
   async function previewWithdraw(tokenId) {
     const position = await npm.positions(tokenId);
@@ -427,7 +568,9 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
   // ── setup ──────────────────────────────────────────────────────────────
 
   before(async function () {
+    // ── Phase 1: establish the fork. The one and only place a skip is legal. ──────────
     const candidates = resolveRpcCandidates();
+    const configured = Boolean(process.env.MAINNET_RPC_URL || process.env.INFURA_API_KEY);
     const failures = [];
 
     for (const url of candidates) {
@@ -442,19 +585,34 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
     }
 
     if (!forked) {
+      await resetToLocal().catch(() => {});
+      const detail = `no usable RPC for block ${PINNED_BLOCK}:\n    ${failures.join("\n    ")}`;
+
+      // An endpoint was configured on purpose, so the operator asked for these tests.
+      // Failing to reach it is a failure, not an excuse to go quiet.
+      if (configured) {
+        throw new Error(
+          `[fork] MAINNET_RPC_URL / INFURA_API_KEY is set, so the mainnet-fork suite must ` +
+            `run, but the fork could not be established — ${detail}`
+        );
+      }
+
       console.warn(
-        `\n  [fork] skipping mainnet-fork suite — no usable RPC for block ${PINNED_BLOCK}:\n    ` +
-          failures.join("\n    ") +
+        `\n  [fork] skipping mainnet-fork suite — ${detail}` +
           "\n  Set MAINNET_RPC_URL (archive access required) to run it.\n"
       );
-      await resetToLocal().catch(() => {});
       this.skip();
       return;
     }
 
-    try {
+    // ── Phase 2: build the world. No catch — every failure below is a real defect. ────
+    {
+      pinnedFees = await derivePinnedFees();
+
       chainId = (await ethers.provider.getNetwork()).chainId;
-      [deployer, alice, bob, carol, dave] = await ethers.getSigners();
+      [deployer, alice, bob, carol, dave, backOffice, multisig] = (
+        await ethers.getSigners()
+      ).map(pinFees);
 
       pool = new ethers.Contract(POOL_ADDR, POOL_ABI, deployer);
       npm = new ethers.Contract(NPM_ADDR, NPM_ABI, deployer);
@@ -510,7 +668,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       }
 
       // 7. Deploy the stack against the real pool.
-      const Vault = await ethers.getContractFactory("LPStakingVault");
+      const Vault = await ethers.getContractFactory("LPStakingVault", deployer);
       vault = await Vault.deploy(
         NPM_ADDR,
         POOL_ADDR,
@@ -525,7 +683,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       await vault.waitForDeployment();
       vaultAddr = await vault.getAddress();
 
-      const Zapper = await ethers.getContractFactory("LPZapper");
+      const Zapper = await ethers.getContractFactory("LPZapper", deployer);
       zapper = await Zapper.deploy(
         vaultAddr,
         NPM_ADDR,
@@ -544,25 +702,46 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       zapperAddr = await zapper.getAddress();
       await (await vault.setZapper(zapperAddr)).wait();
 
-      // 8. The guard must be readable before any guarded path is exercised.
+      // 8. Deploy the reward leg in the order scripts/deploy-lp-staking.js fixes: TokenX
+      //    first, then the distributor that becomes its minter, then the epoch armed by
+      //    the deployer, and only then ownership handed to the multisig. `asset` is the
+      //    real mainnet ASSET token, exactly as the script passes LP_ASSET.
+      const TokenXFactory = await ethers.getContractFactory("TokenX", deployer);
+      tokenX = await TokenXFactory.deploy(TOKENX_NAME, TOKENX_SYMBOL, deployer.address);
+      await tokenX.waitForDeployment();
+      tokenXAddr = await tokenX.getAddress();
+
+      const DistributorFactory = await ethers.getContractFactory("RewardsDistributor", deployer);
+      distributor = await DistributorFactory.deploy(
+        tokenXAddr,
+        ASSET_ADDR,
+        backOffice.address, // LP_SIGNER — the back office key, never the deployer
+        deployer.address
+      );
+      await distributor.waitForDeployment();
+      distributorAddr = await distributor.getAddress();
+
+      await (await tokenX.setMinter(distributorAddr)).wait();
+      await (await tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP)).wait();
+      await (await tokenX.transferOwnership(multisig.address)).wait();
+      await (await distributor.transferOwnership(multisig.address)).wait();
+
+      // The voucher domain is a runtime fact of the deployed contract — its chain id is
+      // the fork's, and its verifying contract only exists as of a minute ago.
+      voucherDomain = await readEip712Domain(distributor);
+
+      // 9. The guard must be readable before any guarded path is exercised.
       const preview = await vault.previewTwap();
       expect(preview.withinBounds).to.equal(true);
 
       notes.push(
         `rpc=${rpcUsed} block=${PINNED_BLOCK} chainId=${chainId} whale=${whaleAddr}`,
+        `pinned fees: baseFee=${pinnedFees.baseFee} maxFee=${pinnedFees.maxFeePerGas} ` +
+          `priority=${pinnedFees.maxPriorityFeePerGas}`,
         `spot tick after warm-up=${preview.currentTick} twap=${preview.twapTick} pool liquidity=${await pool.liquidity()}`
       );
 
       snapshot = await takeSnapshot();
-    } catch (error) {
-      console.warn(
-        `\n  [fork] skipping mainnet-fork suite — setup failed against ${rpcUsed}:\n    ` +
-          (error.stack || error.message) +
-          "\n"
-      );
-      forked = false;
-      await resetToLocal().catch(() => {});
-      this.skip();
     }
   });
 
@@ -1091,6 +1270,140 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       // The revert left the stake untouched.
       expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
       expect(await npm.ownerOf(tokenId)).to.equal(vaultAddr);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("7. reward leg: zap -> signed voucher -> claimTokenX", function () {
+    const FIRST_VOUCHER = TOKENS(1_000);
+    const SECOND_VOUCHER = TOKENS(1_750);
+
+    /** The user-facing entry point: USDC in, staked position out. */
+    async function zapIntoStakedPosition(user, amount = USDC(5_000)) {
+      const centre = alignDown(await currentTick());
+      await (await usdc.connect(user).approve(zapperAddr, amount)).wait();
+      const receipt = await (
+        await zapper.connect(user).zapIn(
+          amount,
+          centre - 1200,
+          centre + 1200,
+          {
+            zeroForOne: false, // USDC is token1 on this pool
+            amountIn: amount / 3n,
+            amountOutMin: 0n,
+            amount0Min: 0n,
+            amount1Min: 0n,
+          },
+          FAR_DEADLINE
+        )
+      ).wait();
+      return parseEvent(receipt, zapper, zapperAddr, "ZappedIn");
+    }
+
+    it("is wired the way the deploy script wires it, with the domain read back on chain", async function () {
+      expect(await tokenX.minter()).to.equal(distributorAddr);
+      expect(await tokenX.owner()).to.equal(multisig.address);
+      expect(await tokenX.totalSupply()).to.equal(0n);
+      expect(await tokenX.currentEpochId()).to.equal(EPOCH_ONE);
+      expect(await tokenX.epochCap(EPOCH_ONE)).to.equal(EPOCH_ONE_CAP);
+
+      expect(await distributor.tokenX()).to.equal(tokenXAddr);
+      expect(await distributor.asset()).to.equal(ASSET_ADDR); // the real mainnet ASSET
+      expect(await distributor.signer()).to.equal(backOffice.address);
+      expect(await distributor.owner()).to.equal(multisig.address);
+      expect(await distributor.paused()).to.equal(false);
+      expect(await distributor.assetClaimsEnabled()).to.equal(false);
+
+      // The domain the back office must sign against, as the contract reports it.
+      expect(voucherDomain.name).to.equal("RealLPRewards");
+      expect(voucherDomain.version).to.equal("1");
+      expect(voucherDomain.chainId).to.equal(chainId);
+      expect(voucherDomain.verifyingContract).to.equal(distributorAddr);
+    });
+
+    it("zaps USDC into a staked position and pays the back office's voucher in TokenX", async function () {
+      const zapped = await zapIntoStakedPosition(carol);
+
+      // The position the reward is being paid for is real, staked and in custody.
+      expect(await vault.stakerOf(zapped.tokenId)).to.equal(carol.address);
+      expect(await npm.ownerOf(zapped.tokenId)).to.equal(vaultAddr);
+      expect((await npm.positions(zapped.tokenId)).liquidity).to.be.greaterThan(0n);
+
+      // The back office attests a lifetime entitlement for that staker and nobody else.
+      const signature = await signTokenXVoucher(carol, FIRST_VOUCHER);
+      expect(await tokenX.balanceOf(carol.address)).to.equal(0n);
+
+      const tx = await distributor.connect(carol).claimTokenX(FIRST_VOUCHER, FAR_DEADLINE, signature);
+      const receipt = await tx.wait();
+      const ts = await receiptTimestamp(receipt);
+
+      await expect(tx)
+        .to.emit(distributor, "Claimed")
+        .withArgs(carol.address, tokenXAddr, FIRST_VOUCHER, FIRST_VOUCHER, ts);
+
+      expect(await tokenX.balanceOf(carol.address)).to.equal(FIRST_VOUCHER);
+      expect(await distributor.claimedTokenX(carol.address)).to.equal(FIRST_VOUCHER);
+      expect(await tokenX.totalSupply()).to.equal(FIRST_VOUCHER);
+      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
+
+      // Cumulative, not per-epoch: the next voucher pays only what it adds.
+      const second = await signTokenXVoucher(carol, SECOND_VOUCHER);
+      const delta = SECOND_VOUCHER - FIRST_VOUCHER;
+      const tx2 = await distributor.connect(carol).claimTokenX(SECOND_VOUCHER, FAR_DEADLINE, second);
+      const ts2 = await receiptTimestamp(await tx2.wait());
+
+      await expect(tx2)
+        .to.emit(distributor, "Claimed")
+        .withArgs(carol.address, tokenXAddr, SECOND_VOUCHER, delta, ts2);
+
+      expect(await tokenX.balanceOf(carol.address)).to.equal(SECOND_VOUCHER);
+      expect(await distributor.claimedTokenX(carol.address)).to.equal(SECOND_VOUCHER);
+      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(SECOND_VOUCHER);
+
+      // The zapped stake is untouched by the reward leg — the two are independent.
+      expect(await vault.stakerOf(zapped.tokenId)).to.equal(carol.address);
+    });
+
+    it("rolls the scheduled epoch in on the claim that crosses its boundary", async function () {
+      await zapIntoStakedPosition(carol);
+
+      await (
+        await distributor
+          .connect(carol)
+          .claimTokenX(FIRST_VOUCHER, FAR_DEADLINE, await signTokenXVoucher(carol, FIRST_VOUCHER))
+      ).wait();
+      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
+
+      // The multisig parks the next epoch. No keeper, no timed transaction.
+      const activatesAt = BigInt((await blockTimestamp()) + EPOCH_ROLLOVER_DELAY);
+      await expect(tokenX.connect(multisig).armNextEpoch(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt))
+        .to.emit(tokenX, "NextEpochArmed")
+        .withArgs(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt);
+
+      await advance(EPOCH_ROLLOVER_DELAY + 60);
+
+      // Lazy by design: the running epoch still reads stale, `effectiveEpoch()` does not.
+      expect(await tokenX.currentEpochId()).to.equal(EPOCH_ONE);
+      const effective = await tokenX.effectiveEpoch();
+      expect(effective.epochId).to.equal(EPOCH_TWO);
+      expect(effective.cap).to.equal(EPOCH_TWO_CAP);
+
+      const delta = SECOND_VOUCHER - FIRST_VOUCHER;
+      const tx = await distributor
+        .connect(carol)
+        .claimTokenX(SECOND_VOUCHER, FAR_DEADLINE, await signTokenXVoucher(carol, SECOND_VOUCHER));
+
+      await expect(tx)
+        .to.emit(tokenX, "EpochActivated")
+        .withArgs(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt, anyValue);
+
+      // The claim paid the same difference, but charged it to the new epoch's headroom.
+      expect(await tokenX.balanceOf(carol.address)).to.equal(SECOND_VOUCHER);
+      expect(await tokenX.currentEpochId()).to.equal(EPOCH_TWO);
+      expect(await tokenX.epochCap(EPOCH_TWO)).to.equal(EPOCH_TWO_CAP);
+      expect(await tokenX.mintedInEpoch(EPOCH_TWO)).to.equal(delta);
+      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
+      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(0n);
     });
   });
 });
