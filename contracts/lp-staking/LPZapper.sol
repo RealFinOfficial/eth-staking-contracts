@@ -43,7 +43,9 @@ interface ILPStakingVault {
  *  Replaceable periphery. All custody and accounting live in `LPStakingVault`; this
  *  contract only sequences swap -> mint -> `stakeFor` and refunds what is left over. It
  *  holds no funds and no NFTs between transactions — every balance it ends a transaction
- *  with is dust from a failed refund, recoverable by the owner through `sweep`.
+ *  with is dust from a failed refund, recoverable by the owner through `sweep`, and every
+ *  position NFT it ends a transaction with was pushed in from outside, recoverable through
+ *  `rescuePosition`.
  *
  *  The vault must whitelist this address via `setZapper` before zapping works.
  *
@@ -51,6 +53,16 @@ interface ILPStakingVault {
  */
 contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     using SafeERC20 for IERC20;
+
+    // ──────────────────────── Constants ────────────────────────
+
+    /// @dev NFT-receipt guard states, mirroring {LPStakingVault}. Non-zero sentinels keep
+    ///      the slot warm and avoid the 20k gas of a 0 -> 1 store on every zap, the same
+    ///      trick OZ's ReentrancyGuard uses. A plain storage flag is used rather than
+    ///      0.8.28 `transient` so the file keeps compiling under its declared
+    ///      `pragma ^0.8.20`.
+    uint256 private constant NOT_RECEIVING = 1;
+    uint256 private constant RECEIVING = 2;
 
     // ──────────────────────── State ────────────────────────────
 
@@ -73,6 +85,9 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     /// @notice True when USDC is the pool's token0. Fixes the only valid swap direction.
     bool public immutable usdcIsToken0;
 
+    /// @dev NOT_RECEIVING outside the zapper's own mint, RECEIVING during it.
+    uint256 private _receiveGuard = NOT_RECEIVING;
+
     // ──────────────────────── Events ───────────────────────────
 
     /// @notice A zap completed. The staker credit itself is evidenced by the vault's
@@ -89,6 +104,11 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     /// @notice Dust recovered by the owner.
     event Swept(address indexed token, address indexed to, uint256 amount);
 
+    /// @notice A position NFT that was sitting on this contract outside a zap went to the
+    ///         owner. The zapper holds no NFT between transactions, so every emission of
+    ///         this event is a misdirected transfer being undone.
+    event PositionRescued(uint256 indexed tokenId, address indexed to, uint256 timestamp);
+
     // ──────────────────────── Errors ───────────────────────────
 
     error ZeroAddress();
@@ -99,6 +119,7 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     error InvalidSwapDirection(bool zeroForOne, bool expectedZeroForOne);
     error SwapAmountExceedsInput(uint256 amountIn, uint256 usdcAmount);
     error UnexpectedNftSender(address sender);
+    error UnsolicitedPosition(address operator, address from, uint256 tokenId);
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -219,20 +240,29 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     // ──────────────────────── ERC-721 receiver ─────────────────
 
     /**
-     * @notice ERC-721 receipt hook, accepting position NFTs from the configured position
-     *         manager only.
-     * @dev The canonical position manager mints with `_mint` and never calls back, so this
-     *      hook is defensive: it keeps the zap working against a position manager that
-     *      does, while still rejecting unsolicited NFTs from anywhere else.
+     * @notice ERC-721 receipt hook. Accepts position NFTs only from the configured position
+     *         manager and only inside this contract's own mint.
+     * @dev Two gates, mirroring {LPStakingVault}. The sender check keeps foreign ERC-721
+     *      collections out; the receipt-window check keeps out safe transfers of genuine
+     *      position NFTs pushed in from outside a zap, which would otherwise land here with
+     *      nothing in the zap flow to move them on.
+     *
+     *      The canonical position manager mints with `_mint` and never calls back, so the
+     *      window is opened defensively: it keeps the zap working against a position manager
+     *      that does call back, and costs nothing against one that does not.
+     * @param operator Address that triggered the transfer.
+     * @param from Previous owner.
+     * @param tokenId The NFT being transferred.
      * @return The ERC-721 receiver magic value.
      */
-    function onERC721Received(address, address, uint256, bytes calldata)
+    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata)
         external
         view
         override
         returns (bytes4)
     {
         if (msg.sender != address(positionManager)) revert UnexpectedNftSender(msg.sender);
+        if (_receiveGuard != RECEIVING) revert UnsolicitedPosition(operator, from, tokenId);
         return IERC721Receiver.onERC721Received.selector;
     }
 
@@ -260,6 +290,43 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
         emit Swept(token, to, amount);
+    }
+
+    /**
+     * @notice Recovers a position NFT stranded on this contract.
+     *
+     * @dev The counterpart of {sweep} for the non-fungible side. `onERC721Received` now
+     *      rejects safe transfers arriving outside a zap, but a plain `transferFrom` never
+     *      consults the hook, so an NFT can still be pushed here by mistake. Without this
+     *      function it would be stuck forever: nothing else in the contract moves an NFT
+     *      the zap flow did not mint.
+     *
+     *      No allow-list of ids is needed, because the zapper owns no position NFT between
+     *      transactions by design — it mints, approves the vault and hands custody over in
+     *      the same call. Every id it owns when this function can run is therefore a stray.
+     *
+     *      `nonReentrant` is what makes that argument hold. Inside `_zapIn` there is a real
+     *      window — from the `mint` until `vault.stakeFor` — where the zapper legitimately
+     *      owns the new NFT and no record of it exists anywhere. Sharing the reentrancy
+     *      guard with both zap entry points closes that window: this call cannot execute
+     *      while a zap is in flight, only before or after one.
+     *
+     *      The destination is `owner()` rather than a caller-supplied address, matching
+     *      `RewardsDistributor.recoverExcessAsset`. A position NFT is unique and a mistyped
+     *      recipient is unrecoverable, so the recovery path offers no place to mistype one;
+     *      the owner multisig forwards it to the rightful holder off-chain. A plain
+     *      `transferFrom` is used for the same reason {LPStakingVault-unstake} uses one — a
+     *      multisig without an `onERC721Received` hook must not be locked out of its own
+     *      recovery path.
+     *
+     *      Reverts through the position manager's own authorization check when this
+     *      contract does not own `tokenId`.
+     * @param tokenId Position NFT held by this contract to send to the owner.
+     */
+    function rescuePosition(uint256 tokenId) external onlyOwner nonReentrant {
+        address to = owner();
+        positionManager.transferFrom(address(this), to, tokenId);
+        emit PositionRescued(tokenId, to, block.timestamp);
     }
 
     // ──────────────────────── Internal helpers ─────────────────
@@ -331,6 +398,14 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
 
     /// @dev Mints a position to this contract using the whole current balance of both
     ///      tokens as desired amounts, with the caller's minimums enforced.
+    ///
+    ///      Whole balance, not the amount this call pulled in, and that is deliberate. A
+    ///      token0/token1 balance sitting here before the call can only be a misdirected
+    ///      transfer or dust from a failed refund — the zapper is drained at the end of
+    ///      every zap — and the alternative, tracking per-call amounts, would buy nothing
+    ///      but would leave the dust behind on every pass. So the stray joins this mint and
+    ///      whatever the mint does not consume is refunded to this caller. Only misdirected
+    ///      funds are ever at stake; staked positions are in the vault and are untouched.
     function _mintPosition(int24 tickLower, int24 tickUpper, SwapParams calldata swap, uint256 deadline)
         internal
         returns (uint256 tokenId)
@@ -341,6 +416,10 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         IERC20(token0).forceApprove(address(positionManager), amount0);
         IERC20(token1).forceApprove(address(positionManager), amount1);
 
+        // The canonical position manager uses `_mint`, not `_safeMint`, so no receipt hook
+        // fires here. The guard is opened anyway so the flow stays correct against any
+        // position manager that does call back.
+        _receiveGuard = RECEIVING;
         (tokenId, , , ) = positionManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -356,12 +435,16 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
                 deadline: deadline
             })
         );
+        _receiveGuard = NOT_RECEIVING;
 
         IERC20(token0).forceApprove(address(positionManager), 0);
         IERC20(token1).forceApprove(address(positionManager), 0);
     }
 
-    /// @dev Sends every remaining USDC and ASSET wei back to `to`.
+    /// @dev Sends every remaining USDC and ASSET wei back to `to`. Whole balance by design,
+    ///      the mirror image of {_mintPosition}: a stray USDC or ASSET balance pushed in
+    ///      from outside leaves with the next zapper rather than staying to be swept. See
+    ///      that function's note for why that trade is the intended one.
     function _refundDust(address to) internal returns (uint256 usdcRefunded, uint256 assetRefunded) {
         usdcRefunded = IERC20(usdc).balanceOf(address(this));
         if (usdcRefunded > 0) IERC20(usdc).safeTransfer(to, usdcRefunded);

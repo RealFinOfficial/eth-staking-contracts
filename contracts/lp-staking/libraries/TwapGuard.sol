@@ -43,13 +43,22 @@ struct SwapParams {
  *    - Spot tick from `pool.slot0()`.
  *    - Revert when the absolute difference exceeds `maxTwapDeviationBps` ticks.
  *
- *  Bps-to-ticks approximation: one tick is a 1.0001x price step, i.e. +1.00 bps per tick.
- *  Deviations compound (`1.0001^n`), so `n` ticks is slightly more than `n` bps — at the
- *  2000 bps ceiling the true bound is ~2214 bps rather than 2000. The guard is a
- *  manipulation circuit breaker, not a pricing oracle, and the error is conservative in
- *  the direction that matters (the bound is never tighter than requested), so ticks are
- *  used as a 1:1 stand-in for bps. Callers still carry their own `amountOutMin` /
- *  `amount0Min` / `amount1Min` for exact slippage control.
+ *  Bps-to-ticks approximation, and which way it errs: `maxTwapDeviationBps` is compared
+ *  against a tick difference, one bp taken as one tick. One tick is a 1.0001x price step,
+ *  and steps compound (`1.0001^n`), so `n` ticks is always MORE than `n` bps of price move,
+ *  by up to ~11% over the parameter's range:
+ *
+ *      500 bps configured  -> ~513 bps of real price deviation admitted
+ *     2000 bps configured  -> ~2214 bps of real price deviation admitted
+ *
+ *  The error therefore makes the circuit breaker LOOSER than the number it is configured
+ *  with, never tighter: it trips later than a strict bps reading would suggest, so an
+ *  operator sizing the parameter must read it as a floor on what is allowed through, not a
+ *  ceiling. This is accepted rather than corrected — an exact conversion would need a
+ *  logarithm on-chain, and the guard is a manipulation circuit breaker, not a pricing
+ *  oracle. Nothing about slippage rests on it: the exact protection is the caller's own
+ *  `amountOutMin` / `amount0Min` / `amount1Min`, which bound the value that can actually be
+ *  lost regardless of where this guard trips.
  */
 abstract contract TwapGuard {
     // ──────────────────────── Constants ────────────────────────

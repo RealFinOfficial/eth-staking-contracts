@@ -879,6 +879,89 @@ describe("LPStakingVault", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
+  describe("rescuePosition", function () {
+    /// A plain `transferFrom` never consults `onERC721Received`, so this is the one way an
+    /// NFT can still land in the vault without a staker record behind it.
+    async function pushStrayPosition(holder) {
+      const tokenId = await createPosition(holder);
+      await nfpm.connect(holder).transferFrom(holder.address, vaultAddr, tokenId);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+      expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
+      return tokenId;
+    }
+
+    it("sends an unrecorded position NFT to the owner and logs it", async function () {
+      const tokenId = await pushStrayPosition(alice);
+
+      const tx = await vault.rescuePosition(tokenId);
+      const ts = await txTimestamp(tx);
+
+      await expect(tx).to.emit(vault, "PositionRescued").withArgs(tokenId, owner.address, ts);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(owner.address);
+    });
+
+    it("refuses to move a staked position — the record is what makes custody legitimate", async function () {
+      const tokenId = await stakePosition(alice);
+
+      await expect(vault.rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(vault, "PositionIsStaked")
+        .withArgs(tokenId, alice.address);
+
+      // custody and the record are both untouched, and the staker can still walk out
+      expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
+    });
+
+    it("refuses the position a rebalance just minted, and lets the burned old id go", async function () {
+      const tokenId = await stakePosition(alice);
+      const newTokenId = await vault
+        .connect(alice)
+        .rebalance.staticCall(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      await vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+
+      // the record moved with the position, so the live id is still out of reach
+      await expect(vault.rescuePosition(newTokenId))
+        .to.be.revertedWithCustomError(vault, "PositionIsStaked")
+        .withArgs(newTokenId, alice.address);
+
+      // the old id has no record any more, but it was burned, so there is nothing to move
+      expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
+      await expect(vault.rescuePosition(tokenId)).to.be.revertedWithCustomError(nfpm, "ERC721NonexistentToken");
+    });
+
+    it("is owner only", async function () {
+      const tokenId = await pushStrayPosition(alice);
+
+      await expect(vault.connect(alice).rescuePosition(tokenId)).to.be.revertedWithCustomError(
+        vault,
+        "OwnableUnauthorizedAccount"
+      );
+      expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+    });
+
+    it("cannot pull in an NFT the vault does not hold, even one approved to it", async function () {
+      // `createPosition` leaves the vault approved for the token, which is what a user does
+      // before `stake`. The rescue transfers out of the vault rather than pulling into it,
+      // so the standing approval buys the owner nothing.
+      const tokenId = await createPosition(alice);
+
+      await expect(vault.rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(nfpm, "ERC721IncorrectOwner")
+        .withArgs(vaultAddr, tokenId, alice.address);
+    });
+
+    it("still works after the staker of another position unstakes", async function () {
+      const stray = await pushStrayPosition(bob);
+      const staked = await stakePosition(alice);
+      await vault.connect(alice).unstake(staked);
+
+      await expect(vault.rescuePosition(stray)).to.emit(vault, "PositionRescued");
+      expect(await nfpm.ownerOf(stray)).to.equal(owner.address);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("Reentrancy", function () {
     let attacker, attackerAddr, hostileVault, hostileVaultAddr;
 

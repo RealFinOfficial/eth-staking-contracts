@@ -105,6 +105,10 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     /// @notice Whitelisted zapper changed. Carries both sides for auditability.
     event ZapperSet(address previousZapper, address newZapper);
 
+    /// @notice A position NFT with no staker record left the vault for the owner. Never
+    ///         fires for a staked position — see {rescuePosition}.
+    event PositionRescued(uint256 indexed tokenId, address indexed to, uint256 timestamp);
+
     // ──────────────────────── Errors ───────────────────────────
 
     error ZeroAddress();
@@ -119,6 +123,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     error UnexpectedNftSender(address sender);
     error UnsolicitedPosition(address operator, address from, uint256 tokenId);
     error SwapAmountExceedsBalance(address tokenIn, uint256 amountIn, uint256 balance);
+    error PositionIsStaked(uint256 tokenId, address staker);
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -368,6 +373,51 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         zapper = newZapper;
     }
 
+    /**
+     * @notice Recovers a position NFT the vault holds with no staker behind it.
+     *
+     * @dev Restricted to `_stakers[tokenId] == address(0)`, and that single condition is
+     *      what makes the function safe. **A position in legitimate custody always carries
+     *      a staker record.** Every path that takes an NFT in writes the record in the same
+     *      transaction: `_stake` sets it before pulling custody, and `rebalance` moves it
+     *      from the old id to the new one. Every path that gives an NFT up clears the record
+     *      in the same transaction: `unstake` deletes it before transferring out, and
+     *      `rebalance` deletes the old id before burning it. Record and custody are created
+     *      and destroyed together, so a zero record on an NFT the vault owns can only mean
+     *      the NFT arrived without going through a stake path — which is exactly what this
+     *      function exists to undo. A staked position is unreachable here by construction,
+     *      no matter who the owner is.
+     *
+     *      `onERC721Received` already rejects safe transfers arriving outside a stake flow,
+     *      but a plain `transferFrom` never consults the hook, so an NFT can still be pushed
+     *      in by mistake and would otherwise stay here forever.
+     *
+     *      `nonReentrant` closes the one window where the invariant is momentarily open:
+     *      inside `rebalance`, between the `mint` and the `_stakers[newTokenId] = staker`
+     *      write, the vault owns a new NFT that has no record yet, and between that write
+     *      and the `burn` it owns an old NFT whose record has just been cleared. Sharing the
+     *      reentrancy guard with `stake`, `unstake` and `rebalance` means this call can
+     *      never execute inside one of them.
+     *
+     *      The destination is `owner()` rather than a caller-supplied address, matching
+     *      `RewardsDistributor.recoverExcessAsset`. A position NFT is unique and a mistyped
+     *      recipient is unrecoverable, so the recovery path offers no place to mistype one;
+     *      the owner multisig forwards it to the rightful holder off-chain. A plain
+     *      `transferFrom` is used for the same reason {unstake} uses one — a multisig
+     *      without an `onERC721Received` hook must not be locked out of its own recovery
+     *      path.
+     * @param tokenId Unrecorded position NFT held by this vault.
+     */
+    function rescuePosition(uint256 tokenId) external onlyOwner nonReentrant {
+        address staker = _stakers[tokenId];
+        if (staker != address(0)) revert PositionIsStaked(tokenId, staker);
+
+        address to = owner();
+        positionManager.transferFrom(address(this), to, tokenId);
+
+        emit PositionRescued(tokenId, to, block.timestamp);
+    }
+
     // ──────────────────────── View functions ───────────────────
 
     /**
@@ -475,6 +525,15 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
 
     /// @dev Mints a new position on the configured pool using the vault's whole balance
     ///      of both tokens as desired amounts, with the caller's minimums enforced.
+    ///
+    ///      Whole balance, not the amount this rebalance just withdrew, and that is
+    ///      deliberate. The vault is drained of both tokens at the end of every rebalance,
+    ///      so a token0/token1 balance sitting here beforehand can only be a misdirected
+    ///      transfer; it joins this mint and whatever the mint leaves over is refunded to
+    ///      this rebalancer. Only misdirected funds are ever at stake — staked value lives
+    ///      inside the position NFTs and no stray balance can reach it. Tracking per-call
+    ///      amounts instead would buy no protection for stakers and would strand the dust
+    ///      on every pass. Other tokens have no such path and are recovered by the owner.
     function _mintPosition(int24 tickLower, int24 tickUpper, SwapParams calldata swap, uint256 deadline)
         internal
         returns (uint256 tokenId, uint128 liquidity)
@@ -511,7 +570,9 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     }
 
     /// @dev Sends every remaining token0/token1 wei to `to`. The vault is designed to hold
-    ///      no fungible balance between transactions.
+    ///      no fungible balance between transactions. Whole balance by design, the mirror
+    ///      image of {_mintPosition}: a stray token0/token1 balance leaves with the next
+    ///      rebalancer. See that function's note for why that trade is the intended one.
     function _refundDust(address to) internal returns (uint256 amount0, uint256 amount1) {
         amount0 = IERC20(token0).balanceOf(address(this));
         if (amount0 > 0) IERC20(token0).safeTransfer(to, amount0);

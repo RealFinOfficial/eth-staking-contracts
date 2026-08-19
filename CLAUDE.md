@@ -61,7 +61,18 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
 deviates from the pool TWAP by more than `maxTwapDeviationBps`. Callers still carry their
 own `amountOutMin` / `amount0Min` / `amount1Min` — the guard is a manipulation circuit
-breaker, not a pricing oracle.
+breaker, not a pricing oracle. The bps ceiling is compared against a tick count, and ticks
+compound, so the real bound is looser than the configured number (2000 bps → ~2214 bps).
+
+Both also refuse unsolicited position NFTs: `onERC721Received` accepts a safe transfer only
+inside their own mint/stake flow. A plain `transferFrom` bypasses the hook entirely, so both
+carry an owner `rescuePosition(tokenId)` that sends a stranded NFT to `owner()`. The vault's
+is restricted to `stakerOf(tokenId) == address(0)`; since record and custody are always
+created and destroyed in the same transaction, a staked position can never be reached by it.
+
+Deliberate design choices an auditor is expected to question — the `recoverExcessAsset`
+timing, the tick-vs-bps bound, one-step `Ownable`, the whole-balance mint/refund and the
+epoch cap's role — are written up in `docs/lp-staking-audit-notes.md`.
 
 ### Deploy order
 
@@ -119,11 +130,13 @@ test/                — Hardhat test files (Mocha + Chai)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 56 tests
+    LPStakingVault.test.js      — 62 tests
     RewardsDistributor.test.js  — 44 tests
-    LPZapper.test.js            — 31 tests
-    TokenX.test.js              — 29 tests
+    TokenX.test.js              — 47 tests
+    LPZapper.test.js            — 38 tests
     fork/LPStakingFork.test.js  — 16 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
+docs/                — Design and review notes
+  lp-staking-audit-notes.md — Deliberate properties of the LP stack an auditor will flag
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, Ledger nonce workaround
@@ -144,7 +157,7 @@ scripts refuse to run on chain 1 without `CONFIRM=yes`.
 
 ```bash
 npx hardhat compile      # Compile contracts
-npx hardhat test         # Run all tests (288)
+npx hardhat test         # Run all tests (319, plus 16 fork tests with MAINNET_RPC_URL set)
 npx hardhat coverage     # Run tests with coverage report
 ```
 

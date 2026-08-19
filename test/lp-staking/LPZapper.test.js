@@ -115,6 +115,13 @@ describe("LPZapper", function () {
     expect(await asset.balanceOf(zapAddr)).to.equal(0n);
   }
 
+  /// Fabricates a position NFT owned by `holder`. No principal is booked behind it: these
+  /// are only ever moved around, never decreased or collected.
+  async function createPosition(holder) {
+    await nfpm.mintFake(holder.address, token0Addr, token1Addr, FEE, TICK_LOWER, TICK_UPPER, 1_000_000n, 0n, 0n);
+    return nfpm.lastMintedId();
+  }
+
   beforeEach(async function () {
     [owner, alice, bob, stranger] = await ethers.getSigners();
 
@@ -581,6 +588,26 @@ describe("LPZapper", function () {
         zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(zap, "ZappedIn");
     });
+
+    it("rejects a genuine position pushed in outside a zap", async function () {
+      const tokenId = await createPosition(alice);
+
+      await expect(
+        nfpm.connect(alice)["safeTransferFrom(address,address,uint256)"](alice.address, zapAddr, tokenId)
+      )
+        .to.be.revertedWithCustomError(zap, "UnsolicitedPosition")
+        .withArgs(alice.address, alice.address, tokenId);
+    });
+
+    it("closes the receipt window again after a zap", async function () {
+      await nfpm.setSafeMintEnabled(true);
+      await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
+
+      const tokenId = await createPosition(bob);
+      await expect(
+        nfpm.connect(bob)["safeTransferFrom(address,address,uint256)"](bob.address, zapAddr, tokenId)
+      ).to.be.revertedWithCustomError(zap, "UnsolicitedPosition");
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -625,6 +652,75 @@ describe("LPZapper", function () {
       await expect(zap.sweep(usdcAddr, USDC(1), stranger.address)).to.be.revertedWithCustomError(
         usdc,
         "ERC20InsufficientBalance"
+      );
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("rescuePosition", function () {
+    /// A plain `transferFrom` never consults `onERC721Received`, so this is the one way an
+    /// NFT can still land on the zapper now that the hook rejects unsolicited receipts.
+    async function pushStrayPosition(holder) {
+      const tokenId = await createPosition(holder);
+      await nfpm.connect(holder).transferFrom(holder.address, zapAddr, tokenId);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(zapAddr);
+      return tokenId;
+    }
+
+    it("sends a stray position NFT to the owner and logs it", async function () {
+      const tokenId = await pushStrayPosition(alice);
+
+      const tx = await zap.rescuePosition(tokenId);
+      const ts = await txTimestamp(tx);
+
+      await expect(tx).to.emit(zap, "PositionRescued").withArgs(tokenId, owner.address, ts);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(owner.address);
+      expect(await nfpm.balanceOf(zapAddr)).to.equal(0n);
+    });
+
+    it("goes to the owner and nowhere else, even after ownership moves", async function () {
+      const tokenId = await pushStrayPosition(alice);
+      await zap.transferOwnership(bob.address);
+
+      await expect(zap.rescuePosition(tokenId)).to.be.revertedWithCustomError(
+        zap,
+        "OwnableUnauthorizedAccount"
+      );
+
+      const tx = await zap.connect(bob).rescuePosition(tokenId);
+      await expect(tx).to.emit(zap, "PositionRescued").withArgs(tokenId, bob.address, await txTimestamp(tx));
+      expect(await nfpm.ownerOf(tokenId)).to.equal(bob.address);
+    });
+
+    it("is owner only", async function () {
+      const tokenId = await pushStrayPosition(alice);
+
+      await expect(zap.connect(alice).rescuePosition(tokenId)).to.be.revertedWithCustomError(
+        zap,
+        "OwnableUnauthorizedAccount"
+      );
+      expect(await nfpm.ownerOf(tokenId)).to.equal(zapAddr);
+    });
+
+    it("reverts when the zapper does not hold the NFT", async function () {
+      // the zapper holds no position between transactions, so this is the normal state
+      const tokenId = await createPosition(alice);
+
+      await expect(zap.rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(nfpm, "ERC721InsufficientApproval")
+        .withArgs(zapAddr, tokenId);
+    });
+
+    it("cannot reach a position the zap already handed to the vault", async function () {
+      const tokenId = await zap
+        .connect(alice)
+        .zapIn.staticCall(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
+      await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
+
+      expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+      await expect(zap.rescuePosition(tokenId)).to.be.revertedWithCustomError(
+        nfpm,
+        "ERC721InsufficientApproval"
       );
     });
   });
