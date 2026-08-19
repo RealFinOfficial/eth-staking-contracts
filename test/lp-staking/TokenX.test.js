@@ -216,16 +216,30 @@ describe("TokenX", function () {
         .withArgs(7n, TOKENS(50), TOKENS(12), TOKENS(39));
     });
 
-    it("treats a zero-amount mint as a no-op that succeeds even with no headroom", async function () {
-      // documents current behaviour: `amount > remaining` is false for 0 > 0
-      await token.setMinter(minter.address);
+    it("rejects a zero amount instead of emitting a zero-value Transfer", async function () {
+      await armMinter(TOKENS(100));
 
-      await expect(token.connect(minter).mint(alice.address, 0n))
-        .to.emit(token, "Transfer")
-        .withArgs(ethers.ZeroAddress, alice.address, 0n);
+      await expect(token.connect(minter).mint(alice.address, 0n)).to.be.revertedWithCustomError(
+        token,
+        "ZeroAmount"
+      );
 
       expect(await token.totalSupply()).to.equal(0n);
-      expect(await token.mintedInEpoch(0)).to.equal(0n);
+      expect(await token.mintedInEpoch(EPOCH)).to.equal(0n);
+    });
+
+    it("checks the zero amount before the cap but after the minter gate", async function () {
+      // unarmed epoch: a positive amount fails on the cap, zero still fails on ZeroAmount
+      await token.setMinter(minter.address);
+      await expect(token.connect(minter).mint(alice.address, 0n)).to.be.revertedWithCustomError(
+        token,
+        "ZeroAmount"
+      );
+
+      // a stranger passing zero is still rejected as a stranger
+      await expect(token.connect(alice).mint(alice.address, 0n))
+        .to.be.revertedWithCustomError(token, "NotMinter")
+        .withArgs(alice.address);
     });
   });
 
@@ -312,6 +326,336 @@ describe("TokenX", function () {
       await expect(token.connect(minter).mint(alice.address, 1n))
         .to.be.revertedWithCustomError(token, "EpochMintCapExceeded")
         .withArgs(EPOCH, 0n, 0n, 1n);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("scheduled epoch rollover", function () {
+    const NEXT = 2n;
+    const HOUR = 3600;
+
+    /// A timestamp `secondsAhead` in the future, for use as `activatesAt`.
+    async function future(secondsAhead = HOUR) {
+      return BigInt(await time.latest()) + BigInt(secondsAhead);
+    }
+
+    beforeEach(async function () {
+      // minter armed, epoch 1 running with a cap of 100
+      await armMinter(TOKENS(100));
+    });
+
+    it("starts with nothing armed", async function () {
+      const other = await deployToken(owner.address);
+      const pending = await other.pendingEpoch();
+      expect(pending.epochId).to.equal(0n);
+      expect(pending.cap).to.equal(0n);
+      expect(pending.activatesAt).to.equal(0n);
+    });
+
+    it("armNextEpoch and cancelNextEpoch are owner only", async function () {
+      const at = await future();
+
+      await expect(token.connect(alice).armNextEpoch(NEXT, TOKENS(50), at))
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      await expect(token.connect(alice).cancelNextEpoch())
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+    });
+
+    it("parks one pending epoch and emits NextEpochArmed", async function () {
+      const at = await future();
+
+      await expect(token.armNextEpoch(NEXT, TOKENS(50), at))
+        .to.emit(token, "NextEpochArmed")
+        .withArgs(NEXT, TOKENS(50), at);
+
+      const pending = await token.pendingEpoch();
+      expect(pending.epochId).to.equal(NEXT);
+      expect(pending.cap).to.equal(TOKENS(50));
+      expect(pending.activatesAt).to.equal(at);
+
+      // arming alone changes nothing about the running epoch
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.epochCap(NEXT)).to.equal(0n);
+    });
+
+    it("rejects an activation time that is not strictly in the future", async function () {
+      const now = BigInt(await time.latest()) + 100n;
+
+      // in the past
+      await time.setNextBlockTimestamp(now);
+      await expect(token.armNextEpoch(NEXT, TOKENS(50), now - 10n))
+        .to.be.revertedWithCustomError(token, "ActivationNotInFuture")
+        .withArgs(now - 10n, now);
+
+      // exactly now — it would be due on the very next mint, which is setEpochCap's job
+      await time.setNextBlockTimestamp(now + 100n);
+      await expect(token.armNextEpoch(NEXT, TOKENS(50), now + 100n))
+        .to.be.revertedWithCustomError(token, "ActivationNotInFuture")
+        .withArgs(now + 100n, now + 100n);
+
+      // one second later is accepted
+      await time.setNextBlockTimestamp(now + 200n);
+      await token.armNextEpoch(NEXT, TOKENS(50), now + 201n);
+      expect((await token.pendingEpoch()).activatesAt).to.equal(now + 201n);
+    });
+
+    it("accepts a zero cap, which schedules a freeze", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, 0n, at);
+      await time.increaseTo(at);
+
+      await expect(token.connect(minter).mint(alice.address, 1n))
+        .to.be.revertedWithCustomError(token, "EpochMintCapExceeded")
+        .withArgs(NEXT, 0n, 0n, 1n);
+    });
+
+    it("does not roll before the boundary", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      await time.setNextBlockTimestamp(at - 1n);
+      await expect(token.connect(minter).mint(alice.address, TOKENS(10))).to.not.emit(
+        token,
+        "EpochActivated"
+      );
+
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.mintedInEpoch(EPOCH)).to.equal(TOKENS(10));
+      expect(await token.mintedInEpoch(NEXT)).to.equal(0n);
+      expect((await token.pendingEpoch()).activatesAt).to.equal(at);
+    });
+
+    it("rolls on the first mint at the boundary and clears the slot", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      // exactly at activatesAt: `>=` makes it due
+      await time.setNextBlockTimestamp(at);
+      await expect(token.connect(minter).mint(alice.address, TOKENS(10)))
+        .to.emit(token, "EpochActivated")
+        .withArgs(NEXT, TOKENS(50), at, at);
+
+      expect(await token.currentEpochId()).to.equal(NEXT);
+      expect(await token.epochCap(NEXT)).to.equal(TOKENS(50));
+      expect(await token.mintedInEpoch(NEXT)).to.equal(TOKENS(10));
+      expect(await token.mintedInEpoch(EPOCH)).to.equal(0n);
+
+      // the slot is consumed, so a later mint cannot activate it twice
+      const pending = await token.pendingEpoch();
+      expect(pending.epochId).to.equal(0n);
+      expect(pending.cap).to.equal(0n);
+      expect(pending.activatesAt).to.equal(0n);
+
+      await expect(token.connect(minter).mint(alice.address, TOKENS(10))).to.not.emit(
+        token,
+        "EpochActivated"
+      );
+      expect(await token.mintedInEpoch(NEXT)).to.equal(TOKENS(20));
+    });
+
+    it("carries both the scheduled and the actual activation time when the mint comes late", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      const late = at + 5000n;
+      await time.setNextBlockTimestamp(late);
+      await expect(token.connect(minter).mint(alice.address, TOKENS(1)))
+        .to.emit(token, "EpochActivated")
+        .withArgs(NEXT, TOKENS(50), at, late);
+    });
+
+    it("enforces the new epoch's cap on the very mint that rolls it", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+      await time.increaseTo(at);
+
+      // 60 has headroom under the old cap of 100 but not under the new one of 50
+      await expect(token.connect(minter).mint(alice.address, TOKENS(60)))
+        .to.be.revertedWithCustomError(token, "EpochMintCapExceeded")
+        .withArgs(NEXT, TOKENS(50), 0n, TOKENS(60));
+
+      // the whole transaction reverted, so the rollover did not stick either
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect((await token.pendingEpoch()).activatesAt).to.equal(at);
+
+      // and the next mint that fits still rolls it in
+      await token.connect(minter).mint(alice.address, TOKENS(50));
+      expect(await token.currentEpochId()).to.equal(NEXT);
+      expect(await token.mintedInEpoch(NEXT)).to.equal(TOKENS(50));
+    });
+
+    it("a second arming overwrites the first, and only the last one activates", async function () {
+      const first = await future(HOUR);
+      const second = await future(2 * HOUR);
+
+      await token.armNextEpoch(NEXT, TOKENS(50), first);
+      await expect(token.armNextEpoch(3n, TOKENS(70), second))
+        .to.emit(token, "NextEpochArmed")
+        .withArgs(3n, TOKENS(70), second);
+
+      const pending = await token.pendingEpoch();
+      expect(pending.epochId).to.equal(3n);
+      expect(pending.cap).to.equal(TOKENS(70));
+      expect(pending.activatesAt).to.equal(second);
+
+      // the discarded arming's boundary passes without doing anything
+      await time.increaseTo(first + 60n);
+      await token.connect(minter).mint(alice.address, TOKENS(10));
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.epochCap(NEXT)).to.equal(0n);
+
+      // the surviving one lands at its own boundary
+      await time.increaseTo(second);
+      await token.connect(minter).mint(alice.address, TOKENS(10));
+      expect(await token.currentEpochId()).to.equal(3n);
+      expect(await token.epochCap(3n)).to.equal(TOKENS(70));
+    });
+
+    it("cancelNextEpoch clears the slot, logs what was discarded and stops the rollover", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      await expect(token.cancelNextEpoch())
+        .to.emit(token, "NextEpochCancelled")
+        .withArgs(NEXT, TOKENS(50), at);
+
+      expect((await token.pendingEpoch()).activatesAt).to.equal(0n);
+
+      await time.increaseTo(at + 60n);
+      await expect(token.connect(minter).mint(alice.address, TOKENS(10))).to.not.emit(
+        token,
+        "EpochActivated"
+      );
+
+      // the running epoch and its cap were left exactly as they were
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.epochCap(EPOCH)).to.equal(TOKENS(100));
+      expect(await token.mintedInEpoch(EPOCH)).to.equal(TOKENS(10));
+      expect(await token.epochCap(NEXT)).to.equal(0n);
+    });
+
+    it("cancelNextEpoch reverts when nothing is armed, activation included", async function () {
+      await expect(token.cancelNextEpoch()).to.be.revertedWithCustomError(token, "NoPendingEpoch");
+
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+      await time.increaseTo(at);
+      await token.connect(minter).mint(alice.address, TOKENS(1));
+
+      // the mint consumed the slot — a cancel arriving afterwards must not pretend to work
+      await expect(token.cancelNextEpoch()).to.be.revertedWithCustomError(token, "NoPendingEpoch");
+    });
+
+    it("setEpochCap does not clear a pending epoch, so the schedule still fires later", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      // an immediate switch made while epoch 2 is armed
+      await token.setEpochCap(9n, TOKENS(200));
+      expect(await token.currentEpochId()).to.equal(9n);
+      expect((await token.pendingEpoch()).epochId).to.equal(NEXT);
+
+      await token.connect(minter).mint(alice.address, TOKENS(150));
+      expect(await token.mintedInEpoch(9n)).to.equal(TOKENS(150));
+
+      // at the boundary the scheduled epoch supersedes the manual switch
+      await time.increaseTo(at);
+      await expect(token.connect(minter).mint(alice.address, TOKENS(10))).to.emit(
+        token,
+        "EpochActivated"
+      );
+
+      expect(await token.currentEpochId()).to.equal(NEXT);
+      expect(await token.mintedInEpoch(9n)).to.equal(TOKENS(150));
+      expect(await token.mintedInEpoch(NEXT)).to.equal(TOKENS(10));
+
+      // epoch 2's cap of 50 is what binds now, not epoch 9's 200
+      await expect(token.connect(minter).mint(alice.address, TOKENS(41)))
+        .to.be.revertedWithCustomError(token, "EpochMintCapExceeded")
+        .withArgs(NEXT, TOKENS(50), TOKENS(10), TOKENS(41));
+    });
+
+    it("cancelNextEpoch leaves an immediate setEpochCap switch as the last word", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+      await token.setEpochCap(9n, TOKENS(200));
+      await token.cancelNextEpoch();
+
+      await time.increaseTo(at + 60n);
+      await token.connect(minter).mint(alice.address, TOKENS(150));
+      expect(await token.currentEpochId()).to.equal(9n);
+      expect(await token.mintedInEpoch(9n)).to.equal(TOKENS(150));
+    });
+
+    it("scheduling an epoch id that already has a tally resumes it instead of resetting it", async function () {
+      await token.connect(minter).mint(alice.address, TOKENS(60));
+      await token.setEpochCap(5n, TOKENS(100));
+
+      // schedule a return to epoch 1, which already carries 60
+      const at = await future();
+      await token.armNextEpoch(EPOCH, TOKENS(100), at);
+      await time.increaseTo(at);
+
+      // only the original 40 of headroom is left
+      await token.connect(minter).mint(alice.address, TOKENS(40));
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.mintedInEpoch(EPOCH)).to.equal(TOKENS(100));
+
+      await expect(token.connect(minter).mint(alice.address, 1n))
+        .to.be.revertedWithCustomError(token, "EpochMintCapExceeded")
+        .withArgs(EPOCH, TOKENS(100), TOKENS(100), 1n);
+    });
+
+    it("effectiveEpoch reports the running epoch until the boundary, then the pending one", async function () {
+      let effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(EPOCH);
+      expect(effective.cap).to.equal(TOKENS(100));
+
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      // armed but not due yet
+      effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(EPOCH);
+      expect(effective.cap).to.equal(TOKENS(100));
+
+      await time.increaseTo(at);
+
+      // due, but no mint has rolled it in: storage still reads the old epoch and a
+      // zero cap for the new id, which is exactly why the view returns both fields
+      expect(await token.currentEpochId()).to.equal(EPOCH);
+      expect(await token.epochCap(NEXT)).to.equal(0n);
+      effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(NEXT);
+      expect(effective.cap).to.equal(TOKENS(50));
+
+      // after the rollover the view and storage agree
+      await token.connect(minter).mint(alice.address, TOKENS(1));
+      effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(NEXT);
+      expect(effective.cap).to.equal(TOKENS(50));
+      expect(await token.currentEpochId()).to.equal(NEXT);
+    });
+
+    it("effectiveEpoch follows setEpochCap and cancellation too", async function () {
+      const at = await future();
+      await token.armNextEpoch(NEXT, TOKENS(50), at);
+
+      await token.setEpochCap(9n, TOKENS(200));
+      let effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(9n);
+      expect(effective.cap).to.equal(TOKENS(200));
+
+      await token.cancelNextEpoch();
+      await time.increaseTo(at + 60n);
+      effective = await token.effectiveEpoch();
+      expect(effective.epochId).to.equal(9n);
+      expect(effective.cap).to.equal(TOKENS(200));
     });
   });
 
