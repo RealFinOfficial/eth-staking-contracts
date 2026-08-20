@@ -128,3 +128,12 @@ Monitor `EpochMintCapExceeded` reverts and `mintedInEpoch(currentEpochId)` again
 `epochCap(currentEpochId)`; use `effectiveEpoch()` rather than `currentEpochId` when a
 scheduled rollover is armed, since the rollover is lazy and `currentEpochId` reads stale until
 the next mint.
+
+## 6. Emergency freeze must account for an armed scheduled epoch
+
+With the lazy rollover live, `setEpochCap(id, 0)` alone is **not** a durable freeze: if a
+scheduled epoch is armed, the first mint past its boundary rolls over and re-arms that
+epoch's cap, silently un-freezing the token. The correct emergency-freeze sequence is
+`cancelNextEpoch()` **then** `setEpochCap(id, 0)` — or `setMinter(address(0))`, which
+disables minting regardless of epoch state. (Reviewer-confirmed ops consequence of the
+setEpochCap-does-not-clear-pending semantics; belongs in the deploy/ops runbook.)
