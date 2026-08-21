@@ -32,6 +32,36 @@ the `pending` block tag without retrying, and Infura returns an intermittent
 `-32603` for that tag, which aborts the transaction before it reaches the
 device. `lib/pools.js` resolves it with retries and a `latest` fallback.
 
+## Running against a local fork
+
+`networks.localhost` exists so the LP-staking scripts can be exercised against a
+`hardhat node` — a real JSON-RPC endpoint with real Uniswap contracts on it, which is what
+`test/lp-staking/integration/LPStakingLocalFork.test.js` does on every run.
+
+```bash
+# terminal 1 — a node forked at the block the test suites pin
+npx hardhat node --fork "$MAINNET_RPC_URL" --fork-block-number 25750000 --port 8545
+
+# terminal 2 — the scripts, pointed at it
+export LOCALHOST_RPC_URL=http://127.0.0.1:8545
+export LOCALHOST_GAS_PRICE=10000000000          # 10 gwei, see below
+export DEPLOYMENTS_FILE=/tmp/local-fork/deployments.json
+
+LP_ASSET=0x… LP_USDC=0x… LP_FACTORY=0x1F98431c8aD98523631AE4a59f267346ea31F984 \
+LP_NPM=0xC36442b4a4522E871399CD717aBDD847Ab11FE88 LP_INITIAL_SQRT_PRICE_X96=… \
+  npx hardhat run scripts/create-sepolia-pool.js --network localhost
+```
+
+| Variable | Effect |
+|---|---|
+| `LOCALHOST_RPC_URL` | The node's URL. Unset means `http://127.0.0.1:8545` |
+| `LOCALHOST_GAS_PRICE` | Fixed gas price in wei. A forked node inherits mainnet's base fee at the pinned block, so leaving Hardhat to estimate can undershoot the next block and the transaction is rejected. These scripts do not pin fees themselves |
+| `DEPLOYMENTS_FILE` | Where `recordDeployment` writes. Point it at a scratch file so a throwaway chain-31337 deploy never rewrites the tracked `deployments.json` |
+
+A fork reports chain id **31337**, which neither LP script has Uniswap defaults for, so
+`LP_FACTORY`, `LP_NPM` and `LP_ROUTER` all have to be passed explicitly — the mainnet
+values, since that is what the fork carries. See `.env.example` for the addresses.
+
 ## User actions
 
 | Script | Pools | Required env |
@@ -96,6 +126,51 @@ LEDGER_PING=1 npx hardhat run scripts/ledger-check.js --network mainnet
 CONFIRM=yes npx hardhat run scripts/deploy-weighted.js --network mainnet
 DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 ```
+
+## Test tooling (plain Node, not `hardhat run`)
+
+Two scripts here are not deployment scripts at all. They take no network and no signer; run
+them with `node`, or through the npm scripts that already pass their arguments.
+
+| Script | Purpose |
+|---|---|
+| `run-forge.mjs` | Wraps `forge`. Forge does not read `.env`, so this loads it, resolves the fork endpoint and hands the rest of the argv straight through |
+| `check-coverage.mjs` | The blocking coverage gate: per-file line and branch floors for the four LP contracts and `libraries/TwapGuard.sol` |
+| `check-coverage.test.mjs` | Tests the gate itself, by running it as a subprocess against synthetic lcov. Node builtins only — no forge, no network |
+
+```bash
+npm run test:forge                            # node scripts/run-forge.mjs test
+npm run coverage:forge:check                  # measure, then grade
+node scripts/check-coverage.mjs lcov.info     # grade an lcov already on disk
+node scripts/check-coverage.mjs --config-check # basis only, no lcov needed
+node --test scripts/check-coverage.test.mjs   # the gate's own tests
+```
+
+`run-forge.mjs` resolves the endpoint with the same one-sided rule the Hardhat fork suites
+use — `<NETWORK>_RPC_URL`, then `INFURA_API_KEY`, then the first public candidate that proves
+it serves ARCHIVE STATE at the pinned block — and exports `LP_FORK_RPC_REQUIRED` so
+`test/forge/utils/BaseForge.sol` can tell an environment fact (skip) from a defect (fail). An
+explicitly configured endpoint is used alone and never probed: if an operator pointed the
+suite at a node, a failure there is a real failure. The Infura project id is never printed;
+only the endpoint host is ever logged.
+
+The public probe makes THREE historical reads at the pinned block — `eth_getBalance` of a
+known account, `eth_getCode` of the position manager, and an `eth_call` of `totalSupply()` on
+a token — as three separate requests, and requires all three. A pruned node answers the header
+happily and then fails the first read a forked test makes; and one state read is one sample,
+which is not enough against `ethereum-sepolia-rpc.publicnode.com`, a load-balanced pool whose
+backends disagree about Sepolia archive availability (run 32845141961: probe passed, first
+fork read failed; run 32845136586: probe failed, tenderly used, green). Three separate requests
+sample the pool three times; a batch would land on one backend. `sepolia.gateway.tenderly.co`
+is tried first for the same reason. Each rejected candidate is logged as `host: short reason`,
+so the next CI log says which endpoints were tried and why they were passed over.
+
+`check-coverage.mjs` refuses to grade a run whose measurement basis it does not recognise. The
+npm script passes `LP_COVERAGE_BASIS=forge-1.7-ir-minimum`; do not set it by hand. It also
+pins each file's DENOMINATOR, so a changed compiler, a changed flag or an edited contract
+fails the gate with "denominator moved" instead of being quietly graded against a bar that no
+longer describes it. See README.md for the measured table and for the three lines
+`--ir-minimum` cannot attribute.
 
 ## Historical Sepolia deployments
 

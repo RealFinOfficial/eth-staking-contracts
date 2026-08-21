@@ -137,3 +137,144 @@ epoch's cap, silently un-freezing the token. The correct emergency-freeze sequen
 `cancelNextEpoch()` **then** `setEpochCap(id, 0)` — or `setMinter(address(0))`, which
 disables minting regardless of epoch state. (Reviewer-confirmed ops consequence of the
 setEpochCap-does-not-clear-pending semantics; belongs in the deploy/ops runbook.)
+
+## 7. SEC-01 — a fresh pool has one observation, so every swap-bearing path reverts `OLD`
+
+A Uniswap V3 pool stores exactly **one** oracle observation until someone calls
+`increaseObservationCardinalityNext` **and** trade fills the new slots. Until the array holds
+at least `twapWindow` seconds of history, `pool.observe([twapWindow, 0])` reverts with the bare
+string `OLD`. `TwapGuard` neither catches nor translates it, so it reaches the caller as an
+uninterpretable revert.
+
+Blocked on a fresh pool: `zapIn` with any swap leg, and `rebalance` with any swap leg. Also
+`previewTwap()` on both the vault and the zapper, so the frontend cannot even pre-check.
+Working from block one: `stake`, `stakeWithPermit`, `stakeFor`, `unstake`, and a swap-free
+`rebalance`.
+
+**Deploy blocker, operational.** `scripts/deploy-lp-staking.js` already grows the array and
+already prints the warning; what it cannot do is create the history. Before announcing the
+program: seed liquidity, trade the pool for at least `twapWindow` seconds, then confirm with
+`pool.observe([twapWindow, 0])`.
+
+Tests: `test/forge/fork/TwapManipulation.t.sol`, `TwapColdOracleTest` — five `test_SEC01_*`
+cases including the working-paths arm (`…ColdOracleLeavesStakeUnstakeAndSwapFreeRebalanceWorking`)
+and the warm-up remedy (`…GrowingAndWarmingTheOracleMakesTheGuardReadable`).
+
+## 8. SEC-02 — the TWAP guard is pre-trade only, and is skipped when `amountIn == 0`
+
+`_checkTwapDeviation()` runs **before** `swapRouter.exactInputSingle`, so the swap's own price
+impact is outside it: a rebalance can pass the guard and then leave spot further from the TWAP
+than the guard would ever admit. And `rebalance` / `_zapIn` only call `_executeSwap` when
+`swap.amountIn > 0`, so a no-swap rebalance never consults the guard at all and re-mints at
+whatever price a sandwicher has set.
+
+Everything inside the guard's tolerance is therefore free MEV. A whale push that stays under
+the 500-tick ceiling measurably reduces the liquidity a zap-in buys, and nothing reverts.
+**The caller's own `amountOutMin` / `amount0Min` / `amount1Min` are the only exact protection,
+and nothing on-chain forces them to be non-zero.** Frontends must always quote them from a
+fresh reading; a UI default of zero is a live loss.
+
+Tests: `test/forge/fork/SwapSlippageMEV.t.sol` —
+`test_SEC02_TheSwapsOwnImpactIsOutsideThePreTradeGuard`,
+`test_SEC02_NoSwapRebalanceNeverConsultsTheGuard`, plus the four `test_Sandwich_*` cases that
+measure the loss and then measure the remedy.
+
+## 9. SEC-03 — `twapWindow` has no upper bound, so one owner transaction bricks both swap legs
+
+`TwapGuard._setTwapParams` bounds the window only from below (`window < MIN_TWAP_WINDOW`).
+`setTwapParams(1_000_000_000, 500)` is accepted, and no oracle can serve a 31-year lookback, so
+from that transaction on every `rebalance` with a swap leg and every `zapIn` reverts with the
+bare `OLD`. `type(uint32).max` is likewise accepted.
+
+Griefing, not loss of funds: the exits stay open, so stakers can always leave with their
+positions, and the owner can undo it — unless the owner has also renounced (see item 3).
+
+Tests: `test/forge/fork/TwapManipulation.t.sol` — `test_SEC03_TwapWindowHasNoUpperBound`,
+`test_SEC03_OwnerCanBrickBothSwapLegsWithOneTransaction`.
+
+## 10. SEC-04 — replacing the distributor replays every lifetime entitlement
+
+The claim ledger (`claimedTokenX`) lives on `RewardsDistributor`, not on `TokenX`.
+`TokenX.setMinter` is the migration escape hatch, and a replacement distributor starts with an
+EMPTY ledger — so after a migration every user can re-spend their entire lifetime entitlement
+against the new contract. Measured: a user paid once by v1 is paid a second time, in full, by
+v2. The epoch cap is the only thing that bounds the total.
+
+The old distributor loses its mint right the moment the minter moves, so this is an addition,
+never a doubling through both at once.
+
+**Operational mitigation, required before any migration:** either seed the new distributor's
+ledger with the old cumulatives, or arm a fresh epoch whose cap reflects what is genuinely
+still owed. There is no on-chain guard.
+
+Tests: `test/forge/fork/RewardVoucherFork.t.sol` —
+`test_SEC04_AReplacementDistributorReplaysEveryLifetimeEntitlement`,
+`test_SEC04_TheReplacedDistributorLosesItsMintRightImmediately`.
+
+## 11. SEC-05 — `stakeFor(vault)` / `stakeFor(zapper)` strands the position permanently
+
+`LPStakingVault.stakeFor` validates only `user != address(0)`. Crediting the vault itself, or
+the zapper, produces a position that:
+
+* `unstake` will not release — the recorded staker is a contract, and neither contract exposes
+  any call path that reaches `vault.unstake`; and
+* `rescuePosition` will not release either — it refuses any tokenId whose staker record is
+  non-zero, which is exactly what `stakeFor` just wrote.
+
+Nothing on-chain can move that NFT again. Only the whitelisted zapper can call `stakeFor`, so
+the trigger is a bug in the zapper (or its successor), not an outside attack — but the zapper
+is explicitly described as replaceable periphery, which is where the risk sits.
+
+A fix would be one line in `stakeFor`: `if (user == address(this) || user == zapper_) revert`.
+
+Tests: `test/forge/fork/TickSpacing.t.sol` —
+`test_SEC05_StakeForTheVaultItselfStrandsThePositionForever`,
+`test_SEC05_StakeForTheZapperStrandsThePositionForever`.
+
+## 12. Smaller behaviours now pinned by tests
+
+Not findings, but each surprised somebody during this work and each is now asserted by a named
+test rather than left to be rediscovered.
+
+* **EIP-4494 does not work for code-bearing owners.** Uniswap's `ERC721Permit` branches on
+  `Address.isContract(owner)` and routes a code-bearing owner to ERC-1271. That covers contract
+  wallets AND ordinary EOAs carrying an **EIP-7702 delegation** — at the pinned Sepolia block
+  several plainly-derived addresses already do. `stakeWithPermit` is unusable from such an
+  account and the revert carries no message; approve-then-`stake` still works.
+  (`test/forge/fork/PermitDomains.t.sol:test_NftPermit_ACodeBearingOwnerCannotUseTheEip4494Path`)
+* **`LPZapper.sweep` is the one external function with no `nonReentrant`.** A hostile owner
+  sweeping a hook-bearing token really can reenter it and sweep again in the same transaction.
+  It is `onlyOwner` and moves tokens the owner may already move freely, so it is a documented
+  asymmetry rather than a vulnerability.
+  (`test/forge/unit/Reentrancy.t.sol:test_Reentrancy_ZapperSweepIsUnguardedAndReallyDoesReenter`)
+* **A single-sided withdrawal cannot fill a two-sided range.** When spot has left a position's
+  range the position holds ONE token, and a swap-free rebalance into a range that straddles
+  spot reverts inside Uniswap with no message. Re-ranging an out-of-range position needs a swap
+  leg.
+  (`test/forge/fork/SwapSlippageMEV.t.sol:test_Rebalance_SingleSidedWithdrawalCannotFillATwoSidedRange`)
+* **Out-of-range tick bounds revert with `T`, not `TLM` / `TUM`.** The periphery's
+  `TickMath.getSqrtRatioAtTick` trips before the pool's own `checkTicks`. A zero-width range and
+  a misaligned tick both revert with NO data at all (`FullMath` and `TickBitmap` use bare
+  `require`s). Frontends cannot rely on a readable message for any tick error.
+  (`test/forge/fork/TickSpacing.t.sol`, the five `test_Ticks_*` cases)
+* **`increaseLiquidity` is permissionless on the canonical position manager.** Anyone can top up
+  a STAKED position and the value accrues to the existing staker, with no vault event behind it.
+  Off-chain scoring must expect a position's liquidity to grow without a `Staked` / `Rebalanced`
+  event.
+  (`test/forge/fork/TickSpacing.t.sol:test_ThirdParty_CanIncreaseLiquidityOnAStakedPosition`)
+* **A fee-on-transfer token would break the position manager's accounting**, not just the refund
+  event: the manager credits the amount it asked for and receives less, and the shortfall only
+  surfaces as an insufficient-balance revert on the NEXT withdrawal. The pool triple check makes
+  this unreachable on a correct deployment; it is recorded because `sweep` /
+  `recoverExcessAsset` touch arbitrary tokens.
+* **A fee-on-transfer ASSET would short every claimer permanently.** `claimAsset` books
+  `cumulativeAmount` into `claimedAsset` BEFORE the transfer, so the fee the token withholds can
+  never be re-claimed — the ledger already says it was paid. This is a **deployment constraint
+  on the ASSET token**, not a contract bug.
+  (`test/lp-staking/RewardsDistributor.test.js`: "books the amount sent, so a fee-on-transfer
+  ASSET shorts the claimer for good")
+* **An ASSET whose `transfer` returns false instead of reverting is rejected, and books
+  nothing.** `SafeERC20` turns the false into a revert, the whole claim reverts, and
+  `claimedAsset` is left where it was — so the user can retry once the token is fixed.
+  (`test/lp-staking/RewardsDistributor.test.js`: "rejects an ASSET whose transfer returns false
+  instead of reverting, and books nothing")
