@@ -6,7 +6,11 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "test:coverage": "hardhat coverage"
+    "test:coverage": "hardhat coverage",
+    "test:forge": "node scripts/run-forge.mjs test",
+    "test:forge:ci": "FOUNDRY_PROFILE=ci node scripts/run-forge.mjs test",
+    "coverage:forge": "node scripts/run-forge.mjs coverage --ir-minimum --report lcov --report summary",
+    "coverage:forge:check": "LP_COVERAGE_BASIS=forge-1.7-ir-minimum node scripts/run-forge.mjs coverage --ir-minimum --report lcov && LP_COVERAGE_BASIS=forge-1.7-ir-minimum node scripts/check-coverage.mjs"
   },
   "keywords": [],
   "author": "",
