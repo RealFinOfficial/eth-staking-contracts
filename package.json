@@ -6,7 +6,11 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
+    "test:integration": "hardhat test test/lp-staking/integration/LPStakingLocalFork.test.js",
+    "test:integration:sepolia": "hardhat test test/lp-staking/integration/LPStakingSepoliaFork.test.js",
+    "test:sepolia:live": "hardhat test test-live/sepolia/SepoliaLive.test.js --network sepolia",
     "test:coverage": "hardhat coverage",
+    "test:coverage:unit": "hardhat coverage --testfiles \"test/lp-staking/{LPStakingVault,LPZapper,RewardsDistributor,TokenX}.test.js\"",
     "test:forge": "node scripts/run-forge.mjs test",
     "test:forge:ci": "FOUNDRY_PROFILE=ci node scripts/run-forge.mjs test",
     "coverage:forge": "node scripts/run-forge.mjs coverage --ir-minimum --report lcov --report summary",

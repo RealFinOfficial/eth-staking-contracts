@@ -232,6 +232,32 @@ describe("LPZapper", function () {
         .withArgs(token0Addr, token1Addr, OTHER_FEE);
     });
 
+    it("rejects the pool on a wrong token0, a wrong token1 or a wrong fee, each on its own", async function () {
+      const Token = await ethers.getContractFactory("MockERC20Decimals");
+      const other = await Token.deploy("Other", "OTHER", ASSET(1), 18);
+      const otherAddr = await other.getAddress();
+
+      await pool.setTokens(otherAddr, token1Addr);
+      await expect(deployZapper())
+        .to.be.revertedWithCustomError(zap, "PoolMismatch")
+        .withArgs(otherAddr, token1Addr, FEE);
+
+      await pool.setTokens(token0Addr, otherAddr);
+      await expect(deployZapper())
+        .to.be.revertedWithCustomError(zap, "PoolMismatch")
+        .withArgs(token0Addr, otherAddr, FEE);
+
+      await pool.setTokens(token0Addr, token1Addr);
+      await pool.setFee(OTHER_FEE);
+      await expect(deployZapper())
+        .to.be.revertedWithCustomError(zap, "PoolMismatch")
+        .withArgs(token0Addr, token1Addr, OTHER_FEE);
+
+      // the restored triple deploys, so each arm above was the only difference
+      await pool.setFee(FEE);
+      expect(await (await deployZapper()).pool()).to.equal(poolAddr);
+    });
+
     it("rejects a usdc/asset pair that is not the pool's pair", async function () {
       const Token = await ethers.getContractFactory("MockERC20Decimals");
       const other = await Token.deploy("Other", "OTHER", ASSET(1), 18);
@@ -470,6 +496,67 @@ describe("LPZapper", function () {
       await expectZapperDrained();
     });
 
+    it("refunds only the ASSET side when the whole input is swapped", async function () {
+      // Nothing is left on the USDC side to refund, so `_refundDust` takes its ASSET-only
+      // arm — the mirror of the amountIn == 0 case above, which takes the USDC-only arm.
+      const swapAll = swapParams({ amountIn: USDC_IN, amountOutMin: ASSET(1000) });
+      const assetRefund = ASSET(1000) - (ASSET(1000) * CONSUME_BPS) / 10_000n;
+
+      const tokenId = await zap
+        .connect(alice)
+        .zapIn.staticCall(USDC_IN, TICK_LOWER, TICK_UPPER, swapAll, FAR_DEADLINE);
+      const tx = await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapAll, FAR_DEADLINE);
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
+        .to.emit(zap, "ZappedIn")
+        .withArgs(alice.address, tokenId, USDC_IN, 0n, assetRefund, ts);
+
+      expect(assetRefund).to.be.gt(0n);
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      await expectZapperDrained();
+    });
+
+    it("bubbles the pool's own revert when the swap leg cannot read the oracle", async function () {
+      await pool.setObserveReverts(true);
+
+      await expect(
+        zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
+      ).to.be.revertedWith("OLD");
+
+      // a zap with no swap leg never asks the oracle, so a dead oracle does not close the door
+      await expect(
+        zap
+          .connect(alice)
+          .zapIn(
+            USDC_IN,
+            TICK_LOWER,
+            TICK_UPPER,
+            swapParams({ amountIn: 0n, amountOutMin: 0n }),
+            FAR_DEADLINE
+          )
+      ).to.emit(zap, "ZappedIn");
+    });
+
+    it("measures the deviation against the floored TWAP tick, not the truncated one", async function () {
+      // -301 tick-seconds over a 300 s window is a true mean of -1.0033: floored it is -2,
+      // truncated it is -1. At spot 499 the two readings give opposite verdicts, so this
+      // pins which one the guard actually used.
+      await zap.setTwapParams(300, MAX_DEVIATION_BPS);
+      await pool.setTickCumulatives([0, -301]);
+
+      await pool.setCurrentTick(499);
+      await expect(zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE))
+        .to.be.revertedWithCustomError(zap, "TwapDeviationTooHigh")
+        .withArgs(499, -2, MAX_DEVIATION_BPS);
+
+      // one tick closer is exactly the ceiling away from -2, and the ceiling is inclusive
+      await pool.setCurrentTick(498);
+      await expect(
+        zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
+      ).to.emit(zap, "ZappedIn");
+    });
+
     it("holds no USDC or ASSET across repeated zaps", async function () {
       for (let i = 0; i < 3; i++) {
         await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
@@ -646,6 +733,33 @@ describe("LPZapper", function () {
 
       expect((await usdc.balanceOf(bob.address)) - before).to.equal(USDC(5));
       await expectZapperDrained();
+    });
+
+    it("sweeps a zero amount and logs it, because sweep guards only the recipient", async function () {
+      // The only stated guard is `to == address(0)`; a zero amount is a no-op transfer that
+      // still emits, unlike `RewardsDistributor.recoverExcessAsset`, which rejects zero.
+      const before = await usdc.balanceOf(bob.address);
+
+      await expect(zap.sweep(usdcAddr, 0n, bob.address))
+        .to.emit(zap, "Swept")
+        .withArgs(usdcAddr, bob.address, 0n);
+
+      expect(await usdc.balanceOf(bob.address)).to.equal(before);
+    });
+
+    it("refuses to sweep an address with no code, or a token whose transfer returns false", async function () {
+      // `sweep` takes any address, so SafeERC20 is the whole defence here.
+      await expect(zap.sweep(ZERO, USDC(1), bob.address))
+        .to.be.revertedWithCustomError(zap, "SafeERC20FailedOperation")
+        .withArgs(ZERO);
+
+      const Silent = await ethers.getContractFactory("MockReturnsFalseERC20");
+      const silent = await Silent.deploy("Silent", "SILENT", USDC(1000), 6);
+      const silentAddr = await silent.getAddress();
+
+      await expect(zap.sweep(silentAddr, USDC(1), bob.address))
+        .to.be.revertedWithCustomError(zap, "SafeERC20FailedOperation")
+        .withArgs(silentAddr);
     });
 
     it("cannot sweep more than the contract holds", async function () {

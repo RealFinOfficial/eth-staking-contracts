@@ -633,6 +633,65 @@ describe("RewardsDistributor", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
+  describe("Hostile ASSET tokens", function () {
+    /// Re-points the suite at a distributor wired to `assetToken`. The EIP-712 helpers read
+    /// `distributorAddr` when they sign, so the swap has to happen before any voucher is
+    /// made; `beforeEach` puts the standard fixture back for the next test.
+    async function useDistributorFor(assetToken) {
+      const Distributor = await ethers.getContractFactory("RewardsDistributor");
+      distributor = await Distributor.deploy(
+        tokenXAddr,
+        await assetToken.getAddress(),
+        voucherSigner.address,
+        owner.address
+      );
+      distributorAddr = await distributor.getAddress();
+      await distributor.setAssetClaimsEnabled(true);
+    }
+
+    it("rejects an ASSET whose transfer returns false instead of reverting, and books nothing", async function () {
+      const Silent = await ethers.getContractFactory("MockReturnsFalseERC20");
+      const silent = await Silent.deploy("Silent", "SILENT", USDC(1_000_000), 6);
+      const silentAddr = await silent.getAddress();
+      await useDistributorFor(silent);
+
+      // The payout is the last step of the claim, so an unchecked return value would leave
+      // the ledger saying "paid" with nothing sent. SafeERC20 turns it into a revert.
+      await expect(claimAsset(alice, USDC(500)))
+        .to.be.revertedWithCustomError(distributor, "SafeERC20FailedOperation")
+        .withArgs(silentAddr);
+
+      expect(await distributor.claimedAsset(alice.address)).to.equal(0n);
+    });
+
+    it("books the amount sent, so a fee-on-transfer ASSET shorts the claimer for good", async function () {
+      const FeeToken = await ethers.getContractFactory("MockFeeOnTransferERC20");
+      const feeToken = await FeeToken.deploy("Fee Coin", "FEE", USDC(1_000_000), 6, 100);
+      const feeTokenAddr = await feeToken.getAddress();
+      await useDistributorFor(feeToken);
+
+      // the 1% cut applies to the funding transfer too
+      await feeToken.transfer(distributorAddr, USDC(10_000));
+      expect(await feeToken.balanceOf(distributorAddr)).to.equal(USDC(9900));
+
+      const tx = await claimAsset(alice, USDC(500));
+      const ts = await txTimestamp(tx);
+
+      // the event and the ledger both state the amount sent, not the amount that arrived
+      await expect(tx)
+        .to.emit(distributor, "Claimed")
+        .withArgs(alice.address, feeTokenAddr, USDC(500), USDC(500), ts);
+      expect(await distributor.claimedAsset(alice.address)).to.equal(USDC(500));
+      expect(await feeToken.balanceOf(alice.address)).to.equal(USDC(495));
+
+      // and the shortfall is unrecoverable: the cumulative ledger already counts it as paid
+      await expect(claimAsset(alice, USDC(500)))
+        .to.be.revertedWithCustomError(distributor, "NothingToClaim")
+        .withArgs(USDC(500), USDC(500));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("Property: out-of-order vouchers never overpay", function () {
     // Deterministic PRNG (mulberry32). No Math.random — the sequence must be
     // reproducible so a failure is replayable.

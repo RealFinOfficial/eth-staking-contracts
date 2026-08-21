@@ -25,6 +25,7 @@ describe("LPStakingVault", function () {
   // ReentrantAttacker.Mode
   const MODE_UNSTAKE = 1;
   const MODE_REBALANCE = 2;
+  const MODE_STAKE = 3;
 
   const NO_SWAP = {
     zeroForOne: true,
@@ -212,6 +213,44 @@ describe("LPStakingVault", function () {
       await expect(deployVault({ pool: await wrongTokenPool.getAddress() }))
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(token0Addr, await other.getAddress(), FEE);
+    });
+
+    it("rejects a pair whose two tokens are the same address", async function () {
+      // `_token0 >= _token1` folds two mistakes into one error: the equal case here, and the
+      // out-of-order case below. Both are caught before the pool is ever read.
+      await expect(deployVault({ token0: token0Addr, token1: token0Addr }))
+        .to.be.revertedWithCustomError(vault, "TokensNotSorted")
+        .withArgs(token0Addr, token0Addr);
+
+      await expect(deployVault({ token0: token1Addr, token1: token0Addr }))
+        .to.be.revertedWithCustomError(vault, "TokensNotSorted")
+        .withArgs(token1Addr, token0Addr);
+    });
+
+    it("rejects the pool on a wrong token0, a wrong token1 or a wrong fee, each on its own", async function () {
+      const Token = await ethers.getContractFactory("MockERC20Decimals");
+      const other = await Token.deploy("Other", "OTHER", 1000n, 18);
+      const otherAddr = await other.getAddress();
+
+      await pool.setTokens(otherAddr, token1Addr);
+      await expect(deployVault())
+        .to.be.revertedWithCustomError(vault, "PoolMismatch")
+        .withArgs(otherAddr, token1Addr, FEE);
+
+      await pool.setTokens(token0Addr, otherAddr);
+      await expect(deployVault())
+        .to.be.revertedWithCustomError(vault, "PoolMismatch")
+        .withArgs(token0Addr, otherAddr, FEE);
+
+      await pool.setTokens(token0Addr, token1Addr);
+      await pool.setFee(OTHER_FEE);
+      await expect(deployVault())
+        .to.be.revertedWithCustomError(vault, "PoolMismatch")
+        .withArgs(token0Addr, token1Addr, OTHER_FEE);
+
+      // and the same triple restored deploys, so each arm above was the only difference
+      await pool.setFee(FEE);
+      expect(await (await deployVault()).pool()).to.equal(poolAddr);
     });
 
     it("enforces the TWAP window floor", async function () {
@@ -836,6 +875,91 @@ describe("LPStakingVault", function () {
       expect(await token1.balanceOf(vaultAddr)).to.equal(0n);
     });
 
+    it("refunds only the side that carries dust, one arm at a time", async function () {
+      await nfpm.setMintConsumeBps(CONSUME_BPS);
+
+      // A position with nothing behind its token1 side. The mint desires zero token1, so the
+      // refund can only have a token0 leg — the "token0 only" arm of `_refundDust`.
+      const only0 = await stakePosition(alice, { principal1: 0n });
+      const used0Only = (P0 * CONSUME_BPS) / 10_000n;
+      const dust0 = P0 - used0Only;
+      const token1Before = await token1.balanceOf(alice.address);
+
+      let newTokenId = await vault
+        .connect(alice)
+        .rebalance.staticCall(only0, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      let tx = await vault
+        .connect(alice)
+        .rebalance(only0, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+
+      await expect(tx)
+        .to.emit(vault, "Rebalanced")
+        .withArgs(
+          alice.address,
+          only0,
+          newTokenId,
+          NEW_TICK_LOWER,
+          NEW_TICK_UPPER,
+          used0Only,
+          dust0,
+          0n,
+          await txTimestamp(tx)
+        );
+      expect(dust0).to.be.gt(0n);
+      expect(await token1.balanceOf(alice.address)).to.equal(token1Before);
+
+      // The mirror image: nothing behind token0, so only the token1 leg can fire.
+      const only1 = await stakePosition(bob, { principal0: 0n });
+      const used1Only = (P1 * CONSUME_BPS) / 10_000n;
+      const dust1 = P1 - used1Only;
+      const token0Before = await token0.balanceOf(bob.address);
+
+      newTokenId = await vault
+        .connect(bob)
+        .rebalance.staticCall(only1, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      tx = await vault.connect(bob).rebalance(only1, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+
+      await expect(tx)
+        .to.emit(vault, "Rebalanced")
+        .withArgs(
+          bob.address,
+          only1,
+          newTokenId,
+          NEW_TICK_LOWER,
+          NEW_TICK_UPPER,
+          used1Only,
+          0n,
+          dust1,
+          await txTimestamp(tx)
+        );
+      expect(dust1).to.be.gt(0n);
+      expect(await token0.balanceOf(bob.address)).to.equal(token0Before);
+    });
+
+    it("bubbles the pool's own revert when the oracle cannot serve the window", async function () {
+      const tokenId = await stakePosition(alice);
+      await nfpm.setMintConsumeBps(10_000n);
+      await pool.setObserveReverts(true);
+
+      await expect(
+        vault
+          .connect(alice)
+          .rebalance(
+            tokenId,
+            NEW_TICK_LOWER,
+            NEW_TICK_UPPER,
+            swapParams({ amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n }),
+            FAR_DEADLINE
+          )
+      ).to.be.revertedWith("OLD");
+
+      // the very same position re-ranges without a swap: the oracle is read for the swap leg
+      // and for nothing else, so a dead oracle never blocks an exit
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.emit(vault, "Rebalanced");
+    });
+
     it("works against a position manager whose mint calls back into the receiver", async function () {
       const tokenId = await stakePosition(alice);
       await nfpm.setMintConsumeBps(10_000n);
@@ -999,6 +1123,27 @@ describe("LPStakingVault", function () {
       ).to.be.revertedWithCustomError(hostileVault, "ReentrancyGuardReentrantCall");
     });
 
+    it("stops a router that re-enters stake during the swap leg", async function () {
+      const tokenId = await stakeIntoHostileVault(alice);
+
+      // A position that is NOT staked yet, so `AlreadyStaked` cannot be the reason the
+      // re-entrant call fails. `nonReentrant` runs before anything in `stake`'s body.
+      await nfpm.mintFake(alice.address, token0Addr, token1Addr, FEE, TICK_LOWER, TICK_UPPER, LIQUIDITY, 0n, 0n);
+      const fresh = await nfpm.lastMintedId();
+      await nfpm.connect(alice).approve(hostileVaultAddr, fresh);
+      await attacker.configure(hostileVaultAddr, fresh, MODE_STAKE);
+
+      await expect(
+        hostileVault.connect(alice).rebalance(
+          tokenId,
+          NEW_TICK_LOWER,
+          NEW_TICK_UPPER,
+          { zeroForOne: true, amountIn: 1n * unit0, amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n },
+          FAR_DEADLINE
+        )
+      ).to.be.revertedWithCustomError(hostileVault, "ReentrancyGuardReentrantCall");
+    });
+
     it("stops a router that re-enters rebalance during the swap leg", async function () {
       const tokenId = await stakeIntoHostileVault(alice);
       await attacker.configure(hostileVaultAddr, tokenId, MODE_REBALANCE);
@@ -1012,6 +1157,145 @@ describe("LPStakingVault", function () {
           FAR_DEADLINE
         )
       ).to.be.revertedWithCustomError(hostileVault, "ReentrancyGuardReentrantCall");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Hostile ERC-20 pool tokens", function () {
+    const ALT_SUPPLY = 1_000_000n * 10n ** 18n;
+    const ALT_PRINCIPAL = 1000n * 10n ** 18n;
+
+    /// Deploys a second vault whose pool pair is `factoryName`, with one position staked in
+    /// it by alice and the router primed to trade the pair 1:1. Both tokens carry 18
+    /// decimals, so every amount here is in whole units.
+    async function deployAltVault(factoryName, opts = {}) {
+      const Token = await ethers.getContractFactory(factoryName);
+      const a = await Token.deploy("Alt A", "ALTA", ALT_SUPPLY, 18);
+      const b = await Token.deploy("Alt B", "ALTB", ALT_SUPPLY, 18);
+      const [alt0, alt1] =
+        (await a.getAddress()).toLowerCase() < (await b.getAddress()).toLowerCase() ? [a, b] : [b, a];
+      const alt0Addr = await alt0.getAddress();
+      const alt1Addr = await alt1.getAddress();
+
+      const Pool = await ethers.getContractFactory("MockUniswapV3Pool");
+      const altPool = await Pool.deploy(alt0Addr, alt1Addr, FEE);
+
+      const altVault = await deployVault({
+        pool: await altPool.getAddress(),
+        token0: alt0Addr,
+        token1: alt1Addr,
+        initialOwner: opts.ownerIsToken0 ? alt0Addr : owner.address,
+      });
+      const altVaultAddr = await altVault.getAddress();
+
+      await router.setRate(alt0Addr, alt1Addr, 10n ** 18n, 10n ** 18n);
+      await router.setRate(alt1Addr, alt0Addr, 10n ** 18n, 10n ** 18n);
+      await alt0.transfer(routerAddr, 100_000n * 10n ** 18n);
+      await alt1.transfer(routerAddr, 100_000n * 10n ** 18n);
+
+      await nfpm.mintFake(
+        alice.address,
+        alt0Addr,
+        alt1Addr,
+        FEE,
+        TICK_LOWER,
+        TICK_UPPER,
+        LIQUIDITY,
+        ALT_PRINCIPAL,
+        ALT_PRINCIPAL
+      );
+      const tokenId = await nfpm.lastMintedId();
+      await alt0.transfer(nfpmAddr, ALT_PRINCIPAL);
+      await alt1.transfer(nfpmAddr, ALT_PRINCIPAL);
+      await nfpm.connect(alice).approve(altVaultAddr, tokenId);
+      await altVault.connect(alice).stake(tokenId);
+
+      return { altVault, altVaultAddr, alt0, alt1, alt0Addr, alt1Addr, tokenId };
+    }
+
+    it("re-ranges through a stale non-zero allowance a plain approve could never clear", async function () {
+      const { altVault, altVaultAddr, alt0, tokenId } = await deployAltVault(
+        "MockNonZeroApproveRevertsERC20"
+      );
+
+      // the token really is stuck once an allowance stands — this is the state `forceApprove`
+      // exists to get out of
+      await alt0.approve(bob.address, 1n);
+      await expect(alt0.approve(bob.address, 2n))
+        .to.be.revertedWithCustomError(alt0, "ApproveFromNonZeroAllowance")
+        .withArgs(bob.address, 1n, 2n);
+
+      // a leftover allowance on both spenders a rebalance approves
+      await alt0.seedAllowance(altVaultAddr, nfpmAddr, 1n);
+      await alt0.seedAllowance(altVaultAddr, routerAddr, 1n);
+
+      await expect(
+        altVault.connect(alice).rebalance(
+          tokenId,
+          NEW_TICK_LOWER,
+          NEW_TICK_UPPER,
+          {
+            zeroForOne: true,
+            amountIn: 100n * 10n ** 18n,
+            amountOutMin: 0n,
+            amount0Min: 0n,
+            amount1Min: 0n,
+          },
+          FAR_DEADLINE
+        )
+      ).to.emit(altVault, "Rebalanced");
+
+      // both approvals went out through the zero-first fallback and came back to zero
+      expect(await alt0.allowance(altVaultAddr, nfpmAddr)).to.equal(0n);
+      expect(await alt0.allowance(altVaultAddr, routerAddr)).to.equal(0n);
+    });
+
+    it("cannot be re-entered by a token hook calling stakeFor during a rebalance", async function () {
+      const { altVault, altVaultAddr, alt0, alt0Addr, tokenId } = await deployAltVault("MockHookERC20");
+
+      // the token itself is the whitelisted zapper, so the re-entrant call is one that would
+      // otherwise clear `stakeFor`'s caller gate
+      await altVault.setZapper(alt0Addr);
+
+      const payload = altVault.interface.encodeFunctionData("stakeFor", [bob.address, tokenId]);
+      await alt0.setRecipientHook(altVaultAddr, altVaultAddr, payload);
+
+      // the hook fires inside `collect`, i.e. inside the rebalance
+      await expect(
+        altVault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.be.revertedWithCustomError(altVault, "ReentrancyGuardReentrantCall");
+
+      // outside a rebalance the identical call reaches `stakeFor`'s own checks, which proves
+      // the hook is wired and that the guard is what rejected it above
+      await expect(alt0.fireRecipientHook(altVaultAddr))
+        .to.be.revertedWithCustomError(altVault, "AlreadyStaked")
+        .withArgs(tokenId, alice.address);
+    });
+
+    it("cannot be re-entered by a token hook calling rescuePosition during a rebalance", async function () {
+      // the vault's owner is the token itself, so the re-entrant call clears `onlyOwner` —
+      // which runs before `nonReentrant` — and the guard is all that is left to stop it
+      const { altVault, altVaultAddr, alt0, alt0Addr, alt1Addr, tokenId } = await deployAltVault(
+        "MockHookERC20",
+        { ownerIsToken0: true }
+      );
+
+      // a stray NFT with no staker record: exactly what `rescuePosition` exists to move
+      await nfpm.mintFake(bob.address, alt0Addr, alt1Addr, FEE, TICK_LOWER, TICK_UPPER, LIQUIDITY, 0n, 0n);
+      const stray = await nfpm.lastMintedId();
+      await nfpm.connect(bob).transferFrom(bob.address, altVaultAddr, stray);
+
+      const payload = altVault.interface.encodeFunctionData("rescuePosition", [stray]);
+      await alt0.setRecipientHook(altVaultAddr, altVaultAddr, payload);
+
+      await expect(
+        altVault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.be.revertedWithCustomError(altVault, "ReentrancyGuardReentrantCall");
+
+      // the identical call succeeds once no rebalance is in flight, so nothing but the guard
+      // rejected it — the window the guard closes is real
+      await expect(alt0.fireRecipientHook(altVaultAddr)).to.emit(altVault, "PositionRescued");
+      expect(await nfpm.ownerOf(stray)).to.equal(alt0Addr);
     });
   });
 
@@ -1091,6 +1375,24 @@ describe("LPStakingVault", function () {
       await pool.setTicks(-MAX_DEVIATION_BPS, 0);
       preview = await vault.previewTwap();
       expect(preview.withinBounds).to.equal(true);
+    });
+
+    it("floors a negative TWAP tick that does not divide the window evenly", async function () {
+      // The pool's derived series always divides the window exactly, so the guard's floor
+      // correction is unreachable through it. Raw cumulatives put a remainder in front of it:
+      // -301 tick-seconds over 300 s is a true mean of -1.0033.
+      await vault.setTwapParams(300, MAX_DEVIATION_BPS);
+
+      await pool.setTickCumulatives([0, -301]);
+      expect((await vault.previewTwap()).twapTick).to.equal(-2);
+
+      // exact division leaves nothing to correct
+      await pool.setTickCumulatives([0, -300]);
+      expect((await vault.previewTwap()).twapTick).to.equal(-1);
+
+      // and a positive remainder is truncated, never floored — flooring only applies below zero
+      await pool.setTickCumulatives([0, 301]);
+      expect((await vault.previewTwap()).twapTick).to.equal(1);
     });
 
     it("reads the TWAP over the configured window", async function () {

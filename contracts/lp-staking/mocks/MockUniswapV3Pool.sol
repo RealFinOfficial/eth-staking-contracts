@@ -15,6 +15,11 @@ pragma solidity ^0.8.20;
  *
  *  `slot0().tick` is settable independently, so a test can put spot at any distance from
  *  the TWAP and drive {TwapGuard} to either side of its bound.
+ *
+ *  That synthetic series always divides the window exactly, so it can never hand the guard
+ *  a remainder. {setTickCumulatives} is the escape hatch: it switches `observe` into a raw
+ *  mode that returns two caller-chosen cumulatives verbatim, which is the only way to reach
+ *  the floor correction in {TwapGuard-_twapAndSpotTicks}.
  */
 contract MockUniswapV3Pool {
     // ──────────────────────── State ────────────────────────────
@@ -33,6 +38,12 @@ contract MockUniswapV3Pool {
     uint16 public observationCardinalityNext = 1;
     /// @notice When true, `observe` reverts the way an under-provisioned pool does.
     bool public observeReverts;
+    /// @notice When true, `observe` returns {rawTickCumulatives} verbatim instead of the
+    ///         series derived from `twapTick`.
+    bool public useRawCumulatives;
+    /// @notice The two cumulatives raw mode hands back: index 0 answers `secondsAgos[0]`,
+    ///         index 1 answers `secondsAgos[1]`.
+    int56[2] public rawTickCumulatives;
 
     /// @dev Arbitrary anchor keeping the synthetic cumulative series away from zero.
     int56 private constant ANCHOR = 1_000_000;
@@ -80,6 +91,28 @@ contract MockUniswapV3Pool {
         observeReverts = value;
     }
 
+    /**
+     * @notice Pins the two tick cumulatives `observe` returns, and switches the oracle into
+     *         raw mode in the same call.
+     * @dev Setting the values IS the mode switch — a test that wants specific cumulatives
+     *      always wants them served. Use {setUseRawCumulatives} to go back to the series
+     *      derived from `twapTick` without discarding them.
+     *
+     *      Raw mode exists for one branch: {TwapGuard} floors its mean tick toward negative
+     *      infinity, and the correction only runs when `tickCumulatives[1] - tickCumulatives[0]`
+     *      leaves a remainder over the window. The derived series never leaves one.
+     * @param cumulatives [0] is returned for `secondsAgos[0]`, [1] for `secondsAgos[1]`.
+     */
+    function setTickCumulatives(int56[2] calldata cumulatives) external {
+        rawTickCumulatives = cumulatives;
+        useRawCumulatives = true;
+    }
+
+    /// @notice Switches raw mode on or off without changing the pinned cumulatives.
+    function setUseRawCumulatives(bool value) external {
+        useRawCumulatives = value;
+    }
+
     // ──────────────────────── Pool surface ─────────────────────
 
     function token0() external view returns (address) {
@@ -119,6 +152,15 @@ contract MockUniswapV3Pool {
 
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);
+
+        if (useRawCumulatives) {
+            require(secondsAgos.length == 2, "raw mode serves 2 observations");
+            tickCumulatives[0] = rawTickCumulatives[0];
+            tickCumulatives[1] = rawTickCumulatives[1];
+            secondsPerLiquidityCumulativeX128s[0] = uint160(uint56(ANCHOR));
+            secondsPerLiquidityCumulativeX128s[1] = uint160(uint56(ANCHOR));
+            return (tickCumulatives, secondsPerLiquidityCumulativeX128s);
+        }
 
         for (uint256 i = 0; i < secondsAgos.length; i++) {
             int56 age = int56(uint56(secondsAgos[i]));
