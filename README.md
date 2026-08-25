@@ -365,6 +365,15 @@ forks Sepolia at block 11,562,000.
   through the network profile — the same 42 steps against the team's real tREAL/tUSDC and the
   Uniswap Sepolia deployment.
 
+### Test maps
+
+- Contracts test map (every tier, new tests and audit-finding tests marked): https://claude.ai/code/artifact/d04fc2cb-8da8-42c8-b91b-86ffcec1576b
+- Indexer test map (companion, evm-indexer): https://claude.ai/code/artifact/319b99b2-ccd0-48d9-93bc-fbef9c263c92
+- Expansion report (what landed, verification, audit findings SEC-01..05, open decisions): https://claude.ai/code/artifact/0ac9c23a-25bd-4fb3-8152-5673f6cac322
+
+The pages are generated from the test files at the branch head on 2026-08-25 and are private
+artifacts shared by the repository owner on request.
+
 ### The network profile
 
 One object per world the fork suites can run in: `test/lp-staking/helpers/profiles.js` for
