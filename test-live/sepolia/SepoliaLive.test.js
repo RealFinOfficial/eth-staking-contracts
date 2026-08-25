@@ -400,7 +400,7 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
         positions.minted = BigInt(log.topics[3]);
       }
     }
-    expect(positions.minted, "no position NFT was minted").to.not.equal(undefined);
+    expect(positions.minted !== undefined, "no position NFT was minted").to.equal(true);
 
     const position = await npm.positions(positions.minted);
     expect(position.liquidity, "the mint produced no liquidity").to.be.greaterThan(0n);
