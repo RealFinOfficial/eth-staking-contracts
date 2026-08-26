@@ -19,8 +19,11 @@ import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPosit
  *  to undo; it is pinned by name in `test/forge/unit/VaultBranches.t.sol`. Mixing it in here
  *  would weaken the equivalence into an implication and hide a real regression.
  *
- *  Every action self-primes: if nothing is staked yet it stakes first, so the anti-vacuity
- *  invariant can be a hard assertion rather than a probabilistic one.
+ *  Every action self-primes: if nothing is staked yet it stakes first, so an exit action
+ *  that is drawn at all always has a live position to work on. That is what lets the
+ *  anti-vacuity invariant assert an exit SUCCEEDED whenever one was ATTEMPTED, instead of
+ *  merely hoping the draw was lucky — see {VaultCustodyInvariantsTest} for why the gate is
+ *  the attempt counter rather than the call counter.
  */
 contract VaultCustodyHandler is Test {
     LPStakingVault internal immutable vault;
@@ -46,6 +49,10 @@ contract VaultCustodyHandler is Test {
     uint256 public unstakes;
     uint256 public rebalances;
     uint256 public rescueAttempts;
+    /// @notice Exit actions drawn against a live position — the denominator the anti-vacuity
+    ///         invariant gates on. Incremented before the call, so an exit that is attempted
+    ///         and then always reverts is still counted and still fails the campaign.
+    uint256 public exitAttempts;
     /// @notice Set if `rescuePosition` ever released a position that carried a staker.
     bool public rescueEverMovedAStakedPosition;
 
@@ -87,6 +94,7 @@ contract VaultCustodyHandler is Test {
         calls++;
         _prime();
         if (staked.length == 0) return;
+        exitAttempts++;
 
         uint256 index = bound(idSeed, 0, staked.length - 1);
         uint256 tokenId = staked[index];
@@ -103,6 +111,7 @@ contract VaultCustodyHandler is Test {
         calls++;
         _prime();
         if (staked.length == 0) return;
+        exitAttempts++;
 
         uint256 index = bound(idSeed, 0, staked.length - 1);
         uint256 tokenId = staked[index];
@@ -203,8 +212,8 @@ contract VaultCustodyHandler is Test {
 contract VaultCustodyInvariantsTest is LocalHarness {
     VaultCustodyHandler internal handler;
 
-    /// @dev Below this many calls a sequence has not had room to exercise the exit paths, so
-    ///      the anti-vacuity check would be reporting the campaign's warm-up, not a defect.
+    /// @dev Below this many calls in a run, the anti-vacuity check would be reporting the
+    ///      run's warm-up rather than a defect, so it stands down entirely.
     uint256 internal constant ANTI_VACUITY_MIN_CALLS = 10;
 
     function setUp() public {
@@ -282,14 +291,29 @@ contract VaultCustodyInvariantsTest is LocalHarness {
      *      `try/catch`, so a harness that silently refused every call would leave all four
      *      invariants trivially true. This pins that the campaign really moved positions
      *      through the vault and really exercised the exits.
+     *
+     *      The two clauses are gated differently, because the handler's ghosts are storage
+     *      and forge resets them for EVERY run — they count one run's calls, not the
+     *      campaign's. `stakes` needs no more than the call-count gate: every action either
+     *      stakes or self-primes, so past the warm-up a run has staked whatever it drew.
+     *      `unstakes + rebalances` cannot be gated that way. The selector table gives the
+     *      non-exit actions 3 of 8 weights, so a run whose first {ANTI_VACUITY_MIN_CALLS}
+     *      draws are all `stakeOne` / `rescueStaked` is legal at (3/8)^10 per run — rare
+     *      enough to look like a defect, common enough to fail a 512-run campaign roughly
+     *      3 % of the time. It is not a defect: an exit that was never drawn is a fact about
+     *      the draw, not about the vault. So the clause is gated on an exit having been
+     *      ATTEMPTED. The teeth are unchanged, because self-priming guarantees every drawn
+     *      exit has a live position to act on: an exit that is attempted and never succeeds
+     *      still fails the campaign, which is the property this check exists to defend.
      */
     function invariant_VaultCustodyIsActuallyExercised() public view {
         if (handler.calls() < ANTI_VACUITY_MIN_CALLS) return;
         assertGt(handler.stakes(), 0, "no position was ever staked: the custody invariants would pass vacuously");
+        if (handler.exitAttempts() == 0) return;
         assertGt(
             handler.unstakes() + handler.rebalances(),
             0,
-            "no position ever left custody: the destroy-together half is untested"
+            "an exit was attempted but no position ever left custody: the destroy-together half is untested"
         );
     }
 }
