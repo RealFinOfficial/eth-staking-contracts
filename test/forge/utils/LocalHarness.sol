@@ -30,8 +30,8 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
  *    * The test contract stays the owner of all four contracts. Production transfers
  *      ownership to LP_MULTISIG at the end of the deploy script; the access-control file
  *      re-creates that split explicitly where it is the subject.
- *    * `twapWindow` is {MIN_TWAP_WINDOW} (300) rather than the production default of 1800,
- *      so a test that warps past a window does not have to warp half an hour.
+ *    * `twapWindow` is {MIN_TWAP_WINDOW} (300), which is also the production default, so a
+ *      test that warps past a window warps five minutes.
  *    * The pool mock reports spot == TWAP == tick 0, so the guard passes unless a test
  *      moves it.
  */

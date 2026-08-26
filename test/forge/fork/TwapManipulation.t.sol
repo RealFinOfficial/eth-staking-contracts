@@ -104,8 +104,8 @@ contract TwapColdOracleTest is ForkHarness {
 
 contract TwapManipulationTest is ForkHarness {
     /// @dev Whale trade sizes measured against the seeded depth: ~700 ticks each way.
-    uint256 internal constant PUSH_UP_USDC = 200_000e6;
-    uint256 internal constant PUSH_DOWN_ASSET = 400_000e18;
+    uint256 internal constant PUSH_UP_USDC = 500_000e6;
+    uint256 internal constant PUSH_DOWN_ASSET = 1_000_000e18;
 
     function setUp() public {
         _deployForkedStack();
@@ -132,7 +132,7 @@ contract TwapManipulationTest is ForkHarness {
         uint256 tokenId = _mintAndStake(alice, 600);
         _pushSpotUp(PUSH_UP_USDC);
 
-        assertGt(_deviationTicks(), 500, "the push must actually leave the 500-tick ceiling behind");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "the push must actually leave the ceiling behind");
 
         SwapParams memory swap =
             SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
@@ -145,7 +145,7 @@ contract TwapManipulationTest is ForkHarness {
         uint256 tokenId = _mintAndStake(alice, 600);
         _pushSpotDown(PUSH_DOWN_ASSET);
 
-        assertGt(_deviationTicks(), 500, "the push must actually leave the 500-tick ceiling behind");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "the push must actually leave the ceiling behind");
 
         SwapParams memory swap =
             SwapParams({zeroForOne: true, amountIn: 1_000e18, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
@@ -225,7 +225,7 @@ contract TwapManipulationTest is ForkHarness {
     function test_Guard_ReopensOnceTheTwapCatchesUpWithSpot() public {
         uint256 tokenId = _mintAndStake(alice, 600);
         _pushSpotUp(PUSH_UP_USDC);
-        assertGt(_deviationTicks(), 500, "precondition: the guard must be tripped");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "precondition: the guard must be tripped");
 
         // Trade at the new price for longer than the window so the mean moves to it.
         for (uint256 i = 0; i < 12; ++i) {
@@ -234,7 +234,11 @@ contract TwapManipulationTest is ForkHarness {
             _swap(whale, profile.asset, profile.usdc, out, 0);
         }
 
-        assertLe(_deviationTicks(), 500, "after a full window at the new price the guard must reopen");
+        assertLe(
+            _deviationTicks(),
+            uint256(profile.maxDevTicks),
+            "after a full window at the new price the guard must reopen"
+        );
 
         SwapParams memory swap =
             SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
@@ -249,7 +253,7 @@ contract TwapManipulationTest is ForkHarness {
         uint256 tokenId = _mintAndStake(alice, 600);
         uint256 bobToken = _mintAndStake(bob, 600);
         _pushSpotUp(PUSH_UP_USDC);
-        assertGt(_deviationTicks(), 500, "precondition: the guard must be tripped");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "precondition: the guard must be tripped");
 
         vm.prank(alice);
         vault.unstake(tokenId);

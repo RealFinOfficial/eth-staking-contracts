@@ -85,15 +85,17 @@ const NFT_PERMIT_VERSION = "1";
 
 const TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW — shortest legal window
 /** What the scenario hands the deploy script, in bps — the script's human-facing knob. */
-const MAX_DEVIATION_BPS = 500;
-/** What the script converts that into and the contract stores: floor(ln 1.05 / ln 1.0001). */
-const MAX_DEVIATION_TICKS = 487;
+const MAX_DEVIATION_BPS = 1000;
+/** What the script converts that into and the contract stores: floor(ln 1.10 / ln 1.0001). */
+const MAX_DEVIATION_TICKS = 953;
 /** Retuned by A19/A20 from the multisig. */
 const RETUNED_TWAP_WINDOW = 600;
 /** `setTwapParams` takes ticks directly — no conversion on this path. */
 const RETUNED_MAX_DEVIATION_TICKS = 400;
 
-const OBSERVATION_CARDINALITY = 100;
+// Deploy default since 2026-08-26: 2 * ceil(window / 12) slots, so a 300 s window needs 50
+// and 150 leaves margin for the burst of trading a crash produces.
+const OBSERVATION_CARDINALITY = 150;
 
 const ASSET = (n) => BigInt(n) * 10n ** ASSET_DECIMALS;
 const USDC = (n) => BigInt(n) * 10n ** USDC_DECIMALS;

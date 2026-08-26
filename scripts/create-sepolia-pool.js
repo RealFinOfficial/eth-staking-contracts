@@ -225,10 +225,11 @@ async function main() {
   console.log(
     `\nNext:\n` +
       `  1. LP_POOL=${created} npx hardhat run scripts/deploy-lp-staking.js --network ${hre.network.name}\n` +
-      `     (it also grows the oracle to LP_OBSERVATION_CARDINALITY)\n` +
-      `  2. Seed liquidity and trade the pool for at least LP_TWAP_WINDOW seconds — a\n` +
-      `     brand-new pool stores one observation, so pool.observe() reverts with 'OLD'\n` +
-      `     and every TWAP-guarded path reverts with it until the window fills.`
+      `     (it also grows the oracle to LP_OBSERVATION_CARDINALITY, default 150, which it\n` +
+      `     refuses to leave below 2 * ceil(LP_TWAP_WINDOW / 12))\n` +
+      `  2. Seed liquidity and trade the pool for at least LP_TWAP_WINDOW seconds (default\n` +
+      `     300) — a brand-new pool stores one observation, so pool.observe() reverts with\n` +
+      `     'OLD' and every TWAP-guarded path reverts with it until the window fills.`
   );
 }
 

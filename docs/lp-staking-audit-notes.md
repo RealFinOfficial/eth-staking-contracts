@@ -169,10 +169,30 @@ Blocked on a fresh pool: `zapIn` with any swap leg, and `rebalance` with any swa
 Working from block one: `stake`, `stakeWithPermit`, `stakeFor`, `unstake`, and a swap-free
 `rebalance`.
 
-**Deploy blocker, operational.** `scripts/deploy-lp-staking.js` already grows the array and
-already prints the warning; what it cannot do is create the history. Before announcing the
-program: seed liquidity, trade the pool for at least `twapWindow` seconds, then confirm with
+**Deploy blocker, operational.** `scripts/deploy-lp-staking.js` grows the array and prints
+the warning; what it cannot do is create the history. Before announcing the program: seed
+liquidity, trade the pool for at least `twapWindow` seconds, then confirm with
 `pool.observe([twapWindow, 0])`.
+
+**Sized since 2026-08-26** (review F5, which called an unsized cardinality a liveness
+dependency). `LP_OBSERVATION_CARDINALITY` defaults to **150** and the script refuses to run
+below the derived floor:
+
+```
+cardinality >= 2 * ceil(twapWindow / 12)
+```
+
+One observation per 12-second block is the worst case a pool can fill, so `ceil(window/12)`
+slots is the bare minimum for a window's worth of history; the factor of 2 is margin for the
+burst of trading a crash produces — which is precisely when the guard is read. A 300 s window
+needs >= 50 slots, a 3600 s window >= 600. The error names the arithmetic, so an operator who
+widens the window is told the new floor instead of discovering it as an `OLD` revert in
+production. The size the stack was armed with is written into the `UniswapV3Pool` record in
+`deployments.json`.
+
+Note what this does NOT fix: allocating slots is not filling them. A swap-free `rebalance`
+and every custody path still work from block one, and the swap legs still need the pool to
+have been traded for a window.
 
 Tests: `test/forge/fork/TwapManipulation.t.sol`, `TwapColdOracleTest` — five `test_SEC01_*`
 cases including the working-paths arm (`…ColdOracleLeavesStakeUnstakeAndSwapFreeRebalanceWorking`)
@@ -182,12 +202,22 @@ and the warm-up remedy (`…GrowingAndWarmingTheOracleMakesTheGuardReadable`).
 
 `_checkTwapDeviation()` runs **before** `swapRouter.exactInputSingle`, so the swap's own price
 impact is outside it: a rebalance can pass the guard and then leave spot further from the TWAP
-than the guard would ever admit. And `rebalance` / `_zapIn` only call `_executeSwap` when
-`swap.amountIn > 0`, so a no-swap rebalance never consults the guard at all and re-mints at
-whatever price a sandwicher has set.
+than the guard would ever admit.
 
-Everything inside the guard's tolerance is therefore free MEV. A whale push that stays under
-the 500-tick ceiling measurably reduces the liquidity a zap-in buys, and nothing reverts.
+The second half — `rebalance` / `_zapIn` only call `_executeSwap` when `swap.amountIn > 0`, so
+a no-swap rebalance never consults the guard at all — is **DELIBERATE since 2026-08-26**
+(review recommendation 3), not a finding. A range move must remain available at any price: it
+is the fallback the frontend offers while the guard is tripped, "move range now, optimize
+ratio later". Closing it would turn the circuit breaker into a lock on the one action a staker
+whose position has fallen out of range actually needs. See
+`docs/reviews/spec-review-2026-08-26.md` in the lp-staking docs repo (F1, F2, rec. 3).
+
+The price of that, stated in the `SwapParams` NatSpec: with `amountIn == 0` the mint minimums
+are the ONLY protection on the mint, so they must be quoted tightly as a share of the
+position's total value.
+
+Everything inside the guard's tolerance is free MEV either way. A whale push that stays under
+the ceiling measurably reduces the liquidity a zap-in buys, and nothing reverts.
 **The caller's own `amountOutMin` / `amount0Min` / `amount1Min` are the only exact protection,
 and nothing on-chain forces them to be non-zero.** Frontends must always quote them from a
 fresh reading; a UI default of zero is a live loss.

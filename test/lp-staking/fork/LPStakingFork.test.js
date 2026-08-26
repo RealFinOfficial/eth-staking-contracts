@@ -645,7 +645,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       // 3. Grow the oracle. The live pool sits at cardinality 1, so `observe([300, 0])`
       //    reverts "OLD" until this runs — exactly as the deployment runbook describes.
-      await (await pool.increaseObservationCardinalityNext(100)).wait();
+      await (await pool.increaseObservationCardinalityNext(150)).wait();
 
       // 4. Standing approvals for the real router and position manager.
       for (const user of [deployer, alice, bob, carol, dave, whale]) {

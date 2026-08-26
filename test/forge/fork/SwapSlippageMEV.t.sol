@@ -24,7 +24,7 @@ contract SwapSlippageMEVTest is ForkHarness {
     ///      ceiling, which is the case the guard cannot help with.
     uint256 internal constant SANDWICH_USDC = 100_000e6;
     /// @dev ~700 ticks: outside the ceiling, used where the guard must trip.
-    uint256 internal constant PUSH_UP_USDC = 200_000e6;
+    uint256 internal constant PUSH_UP_USDC = 500_000e6;
 
     uint256 internal constant ZAP_USDC = 20_000e6;
 
@@ -56,7 +56,7 @@ contract SwapSlippageMEVTest is ForkHarness {
 
         // The vault's own swap, out of the position it just emptied.
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 200_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: false, amountIn: 400_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
 

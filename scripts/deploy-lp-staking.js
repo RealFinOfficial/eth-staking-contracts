@@ -22,14 +22,17 @@ const pools = require("./lib/pools");
 //   LP_NPM                    — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
 //   LP_ROUTER                 — SwapRouter02 (per-chain default, see UNISWAP_BY_CHAIN)
 //   LP_FEE                    — pool fee tier in hundredths of a bip (3000)
-//   LP_TWAP_WINDOW            — TWAP lookback in seconds, 300..3600 (1800)
-//   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in BPS, <= 2000 (500). The contract
+//   LP_TWAP_WINDOW            — TWAP lookback in seconds, 300..3600 (300)
+//   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in BPS, <= 2000 (1000). The contract
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
 //   LP_EPOCH_ID               — first epoch id to arm on TokenX (none)
 //   LP_EPOCH_CAP              — that epoch's mint cap, in whole TokenX (none)
-//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (100)
+//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (150). Must be at least
+//                               2 * ceil(LP_TWAP_WINDOW / 12): one slot per block in the
+//                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
+//                               needs >= 600
 //
 // Mainnet needs CONFIRM=yes, like every other state-changing script here.
 
@@ -55,7 +58,25 @@ const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 const MIN_TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW
 const MAX_TWAP_WINDOW = 3600; // TwapGuard.MAX_TWAP_WINDOW
 const MAX_TWAP_DEVIATION_TICKS = 1823; // TwapGuard.MAX_TWAP_DEVIATION_TICKS
-const DEFAULT_OBSERVATION_CARDINALITY = 100;
+// The guard's defaults, decided 2026-08-26 from the spec review: a WIDE circuit breaker.
+// 300 s of lookback clears within ~1-2.5 minutes even after a 20% crash, and 1000 bps never
+// trips below a 10% instantaneous move — so `rebalance` stays available exactly when a
+// position has fallen out of range and needs it. The caller's own minimums remain the
+// primary protection; see `libraries/TwapGuard.sol`.
+const DEFAULT_TWAP_WINDOW = 300;
+const DEFAULT_TWAP_MAX_DEVIATION_BPS = 1000;
+
+// Observation slots. A pool fills at most one per block, so `window / 12` seconds of history
+// is `ceil(window / 12)` slots in the worst case (every block trading); doubling that leaves
+// room for the burst of activity a crash produces, which is exactly when the guard is read.
+const DEFAULT_OBSERVATION_CARDINALITY = 150;
+const SECONDS_PER_BLOCK = 12;
+const CARDINALITY_MARGIN = 2;
+
+/** Smallest cardinality that can hold `window` seconds of history with margin. */
+function requiredCardinality(window) {
+  return CARDINALITY_MARGIN * Math.ceil(window / SECONDS_PER_BLOCK);
+}
 
 /**
  * Exact basis-points -> ticks conversion, the one the guard's NatSpec states.
@@ -122,8 +143,10 @@ async function main() {
   const multisig = readAddress("LP_MULTISIG");
 
   const fee = Number(process.env.LP_FEE || 3000);
-  const twapWindow = Number(process.env.LP_TWAP_WINDOW || 1800);
-  const twapMaxDeviationBps = Number(process.env.LP_TWAP_MAX_DEVIATION_BPS || 500);
+  const twapWindow = Number(process.env.LP_TWAP_WINDOW || DEFAULT_TWAP_WINDOW);
+  const twapMaxDeviationBps = Number(
+    process.env.LP_TWAP_MAX_DEVIATION_BPS || DEFAULT_TWAP_MAX_DEVIATION_BPS
+  );
   const twapMaxDeviationTicks = bpsToTicks(twapMaxDeviationBps);
   const observationCardinality = Number(
     process.env.LP_OBSERVATION_CARDINALITY || DEFAULT_OBSERVATION_CARDINALITY
@@ -167,6 +190,17 @@ async function main() {
   if (!Number.isInteger(observationCardinality) || observationCardinality < 1 || observationCardinality > 65535) {
     throw new Error(`LP_OBSERVATION_CARDINALITY must be a uint16 — got ${observationCardinality}`);
   }
+  // Sizing the oracle is a liveness dependency, not a nicety: a buffer too small for the
+  // window makes `observe()` revert `OLD` and takes both swap legs down with it, and a burst
+  // of trading wraps a small buffer fastest.
+  const minimumCardinality = requiredCardinality(twapWindow);
+  if (observationCardinality < minimumCardinality) {
+    throw new Error(
+      `LP_OBSERVATION_CARDINALITY ${observationCardinality} is too small for a ${twapWindow}s ` +
+        `window: at one observation per 12s block it needs at least ` +
+        `${CARDINALITY_MARGIN} * ceil(${twapWindow} / ${SECONDS_PER_BLOCK}) = ${minimumCardinality} slots`
+    );
+  }
 
   // The constructors take the pair pre-sorted; sorting here removes one way to
   // get it wrong. Address comparison is on the lowercase hex, as Solidity does.
@@ -194,7 +228,9 @@ async function main() {
   console.log(
     `Initial epoch:      ${epochId ? `${epochId} capped at ${epochCapRaw} TokenX` : "NOT ARMED"}`
   );
-  console.log(`Observation target: ${observationCardinality}`);
+  console.log(
+    `Observation target: ${observationCardinality} (>= ${minimumCardinality} for a ${twapWindow}s window)`
+  );
 
   // ──────────────────────── on-chain safety checks ────────────────────────
 
@@ -330,6 +366,8 @@ async function main() {
     token0,
     token1,
     fee,
+    twapWindow,
+    maxTwapDeviationTicks: twapMaxDeviationTicks,
   });
 
   const zapperDeploy = await deployContract(
@@ -356,6 +394,8 @@ async function main() {
     vault: vaultDeploy.address,
     usdc,
     asset,
+    twapWindow,
+    maxTwapDeviationTicks: twapMaxDeviationTicks,
   });
 
   const tokenX = tokenXDeploy.contract;
@@ -411,6 +451,16 @@ async function main() {
       (o) => poolAsDeployer.increaseObservationCardinalityNext(observationCardinality, o)
     );
   }
+
+  // The pool is not deployed by this script, but the size the stack was armed with is a
+  // deployment fact of the same kind as the guard parameters, so it goes in the registry
+  // beside them. The other three keys are the ones create-sepolia-pool.js writes.
+  pools.recordDeployment(chainId, "UniswapV3Pool", poolAddress, {
+    token0,
+    token1,
+    fee,
+    observationCardinality: Math.max(observationCardinality, cardinalityNext),
+  });
 
   if (cardinality <= 1) {
     console.log(

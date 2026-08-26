@@ -86,9 +86,10 @@ library Profiles {
             funders: funders,
             usdcPermit: false,
             assetPermit: false,
-            twapWindow: 300, // TwapGuard.MIN_TWAP_WINDOW: shortest legal window, shortest warm-up.
-            // Production deploys 1800 (scripts/deploy-lp-staking.js LP_TWAP_WINDOW default).
-            maxDevTicks: 500
+            // The production defaults since 2026-08-26: 300 s / 1000 bps = 953 ticks
+            // (scripts/deploy-lp-staking.js DEFAULT_TWAP_WINDOW, DEFAULT_TWAP_MAX_DEVIATION_BPS).
+            twapWindow: 300,
+            maxDevTicks: 953
         });
     }
 
@@ -122,7 +123,7 @@ library Profiles {
             usdcPermit: true,
             assetPermit: true,
             twapWindow: 300,
-            maxDevTicks: 500
+            maxDevTicks: 953
         });
     }
 

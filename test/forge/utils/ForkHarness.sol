@@ -99,7 +99,9 @@ abstract contract ForkHarness is BaseForge {
     uint256 internal constant WARMUP_SWAP_USDC = 25e6;
 
     /// @dev Oracle slots the deploy script grows the pool into (LP_OBSERVATION_CARDINALITY).
-    uint16 internal constant OBSERVATION_CARDINALITY = 100;
+    ///      Its rule is 2 * ceil(window / 12); a 300 s window needs 50, and 150 is the
+    ///      default that leaves margin for a burst of trading.
+    uint16 internal constant OBSERVATION_CARDINALITY = 150;
 
     // ──────────────────────── EIP-712 constants ────────────────
 

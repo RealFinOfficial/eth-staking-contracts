@@ -115,6 +115,13 @@ reversed without reverting anywhere.
   and any `rebalance` carrying a swap leg) reverts with it. Paths without a swap work from
   block one. A pool at cardinality 1 therefore needs roughly a window's worth of trading
   after the bump before the guarded paths become usable
+- **The oracle is sized, not guessed.** `LP_OBSERVATION_CARDINALITY` defaults to 150 and the
+  deploy script refuses anything below `2 × ceil(LP_TWAP_WINDOW / 12)` — one slot per 12 s
+  block in the worst case, doubled for the burst of trading a crash produces, which is
+  exactly when the guard is read. 300 s needs ≥ 50, 3600 s needs ≥ 600
+- **Guard defaults are wide on purpose.** `LP_TWAP_WINDOW=300`, `LP_TWAP_MAX_DEVIATION_BPS=1000`
+  (= 953 ticks). A narrow guard locks `rebalance` out exactly when a position has fallen out
+  of range and needs re-ranging; the caller's own minimums are the primary protection
 
 ## Project Structure
 
