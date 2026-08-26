@@ -18,40 +18,64 @@
       "observationCardinality": 150
     },
     "TokenX": {
-      "address": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
-      "deployTx": "0xb3a22e66cc5f5bea637112ce3e54685b5a1c54b1457d2a9514f0a7e95a91cc5c",
-      "block": 11570607,
+      "address": "0x5dD440EE47814ce9B6aC45764dF1D9B2f12A4f97",
+      "deployTx": "0x49af0d2a71bd08e1225e569a86f4d1542dd74f85b152b3d3ee580840269ebcbc",
+      "block": 11571453,
       "name": "Real LP Rewards",
       "symbol": "RLP"
     },
     "RewardsDistributor": {
-      "address": "0x2c74230c7c1c6bBA4ff67250f4b0781a62732AeF",
-      "deployTx": "0x89ab069a0c2b6ccf8f9ad3ddae0907d89255da251cd0c30a54a1d6a627d7c1eb",
-      "block": 11570608,
-      "tokenX": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
+      "address": "0xF192EaD2eb35C2d16a50fA074502C97a68FC0B7f",
+      "deployTx": "0xadf7ee75fdccc018397e46750de74bf914c1381b34ff4ec9117aea930a75907b",
+      "block": 11571455,
+      "implementation": "0x3aE3726bd5044D9e27075a67eD37250464F7F9B8",
+      "implementationTx": "0x7c75d920a5a08cda01fd774cd04aafceea1fe700185a9304ed17c869eeea72e3",
+      "tokenX": "0x5dD440EE47814ce9B6aC45764dF1D9B2f12A4f97",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
-      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x4e763129Ec2a757FB64B9388870050be5F71481e"
     },
     "LPStakingVault": {
-      "address": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
-      "deployTx": "0x31bfb6de2e03dcec9baa071f9f592a3746ada818cee4bd426a980d10c8b09659",
-      "block": 11570609,
+      "address": "0x116a043ee16499b5259D0D2eCa40B9DE481745b8",
+      "deployTx": "0x43e5e23ab219fe996be06e561d57b684a85163cfe4a51ba358620919a6ae1f99",
+      "block": 11571457,
+      "implementation": "0x67285E6e609bd3a04b7e8fe8E6AE057fD1437c05",
+      "implementationTx": "0x331d5177bd16864b1de8bd89110d1cceb2e0694939f01c4bd2c3075fddd70eb6",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "fee": 3000,
       "twapWindow": 300,
-      "maxTwapDeviationTicks": 953
+      "maxTwapDeviationTicks": 953,
+      "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x4e763129Ec2a757FB64B9388870050be5F71481e"
     },
     "LPZapper": {
-      "address": "0xd425748F81334aDbA95F19Bb37293e02992F6C88",
-      "deployTx": "0xafabaad1a52714e7303c4b88ae708ba9cf1e0100b270b4dd3da0a1ce4f4e3423",
-      "block": 11570610,
-      "vault": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
+      "address": "0xA332E93c43188209a3Da8b4946F3186cD1904052",
+      "deployTx": "0xdf460429c0ad517d54641a0a3302701323d0b4b6172856380d392d9b1e539f15",
+      "block": 11571458,
+      "vault": "0x116a043ee16499b5259D0D2eCa40B9DE481745b8",
       "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953
+    },
+    "TimelockController": {
+      "address": "0x4e763129Ec2a757FB64B9388870050be5F71481e",
+      "deployTx": "0x5300b9c18abd1d69c819b540ca06f579acc1d6c4a468f4d5781bd3517d970c5d",
+      "block": 11571462,
+      "minDelay": 300,
+      "proposers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "executors": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "cancellers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "admin": "0x0000000000000000000000000000000000000000"
     }
   }
 }
