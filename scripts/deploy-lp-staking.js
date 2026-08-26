@@ -5,8 +5,13 @@ const pools = require("./lib/pools");
 //
 // Deploy order is fixed by the wiring: TokenX first (nothing depends on it),
 // then RewardsDistributor (needs TokenX), then LPStakingVault, then LPZapper
-// (needs the vault). The deployer owns all four until the wiring is done, then
-// ownership moves to LP_MULTISIG in the same run.
+// (needs the vault). The deployer owns TokenX, the vault and the zapper until the
+// wiring is done, then ownership moves to LP_MULTISIG in the same run.
+//
+// RewardsDistributor is the exception: it is a UUPS proxy (implementation + LPProxy),
+// its `initialize` names LP_MULTISIG as the owner from block one, and LP_GUARDIAN
+// holds the undelayed fast path. `Ownable2Step` is why it is not in the transfer list —
+// a transfer would only nominate, and the multisig would have to accept separately.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -27,6 +32,9 @@ const pools = require("./lib/pools");
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
+//   LP_GUARDIAN               — fast-path guardian on the RewardsDistributor proxy: pauses,
+//                               signer rotation and recoverExcessAsset, with no delay
+//                               (LP_MULTISIG)
 //   LP_EPOCH_ID               — first epoch id to arm on TokenX (none)
 //   LP_EPOCH_CAP              — that epoch's mint cap, in whole TokenX (none)
 //   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (150). Must be at least
@@ -53,6 +61,10 @@ const UNISWAP_BY_CHAIN = {
     swapRouter02: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
   },
 };
+
+// ERC-1967 implementation slot: keccak256("eip1967.proxy.implementation") - 1.
+const ERC1967_IMPLEMENTATION_SLOT =
+  "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 const MIN_TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW
@@ -141,6 +153,10 @@ async function main() {
   const swapRouter = readAddress("LP_ROUTER", uniswap.swapRouter02);
   const signer = readAddress("LP_SIGNER");
   const multisig = readAddress("LP_MULTISIG");
+  // Fast-path incident responder on the distributor proxy: pauses, signer rotation and
+  // `recoverExcessAsset`, with no timelock in front of it. Defaults to the multisig, which
+  // is what it is unless a dedicated ops key is provisioned.
+  const guardian = readAddress("LP_GUARDIAN", multisig);
 
   const fee = Number(process.env.LP_FEE || 3000);
   const twapWindow = Number(process.env.LP_TWAP_WINDOW || DEFAULT_TWAP_WINDOW);
@@ -331,17 +347,47 @@ async function main() {
     symbol: tokenXSymbol,
   });
 
-  const distributorDeploy = await deployContract(
+  // The distributor is a UUPS proxy (spec 01 revision 2026-08-26): an implementation that
+  // carries the two immutables and burns its own initializers, then an LPProxy whose
+  // constructor delegatecalls `initialize` in the SAME transaction — an uninitialized proxy
+  // is one `initialize` race away from belonging to whoever calls it first.
+  //
+  // Two deploys rather than `upgrades.deployProxy` because mainnet signs with a Ledger and
+  // every transaction here carries an explicit nonce (see deployContract); the plugin sends
+  // its own un-nonce-able pair.
+  const distributorImplDeploy = await deployContract(
     "RewardsDistributor",
-    [tokenXDeploy.address, asset, signer, deployer.address],
+    [tokenXDeploy.address, asset],
     deployer
   );
+  const distributorInitData = distributorImplDeploy.contract.interface.encodeFunctionData(
+    "initialize",
+    [multisig, guardian, signer]
+  );
+  const distributorProxyDeploy = await deployContract(
+    "LPProxy",
+    [distributorImplDeploy.address, distributorInitData],
+    deployer
+  );
+  const distributorDeploy = {
+    address: distributorProxyDeploy.address,
+    tx: distributorProxyDeploy.tx,
+    receipt: distributorProxyDeploy.receipt,
+    contract: await hre.ethers.getContractAt(
+      "RewardsDistributor",
+      distributorProxyDeploy.address,
+      deployer
+    ),
+  };
   pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, {
     deployTx: distributorDeploy.tx.hash,
     block: distributorDeploy.receipt.blockNumber,
+    implementation: distributorImplDeploy.address,
+    implementationTx: distributorImplDeploy.tx.hash,
     tokenX: tokenXDeploy.address,
     asset,
     signer,
+    guardian,
   });
 
   const vaultDeploy = await deployContract(
@@ -427,9 +473,11 @@ async function main() {
 
   console.log("\nTransferring ownership to the multisig...");
   await pools.send("TokenX -> multisig", deployer, (o) => tokenX.transferOwnership(multisig, o));
-  await pools.send("RewardsDistributor -> multisig", deployer, (o) =>
-    distributor.transferOwnership(multisig, o)
-  );
+  // The distributor is NOT in this list: its proxy is Ownable2Step, so a transfer here would
+  // only nominate and the multisig would have to send a second transaction to accept.
+  // `initialize` above therefore names the multisig as the owner from block one. When the
+  // TimelockController lands, the owner becomes the timelock and the acceptance becomes the
+  // timelock's first scheduled operation.
   await pools.send("LPStakingVault -> multisig", deployer, (o) =>
     vault.transferOwnership(multisig, o)
   );
@@ -501,8 +549,25 @@ async function main() {
   check("RewardsDistributor.asset", await distributor.asset(), asset);
   check("RewardsDistributor.signer", await distributor.signer(), signer);
   check("RewardsDistributor.owner", await distributor.owner(), multisig);
+  check("RewardsDistributor.pendingOwner", await distributor.pendingOwner(), hre.ethers.ZeroAddress);
+  check("RewardsDistributor.guardian", await distributor.guardian(), guardian);
   check("RewardsDistributor.paused", await distributor.paused(), false);
   check("RewardsDistributor.assetClaimsEnabled", await distributor.assetClaimsEnabled(), false);
+  // Reads the ERC-1967 slot rather than trusting the constructor argument: this is the only
+  // proof that the proxy in the registry really delegates to the implementation in it.
+  check(
+    "RewardsDistributor.implementation (ERC-1967 slot)",
+    hre.ethers.getAddress(
+      "0x" +
+        (
+          await hre.ethers.provider.getStorage(
+            distributorDeploy.address,
+            ERC1967_IMPLEMENTATION_SLOT
+          )
+        ).slice(-40)
+    ),
+    distributorImplDeploy.address
+  );
 
   check("LPStakingVault.pool", await vault.pool(), poolAddress);
   check("LPStakingVault.positionManager", await vault.positionManager(), positionManager);
@@ -535,7 +600,8 @@ async function main() {
 
   console.log("\n──────── deployed addresses ────────");
   console.log(`TokenX:             ${tokenXDeploy.address}`);
-  console.log(`RewardsDistributor: ${distributorDeploy.address}`);
+  console.log(`RewardsDistributor: ${distributorDeploy.address} (proxy)`);
+  console.log(`  implementation:   ${distributorImplDeploy.address}`);
   console.log(`LPStakingVault:     ${vaultDeploy.address}`);
   console.log(`LPZapper:           ${zapperDeploy.address}`);
 
@@ -546,8 +612,12 @@ async function main() {
       `"${tokenXName}" "${tokenXSymbol}" ${deployer.address}`
   );
   console.log(
-    `npx hardhat verify --network ${network} ${distributorDeploy.address} ` +
-      `${tokenXDeploy.address} ${asset} ${signer} ${deployer.address}`
+    `npx hardhat verify --network ${network} ${distributorImplDeploy.address} ` +
+      `${tokenXDeploy.address} ${asset}`
+  );
+  console.log(
+    `npx hardhat verify --network ${network} ${distributorProxyDeploy.address} ` +
+      `${distributorImplDeploy.address} ${distributorInitData}`
   );
   console.log(
     `npx hardhat verify --network ${network} ${vaultDeploy.address} ` +

@@ -41,30 +41,42 @@ import {pathToFileURL} from "node:url";
 // re-ratification of the floors, not a configuration tweak.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-08-26 (rebalance pause + tick-native TWAP params) ───────
+// ── Pinned floors, re-measured 2026-08-26 (RewardsDistributor behind a UUPS proxy) ──────────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
 // | LPStakingVault.sol      |  99.08% (108/109)| 100.00% (21/21) |
 // | LPZapper.sol            |  98.65% (73/74)  | 100.00% (15/15) |
-// | RewardsDistributor.sol  | 100.00% (43/43)  | 100.00% (10/10) |
+// | RewardsDistributor.sol  |  96.34% (79/82)  | 100.00% (13/13) |
 // | TokenX.sol              |  97.62% (41/42)  | 100.00% (7/7)   |
 // | libraries/TwapGuard.sol | 100.00% (37/37)  | 100.00% (7/7)   |
 //
 // Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate.
+// uncovered branch fails the gate. The distributor's branch count moved 10 -> 13 with the
+// guardian tier: both arms of `onlyGuardian`, the `setGuardian` zero check, and the
+// `renounceOwnership` rejection are each asserted.
 //
-// The three uncovered LINES are all call sites, and all three are an `--ir-minimum` line
-// attribution artefact rather than a gap:
+// The distributor's line denominator moved 43 -> 82 because the proxy split its state into an
+// ERC-7201 struct behind six getters, added `initialize`, `setGuardian`, `_authorizeUpgrade`
+// and the renounce override, and gave every storage read an explicit `$` handle.
 //
-//   * `contracts/lp-staking/LPStakingVault.sol:537`  `_checkTwapDeviation();`
-//   * `contracts/lp-staking/LPZapper.sol:389`        `_checkTwapDeviation();`
-//   * `contracts/lp-staking/TokenX.sol:155`          `_rollPendingEpoch();`
+// The six uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
+// gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
+// run, so all six are demonstrably executed; the inlined site simply loses its own mapping:
 //
-// Each callee reports 100% coverage of its own body in the same run, so all three are
-// demonstrably executed — the inlined call site simply loses its own mapping. They are named
-// here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with contrived tests
-// that could not move them.
+//   * `contracts/lp-staking/LPStakingVault.sol:537`     `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPZapper.sol:389`           `_checkTwapDeviation();`
+//   * `contracts/lp-staking/TokenX.sol:155`             `_rollPendingEpoch();`
+//   * `contracts/lp-staking/RewardsDistributor.sol:160` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
+//     — every getter and every claim reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
+//     reads the resulting slot directly.
+//   * `contracts/lp-staking/RewardsDistributor.sol:206` `_disableInitializers();` — asserted by
+//     `test_Constructor_DisablesTheImplementationsInitializers`, which proves it ran.
+//   * `contracts/lp-staking/RewardsDistributor.sol:217` `__Ownable2Step_init();` — an empty OZ
+//     initializer, kept because the upgrades plugin validates the parent-initializer chain.
+//
+// They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
+// contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
     lines: {found: 109, minHit: 108},
@@ -75,8 +87,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 43, minHit: 43},
-    branches: {found: 10, minHit: 10},
+    lines: {found: 82, minHit: 79},
+    branches: {found: 13, minHit: 13},
   },
   "contracts/lp-staking/TokenX.sol": {
     lines: {found: 42, minHit: 41},

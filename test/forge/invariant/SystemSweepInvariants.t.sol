@@ -180,6 +180,8 @@ contract SystemSweepHandler is Test {
     }
 
     /// @dev The treasury hatch on the distributor, which moves ASSET the reward float owns.
+    ///      It is a GUARDIAN call, not an owner call; the local harness gives the distributor
+    ///      the same address for both, so `protocolOwner` is also its guardian here.
     function recoverDistributorAsset(uint256 amountSeed) external {
         calls++;
         _prime();
@@ -187,7 +189,7 @@ contract SystemSweepHandler is Test {
         uint256 balance = asset.balanceOf(address(distributor));
         if (balance == 0) return;
 
-        vm.prank(protocolOwner);
+        vm.prank(distributor.guardian());
         try distributor.recoverExcessAsset(bound(amountSeed, 1, balance)) {} catch {}
     }
 

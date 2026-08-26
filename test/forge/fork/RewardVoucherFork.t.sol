@@ -219,7 +219,7 @@ contract RewardVoucherForkTest is ForkHarness {
         assertEq(tokenX.balanceOf(alice), AWARD, "precondition: the first distributor paid once");
 
         RewardsDistributor distributorV2 =
-            new RewardsDistributor(address(tokenX), profile.asset, voucherSigner, address(this));
+            _deployDistributorProxy(address(tokenX), profile.asset, address(this), address(this), voucherSigner);
 
         vm.prank(multisig);
         tokenX.setMinter(address(distributorV2));
@@ -243,7 +243,7 @@ contract RewardVoucherForkTest is ForkHarness {
     ///      an addition to the new one, never a doubling through both at once.
     function test_SEC04_TheReplacedDistributorLosesItsMintRightImmediately() public {
         RewardsDistributor distributorV2 =
-            new RewardsDistributor(address(tokenX), profile.asset, voucherSigner, address(this));
+            _deployDistributorProxy(address(tokenX), profile.asset, address(this), address(this), voucherSigner);
         vm.prank(multisig);
         tokenX.setMinter(address(distributorV2));
 

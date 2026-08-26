@@ -4,6 +4,9 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {Profiles} from "./Profiles.sol";
 
+import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
+
 /**
  * @title BaseForge
  * @notice Bottom rung of the harness ladder: constants, the active network profile, and
@@ -110,6 +113,28 @@ abstract contract BaseForge is Test {
                 " yourself."
             )
         );
+    }
+
+    // ──────────────────────── Proxy deployment ─────────────────
+
+    /**
+     * @notice Deploys the distributor the way production does: an implementation carrying the
+     *         two immutables, then an {LPProxy} whose constructor delegatecalls `initialize`.
+     * @dev Lives on this rung rather than on one harness because BOTH {LocalHarness} and
+     *      {ForkHarness} need the identical two-transaction shape, and a test that deploys a
+     *      bare implementation instead would be testing a contract nobody deploys.
+     */
+    function _deployDistributorProxy(
+        address tokenX_,
+        address asset_,
+        address owner_,
+        address guardian_,
+        address signer_
+    ) internal returns (RewardsDistributor) {
+        RewardsDistributor impl = new RewardsDistributor(tokenX_, asset_);
+        LPProxy proxy =
+            new LPProxy(address(impl), abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, signer_)));
+        return RewardsDistributor(address(proxy));
     }
 
     // ──────────────────────── Tick helpers ─────────────────────

@@ -66,21 +66,26 @@ pricing oracle: it caps the damage of a compromised frontend feeding `amountOutM
 custodied position, and no slippage protection rests on it. The exact bounds are the
 caller's own `amountOutMin`, `amount0Min` and `amount1Min`.
 
-## 3. Ownership is one-step everywhere, and `renounceOwnership` is live
+## 3. Ownership is one-step on the non-upgradeable contracts, and `renounceOwnership` is live there
 
-All four contracts use OpenZeppelin `Ownable` (not `Ownable2Step`). `transferOwnership` takes
-effect immediately with no acceptance from the new owner, and the inherited
-`renounceOwnership()` is callable and sets the owner to `address(0)`. A wrong address in
-either call bricks every admin path permanently. There is no recovery.
+**Changed 2026-08-26 for `RewardsDistributor`** (see item 14): that contract is now a UUPS
+proxy with `Ownable2StepUpgradeable`, a separate `guardian` tier, and `renounceOwnership`
+disabled. The note below therefore describes `TokenX`, `LPStakingVault` and `LPZapper`; the
+distributor's row is kept for contrast and marked.
+
+The three non-upgradeable contracts use OpenZeppelin `Ownable` (not `Ownable2Step`).
+`transferOwnership` takes effect immediately with no acceptance from the new owner, and the
+inherited `renounceOwnership()` is callable and sets the owner to `address(0)`. A wrong address
+in either call bricks every admin path permanently. There is no recovery.
 
 What dies with the owner, per contract:
 
 | Contract | Lost | Survives |
 |---|---|---|
 | `TokenX` | `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` | transfers, `permit`, `burn`; `mint` keeps working until the running epoch's cap is reached, then reverts `EpochMintCapExceeded` forever — **minting dies when the cap runs out** |
-| `RewardsDistributor` | `setSigner`, `setPaused`, `setAssetClaimsEnabled`, `recoverExcessAsset` | claims against already-signed vouchers, for as long as the signer key and the TokenX cap allow |
 | `LPStakingVault` | `setTwapParams`, `setDepositsPaused`, `setRebalancePaused`, `setZapper`, `rescuePosition` | `stake` and `unstake` — **the exit is never gated by the owner**, by design; `rebalance` too unless the owner left it paused (see item 13) |
 | `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit` |
+| `RewardsDistributor` | **not applicable** — `renounceOwnership` reverts `RenounceDisabled()`, and a handover needs the new owner to call `acceptOwnership` | everything; the two tiers are independent slots, so an ownership handover leaves the guardian's pauses and signer rotation untouched, and a guardian rotation leaves the owner's tier untouched |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
 because `unstake` is permissionless and unpausable. A renounce with `rebalancePaused` left on
@@ -89,9 +94,16 @@ the exit still works, so no position is trapped. The program-facing consequence 
 severe: rewards stop when the armed cap is exhausted and no new one can be armed.
 
 **Before deployment:** confirm the multisig address by executing a no-op transaction from it
-first, and treat `renounceOwnership` as forbidden in the ops runbook. One-step `Ownable` was
-kept for consistency with the existing pool contracts; moving the LP stack to `Ownable2Step`
-is the alternative if the team prefers the extra handshake.
+first, and treat `renounceOwnership` as forbidden in the ops runbook for the three contracts
+that still allow it. `LPStakingVault` moves to the same 2-step + timelock + guardian model as
+the distributor in the next commit; `TokenX` and `LPZapper` stay plain `Ownable` on purpose —
+TokenX's escape hatch is minter re-pointing and the zapper is replaceable periphery.
+
+Tests: `test/forge/unit/AccessControl.t.sol` — the matrix per contract, plus
+`test_Ownership_TheDistributorProxyCannotBeRenounced`,
+`test_Ownership_TheDistributorHandoverNeedsAcceptance`,
+`test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover`,
+`test_Renounce_DistributorGuardianLosesThreeAdminCallsOnRotation`.
 
 ## 4. Whole-balance mint and refund award stray ERC-20 balances to the next caller
 
@@ -359,3 +371,89 @@ What this deliberately does NOT do is make the exit conditional. With both switc
 staker can still `unstake` and manage the position on Uniswap directly; that is asserted on the
 fork (`test/forge/fork/PositionLifecycle.t.sol:test_RebalancePaused_BlocksRebalanceButNeverUnstake`)
 and in both integration scenarios (steps A43-A45).
+
+## 14. Upgradeability (spec revision 2026-08-26) — `RewardsDistributor`
+
+Management requirement, recorded in `docs/specs/00-architecture-overview.md` decision 5 and
+`docs/specs/01-contracts.md` §1/§2.4: `RewardsDistributor` and `LPStakingVault` become UUPS
+(ERC-1967) proxies owned by a `TimelockController`. **This item covers the distributor only;
+the vault follows in the next commit.**
+
+### Why the distributor, specifically
+
+Item 10 (SEC-04) is the whole argument. `claimedTokenX[user]` and `claimedAsset[user]` are the
+only record of what has already been paid, and the vouchers state a LIFETIME figure. Fixing a
+bug by deploying a replacement contract starts those ledgers at zero, and every outstanding
+voucher becomes payable a second time — bounded only by the TokenX epoch cap. A proxy is what
+lets the code be replaced while the ledger stays exactly where it is. SEC-04 is therefore no
+longer the mitigation of last resort; it is what happens if the escape hatch is used instead of
+the upgrade path, and it stays documented for that reason.
+
+### Shape
+
+- `contracts/lp-staking/deploy/LPProxy.sol` — OZ `ERC1967Proxy`, nothing added. It exists so the
+  repo owns the artifact (the indexer only vendors artifacts whose `sourceName` starts with
+  `contracts/lp-staking/`) and so one name means one proxy across script, suites and explorer.
+- `contracts/lp-staking/deploy/LPTimelock.sol` — OZ `TimelockController`, nothing added, for the
+  same two reasons.
+- The implementation constructor takes the two immutables (`tokenX`, `asset`), keeps their zero
+  checks, and ends with `_disableInitializers()`. `initialize(owner_, guardian_, signer_)` runs
+  on the proxy, inside the proxy's own deployment transaction.
+- Mutable state lives in ONE ERC-7201 namespace,
+  `erc7201:real.lp.storage.RewardsDistributor`, at
+  `0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00`. The literal is pinned in
+  the contract and re-derived by `test_Storage_LivesAtThePinnedErc7201Slot`: if that slot ever
+  moved, every `claimed[user]` would read zero and every lifetime voucher would pay out again.
+- The EIP-712 domain is bound to the PROXY, so `verifyingContract` is stable across upgrades and
+  no voucher is invalidated by one.
+- `@openzeppelin/contracts/utils/ReentrancyGuard.sol` is used rather than a
+  `ReentrancyGuardUpgradeable`: OZ v5.5 moved that guard to its own ERC-7201 namespace and
+  marked it `@custom:stateless`, and v5.6 removed the upgradeable variant entirely. Its
+  constructor seeds `NOT_ENTERED = 1`, which a proxy never runs — harmless, because
+  `_reentrancyGuardEntered()` tests for `== ENTERED (2)`, so an unwritten slot reads as
+  "not entered".
+
+### Two-tier admin
+
+| tier | holder | functions | why |
+|---|---|---|---|
+| owner | `TimelockController` (48 h on mainnet, short on staging) | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian` | a code change, or switching a whole reward leg on, should be visible on-chain before it can run |
+| guardian | the multisig, directly, no delay | `setSigner`, `setPaused`, `recoverExcessAsset` | a leaked signing key or a bug in the claim path has to be stoppable in minutes |
+
+The split is enforced in both directions and measured that way: the OWNER is rejected on every
+guardian function (`NotGuardian(caller, guardian)`), and the GUARDIAN is rejected on every owner
+function (`OwnableUnauthorizedAccount`). `recoverExcessAsset` now sends to `guardian()`, not to
+`owner()` — the owner is a timelock contract with no way to forward an ERC-20, and the guardian
+is the party that funded the balance in the first place. Item 1's trust note is unchanged
+otherwise.
+
+`renounceOwnership()` reverts `RenounceDisabled()`. A renounce would leave `_authorizeUpgrade`
+with no caller and freeze the implementation forever, which is the exact failure the proxy
+exists to avoid.
+
+### What is NOT guarded
+
+`recoverExcessAsset` carries no `nonReentrant`, exactly like `LPZapper.sweep` (item 12's
+neighbour in `test/forge/unit/Reentrancy.t.sol`). A hostile guardian holding a hook-bearing
+ASSET really can reenter it and recover twice in one transaction — recorded as behaviour, not a
+vulnerability: it is `onlyGuardian`, the destination is the guardian itself, and the balance is
+treasury money the guardian supplied. Measured by
+`test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter`. A hostile OWNER is no
+longer expressible at all: under `Ownable2Step` a contract that never calls `acceptOwnership`
+never becomes the owner.
+
+### Operator notes
+
+- The deploy script deploys implementation + `LPProxy` as two nonce-controlled transactions
+  rather than `upgrades.deployProxy`, because mainnet signs through a Ledger and every
+  transaction in that script carries an explicit nonce. The proxy's `initialize` runs in the
+  proxy's deployment transaction — an uninitialized proxy is one `initialize` race away from
+  belonging to whoever calls it first.
+- `LP_GUARDIAN` (default `LP_MULTISIG`) names the fast-path guardian.
+- The post-deploy checks read the ERC-1967 implementation slot off the proxy, so "the registry's
+  proxy really delegates to the registry's implementation" is asserted rather than assumed.
+- Until the `TimelockController` lands, `initialize` names the multisig as the owner directly.
+  The 2-step handover is exercised in the suites (`ForkHarness`, the Hardhat fork suite, and the
+  `under a TimelockController` block in `test/lp-staking/RewardsDistributor.test.js`), which
+  schedules `acceptOwnership`, proves a premature `execute` reverts
+  `TimelockUnexpectedOperationState`, and then upgrades through the same path.

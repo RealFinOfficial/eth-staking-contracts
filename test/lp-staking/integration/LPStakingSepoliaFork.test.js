@@ -856,10 +856,17 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
           "EpochCapSet",
           "OwnershipTransferred", // -> multisig
         ],
+        // The distributor is a UUPS proxy, so its deploy tx is the PROXY's: `Upgraded` names
+        // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
+        // transaction (owner, guardian, signer) and `Initialized` closes it. There is no
+        // second `OwnershipTransferred` because `initialize` names the multisig directly —
+        // an Ownable2Step handover would need the multisig to send an `acceptOwnership`.
         [distributorAddr.toLowerCase()]: [
+          "Upgraded",
           "OwnershipTransferred",
+          "GuardianSet",
           "SignerChanged",
-          "OwnershipTransferred",
+          "Initialized",
         ],
         [vaultAddr.toLowerCase()]: [
           "OwnershipTransferred",

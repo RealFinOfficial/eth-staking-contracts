@@ -173,7 +173,8 @@ contract ReentrancyTest is LocalHarness {
      */
     function test_Reentrancy_AnAssetPayoutHookCannotReenterClaimAsset() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
-        RewardsDistributor d = new RewardsDistributor(address(tokenX), address(hookAsset), voucherSigner, address(this));
+        RewardsDistributor d =
+            _deployDistributorProxy(address(tokenX), address(hookAsset), address(this), address(this), voucherSigner);
         d.setAssetClaimsEnabled(true);
         hookAsset.mint(address(d), 1_000_000e18);
 
@@ -217,6 +218,37 @@ contract ReentrancyTest is LocalHarness {
         assertTrue(hostile.lastReenterSucceeded(), "sweep really is reentrant: no guard stops it");
         assertEq(stray.balanceOf(address(zapper)), 0, "both sweeps landed, draining the zapper in one transaction");
         assertEq(stray.balanceOf(address(hostile)), 200e18, "and the owner took the whole balance");
+    }
+
+    /**
+     * @dev FINDING (behaviour, not a vulnerability), the distributor's twin of the sweep
+     *      finding above: `recoverExcessAsset` also carries NO `nonReentrant`, and it now
+     *      pays the GUARDIAN rather than the owner. A hostile guardian holding a hook-bearing
+     *      ASSET therefore really can reenter it and recover twice in one transaction.
+     *      It is `onlyGuardian` and the destination is the guardian itself, so this is the
+     *      funding party acting against a balance it funded — recorded so the asymmetry with
+     *      every other entry point is a known decision rather than an oversight.
+     *
+     *      (A hostile OWNER is no longer expressible on this contract: ownership is two-step,
+     *      so a contract that never calls `acceptOwnership` never becomes the owner.)
+     */
+    function test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter() public {
+        HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
+        HostileOwner hostileGuardian = new HostileOwner();
+        RewardsDistributor d = _deployDistributorProxy(
+            address(tokenX), address(hookAsset), address(this), address(hostileGuardian), voucherSigner
+        );
+
+        hookAsset.mint(address(d), 200e18);
+        hookAsset.setHooked(address(hostileGuardian), true);
+        hostileGuardian.configure(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+
+        hostileGuardian.execute(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+
+        assertEq(hostileGuardian.attempts(), 2, "the payout push must have reached the hook, recursively");
+        assertTrue(hostileGuardian.lastReenterSucceeded(), "recoverExcessAsset really is reentrant: no guard stops it");
+        assertEq(hookAsset.balanceOf(address(d)), 0, "both recoveries landed in one transaction");
+        assertEq(hookAsset.balanceOf(address(hostileGuardian)), 200e18, "and the guardian took the whole balance");
     }
 
     // ──────────────────────── Guard scope ──────────────────────

@@ -711,20 +711,33 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       await tokenX.waitForDeployment();
       tokenXAddr = await tokenX.getAddress();
 
+      // The distributor is a UUPS proxy: implementation (immutables + disabled initializers)
+      // then LPProxy, whose constructor runs `initialize` in the same transaction — the shape
+      // scripts/deploy-lp-staking.js deploys.
       const DistributorFactory = await ethers.getContractFactory("RewardsDistributor", deployer);
-      distributor = await DistributorFactory.deploy(
-        tokenXAddr,
-        ASSET_ADDR,
-        backOffice.address, // LP_SIGNER — the back office key, never the deployer
-        deployer.address
+      const distributorImpl = await DistributorFactory.deploy(tokenXAddr, ASSET_ADDR);
+      await distributorImpl.waitForDeployment();
+
+      const ProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
+      const distributorProxy = await ProxyFactory.deploy(
+        await distributorImpl.getAddress(),
+        DistributorFactory.interface.encodeFunctionData("initialize", [
+          deployer.address, // owner, handed to the multisig below
+          multisig.address, // guardian — the fast path, never behind a timelock
+          backOffice.address, // LP_SIGNER — the back office key, never the deployer
+        ])
       );
-      await distributor.waitForDeployment();
-      distributorAddr = await distributor.getAddress();
+      await distributorProxy.waitForDeployment();
+      distributorAddr = await distributorProxy.getAddress();
+      distributor = await ethers.getContractAt("RewardsDistributor", distributorAddr, deployer);
 
       await (await tokenX.setMinter(distributorAddr)).wait();
       await (await tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP)).wait();
       await (await tokenX.transferOwnership(multisig.address)).wait();
+
+      // Ownable2Step: the transfer nominates, and the multisig has to accept.
       await (await distributor.transferOwnership(multisig.address)).wait();
+      await (await distributor.connect(multisig).acceptOwnership()).wait();
 
       // The voucher domain is a runtime fact of the deployed contract — its chain id is
       // the fork's, and its verifying contract only exists as of a minute ago.
@@ -1311,6 +1324,8 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await distributor.asset()).to.equal(ASSET_ADDR); // the real mainnet ASSET
       expect(await distributor.signer()).to.equal(backOffice.address);
       expect(await distributor.owner()).to.equal(multisig.address);
+      expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
+      expect(await distributor.guardian()).to.equal(multisig.address);
       expect(await distributor.paused()).to.equal(false);
       expect(await distributor.assetClaimsEnabled()).to.equal(false);
 

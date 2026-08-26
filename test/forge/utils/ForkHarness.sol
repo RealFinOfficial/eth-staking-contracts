@@ -244,7 +244,7 @@ abstract contract ForkHarness is BaseForge {
     /// @dev Deploy + wiring + ownership, in exactly the order of scripts/deploy-lp-staking.js.
     function _deployStack() private {
         tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
-        distributor = new RewardsDistributor(address(tokenX), profile.asset, voucherSigner, address(this));
+        distributor = _deployDistributorProxy(address(tokenX), profile.asset, address(this), multisig, voucherSigner);
         vault = new LPStakingVault(
             profile.npm,
             address(poolRef),
@@ -278,9 +278,16 @@ abstract contract ForkHarness is BaseForge {
 
         // Ownership to the multisig, as the script does before the oracle warm-up.
         tokenX.transferOwnership(multisig);
-        distributor.transferOwnership(multisig);
         vault.transferOwnership(multisig);
         zapper.transferOwnership(multisig);
+
+        // The distributor proxy is Ownable2Step: the transfer only nominates, and the new
+        // owner has to accept. Production makes that acceptance the timelock's first
+        // scheduled operation; here the multisig accepts directly, which is the same two
+        // transactions with a shorter path.
+        distributor.transferOwnership(multisig);
+        vm.prank(multisig);
+        distributor.acceptOwnership();
     }
 
     /**

@@ -1,11 +1,37 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("RewardsDistributor", function () {
   let distributor, tokenX, asset;
-  let owner, voucherSigner, alice, bob, treasury;
+  let owner, guardian, voucherSigner, alice, bob, treasury;
   let distributorAddr, tokenXAddr, assetAddr;
+
+  // The two admin tiers are DIFFERENT accounts in this suite, so "is this owner-only or
+  // guardian-only" is never answered by them happening to be the same address. In production
+  // `owner` is a TimelockController and `guardian` is the multisig.
+  const asGuardian = () => distributor.connect(guardian);
+
+  /// Deploys a distributor UUPS proxy. `constructorArgs` are the implementation's two
+  /// immutables; `unsafeAllow` names exactly the two patterns the spec chose deliberately.
+  async function deployDistributorProxy(
+    tokenXAddress,
+    assetAddress,
+    ownerAddress,
+    guardianAddress,
+    signerAddress
+  ) {
+    const Distributor = await ethers.getContractFactory("RewardsDistributor");
+    return upgrades.deployProxy(
+      Distributor,
+      [ownerAddress, guardianAddress, signerAddress],
+      {
+        kind: "uups",
+        constructorArgs: [tokenXAddress, assetAddress],
+        unsafeAllow: ["constructor", "state-variable-immutable"],
+      }
+    );
+  }
 
   const TOKENS = (n) => ethers.parseEther(String(n));
   const USDC = (n) => ethers.parseUnits(String(n), 6);
@@ -85,7 +111,7 @@ describe("RewardsDistributor", function () {
   }
 
   beforeEach(async function () {
-    [owner, voucherSigner, alice, bob, treasury] = await ethers.getSigners();
+    [owner, guardian, voucherSigner, alice, bob, treasury] = await ethers.getSigners();
 
     const TokenXFactory = await ethers.getContractFactory("TokenX");
     tokenX = await TokenXFactory.deploy("Token X", "TKX", owner.address);
@@ -95,12 +121,12 @@ describe("RewardsDistributor", function () {
     asset = await AssetFactory.deploy("USD Coin", "USDC", USDC(10_000_000), 6);
     assetAddr = await asset.getAddress();
 
-    const Distributor = await ethers.getContractFactory("RewardsDistributor");
-    distributor = await Distributor.deploy(
+    distributor = await deployDistributorProxy(
       tokenXAddr,
       assetAddr,
-      voucherSigner.address,
-      owner.address
+      owner.address,
+      guardian.address,
+      voucherSigner.address
     );
     distributorAddr = await distributor.getAddress();
 
@@ -117,6 +143,8 @@ describe("RewardsDistributor", function () {
       expect(await distributor.asset()).to.equal(assetAddr);
       expect(await distributor.signer()).to.equal(voucherSigner.address);
       expect(await distributor.owner()).to.equal(owner.address);
+      expect(await distributor.guardian()).to.equal(guardian.address);
+      expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
       expect(await distributor.paused()).to.equal(false);
       expect(await distributor.assetClaimsEnabled()).to.equal(false);
     });
@@ -133,32 +161,74 @@ describe("RewardsDistributor", function () {
       expect(tokenXHash).to.not.equal(assetHash);
     });
 
-    it("emits SignerChanged(0, signer) so the signer is followable from block one", async function () {
+    it("announces both roles in the proxy's own deploy tx, so they are followable from block one", async function () {
+      // `initialize` runs inside the proxy's deployment transaction, so its events are that
+      // transaction's events — there is no second block to look in.
       await expect(distributor.deploymentTransaction())
         .to.emit(distributor, "SignerChanged")
         .withArgs(ethers.ZeroAddress, voucherSigner.address);
+
+      await expect(distributor.deploymentTransaction())
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(ethers.ZeroAddress, guardian.address);
     });
 
-    it("reverts on a zero address for each live reference", async function () {
+    it("rejects a zero tokenX or asset on the IMPLEMENTATION, before any proxy exists", async function () {
+      const Distributor = await ethers.getContractFactory("RewardsDistributor");
+
+      await expect(Distributor.deploy(ethers.ZeroAddress, assetAddr)).to.be.revertedWithCustomError(
+        Distributor,
+        "ZeroAddress"
+      );
+
+      await expect(Distributor.deploy(tokenXAddr, ethers.ZeroAddress)).to.be.revertedWithCustomError(
+        Distributor,
+        "ZeroAddress"
+      );
+    });
+
+    it("rejects a zero owner, guardian or signer in initialize, through the proxy", async function () {
       const Distributor = await ethers.getContractFactory("RewardsDistributor");
 
       await expect(
-        Distributor.deploy(ethers.ZeroAddress, assetAddr, voucherSigner.address, owner.address)
-      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
-
-      await expect(
-        Distributor.deploy(tokenXAddr, ethers.ZeroAddress, voucherSigner.address, owner.address)
-      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
-
-      await expect(
-        Distributor.deploy(tokenXAddr, assetAddr, ethers.ZeroAddress, owner.address)
-      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
-
-      await expect(
-        Distributor.deploy(tokenXAddr, assetAddr, voucherSigner.address, ethers.ZeroAddress)
+        deployDistributorProxy(
+          tokenXAddr,
+          assetAddr,
+          ethers.ZeroAddress,
+          guardian.address,
+          voucherSigner.address
+        )
       )
         .to.be.revertedWithCustomError(Distributor, "OwnableInvalidOwner")
         .withArgs(ethers.ZeroAddress);
+
+      await expect(
+        deployDistributorProxy(
+          tokenXAddr,
+          assetAddr,
+          owner.address,
+          ethers.ZeroAddress,
+          voucherSigner.address
+        )
+      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
+
+      await expect(
+        deployDistributorProxy(
+          tokenXAddr,
+          assetAddr,
+          owner.address,
+          guardian.address,
+          ethers.ZeroAddress
+        )
+      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
+    });
+
+    it("keeps the EIP-712 domain on the PROXY, which is what every voucher is signed against", async function () {
+      const [, name, version, chainId, verifyingContract] = await distributor.eip712Domain();
+      expect(name).to.equal("RealLPRewards");
+      expect(version).to.equal("1");
+      expect(verifyingContract).to.equal(distributorAddr);
+      expect(chainId).to.equal((await ethers.provider.getNetwork()).chainId);
     });
   });
 
@@ -316,12 +386,12 @@ describe("RewardsDistributor", function () {
     });
 
     it("a voucher for another verifying contract is rejected", async function () {
-      const Distributor = await ethers.getContractFactory("RewardsDistributor");
-      const twin = await Distributor.deploy(
+      const twin = await deployDistributorProxy(
         tokenXAddr,
         assetAddr,
-        voucherSigner.address,
-        owner.address
+        owner.address,
+        guardian.address,
+        voucherSigner.address
       );
 
       const foreignDomain = {
@@ -363,18 +433,24 @@ describe("RewardsDistributor", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Pause", function () {
-    it("is owner only and emits Paused", async function () {
+    it("is guardian only — the owner is rejected too — and emits Paused", async function () {
       await expect(distributor.connect(alice).setPaused(true))
-        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
-        .withArgs(alice.address);
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
 
-      await expect(distributor.setPaused(true)).to.emit(distributor, "Paused").withArgs(true);
+      // The pause is an incident switch. Routing it through the timelock would mean waiting
+      // out the delay before a live bug can be stopped, so the OWNER does not hold it.
+      await expect(distributor.setPaused(true))
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
+
+      await expect(asGuardian().setPaused(true)).to.emit(distributor, "Paused").withArgs(true);
       expect(await distributor.paused()).to.equal(true);
     });
 
     it("blocks both legs while paused and restores both on unpause", async function () {
       await enableAssetLeg();
-      await distributor.setPaused(true);
+      await asGuardian().setPaused(true);
 
       await expect(claimTokenX(alice, TOKENS(100))).to.be.revertedWithCustomError(
         distributor,
@@ -385,7 +461,7 @@ describe("RewardsDistributor", function () {
         "ClaimsPaused"
       );
 
-      await expect(distributor.setPaused(false)).to.emit(distributor, "Paused").withArgs(false);
+      await expect(asGuardian().setPaused(false)).to.emit(distributor, "Paused").withArgs(false);
 
       await claimTokenX(alice, TOKENS(100));
       await claimAsset(alice, USDC(500));
@@ -393,10 +469,14 @@ describe("RewardsDistributor", function () {
       expect(await asset.balanceOf(alice.address)).to.equal(USDC(500));
     });
 
-    it("leaves owner functions usable while paused", async function () {
-      await distributor.setPaused(true);
-      await distributor.setSigner(bob.address);
+    it("leaves the admin functions usable while paused", async function () {
+      await asGuardian().setPaused(true);
+
+      await asGuardian().setSigner(bob.address);
       expect(await distributor.signer()).to.equal(bob.address);
+
+      await distributor.setAssetClaimsEnabled(true);
+      expect(await distributor.assetClaimsEnabled()).to.equal(true);
     });
   });
 
@@ -409,10 +489,16 @@ describe("RewardsDistributor", function () {
       );
     });
 
-    it("is toggled by the owner only and emits AssetClaimsEnabled", async function () {
+    it("is toggled by the owner only — the guardian is rejected — and emits AssetClaimsEnabled", async function () {
       await expect(distributor.connect(alice).setAssetClaimsEnabled(true))
         .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
         .withArgs(alice.address);
+
+      // Switching a whole reward leg on is a program decision, not incident response, so it
+      // takes the timelock's delay like an upgrade does.
+      await expect(asGuardian().setAssetClaimsEnabled(true))
+        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
 
       await expect(distributor.setAssetClaimsEnabled(true))
         .to.emit(distributor, "AssetClaimsEnabled")
@@ -494,17 +580,22 @@ describe("RewardsDistributor", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Signer rotation", function () {
-    it("is owner only, rejects address(0) and emits SignerChanged", async function () {
+    it("is guardian only — the owner is rejected too — rejects address(0) and emits SignerChanged", async function () {
       await expect(distributor.connect(alice).setSigner(alice.address))
-        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
-        .withArgs(alice.address);
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
 
-      await expect(distributor.setSigner(ethers.ZeroAddress)).to.be.revertedWithCustomError(
+      // Key-compromise recovery cannot wait out a timelock, so the OWNER does not hold it.
+      await expect(distributor.setSigner(treasury.address))
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
+
+      await expect(asGuardian().setSigner(ethers.ZeroAddress)).to.be.revertedWithCustomError(
         distributor,
         "ZeroAddress"
       );
 
-      await expect(distributor.setSigner(treasury.address))
+      await expect(asGuardian().setSigner(treasury.address))
         .to.emit(distributor, "SignerChanged")
         .withArgs(voucherSigner.address, treasury.address);
       expect(await distributor.signer()).to.equal(treasury.address);
@@ -513,7 +604,7 @@ describe("RewardsDistributor", function () {
     it("invalidates every outstanding voucher of the compromised key", async function () {
       const oldSig = await signVoucher("TokenXClaim", alice, TOKENS(100));
 
-      await distributor.setSigner(treasury.address);
+      await asGuardian().setSigner(treasury.address);
 
       await expect(claimTokenX(alice, TOKENS(100), { signature: oldSig }))
         .to.be.revertedWithCustomError(distributor, "InvalidSignature")
@@ -526,7 +617,7 @@ describe("RewardsDistributor", function () {
 
     it("rotation does not disturb what was already paid", async function () {
       await claimTokenX(alice, TOKENS(100));
-      await distributor.setSigner(treasury.address);
+      await asGuardian().setSigner(treasury.address);
 
       const newSig = await signVoucher("TokenXClaim", alice, TOKENS(150), { signer: treasury });
       await claimTokenX(alice, TOKENS(150), { signature: newSig });
@@ -589,46 +680,84 @@ describe("RewardsDistributor", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("recoverExcessAsset", function () {
-    it("is owner only", async function () {
+    it("is guardian only — the owner is rejected too", async function () {
       await asset.transfer(distributorAddr, USDC(1000));
+
       await expect(distributor.connect(alice).recoverExcessAsset(USDC(1)))
-        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
-        .withArgs(alice.address);
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
+
+      // The owner is a timelock contract, which has no way to forward an ERC-20 anyway.
+      await expect(distributor.recoverExcessAsset(USDC(1)))
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
     });
 
     it("rejects a zero amount", async function () {
-      await expect(distributor.recoverExcessAsset(0n)).to.be.revertedWithCustomError(
+      await expect(asGuardian().recoverExcessAsset(0n)).to.be.revertedWithCustomError(
         distributor,
         "ZeroAmount"
       );
     });
 
-    it("moves ASSET to the owner", async function () {
+    it("moves ASSET to the guardian, never to the owner", async function () {
       await asset.transfer(distributorAddr, USDC(1000));
-      const before = await asset.balanceOf(owner.address);
+      const guardianBefore = await asset.balanceOf(guardian.address);
+      const ownerBefore = await asset.balanceOf(owner.address);
 
-      await distributor.recoverExcessAsset(USDC(400));
+      await asGuardian().recoverExcessAsset(USDC(400));
 
-      expect((await asset.balanceOf(owner.address)) - before).to.equal(USDC(400));
+      expect((await asset.balanceOf(guardian.address)) - guardianBefore).to.equal(USDC(400));
+      expect(await asset.balanceOf(owner.address)).to.equal(ownerBefore);
       expect(await asset.balanceOf(distributorAddr)).to.equal(USDC(600));
     });
 
-    it("emits ExcessAssetRecovered with the owner and the amount", async function () {
+    it("emits ExcessAssetRecovered with the guardian and the amount", async function () {
       await asset.transfer(distributorAddr, USDC(1000));
 
-      const tx = await distributor.recoverExcessAsset(USDC(400));
+      const tx = await asGuardian().recoverExcessAsset(USDC(400));
       const ts = await txTimestamp(tx);
 
       await expect(tx)
         .to.emit(distributor, "ExcessAssetRecovered")
-        .withArgs(owner.address, USDC(400), ts);
+        .withArgs(guardian.address, USDC(400), ts);
     });
 
     it("cannot pull more than the contract holds", async function () {
       await asset.transfer(distributorAddr, USDC(100));
-      await expect(distributor.recoverExcessAsset(USDC(101)))
+      await expect(asGuardian().recoverExcessAsset(USDC(101)))
         .to.be.revertedWithCustomError(asset, "ERC20InsufficientBalance")
         .withArgs(distributorAddr, USDC(100), USDC(101));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("setGuardian", function () {
+    it("is owner only, rejects address(0) and emits GuardianSet", async function () {
+      await expect(asGuardian().setGuardian(alice.address))
+        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
+
+      await expect(distributor.setGuardian(ethers.ZeroAddress)).to.be.revertedWithCustomError(
+        distributor,
+        "ZeroAddress"
+      );
+
+      await expect(distributor.setGuardian(treasury.address))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(guardian.address, treasury.address);
+      expect(await distributor.guardian()).to.equal(treasury.address);
+    });
+
+    it("moves the whole fast-path tier in one call", async function () {
+      await distributor.setGuardian(treasury.address);
+
+      await expect(asGuardian().setPaused(true))
+        .to.be.revertedWithCustomError(distributor, "NotGuardian")
+        .withArgs(guardian.address, treasury.address);
+
+      await distributor.connect(treasury).setPaused(true);
+      expect(await distributor.paused()).to.equal(true);
     });
   });
 
@@ -638,12 +767,12 @@ describe("RewardsDistributor", function () {
     /// `distributorAddr` when they sign, so the swap has to happen before any voucher is
     /// made; `beforeEach` puts the standard fixture back for the next test.
     async function useDistributorFor(assetToken) {
-      const Distributor = await ethers.getContractFactory("RewardsDistributor");
-      distributor = await Distributor.deploy(
+      distributor = await deployDistributorProxy(
         tokenXAddr,
         await assetToken.getAddress(),
-        voucherSigner.address,
-        owner.address
+        owner.address,
+        guardian.address,
+        voucherSigner.address
       );
       distributorAddr = await distributor.getAddress();
       await distributor.setAssetClaimsEnabled(true);
@@ -786,6 +915,233 @@ describe("RewardsDistributor", function () {
         expect(await distributor.claimedTokenX(user.address)).to.equal(book.maxLanded);
       }
       expect(await tokenX.mintedInEpoch(9n)).to.equal(0n);
+    });
+  });
+  // ─────────────────────────────────────────────────────────────
+  describe("Upgradeability", function () {
+    // `constructor` / `state-variable-immutable`: the two patterns the spec chose on purpose
+    // (immutable protocol references, `_disableInitializers()` in the implementation ctor).
+    // `missing-initializer`: V2 is an upgrade of an ALREADY-initialized proxy, so it declares
+    // no `initializer` of its own — its `initializeV2` is a `reinitializer(2)`, and re-running
+    // V1's `initialize` is precisely what must not happen.
+    const V2_ARGS = {
+      unsafeAllow: ["constructor", "state-variable-immutable", "missing-initializer"],
+    };
+
+    async function v2Factory() {
+      return ethers.getContractFactory("RewardsDistributorV2Mock");
+    }
+
+    it("passes the plugin's own implementation-safety check", async function () {
+      const V2 = await v2Factory();
+      await upgrades.validateImplementation(V2, {
+        kind: "uups",
+        constructorArgs: [tokenXAddr, assetAddr],
+        ...V2_ARGS,
+      });
+    });
+
+    it("keeps the claim ledger, the signer and both roles across upgradeProxy", async function () {
+      await claimTokenX(alice, TOKENS(100));
+      await enableAssetLeg(USDC(1000));
+      await claimAsset(bob, USDC(250));
+
+      const V2 = await v2Factory();
+      const upgraded = await upgrades.upgradeProxy(distributorAddr, V2, {
+        kind: "uups",
+        constructorArgs: [tokenXAddr, assetAddr],
+        ...V2_ARGS,
+      });
+
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.getAddress()).to.equal(distributorAddr);
+      expect(await upgraded.claimedTokenX(alice.address)).to.equal(TOKENS(100));
+      expect(await upgraded.claimedAsset(bob.address)).to.equal(USDC(250));
+      expect(await upgraded.signer()).to.equal(voucherSigner.address);
+      expect(await upgraded.guardian()).to.equal(guardian.address);
+      expect(await upgraded.owner()).to.equal(owner.address);
+      expect(await upgraded.assetClaimsEnabled()).to.equal(true);
+    });
+
+    it("keeps the EIP-712 domain, so vouchers signed before the upgrade still spend", async function () {
+      const sig = await signVoucher("TokenXClaim", alice, TOKENS(100));
+
+      const V2 = await v2Factory();
+      await upgrades.upgradeProxy(distributorAddr, V2, {
+        kind: "uups",
+        constructorArgs: [tokenXAddr, assetAddr],
+        ...V2_ARGS,
+      });
+
+      const [, name, version, , verifyingContract] = await distributor.eip712Domain();
+      expect(name).to.equal("RealLPRewards");
+      expect(version).to.equal("1");
+      expect(verifyingContract).to.equal(distributorAddr);
+
+      await claimTokenX(alice, TOKENS(100), { signature: sig });
+      expect(await tokenX.balanceOf(alice.address)).to.equal(TOKENS(100));
+    });
+
+    it("cannot initialise the implementation behind the proxy", async function () {
+      const implAddr = await upgrades.erc1967.getImplementationAddress(distributorAddr);
+      const impl = await ethers.getContractAt("RewardsDistributor", implAddr);
+
+      await expect(
+        impl.initialize(alice.address, alice.address, alice.address)
+      ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
+    });
+
+    it("cannot initialise the proxy a second time", async function () {
+      await expect(
+        distributor.initialize(alice.address, alice.address, alice.address)
+      ).to.be.revertedWithCustomError(distributor, "InvalidInitialization");
+    });
+
+    it("rejects upgradeToAndCall from a stranger, from the guardian and from the raw multisig", async function () {
+      const V2 = await v2Factory();
+      const impl = await V2.deploy(tokenXAddr, assetAddr);
+      await impl.waitForDeployment();
+      const implAddr = await impl.getAddress();
+
+      for (const caller of [alice, guardian, treasury]) {
+        await expect(distributor.connect(caller).upgradeToAndCall(implAddr, "0x"))
+          .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+          .withArgs(caller.address);
+      }
+
+      // ...and the owner can.
+      await expect(distributor.upgradeToAndCall(implAddr, "0x"))
+        .to.emit(distributor, "Upgraded")
+        .withArgs(implAddr);
+    });
+
+    it("refuses renounceOwnership, so the upgrade path can never be frozen", async function () {
+      await expect(distributor.renounceOwnership()).to.be.revertedWithCustomError(
+        distributor,
+        "RenounceDisabled"
+      );
+      expect(await distributor.owner()).to.equal(owner.address);
+
+      // A stranger still gets the standard Ownable rejection, not the reason.
+      await expect(distributor.connect(alice).renounceOwnership())
+        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+    });
+
+    describe("under a TimelockController", function () {
+      const MIN_DELAY = 60n;
+      let timelock, timelockAddr;
+
+      // OZ operation ids are keccak of the whole call tuple; the helper keeps schedule and
+      // execute reading from the same arguments so they can never drift apart.
+      const PREDECESSOR = ethers.ZeroHash;
+      const SALT = ethers.ZeroHash;
+
+      async function schedule(target, data) {
+        return timelock.connect(treasury).schedule(target, 0, data, PREDECESSOR, SALT, MIN_DELAY);
+      }
+
+      async function execute(target, data) {
+        return timelock.connect(treasury).execute(target, 0, data, PREDECESSOR, SALT);
+      }
+
+      beforeEach(async function () {
+        // `treasury` stands in for the multisig here: proposer, executor and canceller.
+        // admin = address(0) leaves the timelock self-administered from block one.
+        const Timelock = await ethers.getContractFactory("LPTimelock");
+        timelock = await Timelock.deploy(
+          MIN_DELAY,
+          [treasury.address],
+          [treasury.address],
+          ethers.ZeroAddress
+        );
+        timelockAddr = await timelock.getAddress();
+      });
+
+      it("takes ownership only through a scheduled acceptOwnership, after the delay", async function () {
+        await distributor.transferOwnership(timelockAddr);
+        expect(await distributor.owner()).to.equal(owner.address);
+        expect(await distributor.pendingOwner()).to.equal(timelockAddr);
+
+        const accept = distributor.interface.encodeFunctionData("acceptOwnership", []);
+        await schedule(distributorAddr, accept);
+
+        // Ready-at has not arrived: the operation exists but cannot run.
+        await expect(execute(distributorAddr, accept)).to.be.revertedWithCustomError(
+          timelock,
+          "TimelockUnexpectedOperationState"
+        );
+
+        await time.increase(Number(MIN_DELAY) + 1);
+        await execute(distributorAddr, accept);
+
+        expect(await distributor.owner()).to.equal(timelockAddr);
+        expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
+      });
+
+      it("upgrades only through the timelock once it owns the proxy", async function () {
+        const accept = distributor.interface.encodeFunctionData("acceptOwnership", []);
+        await distributor.transferOwnership(timelockAddr);
+        await schedule(distributorAddr, accept);
+        await time.increase(Number(MIN_DELAY) + 1);
+        await execute(distributorAddr, accept);
+
+        const V2 = await v2Factory();
+        const impl = await V2.deploy(tokenXAddr, assetAddr);
+        await impl.waitForDeployment();
+        const implAddr = await impl.getAddress();
+
+        // The multisig itself holds no upgrade right — only the timelock does.
+        await expect(distributor.connect(treasury).upgradeToAndCall(implAddr, "0x"))
+          .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+          .withArgs(treasury.address);
+
+        const upgrade = distributor.interface.encodeFunctionData("upgradeToAndCall", [
+          implAddr,
+          "0x",
+        ]);
+        await schedule(distributorAddr, upgrade);
+
+        await expect(execute(distributorAddr, upgrade)).to.be.revertedWithCustomError(
+          timelock,
+          "TimelockUnexpectedOperationState"
+        );
+
+        await time.increase(Number(MIN_DELAY) + 1);
+        await expect(execute(distributorAddr, upgrade))
+          .to.emit(distributor, "Upgraded")
+          .withArgs(implAddr);
+
+        expect(
+          await (await ethers.getContractAt("RewardsDistributorV2Mock", distributorAddr)).version()
+        ).to.equal(2n);
+      });
+
+      it("leaves the guardian tier undelayed while the timelock owns the proxy", async function () {
+        const accept = distributor.interface.encodeFunctionData("acceptOwnership", []);
+        await distributor.transferOwnership(timelockAddr);
+        await schedule(distributorAddr, accept);
+        await time.increase(Number(MIN_DELAY) + 1);
+        await execute(distributorAddr, accept);
+
+        // No schedule, no delay: the incident switch still works in one transaction.
+        await asGuardian().setPaused(true);
+        expect(await distributor.paused()).to.equal(true);
+      });
+
+      it("shortens its own delay only through itself", async function () {
+        // Not even the proposer/executor: shortening the delay is itself a delayed operation.
+        await expect(timelock.connect(treasury).updateDelay(1))
+          .to.be.revertedWithCustomError(timelock, "TimelockUnauthorizedCaller")
+          .withArgs(treasury.address);
+
+        const update = timelock.interface.encodeFunctionData("updateDelay", [1]);
+        await schedule(timelockAddr, update);
+        await time.increase(Number(MIN_DELAY) + 1);
+        await expect(execute(timelockAddr, update))
+          .to.emit(timelock, "MinDelayChange")
+          .withArgs(MIN_DELAY, 1n);
+      });
     });
   });
 });

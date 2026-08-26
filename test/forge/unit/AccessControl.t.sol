@@ -96,15 +96,51 @@ contract AccessControlTest is LocalHarness {
         tokenX.setEpochCap(2, 1e18);
     }
 
+    /**
+     * @dev The distributor proxy is the exception to the matrix above: renouncing would leave
+     *      `_authorizeUpgrade` with no caller and freeze the implementation forever, so the
+     *      call is disabled outright rather than merely discouraged in a runbook.
+     */
+    function test_Ownership_TheDistributorProxyCannotBeRenounced() public {
+        vm.expectRevert(RewardsDistributor.RenounceDisabled.selector);
+        distributor.renounceOwnership();
+        assertEq(distributor.owner(), address(this), "the distributor keeps its owner");
+    }
+
+    /// @dev And its handover is two-step: nominating does not move the owner, accepting does.
+    function test_Ownership_TheDistributorHandoverNeedsAcceptance() public {
+        distributor.transferOwnership(multisig);
+
+        assertEq(distributor.owner(), address(this), "a nomination must not move the owner");
+        assertEq(distributor.pendingOwner(), multisig, "the nominee must be recorded");
+
+        // The nominee is still not the owner until it says so.
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        distributor.setAssetClaimsEnabled(true);
+
+        vm.prank(multisig);
+        distributor.acceptOwnership();
+
+        assertEq(distributor.owner(), multisig, "accepting is what moves the owner");
+        assertEq(distributor.pendingOwner(), address(0), "and it clears the nomination");
+        vm.prank(multisig);
+        distributor.setAssetClaimsEnabled(true);
+        assertTrue(distributor.assetClaimsEnabled(), "the new owner can act");
+    }
+
     // ──────────────────────── Non-owner roles ──────────────────
 
-    /// @dev The voucher signer is a signing key, not an admin. It holds nothing on-chain.
+    /// @dev The voucher signer is a signing key, not an admin. It holds nothing on-chain —
+    ///      neither the owner tier nor the guardian tier.
     function test_Roles_TheVoucherSignerHasNoAdminPowerAnywhere() public {
         vm.startPrank(voucherSigner);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, voucherSigner));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, voucherSigner, address(this)));
         distributor.setSigner(voucherSigner);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, voucherSigner));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, voucherSigner, address(this)));
         distributor.setPaused(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, voucherSigner));
+        distributor.setAssetClaimsEnabled(true);
         vm.expectRevert(abi.encodeWithSelector(TokenX.NotMinter.selector, voucherSigner));
         tokenX.mint(voucherSigner, 1);
         vm.stopPrank();
@@ -162,13 +198,35 @@ contract AccessControlTest is LocalHarness {
         _expectUnauthorized(address(zapper), abi.encodeCall(LPZapper.rescuePosition, (1)));
     }
 
-    function test_Renounce_DistributorLosesFourAdminCalls() public {
-        distributor.renounceOwnership();
+    /**
+     * @dev The distributor cannot be renounced at all, so the matrix entry is not "what dies"
+     *      but "what a HANDOVER costs the old holder". Two tiers, measured separately: the
+     *      old owner loses two calls when ownership is accepted elsewhere, and the old
+     *      guardian loses three when the guardian is rotated.
+     */
+    function test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover() public {
+        distributor.transferOwnership(multisig);
+        vm.prank(multisig);
+        distributor.acceptOwnership();
 
-        _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setSigner, (carol)));
-        _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setPaused, (true)));
         _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setAssetClaimsEnabled, (true)));
-        _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)));
+        _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setGuardian, (carol)));
+
+        // The guardian tier is a separate slot and is untouched by the ownership move.
+        distributor.setPaused(true);
+        assertTrue(distributor.paused(), "the guardian keeps its tier across an ownership handover");
+    }
+
+    function test_Renounce_DistributorGuardianLosesThreeAdminCallsOnRotation() public {
+        distributor.setGuardian(carol);
+
+        _expectNotGuardian(abi.encodeCall(RewardsDistributor.setSigner, (carol)), carol);
+        _expectNotGuardian(abi.encodeCall(RewardsDistributor.setPaused, (true)), carol);
+        _expectNotGuardian(abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), carol);
+
+        // The owner tier is a separate slot and is untouched by the guardian move.
+        distributor.setAssetClaimsEnabled(true);
+        assertTrue(distributor.assetClaimsEnabled(), "the owner keeps its tier across a guardian rotation");
     }
 
     function test_Renounce_TokenXLosesFourAdminCalls() public {
@@ -183,7 +241,7 @@ contract AccessControlTest is LocalHarness {
     }
 
     /**
-     * @dev The load-bearing half of the matrix: with ALL FOUR owners renounced, every user
+     * @dev The load-bearing half of the matrix: with every owner gone, every user
      *      path still works. Staking, zapping, re-ranging, exiting and claiming are gated by
      *      the staker record, the zapper whitelist and the voucher signature — never by the
      *      owner. This is what makes "exits are unconditional" a measured property.
@@ -193,8 +251,14 @@ contract AccessControlTest is LocalHarness {
 
         vault.renounceOwnership();
         zapper.renounceOwnership();
-        distributor.renounceOwnership();
         tokenX.renounceOwnership();
+        // The distributor proxy cannot be renounced (see
+        // {test_Ownership_TheDistributorProxyCannotBeRenounced}), so the closest equivalent is
+        // an owner that will never act again: a black hole that has accepted the handover.
+        RejectingReceiver blackHole = new RejectingReceiver();
+        distributor.transferOwnership(address(blackHole));
+        vm.prank(address(blackHole));
+        distributor.acceptOwnership();
 
         // A brand-new deposit still works.
         uint256 bobToken = _stakePosition(bob);
@@ -247,6 +311,16 @@ contract AccessControlTest is LocalHarness {
     }
 
     // ──────────────────────── Helpers ──────────────────────────
+
+    /// @dev Calls `data` on the distributor from this contract and requires the guardian
+    ///      rejection, naming `expectedGuardian` as the address that would have been allowed.
+    function _expectNotGuardian(bytes memory data, address expectedGuardian) private {
+        vm.expectRevert(
+            abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), expectedGuardian)
+        );
+        (bool ok,) = address(distributor).call(data);
+        ok; // the cheatcode asserts; the boolean is only here to satisfy the compiler
+    }
 
     /// @dev Calls `data` on `target` from this contract and requires the Ownable rejection.
     function _expectUnauthorized(address target, bytes memory data) private {
