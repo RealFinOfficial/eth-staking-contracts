@@ -14,39 +14,44 @@
       "address": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
-      "fee": 3000
+      "fee": 3000,
+      "observationCardinality": 150
     },
     "TokenX": {
-      "address": "0x70dF0B52a63c81dab70Cc0b716Cb78eaFc5ef393",
-      "deployTx": "0xd5a111a6c0cd846b360fd37ee44371279fc913208b1c0c463f3372bc4b13f25a",
-      "block": 11564315,
+      "address": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
+      "deployTx": "0xb3a22e66cc5f5bea637112ce3e54685b5a1c54b1457d2a9514f0a7e95a91cc5c",
+      "block": 11570607,
       "name": "Real LP Rewards",
       "symbol": "RLP"
     },
     "RewardsDistributor": {
-      "address": "0xEC072ACfe096ab142625770eAF08Cd361Ca8510F",
-      "deployTx": "0xc1a741222be5cf38a11b696f71783d217e4ff44535c7f4066847a94d75073950",
-      "block": 11564317,
-      "tokenX": "0x70dF0B52a63c81dab70Cc0b716Cb78eaFc5ef393",
+      "address": "0x2c74230c7c1c6bBA4ff67250f4b0781a62732AeF",
+      "deployTx": "0x89ab069a0c2b6ccf8f9ad3ddae0907d89255da251cd0c30a54a1d6a627d7c1eb",
+      "block": 11570608,
+      "tokenX": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "LPStakingVault": {
-      "address": "0x77eb1Cad812FDe305A9768239475476778364CF8",
-      "deployTx": "0x0cfa4255c8b6099662dae259a36574f24ecce8bf1d049ca57138633d0fbde121",
-      "block": 11564318,
+      "address": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
+      "deployTx": "0x31bfb6de2e03dcec9baa071f9f592a3746ada818cee4bd426a980d10c8b09659",
+      "block": 11570609,
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
-      "fee": 3000
+      "fee": 3000,
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953
     },
     "LPZapper": {
-      "address": "0xCeF8CF6b9565B7Fc7A7c4510d143e5d6BF09a930",
-      "deployTx": "0x525c222a6b2434e60beaaf55c2c1cd640e9b92b346e008f9176f46c687ed8ed8",
-      "block": 11564319,
-      "vault": "0x77eb1Cad812FDe305A9768239475476778364CF8",
+      "address": "0xd425748F81334aDbA95F19Bb37293e02992F6C88",
+      "deployTx": "0xafabaad1a52714e7303c4b88ae708ba9cf1e0100b270b4dd3da0a1ce4f4e3423",
+      "block": 11570610,
+      "vault": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
       "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
-      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f"
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953
     }
   }
 }
