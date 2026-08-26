@@ -631,7 +631,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await vault.zapper()).to.equal(zapperAddr);
       expect(await vault.depositsPaused()).to.equal(false);
       expect(await vault.twapWindow()).to.equal(BigInt(C.TWAP_WINDOW));
-      expect(await vault.maxTwapDeviationBps()).to.equal(BigInt(C.MAX_DEVIATION_BPS));
+      expect(await vault.maxTwapDeviationTicks()).to.equal(BigInt(C.MAX_DEVIATION_TICKS));
 
       expect(await zapper.vault()).to.equal(vaultAddr);
       expect(await zapper.usdc()).to.equal(usdcAddr);
@@ -1125,7 +1125,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       const receipt = await chain.send(
         vault
           .connect(w.multisig)
-          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_BPS)
+          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS)
       );
       ledger.record("A19", "multisig retunes the vault", receipt, [
         { address: vaultAddr, name: "TwapParamsSet" },
@@ -1133,13 +1133,13 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
       const args = chain.parseEvent(receipt, vault.interface, vaultAddr, "TwapParamsSet");
       expect(args.window).to.equal(BigInt(C.RETUNED_TWAP_WINDOW));
-      expect(args.maxDeviationBps).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_BPS));
+      expect(args.maxDeviationTicks).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_TICKS));
       expect(await vault.twapWindow()).to.equal(BigInt(C.RETUNED_TWAP_WINDOW));
-      expect(await vault.maxTwapDeviationBps()).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_BPS));
+      expect(await vault.maxTwapDeviationTicks()).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_TICKS));
 
       // The warm-up left more than the new window's worth of history, so the guard still reads.
       const preview = await vault.previewTwap();
-      expect(preview.maxDeviationTicks).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_BPS));
+      expect(preview.maxDeviationTicks).to.equal(BigInt(C.RETUNED_MAX_DEVIATION_TICKS));
       expect(preview.withinBounds).to.equal(true);
     });
 
@@ -1147,7 +1147,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       const receipt = await chain.send(
         zapper
           .connect(w.multisig)
-          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_BPS)
+          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS)
       );
       ledger.record("A20", "multisig retunes the zapper", receipt, [
         { address: zapperAddr, name: "TwapParamsSet" },

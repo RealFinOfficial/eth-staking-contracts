@@ -84,10 +84,14 @@ const NFT_PERMIT_NAME = "Uniswap V3 Positions NFT-V1";
 const NFT_PERMIT_VERSION = "1";
 
 const TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW — shortest legal window
+/** What the scenario hands the deploy script, in bps — the script's human-facing knob. */
 const MAX_DEVIATION_BPS = 500;
+/** What the script converts that into and the contract stores: floor(ln 1.05 / ln 1.0001). */
+const MAX_DEVIATION_TICKS = 487;
 /** Retuned by A19/A20 from the multisig. */
 const RETUNED_TWAP_WINDOW = 600;
-const RETUNED_MAX_DEVIATION_BPS = 400;
+/** `setTwapParams` takes ticks directly — no conversion on this path. */
+const RETUNED_MAX_DEVIATION_TICKS = 400;
 
 const OBSERVATION_CARDINALITY = 100;
 
@@ -219,8 +223,9 @@ module.exports = {
   NFT_PERMIT_VERSION,
   TWAP_WINDOW,
   MAX_DEVIATION_BPS,
+  MAX_DEVIATION_TICKS,
   RETUNED_TWAP_WINDOW,
-  RETUNED_MAX_DEVIATION_BPS,
+  RETUNED_MAX_DEVIATION_TICKS,
   OBSERVATION_CARDINALITY,
   ASSET,
   USDC,

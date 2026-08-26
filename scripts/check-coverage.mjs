@@ -41,7 +41,7 @@ import {pathToFileURL} from "node:url";
 // re-ratification of the floors, not a configuration tweak.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-08-26 (rebalance pause added) ───────────────────────────
+// ── Pinned floors, re-measured 2026-08-26 (rebalance pause + tick-native TWAP params) ───────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
@@ -49,7 +49,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | LPZapper.sol            |  98.65% (73/74)  | 100.00% (15/15) |
 // | RewardsDistributor.sol  | 100.00% (43/43)  | 100.00% (10/10) |
 // | TokenX.sol              |  97.62% (41/42)  | 100.00% (7/7)   |
-// | libraries/TwapGuard.sol | 100.00% (36/36)  | 100.00% (7/7)   |
+// | libraries/TwapGuard.sol | 100.00% (37/37)  | 100.00% (7/7)   |
 //
 // Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
 // uncovered branch fails the gate.
@@ -83,7 +83,7 @@ export const PER_FILE_FLOORS = {
     branches: {found: 7, minHit: 7},
   },
   "contracts/lp-staking/libraries/TwapGuard.sol": {
-    lines: {found: 36, minHit: 36},
+    lines: {found: 37, minHit: 37},
     branches: {found: 7, minHit: 7},
   },
 };

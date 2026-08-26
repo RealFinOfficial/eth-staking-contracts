@@ -129,7 +129,7 @@ contract ReorgRewardTest is ForkHarness {
     ///      parameter change outside ordinary storage.
     function test_Reorg_RollingBackAnOwnerActionRestoresTheParameters() public {
         uint32 windowBefore = vault.twapWindow();
-        uint24 devBefore = vault.maxTwapDeviationBps();
+        uint24 devBefore = vault.maxTwapDeviationTicks();
 
         uint256 snap = vm.snapshotState();
 
@@ -140,6 +140,6 @@ contract ReorgRewardTest is ForkHarness {
         vm.revertToState(snap);
 
         assertEq(vault.twapWindow(), windowBefore, "the window must be restored by the rollback");
-        assertEq(vault.maxTwapDeviationBps(), devBefore, "the deviation ceiling must be restored by the rollback");
+        assertEq(vault.maxTwapDeviationTicks(), devBefore, "the deviation ceiling must be restored by the rollback");
     }
 }

@@ -140,7 +140,7 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
      * @param _asset ASSET address; must be the other side of the pair.
      * @param _initialOwner Owner (multisig) for `setTwapParams` and `sweep`.
      * @param _twapWindow Initial TWAP window in seconds.
-     * @param _maxTwapDeviationBps Initial spot-vs-TWAP deviation ceiling in bps.
+     * @param _maxTwapDeviationTicks Initial spot-vs-TWAP deviation ceiling, in ticks.
      */
     constructor(
         address _vault,
@@ -154,8 +154,8 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         address _asset,
         address _initialOwner,
         uint32 _twapWindow,
-        uint24 _maxTwapDeviationBps
-    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationBps) {
+        uint24 _maxTwapDeviationTicks
+    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationTicks) {
         if (_vault == address(0) || _positionManager == address(0) || _swapRouter == address(0)) {
             revert ZeroAddress();
         }
@@ -276,11 +276,11 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     /**
      * @notice Retunes this contract's own spot-vs-TWAP guard.
      * @dev Independent of the vault's parameters; both are tuned separately.
-     * @param window New TWAP window in seconds (>= MIN_TWAP_WINDOW).
-     * @param maxDeviationBps New deviation ceiling in bps (0 < x <= MAX_TWAP_DEVIATION_BPS).
+     * @param window New TWAP window in seconds (MIN_TWAP_WINDOW..MAX_TWAP_WINDOW).
+     * @param maxDeviationTicks New deviation ceiling in ticks (0 < x <= MAX_TWAP_DEVIATION_TICKS).
      */
-    function setTwapParams(uint32 window, uint24 maxDeviationBps) external onlyOwner {
-        _setTwapParams(window, maxDeviationBps);
+    function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOwner {
+        _setTwapParams(window, maxDeviationTicks);
     }
 
     /**

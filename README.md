@@ -316,12 +316,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
-npx hardhat test                 # 534 tests: unit suites + three fork suites
+npx hardhat test                 # 536 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 348 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 352 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -478,7 +478,7 @@ the ceiling:
 | `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
 | `RewardsDistributor.sol` | 100.00% (43/43) | 100.00% (10/10) |
 | `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
-| `libraries/TwapGuard.sol` | 100.00% (36/36) | 100.00% (7/7) |
+| `libraries/TwapGuard.sol` | 100.00% (37/37) | 100.00% (7/7) |
 
 The three uncovered lines are the call sites `_checkTwapDeviation();`
 (`LPStakingVault.sol:537`, `LPZapper.sol:389`) and `_rollPendingEpoch();` (`TokenX.sol:155`).

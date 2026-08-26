@@ -61,10 +61,14 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   signed `user` is always `msg.sender`, never an argument
 
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
-deviates from the pool TWAP by more than `maxTwapDeviationBps`. Callers still carry their
+deviates from the pool TWAP by more than `maxTwapDeviationTicks`. Callers still carry their
 own `amountOutMin` / `amount0Min` / `amount1Min` — the guard is a manipulation circuit
-breaker, not a pricing oracle. The bps ceiling is compared against a tick count, and ticks
-compound, so the real bound is looser than the configured number (2000 bps → ~2214 bps).
+breaker, not a pricing oracle, and the exact protection is those minimums. The parameter is
+a tick count, not bps: the window is bounded to 300–3600 s and the ceiling to 1823 ticks
+(`floor(ln 1.2 / ln 1.0001)`, a 20% move). `scripts/deploy-lp-staking.js` keeps the human
+knob in bps and converts with `floor(ln(1 + bps/1e4) / ln(1.0001))` — 500 bps = 487 ticks,
+1000 = 953, 2000 = 1823 — logging both numbers. `amountIn == 0` skips the swap and therefore
+the guard, deliberately: a no-swap range move must stay available at any price.
 
 Both also refuse unsolicited position NFTs: `onERC721Received` accepts a safe transfer only
 inside their own mint/stake flow. A plain `transferFrom` bypasses the hook entirely, so both
@@ -82,8 +86,8 @@ epoch cap's role — are written up in `docs/lp-staking-audit-notes.md`.
 
 1. `TokenX(name, symbol, deployer)`
 2. `RewardsDistributor(tokenX, asset, signer, deployer)`
-3. `LPStakingVault(positionManager, pool, token0, token1, fee, router, deployer, twapWindow, maxDeviationBps)`
-4. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationBps)`
+3. `LPStakingVault(positionManager, pool, token0, token1, fee, router, deployer, twapWindow, maxDeviationTicks)`
+4. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationTicks)`
 5. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
 6. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
 7. `transferOwnership(multisig)` on all four
@@ -128,14 +132,14 @@ contracts/           — Solidity source files
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
     mocks/                    — Test-only Uniswap doubles, permit token and reentrancy attackers
-test/                — Hardhat test files (Mocha + Chai). 534 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 536 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 75 tests
+    LPStakingVault.test.js      — 76 tests
     RewardsDistributor.test.js  — 46 tests
     TokenX.test.js              — 47 tests
-    LPZapper.test.js            — 44 tests
+    LPZapper.test.js            — 45 tests
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
@@ -147,7 +151,7 @@ test/                — Hardhat test files (Mocha + Chai). 534 tests, 0 pending
                                 — 89 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 348 tests: 100 fork, 210 unit, 20 fuzz, 18 invariant
+test/forge/          — Foundry tier. 352 tests: 100 fork, 213 unit, 21 fuzz, 18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
@@ -314,7 +318,7 @@ the ceiling:
 | `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
 | `RewardsDistributor.sol` | 100.00% (43/43) | 100.00% (10/10) |
 | `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
-| `libraries/TwapGuard.sol` | 100.00% (36/36) | 100.00% (7/7) |
+| `libraries/TwapGuard.sol` | 100.00% (37/37) | 100.00% (7/7) |
 
 The three uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:537`,
 `LPZapper.sol:389`) and `_rollPendingEpoch();` (`TokenX.sol:155`). Every callee reports 100% of

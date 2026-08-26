@@ -58,7 +58,7 @@
       },
       {
         "internalType": "uint24",
-        "name": "_maxTwapDeviationBps",
+        "name": "_maxTwapDeviationTicks",
         "type": "uint24"
       }
     ],
@@ -90,12 +90,12 @@
     "inputs": [
       {
         "internalType": "uint24",
-        "name": "maxDeviationBps",
+        "name": "maxDeviationTicks",
         "type": "uint24"
       },
       {
         "internalType": "uint24",
-        "name": "maxAllowedBps",
+        "name": "maxAllowedTicks",
         "type": "uint24"
       }
     ],
@@ -112,6 +112,11 @@
       {
         "internalType": "uint32",
         "name": "minWindow",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "maxWindow",
         "type": "uint32"
       }
     ],
@@ -379,7 +384,7 @@
       {
         "indexed": false,
         "internalType": "uint24",
-        "name": "maxDeviationBps",
+        "name": "maxDeviationTicks",
         "type": "uint24"
       }
     ],
@@ -431,12 +436,25 @@
   },
   {
     "inputs": [],
-    "name": "MAX_TWAP_DEVIATION_BPS",
+    "name": "MAX_TWAP_DEVIATION_TICKS",
     "outputs": [
       {
         "internalType": "uint24",
         "name": "",
         "type": "uint24"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_TWAP_WINDOW",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
@@ -483,7 +501,7 @@
   },
   {
     "inputs": [],
-    "name": "maxTwapDeviationBps",
+    "name": "maxTwapDeviationTicks",
     "outputs": [
       {
         "internalType": "uint24",
@@ -624,7 +642,7 @@
       },
       {
         "internalType": "uint24",
-        "name": "maxDeviationBps",
+        "name": "maxDeviationTicks",
         "type": "uint24"
       }
     ],

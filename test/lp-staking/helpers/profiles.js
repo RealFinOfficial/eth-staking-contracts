@@ -147,7 +147,8 @@ const MAINNET_FUNDERS = [
  *   manager's ERC-721 permit.
  * @property {{mode: "impersonate", funders: string[], fallback: "deal"}} funding
  * @property {number} twapWindow
- * @property {number} maxDevBps
+ * @property {number} maxDevBps   Handed to the deploy script, in bps.
+ * @property {number} maxDevTicks What the script converts that into and the contract stores.
  */
 
 /** @type {Profile} */
@@ -201,6 +202,7 @@ const sepolia = {
 
   twapWindow: C.TWAP_WINDOW,
   maxDevBps: C.MAX_DEVIATION_BPS,
+  maxDevTicks: C.MAX_DEVIATION_TICKS,
 };
 
 /** @type {Profile} */
@@ -255,6 +257,7 @@ const mainnet = {
 
   twapWindow: C.TWAP_WINDOW,
   maxDevBps: C.MAX_DEVIATION_BPS,
+  maxDevTicks: C.MAX_DEVIATION_TICKS,
 };
 
 const profiles = { sepolia, mainnet };

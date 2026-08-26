@@ -139,14 +139,14 @@ const USER_USDC = USDC(50_000);
 const ASSET_FUNDING_USDC = USDC(1_500);
 
 const TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW — shortest legal window, shortest warm-up
-const MAX_DEVIATION_BPS = 500;
+const MAX_DEVIATION_TICKS = 500;
 
 const WARMUP_STEPS = 8;
 const WARMUP_STEP_SECONDS = 60; // 8 * 60 = 480s of history for a 300s window
 const WARMUP_SWAP_USDC = USDC(25);
 
 /** How far past the guard's ceiling the manipulation test pushes spot. */
-const MANIPULATION_TICKS = MAX_DEVIATION_BPS + 500;
+const MANIPULATION_TICKS = MAX_DEVIATION_TICKS + 500;
 /** Hard ceiling on the manipulation swap; the price limit normally stops it well before. */
 const MANIPULATION_MAX_USDC = USDC(2_000_000);
 
@@ -678,7 +678,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         ROUTER_ADDR,
         deployer.address,
         TWAP_WINDOW,
-        MAX_DEVIATION_BPS
+        MAX_DEVIATION_TICKS
       );
       await vault.waitForDeployment();
       vaultAddr = await vault.getAddress();
@@ -696,7 +696,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         ASSET_ADDR,
         deployer.address,
         TWAP_WINDOW,
-        MAX_DEVIATION_BPS
+        MAX_DEVIATION_TICKS
       );
       await zapper.waitForDeployment();
       zapperAddr = await zapper.getAddress();
@@ -782,13 +782,13 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       for (const target of [vault, zapper]) {
         const preview = await target.previewTwap();
-        expect(preview.maxDeviationTicks).to.equal(MAX_DEVIATION_BPS);
+        expect(preview.maxDeviationTicks).to.equal(MAX_DEVIATION_TICKS);
         expect(preview.withinBounds).to.equal(true);
         const deviation =
           preview.currentTick > preview.twapTick
             ? preview.currentTick - preview.twapTick
             : preview.twapTick - preview.currentTick;
-        expect(deviation).to.be.lessThanOrEqual(BigInt(MAX_DEVIATION_BPS));
+        expect(deviation).to.be.lessThanOrEqual(BigInt(MAX_DEVIATION_TICKS));
       }
       expect(await vault.twapWindow()).to.equal(TWAP_WINDOW);
     });
@@ -1175,11 +1175,11 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       notes.push(
         `manipulation: spent ${(result.spent / 10n ** 6n).toString()} USDC, ` +
           `tick ${result.spotBefore} -> ${result.spotAfter}, ` +
-          `spot-vs-TWAP deviation ${deviation} ticks (ceiling ${MAX_DEVIATION_BPS}), ` +
+          `spot-vs-TWAP deviation ${deviation} ticks (ceiling ${MAX_DEVIATION_TICKS}), ` +
           `pool ASSET drained ${result.assetDrainedPct}%, pool liquidity before ${poolLiquidity}`
       );
 
-      expect(Math.abs(deviation)).to.be.greaterThan(MAX_DEVIATION_BPS);
+      expect(Math.abs(deviation)).to.be.greaterThan(MAX_DEVIATION_TICKS);
       expect(preview.withinBounds).to.equal(false);
       expect((await zapper.previewTwap()).withinBounds).to.equal(false);
 

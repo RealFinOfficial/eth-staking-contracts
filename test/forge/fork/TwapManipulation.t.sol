@@ -189,7 +189,7 @@ contract TwapManipulationTest is ForkHarness {
 
         uint256 deviation = _deviationTicks();
         assertGt(deviation, 1, "the push must produce a measurable deviation to tune against");
-        assertLe(deviation, MAX_TWAP_DEVIATION_BPS, "the tuned ceiling must stay inside the contract's own bound");
+        assertLe(deviation, MAX_TWAP_DEVIATION_TICKS, "the tuned ceiling must stay inside the contract's own bound");
 
         vm.prank(multisig);
         vault.setTwapParams(MIN_TWAP_WINDOW, uint24(deviation));
@@ -270,53 +270,84 @@ contract TwapManipulationTest is ForkHarness {
     // ──────────────────────── Owner-side parameters ────────────
 
     /**
-     * @dev FINDING SEC-03 (O-04): `_setTwapParams` bounds the window only from BELOW
-     *      (`window < MIN_TWAP_WINDOW`). There is no upper bound, so a single owner
-     *      transaction can set a window no oracle can serve and permanently brick both swap
-     *      legs — while leaving exits open. Asserted as the CURRENT behaviour.
+     * @dev SEC-03, FIXED 2026-08-26 and inverted here. `_setTwapParams` used to bound the
+     *      window only from below, so one owner transaction could set a lookback no oracle
+     *      can serve. `MAX_TWAP_WINDOW` closes it: the window is now bounded on both sides
+     *      and an oversize value is refused with the three numbers that explain why.
      */
-    function test_SEC03_TwapWindowHasNoUpperBound() public {
-        vm.prank(multisig);
+    function test_TwapWindow_HasAnUpperBound() public {
+        uint32 before_ = vault.twapWindow();
+
+        vm.startPrank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MAX_TWAP_WINDOW + 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
+        vault.setTwapParams(MAX_TWAP_WINDOW + 1, 500);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, type(uint32).max, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
         vault.setTwapParams(type(uint32).max, 500);
-        assertEq(vault.twapWindow(), type(uint32).max, "the setter accepts an unservable window unchanged");
+        vm.stopPrank();
+
+        assertEq(vault.twapWindow(), before_, "a refused window must leave the stored one untouched");
+
+        // and the boundary itself is accepted, so the bound is exactly where it claims to be
+        vm.prank(multisig);
+        vault.setTwapParams(MAX_TWAP_WINDOW, 500);
+        assertEq(vault.twapWindow(), MAX_TWAP_WINDOW, "the maximum window itself must be accepted");
     }
 
-    /// @dev FINDING SEC-03, the consequence: one transaction bricks the rebalance swap leg
-    ///      and the whole zap-in path with a bare `OLD`.
-    function test_SEC03_OwnerCanBrickBothSwapLegsWithOneTransaction() public {
+    /// @dev SEC-03's consequence, now unreachable: the owner cannot brick either swap leg
+    ///      with an unservable window, because no such window can be stored any more.
+    function test_Owner_CannotBrickTheSwapLegsWithAnOversizeWindow() public {
         uint256 tokenId = _mintAndStake(alice, 600);
 
-        // 1e9 seconds (~31 years) of lookback: no pool can ever serve it, and unlike
-        // type(uint32).max it does not wrap the oracle's uint32 timestamp arithmetic, so the
-        // failure mode is unambiguous.
+        // 1e9 seconds (~31 years) of lookback: the value the old, unbounded setter accepted.
         vm.startPrank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, uint32(1_000_000_000), MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
         vault.setTwapParams(1_000_000_000, 500);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, uint32(1_000_000_000), MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
         zapper.setTwapParams(1_000_000_000, 500);
         vm.stopPrank();
 
+        // Both legs still work at the parameters the deploy left behind.
         SwapParams memory swap =
             SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
-        vm.expectRevert(bytes("OLD"));
-        vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
+        uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
+        assertEq(vault.stakerOf(newTokenId), alice, "the rebalance swap leg must still work");
 
+        // Half the USDC is swapped so the mint gets both sides; a full-size swap would
+        // leave the zapper with nothing to pair the ASSET against.
+        SwapParams memory zapSwap =
+            SwapParams({zeroForOne: false, amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.startPrank(bob);
         usdcToken.approve(address(zapper), 1_000e6);
-        vm.expectRevert(bytes("OLD"));
-        zapper.zapIn(1_000e6, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
+        uint256 zapped = zapper.zapIn(1_000e6, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, zapSwap, FAR_DEADLINE);
         vm.stopPrank();
-
-        // The exits stay open, which is why this is a griefing finding and not a loss of funds.
-        vm.prank(alice);
-        vault.unstake(tokenId);
-        assertEq(npm.ownerOf(tokenId), alice, "bricking the guard must not close the exit");
+        assertEq(vault.stakerOf(zapped), bob, "and so must the zap leg");
     }
 
     function test_Guard_RejectsAWindowBelowTheMinimum() public {
         vm.prank(multisig);
         vm.expectRevert(
-            abi.encodeWithSelector(TwapGuard.InvalidTwapWindow.selector, MIN_TWAP_WINDOW - 1, MIN_TWAP_WINDOW)
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MIN_TWAP_WINDOW - 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
         );
         vault.setTwapParams(MIN_TWAP_WINDOW - 1, 500);
     }
@@ -324,16 +355,16 @@ contract TwapManipulationTest is ForkHarness {
     function test_Guard_RejectsAZeroAndAnOversizeDeviation() public {
         vm.startPrank(multisig);
         vm.expectRevert(
-            abi.encodeWithSelector(TwapGuard.InvalidTwapDeviation.selector, uint24(0), MAX_TWAP_DEVIATION_BPS)
+            abi.encodeWithSelector(TwapGuard.InvalidTwapDeviation.selector, uint24(0), MAX_TWAP_DEVIATION_TICKS)
         );
         vault.setTwapParams(MIN_TWAP_WINDOW, 0);
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                TwapGuard.InvalidTwapDeviation.selector, MAX_TWAP_DEVIATION_BPS + 1, MAX_TWAP_DEVIATION_BPS
+                TwapGuard.InvalidTwapDeviation.selector, MAX_TWAP_DEVIATION_TICKS + 1, MAX_TWAP_DEVIATION_TICKS
             )
         );
-        vault.setTwapParams(MIN_TWAP_WINDOW, MAX_TWAP_DEVIATION_BPS + 1);
+        vault.setTwapParams(MIN_TWAP_WINDOW, MAX_TWAP_DEVIATION_TICKS + 1);
         vm.stopPrank();
     }
 
@@ -344,9 +375,9 @@ contract TwapManipulationTest is ForkHarness {
         vault.setTwapParams(600, 250);
 
         assertEq(vault.twapWindow(), 600, "the vault takes the new window");
-        assertEq(vault.maxTwapDeviationBps(), 250, "the vault takes the new ceiling");
+        assertEq(vault.maxTwapDeviationTicks(), 250, "the vault takes the new ceiling");
         assertEq(zapper.twapWindow(), profile.twapWindow, "the zapper's window is untouched");
-        assertEq(zapper.maxTwapDeviationBps(), profile.maxDevBps, "the zapper's ceiling is untouched");
+        assertEq(zapper.maxTwapDeviationTicks(), profile.maxDevTicks, "the zapper's ceiling is untouched");
     }
 
     function test_Guard_OnlyTheOwnerCanRetuneIt() public {

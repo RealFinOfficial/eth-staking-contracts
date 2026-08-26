@@ -35,7 +35,7 @@ library Profiles {
      * @param usdcPermit       True when the USDC side implements EIP-2612. tUSDC does NOT.
      * @param assetPermit      True when the ASSET side implements EIP-2612. tREAL does NOT.
      * @param twapWindow       TWAP window the harness deploys with, in seconds.
-     * @param maxDevBps        Spot-vs-TWAP ceiling the harness deploys with, in bps.
+     * @param maxDevTicks      Spot-vs-TWAP ceiling the harness deploys with, in ticks.
      */
     struct Profile {
         string name;
@@ -52,7 +52,7 @@ library Profiles {
         bool usdcPermit;
         bool assetPermit;
         uint32 twapWindow;
-        uint16 maxDevBps;
+        uint24 maxDevTicks;
     }
 
     /// @dev Fee tier and spacing are the same on both profiles: 0.30% / 60.
@@ -88,7 +88,7 @@ library Profiles {
             assetPermit: false,
             twapWindow: 300, // TwapGuard.MIN_TWAP_WINDOW: shortest legal window, shortest warm-up.
             // Production deploys 1800 (scripts/deploy-lp-staking.js LP_TWAP_WINDOW default).
-            maxDevBps: 500 // same as the production default.
+            maxDevTicks: 500
         });
     }
 
@@ -122,7 +122,7 @@ library Profiles {
             usdcPermit: true,
             assetPermit: true,
             twapWindow: 300,
-            maxDevBps: 500
+            maxDevTicks: 500
         });
     }
 

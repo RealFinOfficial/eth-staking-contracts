@@ -44,8 +44,11 @@ abstract contract BaseForge is Test {
 
     /// @notice TwapGuard.MIN_TWAP_WINDOW, re-declared so a change to the contract fails a test.
     uint32 internal constant MIN_TWAP_WINDOW = 300;
-    /// @notice TwapGuard.MAX_TWAP_DEVIATION_BPS, re-declared for the same reason.
-    uint24 internal constant MAX_TWAP_DEVIATION_BPS = 2000;
+    /// @notice TwapGuard.MAX_TWAP_WINDOW, re-declared for the same reason.
+    uint32 internal constant MAX_TWAP_WINDOW = 3600;
+    /// @notice TwapGuard.MAX_TWAP_DEVIATION_TICKS, re-declared for the same reason.
+    ///         1823 = floor(ln 1.2 / ln 1.0001), a 20% price move.
+    uint24 internal constant MAX_TWAP_DEVIATION_TICKS = 1823;
 
     // ──────────────────────── Test parameters ──────────────────
 

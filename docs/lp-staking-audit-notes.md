@@ -32,25 +32,39 @@ Net effect: the ASSET leg's solvency reduces to trust in the owner multisig. Acc
 since the 2026-08-26 review the same sentence is in the function's own NatSpec, so a reader
 of the contract meets the assumption without opening this file.
 
-## 2. TwapGuard compares bps against ticks, and errs loose
+## 2. The TWAP ceiling is measured in ticks (fixed 2026-08-26)
 
-`TwapGuard._checkTwapDeviation` compares the spot-vs-TWAP tick difference against
-`maxTwapDeviationBps` taken as a tick count. One tick is a 1.0001x price step and steps
-compound, so `n` ticks is always **more** price movement than `n` bps:
+**Was:** `_checkTwapDeviation` compared the tick difference against `maxTwapDeviationBps`
+taken as a tick count, one bp read as one tick. A tick is a 1.0001x price step and steps
+compound, so the guard admitted up to ~11% more price movement than the number said —
+2000 bps configured let ~2214 bps through. The 2026-08-26 review asked for an exact
+conversion.
 
-| Configured `maxTwapDeviationBps` | Real deviation admitted (`1.0001^n - 1`) |
-|---|---|
-| 500 | ~513 bps |
-| 2000 (`MAX_TWAP_DEVIATION_BPS`) | ~2214 bps |
+**Now:** the parameter IS a tick count. `maxTwapDeviationTicks` is what the owner stores and
+what the guard compares against; nothing converts anything on-chain, so there is no error
+left to describe. The bound is `MAX_TWAP_DEVIATION_TICKS = 1823`.
 
-The circuit breaker is therefore up to ~11% **looser** than the number it is configured
-with, never tighter. It trips later than a strict bps reading suggests. Operators must read
-the parameter as a floor on what gets through, not a ceiling.
+The conversion an operator needs to size the parameter in basis points is exact and lives
+off-chain, in `scripts/deploy-lp-staking.js`:
 
-Accepted rather than corrected: an exact conversion needs a logarithm on-chain, and the
-guard is a manipulation circuit breaker, not a pricing oracle. No slippage protection rests
-on it — the exact bounds are the caller's own `amountOutMin`, `amount0Min` and `amount1Min`,
-which cap the value that can actually be lost regardless of where the guard trips.
+```
+ticks(bps) = floor( ln(1 + bps / 1e4) / ln(1.0001) )
+```
+
+| bps | ticks | note |
+|---|---|---|
+| 500 | 487 | |
+| 1000 | 953 | the deployed default (10% price move) |
+| 2000 | 1823 | `MAX_TWAP_DEVIATION_TICKS`, a 20% price move |
+
+The deploy script keeps `LP_TWAP_MAX_DEVIATION_BPS` as the human-facing knob, converts with
+that formula and logs both numbers. A logarithm was deliberately NOT added on-chain: it
+would be audit surface in an immutable contract, used only by a circuit breaker.
+
+What has not changed is what the guard is for. It is a manipulation circuit breaker, not a
+pricing oracle: it caps the damage of a compromised frontend feeding `amountOutMin ~ 0` on a
+custodied position, and no slippage protection rests on it. The exact bounds are the
+caller's own `amountOutMin`, `amount0Min` and `amount1Min`.
 
 ## 3. Ownership is one-step everywhere, and `renounceOwnership` is live
 
@@ -183,18 +197,23 @@ Tests: `test/forge/fork/SwapSlippageMEV.t.sol` —
 `test_SEC02_NoSwapRebalanceNeverConsultsTheGuard`, plus the four `test_Sandwich_*` cases that
 measure the loss and then measure the remedy.
 
-## 9. SEC-03 — `twapWindow` has no upper bound, so one owner transaction bricks both swap legs
+## 9. SEC-03 — `twapWindow` had no upper bound (FIXED 2026-08-26)
 
-`TwapGuard._setTwapParams` bounds the window only from below (`window < MIN_TWAP_WINDOW`).
-`setTwapParams(1_000_000_000, 500)` is accepted, and no oracle can serve a 31-year lookback, so
-from that transaction on every `rebalance` with a swap leg and every `zapIn` reverts with the
-bare `OLD`. `type(uint32).max` is likewise accepted.
+**Was:** `_setTwapParams` bounded the window only from below (`window < MIN_TWAP_WINDOW`), so
+`setTwapParams(1_000_000_000, 500)` and even `type(uint32).max` were accepted. No oracle can
+serve a 31-year lookback, so from that transaction on every `rebalance` with a swap leg and
+every `zapIn` reverted with the bare `OLD` — griefing, not loss of funds, because the exits
+stayed open and the owner could undo it (unless the owner had also renounced, item 3).
 
-Griefing, not loss of funds: the exits stay open, so stakers can always leave with their
-positions, and the owner can undo it — unless the owner has also renounced (see item 3).
+**Now:** `MAX_TWAP_WINDOW = 3600` closes it. The window is bounded on both sides and
+`InvalidTwapWindow(window, minWindow, maxWindow)` carries all three numbers, so an operator
+sees the band in the revert. One hour is long enough for any circuit breaker the program
+would want and short enough that a warmed pool can always serve it.
 
-Tests: `test/forge/fork/TwapManipulation.t.sol` — `test_SEC03_TwapWindowHasNoUpperBound`,
-`test_SEC03_OwnerCanBrickBothSwapLegsWithOneTransaction`.
+Tests, inverted with the fix: `test/forge/fork/TwapManipulation.t.sol` —
+`test_TwapWindow_HasAnUpperBound`, `test_Owner_CannotBrickTheSwapLegsWithAnOversizeWindow`;
+`test/forge/fuzz/TwapTickFuzz.t.sol:testFuzz_TwapParams_NoWindowPastTheMaximumIsEverAccepted`;
+`test/forge/unit/TwapGuardMath.t.sol:test_Guard_SetterRejectsAWindowOneSecondAboveTheMaximum`.
 
 ## 10. SEC-04 — replacing the distributor replays every lifetime entitlement
 

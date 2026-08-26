@@ -22,8 +22,11 @@ const pools = require("./lib/pools");
 //   LP_NPM                    — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
 //   LP_ROUTER                 — SwapRouter02 (per-chain default, see UNISWAP_BY_CHAIN)
 //   LP_FEE                    — pool fee tier in hundredths of a bip (3000)
-//   LP_TWAP_WINDOW            — TWAP lookback in seconds, >= 300 (1800)
-//   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in bps, <= 2000 (500)
+//   LP_TWAP_WINDOW            — TWAP lookback in seconds, 300..3600 (1800)
+//   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in BPS, <= 2000 (500). The contract
+//                               stores TICKS; this script converts exactly with
+//                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
+//                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
 //   LP_EPOCH_ID               — first epoch id to arm on TokenX (none)
 //   LP_EPOCH_CAP              — that epoch's mint cap, in whole TokenX (none)
 //   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (100)
@@ -50,8 +53,23 @@ const UNISWAP_BY_CHAIN = {
 
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 const MIN_TWAP_WINDOW = 300; // TwapGuard.MIN_TWAP_WINDOW
-const MAX_TWAP_DEVIATION_BPS = 2000; // TwapGuard.MAX_TWAP_DEVIATION_BPS
+const MAX_TWAP_WINDOW = 3600; // TwapGuard.MAX_TWAP_WINDOW
+const MAX_TWAP_DEVIATION_TICKS = 1823; // TwapGuard.MAX_TWAP_DEVIATION_TICKS
 const DEFAULT_OBSERVATION_CARDINALITY = 100;
+
+/**
+ * Exact basis-points -> ticks conversion, the one the guard's NatSpec states.
+ *
+ * A tick is a 1.0001x price step and steps compound, so a deviation of `bps` basis points
+ * is `floor(ln(1 + bps/1e4) / ln(1.0001))` ticks. The human-facing knob stays in bps
+ * because that is how a risk limit is discussed; the contract stores the tick count,
+ * because that is what it compares against. Doing the log here rather than on-chain keeps
+ * an immutable contract free of a fixed-point logarithm it would only use for a circuit
+ * breaker.
+ */
+function bpsToTicks(bps) {
+  return Math.floor(Math.log(1 + bps / 1e4) / Math.log(1.0001));
+}
 
 const ASSET_DECIMALS = 18;
 const USDC_DECIMALS = 6;
@@ -106,6 +124,7 @@ async function main() {
   const fee = Number(process.env.LP_FEE || 3000);
   const twapWindow = Number(process.env.LP_TWAP_WINDOW || 1800);
   const twapMaxDeviationBps = Number(process.env.LP_TWAP_MAX_DEVIATION_BPS || 500);
+  const twapMaxDeviationTicks = bpsToTicks(twapMaxDeviationBps);
   const observationCardinality = Number(
     process.env.LP_OBSERVATION_CARDINALITY || DEFAULT_OBSERVATION_CARDINALITY
   );
@@ -129,16 +148,20 @@ async function main() {
   if (!VALID_FEE_TIERS.includes(fee)) {
     throw new Error(`LP_FEE must be one of ${VALID_FEE_TIERS.join(", ")} — got ${fee}`);
   }
-  if (!Number.isInteger(twapWindow) || twapWindow < MIN_TWAP_WINDOW) {
-    throw new Error(`LP_TWAP_WINDOW must be an integer >= ${MIN_TWAP_WINDOW} — got ${twapWindow}`);
+  if (!Number.isInteger(twapWindow) || twapWindow < MIN_TWAP_WINDOW || twapWindow > MAX_TWAP_WINDOW) {
+    throw new Error(
+      `LP_TWAP_WINDOW must be an integer in ${MIN_TWAP_WINDOW}..${MAX_TWAP_WINDOW} — got ${twapWindow}`
+    );
   }
   if (
     !Number.isInteger(twapMaxDeviationBps) ||
     twapMaxDeviationBps <= 0 ||
-    twapMaxDeviationBps > MAX_TWAP_DEVIATION_BPS
+    twapMaxDeviationTicks < 1 ||
+    twapMaxDeviationTicks > MAX_TWAP_DEVIATION_TICKS
   ) {
     throw new Error(
-      `LP_TWAP_MAX_DEVIATION_BPS must be in 1..${MAX_TWAP_DEVIATION_BPS} — got ${twapMaxDeviationBps}`
+      `LP_TWAP_MAX_DEVIATION_BPS must convert into 1..${MAX_TWAP_DEVIATION_TICKS} ticks — ` +
+        `got ${twapMaxDeviationBps} bps = ${twapMaxDeviationTicks} ticks`
     );
   }
   if (!Number.isInteger(observationCardinality) || observationCardinality < 1 || observationCardinality > 65535) {
@@ -165,7 +188,9 @@ async function main() {
   console.log(`Final owner:        ${multisig}`);
   console.log(`TokenX:             ${tokenXName} (${tokenXSymbol})`);
   console.log(`TWAP window:        ${twapWindow}s`);
-  console.log(`TWAP max deviation: ${twapMaxDeviationBps} bps`);
+  console.log(
+    `TWAP max deviation: ${twapMaxDeviationBps} bps = ${twapMaxDeviationTicks} ticks (what the contract stores)`
+  );
   console.log(
     `Initial epoch:      ${epochId ? `${epochId} capped at ${epochCapRaw} TokenX` : "NOT ARMED"}`
   );
@@ -294,7 +319,7 @@ async function main() {
       swapRouter,
       deployer.address,
       twapWindow,
-      twapMaxDeviationBps,
+      twapMaxDeviationTicks,
     ],
     deployer
   );
@@ -321,7 +346,7 @@ async function main() {
       asset,
       deployer.address,
       twapWindow,
-      twapMaxDeviationBps,
+      twapMaxDeviationTicks,
     ],
     deployer
   );
@@ -439,7 +464,7 @@ async function main() {
   check("LPStakingVault.depositsPaused", await vault.depositsPaused(), false);
   check("LPStakingVault.rebalancePaused", await vault.rebalancePaused(), false);
   check("LPStakingVault.twapWindow", await vault.twapWindow(), twapWindow);
-  check("LPStakingVault.maxTwapDeviationBps", await vault.maxTwapDeviationBps(), twapMaxDeviationBps);
+  check("LPStakingVault.maxTwapDeviationTicks", await vault.maxTwapDeviationTicks(), twapMaxDeviationTicks);
   check("LPStakingVault.owner", await vault.owner(), multisig);
 
   check("LPZapper.vault", await zapper.vault(), vaultDeploy.address);
@@ -453,7 +478,7 @@ async function main() {
   check("LPZapper.asset", await zapper.asset(), asset);
   check("LPZapper.usdcIsToken0", await zapper.usdcIsToken0(), usdc === token0);
   check("LPZapper.twapWindow", await zapper.twapWindow(), twapWindow);
-  check("LPZapper.maxTwapDeviationBps", await zapper.maxTwapDeviationBps(), twapMaxDeviationBps);
+  check("LPZapper.maxTwapDeviationTicks", await zapper.maxTwapDeviationTicks(), twapMaxDeviationTicks);
   check("LPZapper.owner", await zapper.owner(), multisig);
 
   // ──────────────────────── summary ────────────────────────
@@ -477,12 +502,12 @@ async function main() {
   console.log(
     `npx hardhat verify --network ${network} ${vaultDeploy.address} ` +
       `${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ${swapRouter} ` +
-      `${deployer.address} ${twapWindow} ${twapMaxDeviationBps}`
+      `${deployer.address} ${twapWindow} ${twapMaxDeviationTicks}`
   );
   console.log(
     `npx hardhat verify --network ${network} ${zapperDeploy.address} ` +
       `${vaultDeploy.address} ${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ` +
-      `${swapRouter} ${usdc} ${asset} ${deployer.address} ${twapWindow} ${twapMaxDeviationBps}`
+      `${swapRouter} ${usdc} ${asset} ${deployer.address} ${twapWindow} ${twapMaxDeviationTicks}`
   );
   console.log(
     "\nThe constructor argument is the DEPLOYER, not the multisig — ownership moved " +

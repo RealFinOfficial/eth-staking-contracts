@@ -63,20 +63,25 @@ contract SwapSlippageMEVTest is ForkHarness {
         assertEq(vault.stakerOf(newTokenId), alice, "the rebalance completed despite its own impact");
         assertGt(
             _deviationTicks(),
-            uint256(profile.maxDevBps),
+            uint256(profile.maxDevTicks),
             "the swap itself left spot further from the TWAP than the guard would ever admit"
         );
     }
 
     /**
-     * @dev FINDING SEC-02 (S-04), part 2: `rebalance` only calls `_executeSwap` when
-     *      `swap.amountIn > 0`, so a no-swap rebalance never touches the guard at all. It
-     *      re-mints at whatever spot a sandwicher has set. Asserted as CURRENT behaviour.
+     * @dev SEC-02, part 2 — and DELIBERATE since the 2026-08-26 review (recommendation 3),
+     *      not a finding. `rebalance` only calls `_executeSwap` when `swap.amountIn > 0`, so
+     *      a no-swap rebalance never touches the guard: a range move must stay available at
+     *      any price, and it is the fallback the frontend offers while the guard is tripped
+     *      ("move range now, optimize ratio later"). The price of that is stated in the
+     *      {SwapParams} NatSpec: with `amountIn == 0` the mint minimums are the only
+     *      protection on the mint, so they must be quoted tightly. Pinned here so the skip
+     *      cannot be removed by accident.
      */
     function test_SEC02_NoSwapRebalanceNeverConsultsTheGuard() public {
         uint256 tokenId = _mintAndStake(alice, 600);
         _pushSpotUp(PUSH_UP_USDC);
-        assertGt(_deviationTicks(), uint256(profile.maxDevBps), "precondition: the guard is tripped");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "precondition: the guard is tripped");
 
         int24 tick = _currentTick();
         vm.prank(alice);
@@ -84,7 +89,7 @@ contract SwapSlippageMEVTest is ForkHarness {
             vault.rebalance(tokenId, _alignDown(tick) - 6000, _alignDown(tick) - 60, _noSwap(), FAR_DEADLINE);
 
         assertEq(vault.stakerOf(newTokenId), alice, "the re-mint happened at a price the guard rejects for swaps");
-        assertGt(_deviationTicks(), uint256(profile.maxDevBps), "and the market was still manipulated when it did");
+        assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "and the market was still manipulated when it did");
     }
 
     // ──────────────────────── Sandwiching ──────────────────────
@@ -104,7 +109,7 @@ contract SwapSlippageMEVTest is ForkHarness {
         vm.revertToState(snap);
 
         _pushSpotUp(SANDWICH_USDC);
-        assertLe(_deviationTicks(), uint256(profile.maxDevBps), "the sandwich must stay inside the guard's ceiling");
+        assertLe(_deviationTicks(), uint256(profile.maxDevTicks), "the sandwich must stay inside the guard's ceiling");
         uint256 sandwichedLiquidity = _zapAndReadLiquidity(alice, lower, upper);
 
         assertLt(sandwichedLiquidity, cleanLiquidity, "a sandwich inside the tolerance really does cost the zapper");

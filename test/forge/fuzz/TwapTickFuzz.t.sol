@@ -22,16 +22,15 @@ import {TwapGuard} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
  *      cumulatives from a chosen mean and so can never hand the guard a remainder, which is
  *      exactly the input that makes the floor correction observable.
  *
- *  Domain: ticks are bounded to Uniswap's own usable range (+/-887272) and windows to
- *  [MIN_TWAP_WINDOW, 1 day]. Outside that range the guard's `int56 -> int24` cast wraps and
+ *  Domain: ticks are bounded to Uniswap's own usable range (+/-887272) and windows to the
+ *  guard's own [MIN_TWAP_WINDOW, MAX_TWAP_WINDOW]. Outside the tick range the `int56 ->
+ *  int24` cast wraps and
  *  the `currentTick - twapTick` subtraction can panic; both are single, named behaviours and
  *  belong in the unit file, not in a property whose domain would then be self-contradictory.
  */
 contract TwapTickFuzzTest is LocalHarness {
     /// @dev Uniswap's own usable tick bound. A real oracle mean can never sit outside it.
     int256 internal constant MAX_USABLE_TICK = 887272;
-    /// @dev Widest window the properties explore. Production runs 1800.
-    uint256 internal constant MAX_WINDOW = 1 days;
 
     RawTickPool internal rawPool;
     /// @dev {TwapGuard} is abstract; the vault is the smallest concrete carrier of it, and
@@ -63,7 +62,7 @@ contract TwapTickFuzzTest is LocalHarness {
      *      a floor rather than against a second division.
      */
     function testFuzz_TwapGuard_MeanTickIsTheFlooredQuotient(uint256 windowSeed, int256 deltaSeed) public {
-        uint32 window = uint32(bound(windowSeed, MIN_TWAP_WINDOW, MAX_WINDOW));
+        uint32 window = uint32(bound(windowSeed, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW));
         int256 w = int256(uint256(window));
         int256 delta = bound(deltaSeed, -MAX_USABLE_TICK * w, MAX_USABLE_TICK * w);
 
@@ -82,7 +81,7 @@ contract TwapTickFuzzTest is LocalHarness {
      *      a real pool can produce.
      */
     function testFuzz_TwapGuard_MeanTickStaysInTheUsableTickRange(uint256 windowSeed, int256 tickSeed) public {
-        uint32 window = uint32(bound(windowSeed, MIN_TWAP_WINDOW, MAX_WINDOW));
+        uint32 window = uint32(bound(windowSeed, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW));
         int256 meanTick = bound(tickSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK);
 
         guard.setTwapParams(window, 500);
@@ -106,7 +105,7 @@ contract TwapTickFuzzTest is LocalHarness {
     {
         int24 spot = int24(bound(spotSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
         int24 mean = int24(bound(meanSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
-        uint24 ceiling = uint24(bound(ceilSeed, 1, MAX_TWAP_DEVIATION_BPS));
+        uint24 ceiling = uint24(bound(ceilSeed, 1, MAX_TWAP_DEVIATION_TICKS));
 
         guard.setTwapParams(MIN_TWAP_WINDOW, ceiling);
 
@@ -129,7 +128,7 @@ contract TwapTickFuzzTest is LocalHarness {
     ) public {
         int24 spot = int24(bound(spotSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
         int24 mean = int24(bound(meanSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
-        uint24 ceiling = uint24(bound(ceilSeed, 1, MAX_TWAP_DEVIATION_BPS));
+        uint24 ceiling = uint24(bound(ceilSeed, 1, MAX_TWAP_DEVIATION_TICKS));
 
         guard.setTwapParams(MIN_TWAP_WINDOW, ceiling);
         (uint256 distance, bool within) = _readGuard(spot, mean);
@@ -140,7 +139,7 @@ contract TwapTickFuzzTest is LocalHarness {
     /**
      * @dev Widening the ceiling can only ever admit more: the verdict is monotonic in the
      *      parameter. A guard that flipped a pass back to a fail as the operator relaxed it
-     *      would be unusable, and the bps-to-ticks approximation must not introduce one.
+     *      would be unusable.
      */
     function testFuzz_TwapGuard_WideningTheCeilingNeverRevokesAPass(
         int256 spotSeed,
@@ -150,8 +149,8 @@ contract TwapTickFuzzTest is LocalHarness {
     ) public {
         int24 spot = int24(bound(spotSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
         int24 mean = int24(bound(meanSeed, -MAX_USABLE_TICK, MAX_USABLE_TICK));
-        uint24 tight = uint24(bound(tightSeed, 1, MAX_TWAP_DEVIATION_BPS));
-        uint24 wide = uint24(bound(wideSeed, tight, MAX_TWAP_DEVIATION_BPS));
+        uint24 tight = uint24(bound(tightSeed, 1, MAX_TWAP_DEVIATION_TICKS));
+        uint24 wide = uint24(bound(wideSeed, tight, MAX_TWAP_DEVIATION_TICKS));
 
         guard.setTwapParams(MIN_TWAP_WINDOW, tight);
         (, bool withinTight) = _readGuard(spot, mean);
@@ -167,16 +166,19 @@ contract TwapTickFuzzTest is LocalHarness {
     // ──────────────────────── Parameter bounds ─────────────────
 
     /**
-     * @dev The window is bounded from BELOW only. The property states both halves in one
-     *      pass: below the minimum the setter reverts and nothing is stored; at or above it
-     *      the value is stored verbatim, however large.
+     * @dev The window is bounded on BOTH sides since the 2026-08-26 review. One pass states
+     *      every arm: below the minimum and above the maximum the setter reverts and nothing
+     *      is stored; inside the band the value is stored verbatim. The seed spans well past
+     *      both ends of the band.
      */
-    function testFuzz_TwapParams_WindowIsAcceptedExactlyFromTheMinimumUp(uint256 windowSeed) public {
-        uint32 window = uint32(bound(windowSeed, 0, uint256(MIN_TWAP_WINDOW) * 2));
+    function testFuzz_TwapParams_WindowIsAcceptedExactlyInsideItsBand(uint256 windowSeed) public {
+        uint32 window = uint32(bound(windowSeed, 0, uint256(MAX_TWAP_WINDOW) * 2));
 
         uint32 before_ = guard.twapWindow();
-        if (window < MIN_TWAP_WINDOW) {
-            vm.expectRevert(abi.encodeWithSelector(TwapGuard.InvalidTwapWindow.selector, window, MIN_TWAP_WINDOW));
+        if (window < MIN_TWAP_WINDOW || window > MAX_TWAP_WINDOW) {
+            vm.expectRevert(
+                abi.encodeWithSelector(TwapGuard.InvalidTwapWindow.selector, window, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW)
+            );
             guard.setTwapParams(window, 500);
             assertEq(guard.twapWindow(), before_, "a rejected window must leave the stored one untouched");
         } else {
@@ -185,23 +187,36 @@ contract TwapTickFuzzTest is LocalHarness {
         }
     }
 
+    /// @dev The upper half on its own, over the whole uint32 range above the maximum. This is
+    ///      the old SEC-03 finding inverted into a property: no oversize window is accepted.
+    function testFuzz_TwapParams_NoWindowPastTheMaximumIsEverAccepted(uint256 windowSeed) public {
+        uint32 window = uint32(bound(windowSeed, uint256(MAX_TWAP_WINDOW) + 1, type(uint32).max));
+
+        uint32 before_ = guard.twapWindow();
+        vm.expectRevert(
+            abi.encodeWithSelector(TwapGuard.InvalidTwapWindow.selector, window, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW)
+        );
+        guard.setTwapParams(window, 500);
+        assertEq(guard.twapWindow(), before_, "an oversize window can never be stored");
+    }
+
     /**
      * @dev The deviation ceiling is bounded on BOTH sides: zero is refused (it would brick
-     *      every swap) and anything past {MAX_TWAP_DEVIATION_BPS} is refused too.
+     *      every swap) and anything past {MAX_TWAP_DEVIATION_TICKS} is refused too.
      */
-    function testFuzz_TwapParams_DeviationIsAcceptedExactlyInsideItsCeiling(uint256 bpsSeed) public {
-        uint24 bps = uint24(bound(bpsSeed, 0, uint256(MAX_TWAP_DEVIATION_BPS) * 2));
+    function testFuzz_TwapParams_DeviationIsAcceptedExactlyInsideItsCeiling(uint256 ticksSeed) public {
+        uint24 ticks = uint24(bound(ticksSeed, 0, uint256(MAX_TWAP_DEVIATION_TICKS) * 2));
 
-        uint24 before_ = guard.maxTwapDeviationBps();
-        if (bps == 0 || bps > MAX_TWAP_DEVIATION_BPS) {
+        uint24 before_ = guard.maxTwapDeviationTicks();
+        if (ticks == 0 || ticks > MAX_TWAP_DEVIATION_TICKS) {
             vm.expectRevert(
-                abi.encodeWithSelector(TwapGuard.InvalidTwapDeviation.selector, bps, MAX_TWAP_DEVIATION_BPS)
+                abi.encodeWithSelector(TwapGuard.InvalidTwapDeviation.selector, ticks, MAX_TWAP_DEVIATION_TICKS)
             );
-            guard.setTwapParams(MIN_TWAP_WINDOW, bps);
-            assertEq(guard.maxTwapDeviationBps(), before_, "a rejected ceiling must leave the stored one untouched");
+            guard.setTwapParams(MIN_TWAP_WINDOW, ticks);
+            assertEq(guard.maxTwapDeviationTicks(), before_, "a rejected ceiling must leave the stored one untouched");
         } else {
-            guard.setTwapParams(MIN_TWAP_WINDOW, bps);
-            assertEq(guard.maxTwapDeviationBps(), bps, "an accepted ceiling is stored verbatim");
+            guard.setTwapParams(MIN_TWAP_WINDOW, ticks);
+            assertEq(guard.maxTwapDeviationTicks(), ticks, "an accepted ceiling is stored verbatim");
         }
     }
 

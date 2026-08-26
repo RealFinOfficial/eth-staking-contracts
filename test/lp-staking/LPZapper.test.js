@@ -14,7 +14,7 @@ describe("LPZapper", function () {
   const FEE = 3000;
   const OTHER_FEE = 500;
   const TWAP_WINDOW = 600;
-  const MAX_DEVIATION_BPS = 500;
+  const MAX_DEVIATION_TICKS = 500;
   const TICK_LOWER = -600;
   const TICK_UPPER = 600;
   const FAR_DEADLINE = 10n ** 12n;
@@ -52,7 +52,7 @@ describe("LPZapper", function () {
       asset: assetAddr,
       initialOwner: owner.address,
       twapWindow: TWAP_WINDOW,
-      maxDeviationBps: MAX_DEVIATION_BPS,
+      maxDeviationTicks: MAX_DEVIATION_TICKS,
       ...overrides,
     };
     const Zapper = await ethers.getContractFactory("LPZapper");
@@ -68,7 +68,7 @@ describe("LPZapper", function () {
       args.asset,
       args.initialOwner,
       args.twapWindow,
-      args.maxDeviationBps
+      args.maxDeviationTicks
     );
   }
 
@@ -168,7 +168,7 @@ describe("LPZapper", function () {
       routerAddr,
       owner.address,
       TWAP_WINDOW,
-      MAX_DEVIATION_BPS
+      MAX_DEVIATION_TICKS
     );
     vaultAddr = await vault.getAddress();
 
@@ -199,7 +199,7 @@ describe("LPZapper", function () {
 
       await expect(zap.deploymentTransaction())
         .to.emit(zap, "TwapParamsSet")
-        .withArgs(TWAP_WINDOW, MAX_DEVIATION_BPS);
+        .withArgs(TWAP_WINDOW, MAX_DEVIATION_TICKS);
     });
 
     it("rejects a zero vault, position manager, swap router or pool token", async function () {
@@ -287,13 +287,16 @@ describe("LPZapper", function () {
     it("enforces the TWAP bounds", async function () {
       await expect(deployZapper({ twapWindow: 299 }))
         .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
-        .withArgs(299, 300);
-      await expect(deployZapper({ maxDeviationBps: 0 }))
+        .withArgs(299, 300, 3600);
+      await expect(deployZapper({ twapWindow: 3601 }))
+        .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
+        .withArgs(3601, 300, 3600);
+      await expect(deployZapper({ maxDeviationTicks: 0 }))
         .to.be.revertedWithCustomError(zap, "InvalidTwapDeviation")
-        .withArgs(0, 2000);
-      await expect(deployZapper({ maxDeviationBps: 2001 }))
+        .withArgs(0, 1823);
+      await expect(deployZapper({ maxDeviationTicks: 1824 }))
         .to.be.revertedWithCustomError(zap, "InvalidTwapDeviation")
-        .withArgs(2001, 2000);
+        .withArgs(1824, 1823);
     });
   });
 
@@ -415,16 +418,16 @@ describe("LPZapper", function () {
     });
 
     it("blocks the zap when spot has drifted too far from the TWAP", async function () {
-      await pool.setTicks(MAX_DEVIATION_BPS + 1, 0);
+      await pool.setTicks(MAX_DEVIATION_TICKS + 1, 0);
 
       await expect(
         zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
       )
         .to.be.revertedWithCustomError(zap, "TwapDeviationTooHigh")
-        .withArgs(MAX_DEVIATION_BPS + 1, 0, MAX_DEVIATION_BPS);
+        .withArgs(MAX_DEVIATION_TICKS + 1, 0, MAX_DEVIATION_TICKS);
 
       // ...and lets it through again once spot is back inside the band
-      await pool.setTicks(MAX_DEVIATION_BPS, 0);
+      await pool.setTicks(MAX_DEVIATION_TICKS, 0);
       await expect(
         zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(zap, "ZappedIn");
@@ -542,13 +545,13 @@ describe("LPZapper", function () {
       // -301 tick-seconds over a 300 s window is a true mean of -1.0033: floored it is -2,
       // truncated it is -1. At spot 499 the two readings give opposite verdicts, so this
       // pins which one the guard actually used.
-      await zap.setTwapParams(300, MAX_DEVIATION_BPS);
+      await zap.setTwapParams(300, MAX_DEVIATION_TICKS);
       await pool.setTickCumulatives([0, -301]);
 
       await pool.setCurrentTick(499);
       await expect(zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE))
         .to.be.revertedWithCustomError(zap, "TwapDeviationTooHigh")
-        .withArgs(499, -2, MAX_DEVIATION_BPS);
+        .withArgs(499, -2, MAX_DEVIATION_TICKS);
 
       // one tick closer is exactly the ceiling away from -2, and the ceiling is inclusive
       await pool.setCurrentTick(498);
@@ -707,14 +710,23 @@ describe("LPZapper", function () {
 
       await expect(zap.setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet").withArgs(1200, 100);
       expect(await zap.twapWindow()).to.equal(1200);
-      expect(await zap.maxTwapDeviationBps()).to.equal(100);
+      expect(await zap.maxTwapDeviationTicks()).to.equal(100);
 
       await expect(zap.setTwapParams(299, 100))
         .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
-        .withArgs(299, 300);
-      await expect(zap.setTwapParams(1200, 2001))
+        .withArgs(299, 300, 3600);
+      await expect(zap.setTwapParams(1200, 1824))
         .to.be.revertedWithCustomError(zap, "InvalidTwapDeviation")
-        .withArgs(2001, 2000);
+        .withArgs(1824, 1823);
+    });
+
+    it("rejects a window one second above the maximum", async function () {
+      await expect(zap.setTwapParams(3601, 100))
+        .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
+        .withArgs(3601, 300, 3600);
+
+      await expect(zap.setTwapParams(3600, 100)).to.emit(zap, "TwapParamsSet").withArgs(3600, 100);
+      expect(await zap.twapWindow()).to.equal(3600);
     });
 
     it("sweeps stranded dust, owner only and never to the zero address", async function () {

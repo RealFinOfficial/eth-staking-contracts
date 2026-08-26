@@ -252,7 +252,7 @@ abstract contract ForkHarness is BaseForge {
             profile.router,
             address(this),
             profile.twapWindow,
-            profile.maxDevBps
+            profile.maxDevTicks
         );
         zapper = new LPZapper(
             address(vault),
@@ -266,7 +266,7 @@ abstract contract ForkHarness is BaseForge {
             profile.asset,
             address(this),
             profile.twapWindow,
-            profile.maxDevBps
+            profile.maxDevTicks
         );
 
         // Wiring, while the deployer still owns everything.

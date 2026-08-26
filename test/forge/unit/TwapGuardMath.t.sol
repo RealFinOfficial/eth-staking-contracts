@@ -215,18 +215,19 @@ contract TwapGuardMathTest is BaseForge {
         assertFalse(above, "and reject both");
     }
 
-    /// @dev `maxDeviationTicks` is the configured bps NUMBER, reinterpreted as a tick count.
-    ///      That is the documented looseness, pinned here so a change cannot pass unnoticed.
-    function test_Guard_ReportsTheConfiguredBpsNumberAsATickCount() public {
+    /// @dev The stored parameter IS the tick count the preview reports and the guard
+    ///      enforces — no conversion anywhere, and the ceiling on it is 1823 ticks.
+    function test_Guard_ReportsTheConfiguredTickCount() public {
         _setCumulatives(0, 0);
         pool.setCurrentTick(0);
 
         (,, int24 maxDeviationTicks,) = guard.previewTwap();
-        assertEq(maxDeviationTicks, int24(uint24(CEILING)), "bps are used as ticks, one for one");
+        assertEq(maxDeviationTicks, int24(uint24(CEILING)), "the preview reports the stored tick count verbatim");
 
-        guard.setTwapParams(WINDOW, MAX_TWAP_DEVIATION_BPS);
+        guard.setTwapParams(WINDOW, MAX_TWAP_DEVIATION_TICKS);
         (,, int24 widest,) = guard.previewTwap();
-        assertEq(widest, int24(uint24(MAX_TWAP_DEVIATION_BPS)), "the widest setting is 2000 ticks, not 2000 bps");
+        assertEq(widest, int24(uint24(MAX_TWAP_DEVIATION_TICKS)), "the widest setting is 1823 ticks");
+        assertEq(widest, 1823, "and 1823 is floor(ln 1.2 / ln 1.0001), a 20% price move");
     }
 
     /// @dev The preview and the enforcing path must never disagree; the preview exists
@@ -258,9 +259,32 @@ contract TwapGuardMathTest is BaseForge {
 
     function test_Guard_SetterRejectsAWindowOneSecondBelowTheMinimum() public {
         vm.expectRevert(
-            abi.encodeWithSelector(TwapGuard.InvalidTwapWindow.selector, MIN_TWAP_WINDOW - 1, MIN_TWAP_WINDOW)
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MIN_TWAP_WINDOW - 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
         );
         guard.setTwapParams(MIN_TWAP_WINDOW - 1, CEILING);
+    }
+
+    /// @dev The ceiling the 2026-08-26 review asked for: the window is bounded on BOTH
+    ///      sides, so no owner transaction can set a lookback the oracle cannot serve.
+    function test_Guard_SetterRejectsAWindowOneSecondAboveTheMaximum() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MAX_TWAP_WINDOW + 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
+        guard.setTwapParams(MAX_TWAP_WINDOW + 1, CEILING);
+
+        // and the extreme the old, unbounded setter used to accept
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, type(uint32).max, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
+        guard.setTwapParams(type(uint32).max, CEILING);
+
+        assertEq(guard.twapWindow(), WINDOW, "a rejected window must leave the stored one untouched");
     }
 
     function test_Guard_SetterAcceptsExactlyTheMinimumWindow() public {
@@ -268,9 +292,26 @@ contract TwapGuardMathTest is BaseForge {
         assertEq(guard.twapWindow(), MIN_TWAP_WINDOW, "the minimum window itself must be accepted");
     }
 
+    function test_Guard_SetterAcceptsExactlyTheMaximumWindow() public {
+        guard.setTwapParams(MAX_TWAP_WINDOW, CEILING);
+        assertEq(guard.twapWindow(), MAX_TWAP_WINDOW, "the maximum window itself must be accepted");
+    }
+
     function test_Guard_SetterAcceptsExactlyTheMaximumDeviation() public {
-        guard.setTwapParams(WINDOW, MAX_TWAP_DEVIATION_BPS);
-        assertEq(guard.maxTwapDeviationBps(), MAX_TWAP_DEVIATION_BPS, "the maximum deviation itself must be accepted");
+        guard.setTwapParams(WINDOW, MAX_TWAP_DEVIATION_TICKS);
+        assertEq(
+            guard.maxTwapDeviationTicks(), MAX_TWAP_DEVIATION_TICKS, "the maximum deviation itself must be accepted"
+        );
+    }
+
+    function test_Guard_SetterRejectsOneTickPastTheMaximumDeviation() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapDeviation.selector, MAX_TWAP_DEVIATION_TICKS + 1, MAX_TWAP_DEVIATION_TICKS
+            )
+        );
+        guard.setTwapParams(WINDOW, MAX_TWAP_DEVIATION_TICKS + 1);
+        assertEq(guard.maxTwapDeviationTicks(), CEILING, "a rejected ceiling must leave the stored one untouched");
     }
 
     function test_Guard_SetterEmitsTheFullNewState() public {

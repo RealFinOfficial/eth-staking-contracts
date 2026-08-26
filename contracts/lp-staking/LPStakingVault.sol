@@ -145,7 +145,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @param _swapRouter SwapRouter02 address used by `rebalance`.
      * @param _initialOwner Owner (multisig) for the admin setters.
      * @param _twapWindow Initial TWAP window in seconds.
-     * @param _maxTwapDeviationBps Initial spot-vs-TWAP deviation ceiling in bps.
+     * @param _maxTwapDeviationTicks Initial spot-vs-TWAP deviation ceiling, in ticks.
      */
     constructor(
         address _positionManager,
@@ -156,8 +156,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         address _swapRouter,
         address _initialOwner,
         uint32 _twapWindow,
-        uint24 _maxTwapDeviationBps
-    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationBps) {
+        uint24 _maxTwapDeviationTicks
+    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationTicks) {
         if (_positionManager == address(0) || _swapRouter == address(0)) revert ZeroAddress();
         if (_token0 == address(0) || _token1 == address(0)) revert ZeroAddress();
         if (_token0 >= _token1) revert TokensNotSorted(_token0, _token1);
@@ -360,11 +360,11 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
 
     /**
      * @notice Retunes the spot-vs-TWAP guard used by `rebalance`.
-     * @param window New TWAP window in seconds (>= MIN_TWAP_WINDOW).
-     * @param maxDeviationBps New deviation ceiling in bps (0 < x <= MAX_TWAP_DEVIATION_BPS).
+     * @param window New TWAP window in seconds (MIN_TWAP_WINDOW..MAX_TWAP_WINDOW).
+     * @param maxDeviationTicks New deviation ceiling in ticks (0 < x <= MAX_TWAP_DEVIATION_TICKS).
      */
-    function setTwapParams(uint32 window, uint24 maxDeviationBps) external onlyOwner {
-        _setTwapParams(window, maxDeviationBps);
+    function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOwner {
+        _setTwapParams(window, maxDeviationTicks);
     }
 
     /**

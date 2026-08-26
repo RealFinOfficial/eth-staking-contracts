@@ -13,7 +13,7 @@ describe("LPStakingVault", function () {
   const FEE = 3000;
   const OTHER_FEE = 500;
   const TWAP_WINDOW = 600;
-  const MAX_DEVIATION_BPS = 500;
+  const MAX_DEVIATION_TICKS = 500;
   const TICK_LOWER = -600;
   const TICK_UPPER = 600;
   const NEW_TICK_LOWER = -1200;
@@ -50,7 +50,7 @@ describe("LPStakingVault", function () {
       swapRouter: routerAddr,
       initialOwner: owner.address,
       twapWindow: TWAP_WINDOW,
-      maxDeviationBps: MAX_DEVIATION_BPS,
+      maxDeviationTicks: MAX_DEVIATION_TICKS,
       ...overrides,
     };
     const Vault = await ethers.getContractFactory("LPStakingVault");
@@ -63,7 +63,7 @@ describe("LPStakingVault", function () {
       args.swapRouter,
       args.initialOwner,
       args.twapWindow,
-      args.maxDeviationBps
+      args.maxDeviationTicks
     );
   }
 
@@ -167,14 +167,14 @@ describe("LPStakingVault", function () {
       expect(await vault.fee()).to.equal(FEE);
       expect(await vault.owner()).to.equal(owner.address);
       expect(await vault.twapWindow()).to.equal(TWAP_WINDOW);
-      expect(await vault.maxTwapDeviationBps()).to.equal(MAX_DEVIATION_BPS);
+      expect(await vault.maxTwapDeviationTicks()).to.equal(MAX_DEVIATION_TICKS);
       expect(await vault.depositsPaused()).to.equal(false);
       expect(await vault.rebalancePaused()).to.equal(false);
       expect(await vault.zapper()).to.equal(ZERO);
 
       await expect(vault.deploymentTransaction())
         .to.emit(vault, "TwapParamsSet")
-        .withArgs(TWAP_WINDOW, MAX_DEVIATION_BPS);
+        .withArgs(TWAP_WINDOW, MAX_DEVIATION_TICKS);
     });
 
     it("rejects a zero position manager, swap router or pool token", async function () {
@@ -254,26 +254,36 @@ describe("LPStakingVault", function () {
       expect(await (await deployVault()).pool()).to.equal(poolAddr);
     });
 
-    it("enforces the TWAP window floor", async function () {
+    it("enforces the TWAP window bounds on both sides", async function () {
       await expect(deployVault({ twapWindow: 299 }))
         .to.be.revertedWithCustomError(vault, "InvalidTwapWindow")
-        .withArgs(299, 300);
+        .withArgs(299, 300, 3600);
+
+      await expect(deployVault({ twapWindow: 3601 }))
+        .to.be.revertedWithCustomError(vault, "InvalidTwapWindow")
+        .withArgs(3601, 300, 3600);
 
       const atFloor = await deployVault({ twapWindow: 300 });
       expect(await atFloor.twapWindow()).to.equal(300);
+
+      const atCeiling = await deployVault({ twapWindow: 3600 });
+      expect(await atCeiling.twapWindow()).to.equal(3600);
     });
 
-    it("enforces the TWAP deviation bounds on both sides", async function () {
-      await expect(deployVault({ maxDeviationBps: 0 }))
+    it("enforces the TWAP deviation bounds on both sides, in ticks", async function () {
+      await expect(deployVault({ maxDeviationTicks: 0 }))
         .to.be.revertedWithCustomError(vault, "InvalidTwapDeviation")
-        .withArgs(0, 2000);
+        .withArgs(0, 1823);
 
-      await expect(deployVault({ maxDeviationBps: 2001 }))
+      await expect(deployVault({ maxDeviationTicks: 1824 }))
         .to.be.revertedWithCustomError(vault, "InvalidTwapDeviation")
-        .withArgs(2001, 2000);
+        .withArgs(1824, 1823);
 
-      const atCeiling = await deployVault({ maxDeviationBps: 2000 });
-      expect(await atCeiling.maxTwapDeviationBps()).to.equal(2000);
+      // 1823 = floor(ln 1.2 / ln 1.0001), the tick count for a 20% price move
+      const atCeiling = await deployVault({ maxDeviationTicks: 1823 });
+      expect(await atCeiling.maxTwapDeviationTicks()).to.equal(1823);
+      expect(await atCeiling.MAX_TWAP_DEVIATION_TICKS()).to.equal(1823);
+      expect(await atCeiling.MAX_TWAP_WINDOW()).to.equal(3600);
     });
   });
 
@@ -773,24 +783,24 @@ describe("LPStakingVault", function () {
     it("reverts when spot has drifted further from the TWAP than the ceiling allows", async function () {
       const tokenId = await stakePosition(alice);
       await primeHappyPath(tokenId);
-      await pool.setTicks(MAX_DEVIATION_BPS + 1, 0);
+      await pool.setTicks(MAX_DEVIATION_TICKS + 1, 0);
 
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
       )
         .to.be.revertedWithCustomError(vault, "TwapDeviationTooHigh")
-        .withArgs(MAX_DEVIATION_BPS + 1, 0, MAX_DEVIATION_BPS);
+        .withArgs(MAX_DEVIATION_TICKS + 1, 0, MAX_DEVIATION_TICKS);
     });
 
     it("passes at exactly the deviation ceiling, on both sides of the TWAP", async function () {
-      await pool.setTicks(1000 + MAX_DEVIATION_BPS, 1000);
+      await pool.setTicks(1000 + MAX_DEVIATION_TICKS, 1000);
       const above = await stakePosition(alice);
       await primeHappyPath(above);
       await expect(
         vault.connect(alice).rebalance(above, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(vault, "Rebalanced");
 
-      await pool.setTicks(1000 - MAX_DEVIATION_BPS, 1000);
+      await pool.setTicks(1000 - MAX_DEVIATION_TICKS, 1000);
       const below = await stakePosition(bob);
       await primeHappyPath(below);
       await expect(
@@ -1349,17 +1359,31 @@ describe("LPStakingVault", function () {
         .to.emit(vault, "TwapParamsSet")
         .withArgs(1200, 100);
       expect(await vault.twapWindow()).to.equal(1200);
-      expect(await vault.maxTwapDeviationBps()).to.equal(100);
+      expect(await vault.maxTwapDeviationTicks()).to.equal(100);
 
       await expect(vault.setTwapParams(299, 100))
         .to.be.revertedWithCustomError(vault, "InvalidTwapWindow")
-        .withArgs(299, 300);
+        .withArgs(299, 300, 3600);
       await expect(vault.setTwapParams(1200, 0))
         .to.be.revertedWithCustomError(vault, "InvalidTwapDeviation")
-        .withArgs(0, 2000);
-      await expect(vault.setTwapParams(1200, 2001))
+        .withArgs(0, 1823);
+      await expect(vault.setTwapParams(1200, 1824))
         .to.be.revertedWithCustomError(vault, "InvalidTwapDeviation")
-        .withArgs(2001, 2000);
+        .withArgs(1824, 1823);
+    });
+
+    it("rejects a window one second above the maximum", async function () {
+      await expect(vault.setTwapParams(3601, 100))
+        .to.be.revertedWithCustomError(vault, "InvalidTwapWindow")
+        .withArgs(3601, 300, 3600);
+      // and the whole uint32 top end goes the same way, which is what SEC-03 needed
+      await expect(vault.setTwapParams(4294967295n, 100))
+        .to.be.revertedWithCustomError(vault, "InvalidTwapWindow")
+        .withArgs(4294967295n, 300, 3600);
+
+      // the boundary itself is accepted, so the bound sits exactly where it claims to
+      await expect(vault.setTwapParams(3600, 100)).to.emit(vault, "TwapParamsSet").withArgs(3600, 100);
+      expect(await vault.twapWindow()).to.equal(3600);
     });
 
     it("toggles the deposit pause, owner only", async function () {
@@ -1408,24 +1432,24 @@ describe("LPStakingVault", function () {
     });
 
     it("previewTwap reports the guard inputs and the verdict on both sides", async function () {
-      await pool.setTicks(1000 + MAX_DEVIATION_BPS, 1000);
+      await pool.setTicks(1000 + MAX_DEVIATION_TICKS, 1000);
       let preview = await vault.previewTwap();
-      expect(preview.currentTick).to.equal(1000 + MAX_DEVIATION_BPS);
+      expect(preview.currentTick).to.equal(1000 + MAX_DEVIATION_TICKS);
       expect(preview.twapTick).to.equal(1000);
-      expect(preview.maxDeviationTicks).to.equal(MAX_DEVIATION_BPS);
+      expect(preview.maxDeviationTicks).to.equal(MAX_DEVIATION_TICKS);
       expect(preview.withinBounds).to.equal(true);
 
-      await pool.setTicks(1000 + MAX_DEVIATION_BPS + 1, 1000);
+      await pool.setTicks(1000 + MAX_DEVIATION_TICKS + 1, 1000);
       preview = await vault.previewTwap();
       expect(preview.withinBounds).to.equal(false);
 
-      await pool.setTicks(-(MAX_DEVIATION_BPS + 1), 0);
+      await pool.setTicks(-(MAX_DEVIATION_TICKS + 1), 0);
       preview = await vault.previewTwap();
-      expect(preview.currentTick).to.equal(-(MAX_DEVIATION_BPS + 1));
+      expect(preview.currentTick).to.equal(-(MAX_DEVIATION_TICKS + 1));
       expect(preview.twapTick).to.equal(0);
       expect(preview.withinBounds).to.equal(false);
 
-      await pool.setTicks(-MAX_DEVIATION_BPS, 0);
+      await pool.setTicks(-MAX_DEVIATION_TICKS, 0);
       preview = await vault.previewTwap();
       expect(preview.withinBounds).to.equal(true);
     });
@@ -1434,7 +1458,7 @@ describe("LPStakingVault", function () {
       // The pool's derived series always divides the window exactly, so the guard's floor
       // correction is unreachable through it. Raw cumulatives put a remainder in front of it:
       // -301 tick-seconds over 300 s is a true mean of -1.0033.
-      await vault.setTwapParams(300, MAX_DEVIATION_BPS);
+      await vault.setTwapParams(300, MAX_DEVIATION_TICKS);
 
       await pool.setTickCumulatives([0, -301]);
       expect((await vault.previewTwap()).twapTick).to.equal(-2);
