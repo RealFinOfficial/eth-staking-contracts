@@ -21,6 +21,11 @@ module.exports = {
   skipFiles: [
     // Test-only mocks. They exist to drive the contracts under test and are never deployed.
     "lp-staking/mocks",
+
+    // Thin wrappers around stock OpenZeppelin contracts (ERC1967Proxy, TimelockController).
+    // They exist so the repo owns their artifacts under `contracts/lp-staking/`; they add no
+    // statements of their own, and what they inherit is OZ code audited upstream.
+    "lp-staking/deploy",
     "MockERC20.sol",
     "MockERC20Decimals.sol",
 

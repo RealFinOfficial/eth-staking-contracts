@@ -8,3 +8,9 @@ coverage/
 coverage.json
 .env
 lcov.info
+
+# `hardhat-upgrades` writes one manifest per network under .openzeppelin/. The named
+# networks (sepolia, mainnet) are COMMITTED — they are the storage-layout baseline
+# `validateUpgrade` grades a new implementation against. The `unknown-<chainId>.json`
+# files are throwaway: every in-process fork run and every ephemeral node writes one.
+.openzeppelin/unknown-*.json
