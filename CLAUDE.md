@@ -37,14 +37,20 @@ A second stack, independent of the pools above: users provide Uniswap V3 ASSET-U
 liquidity and are rewarded in TokenX. It shares no contract, no owner and no token with
 `StakingPool` / `WeightedStakingPool`.
 
-- **`LPStakingVault.sol`** — custody only. Holds staked position NFTs, records who staked
-  each one, and lets the staker `rebalance` (pull all liquidity and fees, optional swap,
-  mint a new range, refund dust, burn the emptied NFT) without ever losing custody. It
-  computes no rewards and stores no dollar values — scoring is off-chain, from the
-  full-state events. `unstake` is never gated by a pause switch, a signature or backend
-  liveness. Deposits and `rebalance` have one owner switch each — `setDepositsPaused`
-  (which also stops zaps, because `zapIn` ends in `stakeFor`) and `setRebalancePaused`,
-  the incident switch for the one complex path in an immutable contract
+- **`LPStakingVault.sol`** — custody only, behind a **UUPS proxy** (`deploy/LPProxy.sol`).
+  Holds staked position NFTs, records who staked each one, and lets the staker `rebalance`
+  (pull all liquidity and fees, optional swap, mint a new range, refund dust, burn the
+  emptied NFT) without ever losing custody. It computes no rewards and stores no dollar
+  values — scoring is off-chain, from the full-state events. `unstake` is never gated by a
+  pause switch, a signature or backend liveness. Deposits and `rebalance` have one guardian
+  switch each — `setDepositsPaused` (which also stops zaps, because `zapIn` ends in
+  `stakeFor`) and `setRebalancePaused`, the FAST incident switch for the one complex path;
+  an upgrade is the slow one. It is upgradeable because `stakers[tokenId]` is the only
+  record of who owns each custodied NFT and the NFTs sit at this address: a replacement
+  contract would strand both. Two admin tiers, both on the proxy — **owner** (a
+  `TimelockController`, `deploy/LPTimelock.sol`): upgrades, `setTwapParams`, `setZapper`,
+  `setGuardian`; **guardian** (the multisig, no delay): both pauses and `rescuePosition`
+  (the NFT goes to the guardian). Ownership is two-step and `renounceOwnership` reverts
 - **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
   `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
   no funds and no NFTs between transactions. The vault must whitelist it with `setZapper`
@@ -59,16 +65,18 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   figure and what the user already claimed; `claimAsset` pays ASSET out of a pre-funded
   balance and stays off until the owner enables it. One typehash per leg so a voucher cannot
   be spent on the other, and the signed `user` is always `msg.sender`, never an argument.
-  It is the one upgradeable contract in the stack so far, because `claimed[user]` must
-  survive a fix: a replacement contract would restart those ledgers at zero and make every
-  outstanding lifetime voucher payable twice. Two admin tiers, both on the proxy —
+  It is upgradeable because `claimed[user]` must survive a fix: a replacement contract would
+  restart those ledgers at zero and make every outstanding lifetime voucher payable twice.
+  Two admin tiers, both on the proxy —
   **owner** (a `TimelockController`, `deploy/LPTimelock.sol`): upgrades,
   `setAssetClaimsEnabled`, `setGuardian`; **guardian** (the multisig, no delay):
   `setSigner`, `setPaused`, `recoverExcessAsset` (funds go to the guardian). Ownership is
   two-step and `renounceOwnership` reverts — a renounce would freeze the upgrade path
 
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
-deviates from the pool TWAP by more than `maxTwapDeviationTicks`. Callers still carry their
+deviates from the pool TWAP by more than `maxTwapDeviationTicks`. The guard's `pool` is
+`immutable` on both; its two parameters live in an ERC-7201 namespace shared by both, which
+the vault's `initialize` and the zapper's constructor each seed. Callers still carry their
 own `amountOutMin` / `amount0Min` / `amount1Min` — the guard is a manipulation circuit
 breaker, not a pricing oracle, and the exact protection is those minimums. The parameter is
 a tick count, not bps: the window is bounded to 300–3600 s and the ceiling to 1823 ticks
@@ -79,13 +87,14 @@ the guard, deliberately: a no-swap range move must stay available at any price.
 
 Both also refuse unsolicited position NFTs: `onERC721Received` accepts a safe transfer only
 inside their own mint/stake flow. A plain `transferFrom` bypasses the hook entirely, so both
-carry an owner `rescuePosition(tokenId)` that sends a stranded NFT to `owner()`. The vault's
-is restricted to `stakerOf(tokenId) == address(0)`; since record and custody are always
-created and destroyed in the same transaction, a staked position can never be reached by it.
+carry a `rescuePosition(tokenId)` that sends a stranded NFT to the address that holds the
+recovery tier — the vault's `guardian()`, the zapper's `owner()`. The vault's is restricted to
+`stakerOf(tokenId) == address(0)`; since record and custody are always created and destroyed
+in the same transaction, a staked position can never be reached by it.
 
 Deliberate design choices an auditor is expected to question — the `recoverExcessAsset`
-timing, the tick-vs-bps bound, one-step `Ownable` on the three non-upgradeable contracts,
-the distributor's proxy and two-tier admin, the whole-balance mint/refund and the epoch cap's
+timing, the tick-vs-bps bound, one-step `Ownable` on the two non-upgradeable contracts,
+the two proxies and their two-tier admin, the whole-balance mint/refund and the epoch cap's
 role — are written up in `docs/lp-staking-audit-notes.md` (upgradeability is item 14).
 
 ### Deploy order
@@ -98,20 +107,26 @@ role — are written up in `docs/lp-staking-audit-notes.md` (upgradeability is i
 3. `LPProxy(distributorImpl, initialize(multisig, guardian, signer))` — the proxy runs
    `initialize` in its own deployment transaction, so there is no window in which an
    uninitialized proxy can be claimed. `LP_GUARDIAN` defaults to `LP_MULTISIG`
-4. `LPStakingVault(positionManager, pool, token0, token1, fee, router, deployer, twapWindow, maxDeviationTicks)`
-5. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationTicks)`
-6. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
-7. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
-8. `transferOwnership(multisig)` on TokenX, the vault and the zapper — the distributor is
-   already owned by the multisig from step 3, because its `Ownable2Step` handover would need
-   the multisig to send an `acceptOwnership` of its own
-9. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
+4. `LPStakingVault(positionManager, pool, token0, token1, fee, router)` — the
+   **implementation**; the six immutables, the live pool triple check on them, and
+   `_disableInitializers()`
+5. `LPProxy(vaultImpl, initialize(deployer, guardian, twapWindow, maxDeviationTicks))` — owner
+   = the **deployer**, not the multisig, because `setZapper` below is owner-only
+6. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationTicks)`
+7. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
+8. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
+9. `transferOwnership(multisig)` on TokenX, the vault and the zapper. TokenX and the zapper
+   are plain `Ownable`, so it takes effect at once. The vault is `Ownable2Step`, so it only
+   NOMINATES — **the multisig must send its own `acceptOwnership`**, and the post-deploy check
+   asserts `pendingOwner == multisig`. The distributor is not in this list at all: it is
+   already owned by the multisig from step 3
+10. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
 
-The deployer owns TokenX, the vault and the zapper through steps 6–7 because that wiring is
-`onlyOwner`; ownership moves only at step 8. Etherscan verification replays the **deployer**
-address, not the multisig — that is what the constructors actually saw. The distributor needs
-two verify commands: one for the implementation (`tokenX`, `asset`) and one for the proxy
-(implementation address + the `initialize` calldata); the script prints both.
+The deployer owns TokenX, the vault and the zapper through steps 7–8 because that wiring is
+`onlyOwner`; ownership moves only at step 9. Etherscan verification replays the **deployer**
+address, not the multisig — that is what the constructors actually saw. Each proxy needs two
+verify commands: one for the implementation and one for the proxy (implementation address +
+the `initialize` calldata); the script prints all four.
 
 The script fails before spending gas when `pool.token0/token1/fee` disagree with the sorted
 `(LP_ASSET, LP_USDC, LP_FEE)`, or when the token decimals are not ASSET 18 / USDC 6. The
@@ -148,7 +163,8 @@ contracts/           — Solidity source files
   MockERC20.sol             — Test-only 18-decimal ERC20 mock
   MockERC20Decimals.sol     — Test-only ERC20 mock with configurable decimals (6-dec USDC-like)
   lp-staking/          — The LP staking stack; imports stay relative inside this folder
-    LPStakingVault.sol        — Custody and atomic re-ranging for Uniswap V3 LP positions
+    LPStakingVault.sol        — Custody and atomic re-ranging for Uniswap V3 LP positions;
+                                the implementation behind a UUPS proxy
     LPZapper.sol              — USDC in, staked position out; replaceable periphery
     TokenX.sol                — LP reward token; one minter, per-epoch mint cap
     RewardsDistributor.sol    — EIP-712 cumulative-voucher claims (TokenX and ASSET legs);
@@ -158,12 +174,12 @@ contracts/           — Solidity source files
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
     mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers
-                                and RewardsDistributorV2Mock (upgrade tests)
-test/                — Hardhat test files (Mocha + Chai). 551 tests, 0 pending
+                                and the two V2 mocks (upgrade tests)
+test/                — Hardhat test files (Mocha + Chai). 565 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 76 tests
+    LPStakingVault.test.js      — 90 tests, incl. the upgrade and timelock paths
     RewardsDistributor.test.js  — 61 tests, incl. the upgrade and timelock paths
     TokenX.test.js              — 47 tests
     LPZapper.test.js            — 45 tests
@@ -178,7 +194,7 @@ test/                — Hardhat test files (Mocha + Chai). 551 tests, 0 pending
                                 — 89 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 365 tests: 100 fork, 226 unit, 21 fuzz, 18 invariant
+test/forge/          — Foundry tier. 380 tests: 100 fork, 241 unit, 21 fuzz, 18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork

@@ -36,14 +36,16 @@ contract TwapGuardMathTest is BaseForge {
 
         pool = new RawTickPool(t0, t1, FEE);
         // The guard is abstract; the vault is the smallest concrete carrier of it, and using
-        // the real contract keeps the test honest about which code path is measured.
-        guard = new LPStakingVault(
+        // the real contract keeps the test honest about which code path is measured — as a
+        // proxy, because that is the only shape in which the parameters are ever seeded.
+        guard = _deployVaultProxy(
             address(new MockPositionManager()),
             address(pool),
             t0,
             t1,
             FEE,
             address(new MockSwapRouter()),
+            address(this),
             address(this),
             WINDOW,
             CEILING
@@ -247,14 +249,16 @@ contract TwapGuardMathTest is BaseForge {
 
     // ──────────────────────── Parameter bounds ─────────────────
 
-    function test_Guard_ConstructorRejectsTheZeroPool() public {
+    /// @dev The pool is an immutable, so its zero check belongs to — and fires on — the
+    ///      IMPLEMENTATION deploy, before any proxy exists to initialise.
+    function test_Guard_ImplementationConstructorRejectsTheZeroPool() public {
         // Deployed BEFORE the cheatcode is armed: `vm.expectRevert` binds to the very next
         // call frame, and a `new` is one.
         address npm = address(new MockPositionManager());
         address router = address(new MockSwapRouter());
 
         vm.expectRevert(TwapGuard.InvalidPool.selector);
-        new LPStakingVault(npm, address(0), address(1), address(2), FEE, router, address(this), WINDOW, CEILING);
+        new LPStakingVault(npm, address(0), address(1), address(2), FEE, router);
     }
 
     function test_Guard_SetterRejectsAWindowOneSecondBelowTheMinimum() public {

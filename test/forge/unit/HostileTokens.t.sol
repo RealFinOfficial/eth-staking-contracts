@@ -246,13 +246,14 @@ contract HostileTokensTest is LocalHarness {
 
         MockUniswapV3Pool p = new MockUniswapV3Pool(address(t0), address(t1), FEE);
         npm2 = new MockPositionManager();
-        v = new LPStakingVault(
+        v = _deployVaultProxy(
             address(npm2),
             address(p),
             address(t0),
             address(t1),
             FEE,
             address(new MockSwapRouter()),
+            address(this),
             address(this),
             MIN_TWAP_WINDOW,
             500
@@ -285,8 +286,17 @@ contract HostileTokensTest is LocalHarness {
 
         MockUniswapV3Pool p = new MockUniswapV3Pool(t0, t1, FEE);
         npm2 = new MockPositionManager();
-        v = new LPStakingVault(
-            address(npm2), address(p), t0, t1, FEE, address(new MockSwapRouter()), address(this), MIN_TWAP_WINDOW, 500
+        v = _deployVaultProxy(
+            address(npm2),
+            address(p),
+            t0,
+            t1,
+            FEE,
+            address(new MockSwapRouter()),
+            address(this),
+            address(this),
+            MIN_TWAP_WINDOW,
+            500
         );
     }
 

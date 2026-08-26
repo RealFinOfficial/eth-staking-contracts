@@ -8,10 +8,17 @@ const pools = require("./lib/pools");
 // (needs the vault). The deployer owns TokenX, the vault and the zapper until the
 // wiring is done, then ownership moves to LP_MULTISIG in the same run.
 //
-// RewardsDistributor is the exception: it is a UUPS proxy (implementation + LPProxy),
-// its `initialize` names LP_MULTISIG as the owner from block one, and LP_GUARDIAN
-// holds the undelayed fast path. `Ownable2Step` is why it is not in the transfer list —
-// a transfer would only nominate, and the multisig would have to accept separately.
+// The two UUPS proxies (implementation + LPProxy) differ in how they get there, and the
+// difference is `setZapper`:
+//
+//   * RewardsDistributor has no owner-only wiring step, so its `initialize` names
+//     LP_MULTISIG as the owner from block one and it is not in the transfer list at all.
+//   * LPStakingVault does: `setZapper` is owner-only and must run before the handover, so
+//     its `initialize` names the DEPLOYER and the run ends with `transferOwnership`. Being
+//     `Ownable2Step`, that only NOMINATES — the multisig sends its own `acceptOwnership`,
+//     and the post-deploy check below asserts `pendingOwner`, not `owner`.
+//
+// LP_GUARDIAN holds the undelayed fast path on both.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -32,8 +39,9 @@ const pools = require("./lib/pools");
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
-//   LP_GUARDIAN               — fast-path guardian on the RewardsDistributor proxy: pauses,
-//                               signer rotation and recoverExcessAsset, with no delay
+//   LP_GUARDIAN               — fast-path guardian on BOTH proxies: the vault's two pause
+//                               switches and rescuePosition, and the distributor's pause,
+//                               signer rotation and recoverExcessAsset — all with no delay
 //                               (LP_MULTISIG)
 //   LP_EPOCH_ID               — first epoch id to arm on TokenX (none)
 //   LP_EPOCH_CAP              — that epoch's mint cap, in whole TokenX (none)
@@ -390,30 +398,49 @@ async function main() {
     guardian,
   });
 
-  const vaultDeploy = await deployContract(
+  // The vault is a UUPS proxy for the same reason and in the same shape as the distributor
+  // above: implementation (the six immutables, the live pool triple check on them, and
+  // `_disableInitializers()`), then an LPProxy whose constructor delegatecalls `initialize`
+  // in the SAME transaction. The owner named here is the DEPLOYER, not the multisig, because
+  // `setZapper` below is owner-only; the handover follows the wiring.
+  const vaultImplDeploy = await deployContract(
     "LPStakingVault",
-    [
-      positionManager,
-      poolAddress,
-      token0,
-      token1,
-      fee,
-      swapRouter,
-      deployer.address,
-      twapWindow,
-      twapMaxDeviationTicks,
-    ],
+    [positionManager, poolAddress, token0, token1, fee, swapRouter],
     deployer
   );
+  const vaultInitData = vaultImplDeploy.contract.interface.encodeFunctionData("initialize", [
+    deployer.address,
+    guardian,
+    twapWindow,
+    twapMaxDeviationTicks,
+  ]);
+  const vaultProxyDeploy = await deployContract(
+    "LPProxy",
+    [vaultImplDeploy.address, vaultInitData],
+    deployer
+  );
+  const vaultDeploy = {
+    address: vaultProxyDeploy.address,
+    tx: vaultProxyDeploy.tx,
+    receipt: vaultProxyDeploy.receipt,
+    contract: await hre.ethers.getContractAt(
+      "LPStakingVault",
+      vaultProxyDeploy.address,
+      deployer
+    ),
+  };
   pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, {
     deployTx: vaultDeploy.tx.hash,
     block: vaultDeploy.receipt.blockNumber,
+    implementation: vaultImplDeploy.address,
+    implementationTx: vaultImplDeploy.tx.hash,
     pool: poolAddress,
     token0,
     token1,
     fee,
     twapWindow,
     maxTwapDeviationTicks: twapMaxDeviationTicks,
+    guardian,
   });
 
   const zapperDeploy = await deployContract(
@@ -478,7 +505,9 @@ async function main() {
   // `initialize` above therefore names the multisig as the owner from block one. When the
   // TimelockController lands, the owner becomes the timelock and the acceptance becomes the
   // timelock's first scheduled operation.
-  await pools.send("LPStakingVault -> multisig", deployer, (o) =>
+  // Ownable2Step: this NOMINATES the multisig. The multisig has to send its own
+  // `acceptOwnership` — the post-deploy check below therefore asserts `pendingOwner`.
+  await pools.send("LPStakingVault -> multisig (nomination)", deployer, (o) =>
     vault.transferOwnership(multisig, o)
   );
   await pools.send("LPZapper -> multisig", deployer, (o) => zapper.transferOwnership(multisig, o));
@@ -580,7 +609,22 @@ async function main() {
   check("LPStakingVault.rebalancePaused", await vault.rebalancePaused(), false);
   check("LPStakingVault.twapWindow", await vault.twapWindow(), twapWindow);
   check("LPStakingVault.maxTwapDeviationTicks", await vault.maxTwapDeviationTicks(), twapMaxDeviationTicks);
-  check("LPStakingVault.owner", await vault.owner(), multisig);
+  check("LPStakingVault.guardian", await vault.guardian(), guardian);
+  // Ownable2Step: the deployer is still the owner until the multisig accepts.
+  check("LPStakingVault.owner", await vault.owner(), deployer.address);
+  check("LPStakingVault.pendingOwner", await vault.pendingOwner(), multisig);
+  // Reads the ERC-1967 slot rather than trusting the constructor argument: this is the only
+  // proof that the proxy in the registry really delegates to the implementation in it.
+  check(
+    "LPStakingVault.implementation (ERC-1967 slot)",
+    hre.ethers.getAddress(
+      "0x" +
+        (
+          await hre.ethers.provider.getStorage(vaultDeploy.address, ERC1967_IMPLEMENTATION_SLOT)
+        ).slice(-40)
+    ),
+    vaultImplDeploy.address
+  );
 
   check("LPZapper.vault", await zapper.vault(), vaultDeploy.address);
   check("LPZapper.pool", await zapper.pool(), poolAddress);
@@ -602,7 +646,8 @@ async function main() {
   console.log(`TokenX:             ${tokenXDeploy.address}`);
   console.log(`RewardsDistributor: ${distributorDeploy.address} (proxy)`);
   console.log(`  implementation:   ${distributorImplDeploy.address}`);
-  console.log(`LPStakingVault:     ${vaultDeploy.address}`);
+  console.log(`LPStakingVault:     ${vaultDeploy.address} (proxy)`);
+  console.log(`  implementation:   ${vaultImplDeploy.address}`);
   console.log(`LPZapper:           ${zapperDeploy.address}`);
 
   const network = hre.network.name;
@@ -620,9 +665,12 @@ async function main() {
       `${distributorImplDeploy.address} ${distributorInitData}`
   );
   console.log(
-    `npx hardhat verify --network ${network} ${vaultDeploy.address} ` +
-      `${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ${swapRouter} ` +
-      `${deployer.address} ${twapWindow} ${twapMaxDeviationTicks}`
+    `npx hardhat verify --network ${network} ${vaultImplDeploy.address} ` +
+      `${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ${swapRouter}`
+  );
+  console.log(
+    `npx hardhat verify --network ${network} ${vaultProxyDeploy.address} ` +
+      `${vaultImplDeploy.address} ${vaultInitData}`
   );
   console.log(
     `npx hardhat verify --network ${network} ${zapperDeploy.address} ` +
@@ -631,7 +679,9 @@ async function main() {
   );
   console.log(
     "\nThe constructor argument is the DEPLOYER, not the multisig — ownership moved " +
-      "afterwards,\nso verification must replay the value the constructor actually saw."
+      "afterwards,\nso verification must replay the value the constructor actually saw.\n" +
+      "Each proxy needs two commands: one for the implementation, one for the proxy itself\n" +
+      "(implementation address + the `initialize` calldata)."
   );
 
   if (failures.length > 0) {

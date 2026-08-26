@@ -27,14 +27,15 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
  *  Uniswap behaviour belongs in {ForkHarness}, not here.
  *
  *  Harness-local divergences from production, all deliberate:
- *    * The test contract stays the owner of all four contracts, and is ALSO the
- *      distributor's `guardian`. Production splits those two: the owner is a timelock and
- *      the guardian is the multisig. Collapsing them here keeps every admin call in this
- *      tier callable without a prank; the files where the split itself is the subject
- *      ({AccessControlTest}, {DistributorBranchesTest}) build a second proxy with a distinct
- *      guardian through {BaseForge-_deployDistributorProxy}. Production also transfers
- *      ownership to LP_MULTISIG at the end of the deploy script; the access-control file
- *      re-creates that split explicitly where it is the subject.
+ *    * The test contract stays the owner of all four contracts, and is ALSO the `guardian`
+ *      of the two proxies (the vault and the distributor). Production splits those two: the
+ *      owner is a timelock and the guardian is the multisig. Collapsing them here keeps every
+ *      admin call in this tier callable without a prank; the files where the split itself is
+ *      the subject ({AccessControlTest}, {VaultBranchesTest}, {DistributorBranchesTest})
+ *      build a second proxy with a distinct guardian through {BaseForge-_deployVaultProxy}
+ *      and {BaseForge-_deployDistributorProxy}. Production also transfers ownership to
+ *      LP_MULTISIG at the end of the deploy script; the access-control file re-creates that
+ *      split explicitly where it is the subject.
  *    * `twapWindow` is {MIN_TWAP_WINDOW} (300), which is also the production default, so a
  *      test that warps past a window warps five minutes.
  *    * The pool mock reports spot == TWAP == tick 0, so the guard passes unless a test
@@ -151,13 +152,14 @@ abstract contract LocalHarness is BaseForge {
         tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
         distributor =
             _deployDistributorProxy(address(tokenX), address(asset), address(this), address(this), voucherSigner);
-        vault = new LPStakingVault(
+        vault = _deployVaultProxy(
             address(npmMock),
             address(poolMock),
             token0,
             token1,
             FEE,
             address(routerMock),
+            address(this),
             address(this),
             MIN_TWAP_WINDOW,
             500

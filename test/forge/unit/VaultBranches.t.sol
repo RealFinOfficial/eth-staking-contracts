@@ -4,13 +4,17 @@ pragma solidity 0.8.28;
 import {Vm} from "forge-std/Vm.sol";
 import {LocalHarness} from "../utils/LocalHarness.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
-import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
+import {LPStakingVaultV2Mock} from "../../../contracts/lp-staking/mocks/LPStakingVaultV2Mock.sol";
+import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
+import {SwapParams, TwapGuard} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {INonfungiblePositionManager} from "../../../contracts/lp-staking/interfaces/INonfungiblePositionManager.sol";
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
 import {MockSwapRouter} from "../../../contracts/lp-staking/mocks/MockSwapRouter.sol";
 import {ContractStakerNoReceiver} from "../../../contracts/lp-staking/mocks/ContractStakerNoReceiver.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
 /**
@@ -28,82 +32,42 @@ contract VaultBranchesTest is LocalHarness {
         _deployLocalStack();
     }
 
-    // ──────────────────────── Constructor ──────────────────────
+    // ──────────────────────── Implementation constructor ───────
+    //
+    // The six immutables are the implementation's only constructor work, so their checks —
+    // including the live pool triple check, which compares three of them against the pool —
+    // fire on the IMPLEMENTATION deploy, before any proxy exists.
 
     function test_Constructor_RejectsAZeroPositionManager() public {
         vm.expectRevert(LPStakingVault.ZeroAddress.selector);
-        new LPStakingVault(
-            address(0), address(poolMock), token0, token1, FEE, address(routerMock), address(this), MIN_TWAP_WINDOW, 500
-        );
+        new LPStakingVault(address(0), address(poolMock), token0, token1, FEE, address(routerMock));
     }
 
     function test_Constructor_RejectsAZeroSwapRouter() public {
         vm.expectRevert(LPStakingVault.ZeroAddress.selector);
-        new LPStakingVault(
-            address(npmMock), address(poolMock), token0, token1, FEE, address(0), address(this), MIN_TWAP_WINDOW, 500
-        );
+        new LPStakingVault(address(npmMock), address(poolMock), token0, token1, FEE, address(0));
     }
 
     function test_Constructor_RejectsAZeroToken0() public {
         vm.expectRevert(LPStakingVault.ZeroAddress.selector);
-        new LPStakingVault(
-            address(npmMock),
-            address(poolMock),
-            address(0),
-            token1,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(poolMock), address(0), token1, FEE, address(routerMock));
     }
 
     function test_Constructor_RejectsAZeroToken1() public {
         vm.expectRevert(LPStakingVault.ZeroAddress.selector);
-        new LPStakingVault(
-            address(npmMock),
-            address(poolMock),
-            token0,
-            address(0),
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(poolMock), token0, address(0), FEE, address(routerMock));
     }
 
     /// @dev The `>=` in `_token0 >= _token1` has two arms; this is the strictly-greater one.
     function test_Constructor_RejectsAnUnsortedPair() public {
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.TokensNotSorted.selector, token1, token0));
-        new LPStakingVault(
-            address(npmMock),
-            address(poolMock),
-            token1,
-            token0,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(poolMock), token1, token0, FEE, address(routerMock));
     }
 
     /// @dev ...and this is the equal one, which a `>` alone would have let through.
     function test_Constructor_RejectsTheSameTokenTwice() public {
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.TokensNotSorted.selector, token0, token0));
-        new LPStakingVault(
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token0,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(poolMock), token0, token0, FEE, address(routerMock));
     }
 
     function test_Constructor_RejectsAPoolWhoseToken0Differs() public {
@@ -113,17 +77,7 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.PoolMismatch.selector, address(0xdead), token1, uint24(FEE))
         );
-        new LPStakingVault(
-            address(npmMock),
-            address(wrong),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(wrong), token0, token1, FEE, address(routerMock));
     }
 
     function test_Constructor_RejectsAPoolWhoseToken1Differs() public {
@@ -133,17 +87,7 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.PoolMismatch.selector, token0, address(0xbeef), uint24(FEE))
         );
-        new LPStakingVault(
-            address(npmMock),
-            address(wrong),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(wrong), token0, token1, FEE, address(routerMock));
     }
 
     function test_Constructor_RejectsAPoolWhoseFeeDiffers() public {
@@ -151,17 +95,17 @@ contract VaultBranchesTest is LocalHarness {
         wrong.setFee(500);
 
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.PoolMismatch.selector, token0, token1, uint24(500)));
-        new LPStakingVault(
-            address(npmMock),
-            address(wrong),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
-        );
+        new LPStakingVault(address(npmMock), address(wrong), token0, token1, FEE, address(routerMock));
+    }
+
+    /// @dev A bare implementation must be inert: its initializers are burnt in its own
+    ///      constructor, so nobody can take ownership of the code the proxy delegates to.
+    function test_Constructor_DisablesTheImplementationsInitializers() public {
+        LPStakingVault impl =
+            new LPStakingVault(address(npmMock), address(poolMock), token0, token1, FEE, address(routerMock));
+
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        impl.initialize(address(this), multisig, MIN_TWAP_WINDOW, 500);
     }
 
     function test_Constructor_StoresTheWholeConfiguration() public view {
@@ -173,6 +117,142 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(vault.fee(), FEE, "the fee tier must be stored");
         assertFalse(vault.depositsPaused(), "a fresh vault must accept deposits");
         assertFalse(vault.rebalancePaused(), "a fresh vault must allow rebalancing");
+    }
+
+    // ──────────────────────── Initializer ──────────────────────
+
+    function test_Initialize_RejectsAZeroOwner() public {
+        address impl = address(_vaultImplementation());
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        new LPProxy(impl, abi.encodeCall(LPStakingVault.initialize, (address(0), multisig, MIN_TWAP_WINDOW, 500)));
+    }
+
+    function test_Initialize_RejectsAZeroGuardian() public {
+        address impl = address(_vaultImplementation());
+
+        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
+        new LPProxy(impl, abi.encodeCall(LPStakingVault.initialize, (address(this), address(0), MIN_TWAP_WINDOW, 500)));
+    }
+
+    /// @dev The TWAP bounds moved out of the constructor with the parameters themselves, so
+    ///      both arms of each bound now fire through the proxy's initialisation.
+    function test_Initialize_EnforcesTheTwapBounds() public {
+        address impl = address(_vaultImplementation());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MIN_TWAP_WINDOW - 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
+        new LPProxy(
+            impl, abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, MIN_TWAP_WINDOW - 1, 500))
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapWindow.selector, MAX_TWAP_WINDOW + 1, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW
+            )
+        );
+        new LPProxy(
+            impl, abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, MAX_TWAP_WINDOW + 1, 500))
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(TwapGuard.InvalidTwapDeviation.selector, uint24(0), MAX_TWAP_DEVIATION_TICKS)
+        );
+        new LPProxy(impl, abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, MIN_TWAP_WINDOW, 0)));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                TwapGuard.InvalidTwapDeviation.selector, MAX_TWAP_DEVIATION_TICKS + 1, MAX_TWAP_DEVIATION_TICKS
+            )
+        );
+        new LPProxy(
+            impl,
+            abi.encodeCall(
+                LPStakingVault.initialize, (address(this), multisig, MIN_TWAP_WINDOW, MAX_TWAP_DEVIATION_TICKS + 1)
+            )
+        );
+    }
+
+    /// @dev The guardian must be followable from logs alone, from block one.
+    function test_Initialize_AnnouncesTheInitialGuardianAndParameters() public {
+        LPStakingVault impl = _vaultImplementation();
+
+        vm.expectEmit(false, false, false, true);
+        emit LPStakingVault.GuardianSet(address(0), multisig);
+        vm.expectEmit(false, false, false, true);
+        emit TwapGuard.TwapParamsSet(MIN_TWAP_WINDOW, 500);
+        new LPProxy(
+            address(impl), abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, MIN_TWAP_WINDOW, 500))
+        );
+    }
+
+    /// @dev A proxy is initialised exactly once; a second call cannot re-seat the owner.
+    function test_Initialize_CannotRunTwiceOnTheProxy() public {
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        vault.initialize(alice, alice, MIN_TWAP_WINDOW, 500);
+    }
+
+    /**
+     * @dev The receive guard is the one field whose inline initializer the proxy would have
+     *      swallowed. Left at zero it equals neither {RECEIVING} nor NOT_RECEIVING, and
+     *      `onERC721Received` — which rejects anything that is not RECEIVING — would still
+     *      reject, but a stake would then be the thing that breaks. This proves the seeding:
+     *      an unsolicited safe transfer is rejected AND a stake goes through.
+     */
+    function test_Initialize_SeedsTheReceiveGuard() public {
+        uint256 stray = _createPosition(bob, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.UnsolicitedPosition.selector, bob, bob, stray));
+        npmMock.safeTransferFrom(bob, address(vault), stray);
+
+        uint256 tokenId = _stakePosition(alice);
+        assertEq(vault.stakerOf(tokenId), alice, "and the guard still opens for a real stake");
+    }
+
+    /**
+     * @dev The custody ledger's address, pinned. `LP_STAKING_VAULT_STORAGE` is a literal in
+     *      the contract because it must never move: if it did, every `stakerOf` would read
+     *      zero after an upgrade, and a zero record is exactly the state `rescuePosition` is
+     *      allowed to act on. This recomputes the ERC-7201 derivation and checks the literal
+     *      against it, through the slot's actual contents.
+     */
+    function test_Storage_LivesAtThePinnedErc7201Slot() public {
+        bytes32 expected =
+            keccak256(abi.encode(uint256(keccak256("real.lp.storage.LPStakingVault")) - 1)) & ~bytes32(uint256(0xff));
+
+        vault.setDepositsPaused(true);
+        vault.setRebalancePaused(true);
+
+        // Namespace slot 0 is `zapper` alone (20 bytes, and `guardian` needs another 20).
+        assertEq(
+            address(uint160(uint256(vm.load(address(vault), expected)))),
+            address(zapper),
+            "namespace slot 0 must be `zapper`"
+        );
+
+        // Slot 1 packs `guardian` with the two pause flags that follow it.
+        uint256 slot1 = uint256(vm.load(address(vault), bytes32(uint256(expected) + 1)));
+        assertEq(address(uint160(slot1)), address(this), "namespace slot 1 must start with `guardian`");
+        assertEq((slot1 >> 160) & 0xff, 1, "`depositsPaused` must sit right after `guardian`");
+        assertEq((slot1 >> 168) & 0xff, 1, "`rebalancePaused` must sit right after `depositsPaused`");
+    }
+
+    /// @dev {TwapGuard}'s parameters have a namespace of their own, shared with the zapper.
+    ///      Same pin, same reason: an upgrade must not move them either.
+    function test_Storage_TheTwapGuardHasItsOwnPinnedNamespace() public view {
+        bytes32 expected =
+            keccak256(abi.encode(uint256(keccak256("real.lp.storage.TwapGuard")) - 1)) & ~bytes32(uint256(0xff));
+
+        uint256 packed = uint256(vm.load(address(vault), expected));
+        assertEq(uint32(packed), MIN_TWAP_WINDOW, "namespace slot 0 must start with `twapWindow`");
+        assertEq(uint24(packed >> 32), 500, "`maxTwapDeviationTicks` must sit right after it");
+
+        // And the plain zapper reads the very same slot on its own storage.
+        uint256 zapperPacked = uint256(vm.load(address(zapper), expected));
+        assertEq(uint32(zapperPacked), MIN_TWAP_WINDOW, "the zapper shares the namespace, not the storage");
     }
 
     // ──────────────────────── Stake validation ─────────────────
@@ -584,43 +664,193 @@ contract VaultBranchesTest is LocalHarness {
         vault.rescuePosition(tokenId);
     }
 
-    function test_RescuePosition_SendsAnUnrecordedPositionToTheOwner() public {
+    /**
+     * @dev The destination is `guardian()` and there is no argument to mistype — not
+     *      `owner()`, which after the deploy script is a timelock contract with no way to
+     *      forward an ERC-721. Measured on a twin whose two roles are DIFFERENT addresses, so
+     *      the assertion cannot pass by them being the same account.
+     */
+    function test_RescuePosition_SendsAnUnrecordedPositionToTheGuardian() public {
+        LPStakingVault twin = _guardedTwin();
+
         uint256 tokenId = _createPosition(alice, TICK_LOWER, TICK_UPPER, LIQUIDITY);
         vm.prank(alice);
-        npmMock.transferFrom(alice, address(vault), tokenId);
+        npmMock.transferFrom(alice, address(twin), tokenId);
 
-        vault.rescuePosition(tokenId);
-        assertEq(npmMock.ownerOf(tokenId), address(this), "the rescue must land on owner(), not on a caller argument");
+        vm.expectEmit(true, true, false, true, address(twin));
+        emit LPStakingVault.PositionRescued(tokenId, multisig, block.timestamp);
+        vm.prank(multisig);
+        twin.rescuePosition(tokenId);
+
+        assertEq(npmMock.ownerOf(tokenId), multisig, "the rescue must land on guardian(), not on a caller argument");
+        assertEq(twin.owner(), address(this), "and the owner must have received nothing");
     }
 
-    /// @dev `renounceOwnership` is live and one-way. What dies with the owner, measured on
-    ///      the vault: every admin setter and the rescue path. What survives: the exits.
-    function test_RenounceOwnership_KillsTheAdminSurfaceButNotTheExits() public {
-        uint256 tokenId = _stakePosition(alice);
-        vault.renounceOwnership();
-        assertEq(vault.owner(), address(0), "ownership really is gone");
+    /**
+     * @dev The split is real in BOTH directions, which is the whole point of two tiers: the
+     *      owner cannot reach the fast-path switches, and the guardian cannot reach the slow
+     *      ones. Measured on a twin whose owner and guardian are different addresses.
+     */
+    function test_AdminFunctions_TheTwoTiersDoNotOverlap() public {
+        LPStakingVault twin = _guardedTwin();
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.setZapper(address(1));
+        // The OWNER is rejected on every guardian function.
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), multisig));
+        twin.setDepositsPaused(true);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), multisig));
+        twin.setRebalancePaused(true);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), multisig));
+        twin.rescuePosition(1);
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        // ...and the GUARDIAN is rejected on every owner function.
+        vm.startPrank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.setTwapParams(600, 100);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.setZapper(address(1));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.setGuardian(multisig);
+        vm.stopPrank();
+
+        // Each tier does work from its own address.
+        vm.prank(multisig);
+        twin.setDepositsPaused(true);
+        assertTrue(twin.depositsPaused(), "the guardian must be able to pause deposits");
+        twin.setZapper(address(1));
+        assertEq(twin.zapper(), address(1), "the owner must be able to point the zapper");
+    }
+
+    function test_SetGuardian_RejectsZeroAndAnnouncesBothSides() public {
+        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
+        vault.setGuardian(address(0));
+
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.GuardianSet(address(this), carol);
+        vault.setGuardian(carol);
+        assertEq(vault.guardian(), carol, "the new guardian must be stored");
+
+        // The old guardian loses the tier immediately.
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), carol));
         vault.setDepositsPaused(true);
+    }
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.setRebalancePaused(true);
+    /**
+     * @dev Renouncing is disabled outright. Under a UUPS proxy an ownerless contract can
+     *      never be upgraded again, so the old "what dies with the owner" matrix has been
+     *      replaced by making the call impossible. The exits were never the owner's to lose.
+     */
+    function test_RenounceOwnership_IsDisabled() public {
+        uint256 tokenId = _stakePosition(alice);
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.setTwapParams(600, 100);
+        vm.expectRevert(LPStakingVault.RenounceDisabled.selector);
+        vault.renounceOwnership();
+        assertEq(vault.owner(), address(this), "the owner must be exactly where it was");
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.rescuePosition(1);
+        // A stranger still gets the standard Ownable rejection, not the reason.
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vault.renounceOwnership();
 
         vm.prank(alice);
         vault.unstake(tokenId);
-        assertEq(npmMock.ownerOf(tokenId), alice, "the exit must survive the loss of the owner");
+        assertEq(npmMock.ownerOf(tokenId), alice, "and the exit is unaffected either way");
+    }
+
+    // ──────────────────────── Upgrades ─────────────────────────
+
+    /**
+     * @dev The reason the proxy exists: the custody ledger must survive a code change. This
+     *      upgrades a proxy that already holds a position and checks that every field is
+     *      exactly where it was, with new code behind it — and that the staker can still
+     *      walk out afterwards.
+     */
+    function test_Upgrade_PreservesTheStakerLedgerAndBothTiers() public {
+        uint256 tokenId = _stakePosition(alice);
+        vault.setZapper(address(0xcafe));
+        vault.setRebalancePaused(true);
+
+        address v2 = address(_v2Implementation());
+        vault.upgradeToAndCall(v2, "");
+
+        assertEq(_implementationOf(address(vault)), v2, "the ERC-1967 slot must name the new code");
+        assertEq(LPStakingVaultV2Mock(address(vault)).version(), 2, "the new code must be the one running");
+        assertEq(vault.stakerOf(tokenId), alice, "the staker ledger must survive the upgrade");
+        assertEq(npmMock.ownerOf(tokenId), address(vault), "and custody with it");
+        assertEq(vault.zapper(), address(0xcafe), "the zapper must survive the upgrade");
+        assertTrue(vault.rebalancePaused(), "the rebalance pause must survive the upgrade");
+        assertFalse(vault.depositsPaused(), "and so must the deposit switch's OFF state");
+        assertEq(vault.guardian(), address(this), "the guardian must survive the upgrade");
+        assertEq(vault.owner(), address(this), "the owner must survive the upgrade");
+        assertEq(vault.twapWindow(), MIN_TWAP_WINDOW, "the TWAP namespace must survive the upgrade");
+        assertEq(vault.maxTwapDeviationTicks(), 500, "the TWAP namespace must survive the upgrade");
+
+        vm.prank(alice);
+        vault.unstake(tokenId);
+        assertEq(npmMock.ownerOf(tokenId), alice, "and the exit still works against the new code");
+    }
+
+    /// @dev V2 writes its own ERC-7201 namespace, so new state cannot collide with V1's.
+    function test_Upgrade_V2StateLivesInItsOwnNamespace() public {
+        uint256 tokenId = _stakePosition(alice);
+        vault.upgradeToAndCall(address(_v2Implementation()), "");
+
+        LPStakingVaultV2Mock upgraded = LPStakingVaultV2Mock(address(vault));
+        upgraded.setUpgradeMarker(42);
+
+        assertEq(upgraded.upgradeMarker(), 42, "V2 state must be readable");
+        assertEq(vault.stakerOf(tokenId), alice, "and must not have touched V1's namespace");
+        assertEq(vault.twapWindow(), MIN_TWAP_WINDOW, "nor the guard's");
+    }
+
+    /// @dev Only the owner tier upgrades. Not a stranger, and not the guardian.
+    function test_Upgrade_RejectsEveryoneButTheOwner() public {
+        LPStakingVault twin = _guardedTwin();
+        address v2 = address(_v2Implementation());
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        twin.upgradeToAndCall(v2, "");
+
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.upgradeToAndCall(v2, "");
+
+        twin.upgradeToAndCall(v2, "");
+        assertEq(_implementationOf(address(twin)), v2, "the owner must be able to upgrade");
     }
 
     // ──────────────────────── Helpers ──────────────────────────
+
+    /// @dev A bare implementation with the harness's own market wired into its immutables.
+    function _vaultImplementation() private returns (LPStakingVault) {
+        return new LPStakingVault(address(npmMock), address(poolMock), token0, token1, FEE, address(routerMock));
+    }
+
+    function _v2Implementation() private returns (LPStakingVaultV2Mock) {
+        return new LPStakingVaultV2Mock(address(npmMock), address(poolMock), token0, token1, FEE, address(routerMock));
+    }
+
+    /// @dev A second proxy whose owner (this contract) and guardian (`multisig`) are
+    ///      DIFFERENT addresses, which the shared harness deliberately collapses into one.
+    function _guardedTwin() private returns (LPStakingVault) {
+        return _deployVaultProxy(
+            address(npmMock),
+            address(poolMock),
+            token0,
+            token1,
+            FEE,
+            address(routerMock),
+            address(this),
+            multisig,
+            MIN_TWAP_WINDOW,
+            500
+        );
+    }
+
+    /// @dev Reads the ERC-1967 implementation slot straight off the proxy.
+    function _implementationOf(address proxy) private view returns (address) {
+        return address(uint160(uint256(vm.load(proxy, ERC1967Utils.IMPLEMENTATION_SLOT))));
+    }
 
     function _stakeWithPrincipal(address holder, uint256 principal0, uint256 principal1)
         private

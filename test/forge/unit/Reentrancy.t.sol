@@ -87,14 +87,16 @@ contract ReentrancyTest is LocalHarness {
 
     /**
      * @dev The window the vault's NatSpec calls out by name: between the `mint` and the
-     *      `_stakers[newTokenId] = staker` write the vault owns an NFT with no record, and
+     *      `stakers[newTokenId] = staker` write the vault owns an NFT with no record, and
      *      between that write and the `burn` it owns one whose record was just cleared.
      *      `rescuePosition` shares the guard precisely so it cannot run there. The router is
-     *      made the owner so that ONLY the guard is left standing between it and the rescue.
+     *      made the GUARDIAN — the tier `rescuePosition` now sits in — so that ONLY the guard
+     *      is left standing between it and the rescue. (It could not be made the owner: the
+     *      proxy's handover is two-step and the router never calls `acceptOwnership`.)
      */
     function test_Reentrancy_RouterCannotReenterRescuePositionMidRebalance() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
-        v.transferOwnership(address(r));
+        v.setGuardian(address(r));
         r.configure(address(v), abi.encodeCall(LPStakingVault.rescuePosition, (tokenId)));
 
         vm.prank(alice);
@@ -257,8 +259,11 @@ contract ReentrancyTest is LocalHarness {
     ///      every argument above hold for any pairing, not just the ones tested.
     function test_Reentrancy_TheVaultsGuardIsSharedAcrossEveryEntryPoint() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
-        v.setZapper(address(r)); // whitelist first: ownership is one-step and immediate
-        v.transferOwnership(address(r));
+        // The router needs both tiers to reach every payload below: `setZapper` is owner
+        // tier, `rescuePosition` is guardian tier. Ownership is two-step and the router never
+        // accepts, so the guardian is the one that gets handed over.
+        v.setZapper(address(r));
+        v.setGuardian(address(r));
 
         bytes[5] memory payloads = [
             abi.encodeCall(LPStakingVault.unstake, (tokenId)),
@@ -307,8 +312,17 @@ contract ReentrancyTest is LocalHarness {
         asset.transfer(address(r), 10_000_000e18);
         usdcToken.transfer(address(r), 10_000_000e6);
 
-        v = new LPStakingVault(
-            address(npmMock), address(poolMock), token0, token1, FEE, address(r), address(this), MIN_TWAP_WINDOW, 500
+        v = _deployVaultProxy(
+            address(npmMock),
+            address(poolMock),
+            token0,
+            token1,
+            FEE,
+            address(r),
+            address(this),
+            address(this),
+            MIN_TWAP_WINDOW,
+            500
         );
         z = new LPZapper(
             address(v),
@@ -353,13 +367,14 @@ contract ReentrancyTest is LocalHarness {
 
         MockUniswapV3Pool p = new MockUniswapV3Pool(address(t0), address(t1), FEE);
         npm2 = new MockPositionManager();
-        v = new LPStakingVault(
+        v = _deployVaultProxy(
             address(npm2),
             address(p),
             address(t0),
             address(t1),
             FEE,
             address(routerMock),
+            address(this),
             address(this),
             MIN_TWAP_WINDOW,
             500

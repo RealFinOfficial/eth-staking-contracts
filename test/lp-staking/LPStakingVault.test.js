@@ -1,10 +1,16 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
+const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("LPStakingVault", function () {
   let vault, pool, nfpm, router;
   let token0, token1;
-  let owner, alice, bob, zapper, stranger;
+  let owner, guardian, alice, bob, zapper, stranger;
+
+  // The two admin tiers are DIFFERENT accounts in this suite, so "is this owner-only or
+  // guardian-only" is never answered by them happening to be the same address. In production
+  // `owner` is a TimelockController and `guardian` is the multisig.
+  const asGuardian = () => vault.connect(guardian);
 
   let vaultAddr, poolAddr, nfpmAddr, routerAddr, token0Addr, token1Addr;
   let unit0, unit1;
@@ -40,8 +46,8 @@ describe("LPStakingVault", function () {
     return (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
   }
 
-  async function deployVault(overrides = {}) {
-    const args = {
+  function vaultArgs(overrides = {}) {
+    return {
       positionManager: nfpmAddr,
       pool: poolAddr,
       token0: token0Addr,
@@ -49,10 +55,17 @@ describe("LPStakingVault", function () {
       fee: FEE,
       swapRouter: routerAddr,
       initialOwner: owner.address,
+      guardian: guardian.address,
       twapWindow: TWAP_WINDOW,
       maxDeviationTicks: MAX_DEVIATION_TICKS,
       ...overrides,
     };
+  }
+
+  /// Deploys the bare IMPLEMENTATION. Only its six immutables and their checks live here —
+  /// its own initializers are burnt in the same constructor, so it is never usable directly.
+  async function deployVaultImpl(overrides = {}) {
+    const args = vaultArgs(overrides);
     const Vault = await ethers.getContractFactory("LPStakingVault");
     return Vault.deploy(
       args.positionManager,
@@ -60,10 +73,30 @@ describe("LPStakingVault", function () {
       args.token0,
       args.token1,
       args.fee,
-      args.swapRouter,
-      args.initialOwner,
-      args.twapWindow,
-      args.maxDeviationTicks
+      args.swapRouter
+    );
+  }
+
+  /// Deploys a vault UUPS proxy. `constructorArgs` are the implementation's six immutables;
+  /// `unsafeAllow` names exactly the two patterns the spec chose deliberately.
+  async function deployVault(overrides = {}) {
+    const args = vaultArgs(overrides);
+    const Vault = await ethers.getContractFactory("LPStakingVault");
+    return upgrades.deployProxy(
+      Vault,
+      [args.initialOwner, args.guardian, args.twapWindow, args.maxDeviationTicks],
+      {
+        kind: "uups",
+        constructorArgs: [
+          args.positionManager,
+          args.pool,
+          args.token0,
+          args.token1,
+          args.fee,
+          args.swapRouter,
+        ],
+        unsafeAllow: ["constructor", "state-variable-immutable"],
+      }
     );
   }
 
@@ -109,7 +142,7 @@ describe("LPStakingVault", function () {
   }
 
   beforeEach(async function () {
-    [owner, alice, bob, zapper, stranger] = await ethers.getSigners();
+    [owner, guardian, alice, bob, zapper, stranger] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
     const usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
@@ -166,36 +199,48 @@ describe("LPStakingVault", function () {
       expect(await vault.token1()).to.equal(token1Addr);
       expect(await vault.fee()).to.equal(FEE);
       expect(await vault.owner()).to.equal(owner.address);
+      expect(await vault.pendingOwner()).to.equal(ZERO);
+      expect(await vault.guardian()).to.equal(guardian.address);
       expect(await vault.twapWindow()).to.equal(TWAP_WINDOW);
       expect(await vault.maxTwapDeviationTicks()).to.equal(MAX_DEVIATION_TICKS);
       expect(await vault.depositsPaused()).to.equal(false);
       expect(await vault.rebalancePaused()).to.equal(false);
       expect(await vault.zapper()).to.equal(ZERO);
 
+      // `initialize` runs inside the proxy's deployment transaction, so its events are that
+      // transaction's events — there is no second block to look in.
       await expect(vault.deploymentTransaction())
         .to.emit(vault, "TwapParamsSet")
         .withArgs(TWAP_WINDOW, MAX_DEVIATION_TICKS);
+
+      await expect(vault.deploymentTransaction())
+        .to.emit(vault, "GuardianSet")
+        .withArgs(ZERO, guardian.address);
     });
 
-    it("rejects a zero position manager, swap router or pool token", async function () {
-      await expect(deployVault({ positionManager: ZERO })).to.be.revertedWithCustomError(
+    // ── implementation constructor ────────────────────────────
+    // The six immutables are the implementation's only constructor work, so their checks —
+    // the live pool triple check included — fire before any proxy exists.
+
+    it("rejects a zero position manager, swap router or pool token on the IMPLEMENTATION", async function () {
+      await expect(deployVaultImpl({ positionManager: ZERO })).to.be.revertedWithCustomError(
         vault,
         "ZeroAddress"
       );
-      await expect(deployVault({ swapRouter: ZERO })).to.be.revertedWithCustomError(
+      await expect(deployVaultImpl({ swapRouter: ZERO })).to.be.revertedWithCustomError(
         vault,
         "ZeroAddress"
       );
-      await expect(deployVault({ token0: ZERO })).to.be.revertedWithCustomError(vault, "ZeroAddress");
-      await expect(deployVault({ token1: ZERO })).to.be.revertedWithCustomError(vault, "ZeroAddress");
+      await expect(deployVaultImpl({ token0: ZERO })).to.be.revertedWithCustomError(vault, "ZeroAddress");
+      await expect(deployVaultImpl({ token1: ZERO })).to.be.revertedWithCustomError(vault, "ZeroAddress");
     });
 
     it("rejects a zero pool in the TWAP guard, which runs before the vault's own checks", async function () {
-      await expect(deployVault({ pool: ZERO })).to.be.revertedWithCustomError(vault, "InvalidPool");
+      await expect(deployVaultImpl({ pool: ZERO })).to.be.revertedWithCustomError(vault, "InvalidPool");
     });
 
     it("rejects an unsorted token pair", async function () {
-      await expect(deployVault({ token0: token1Addr, token1: token0Addr }))
+      await expect(deployVaultImpl({ token0: token1Addr, token1: token0Addr }))
         .to.be.revertedWithCustomError(vault, "TokensNotSorted")
         .withArgs(token1Addr, token0Addr);
     });
@@ -204,14 +249,14 @@ describe("LPStakingVault", function () {
       const Pool = await ethers.getContractFactory("MockUniswapV3Pool");
 
       const wrongFeePool = await Pool.deploy(token0Addr, token1Addr, OTHER_FEE);
-      await expect(deployVault({ pool: await wrongFeePool.getAddress() }))
+      await expect(deployVaultImpl({ pool: await wrongFeePool.getAddress() }))
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(token0Addr, token1Addr, OTHER_FEE);
 
       const Token = await ethers.getContractFactory("MockERC20Decimals");
       const other = await Token.deploy("Other", "OTHER", 1000n, 18);
       const wrongTokenPool = await Pool.deploy(token0Addr, await other.getAddress(), FEE);
-      await expect(deployVault({ pool: await wrongTokenPool.getAddress() }))
+      await expect(deployVaultImpl({ pool: await wrongTokenPool.getAddress() }))
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(token0Addr, await other.getAddress(), FEE);
     });
@@ -219,11 +264,11 @@ describe("LPStakingVault", function () {
     it("rejects a pair whose two tokens are the same address", async function () {
       // `_token0 >= _token1` folds two mistakes into one error: the equal case here, and the
       // out-of-order case below. Both are caught before the pool is ever read.
-      await expect(deployVault({ token0: token0Addr, token1: token0Addr }))
+      await expect(deployVaultImpl({ token0: token0Addr, token1: token0Addr }))
         .to.be.revertedWithCustomError(vault, "TokensNotSorted")
         .withArgs(token0Addr, token0Addr);
 
-      await expect(deployVault({ token0: token1Addr, token1: token0Addr }))
+      await expect(deployVaultImpl({ token0: token1Addr, token1: token0Addr }))
         .to.be.revertedWithCustomError(vault, "TokensNotSorted")
         .withArgs(token1Addr, token0Addr);
     });
@@ -234,24 +279,37 @@ describe("LPStakingVault", function () {
       const otherAddr = await other.getAddress();
 
       await pool.setTokens(otherAddr, token1Addr);
-      await expect(deployVault())
+      await expect(deployVaultImpl())
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(otherAddr, token1Addr, FEE);
 
       await pool.setTokens(token0Addr, otherAddr);
-      await expect(deployVault())
+      await expect(deployVaultImpl())
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(token0Addr, otherAddr, FEE);
 
       await pool.setTokens(token0Addr, token1Addr);
       await pool.setFee(OTHER_FEE);
-      await expect(deployVault())
+      await expect(deployVaultImpl())
         .to.be.revertedWithCustomError(vault, "PoolMismatch")
         .withArgs(token0Addr, token1Addr, OTHER_FEE);
 
       // and the same triple restored deploys, so each arm above was the only difference
       await pool.setFee(FEE);
-      expect(await (await deployVault()).pool()).to.equal(poolAddr);
+      expect(await (await deployVaultImpl()).pool()).to.equal(poolAddr);
+    });
+
+    // ── initialize, through the proxy ─────────────────────────
+
+    it("rejects a zero owner or guardian in initialize, through the proxy", async function () {
+      await expect(deployVault({ initialOwner: ZERO }))
+        .to.be.revertedWithCustomError(vault, "OwnableInvalidOwner")
+        .withArgs(ZERO);
+
+      await expect(deployVault({ guardian: ZERO })).to.be.revertedWithCustomError(
+        vault,
+        "ZeroAddress"
+      );
     });
 
     it("enforces the TWAP window bounds on both sides", async function () {
@@ -345,7 +403,7 @@ describe("LPStakingVault", function () {
 
     it("rejects a stake while deposits are paused", async function () {
       const tokenId = await createPosition(alice);
-      await vault.setDepositsPaused(true);
+      await asGuardian().setDepositsPaused(true);
 
       await expect(vault.connect(alice).stake(tokenId)).to.be.revertedWithCustomError(
         vault,
@@ -450,7 +508,7 @@ describe("LPStakingVault", function () {
     it("is gated by the deposit pause like every other stake path", async function () {
       await vault.setZapper(zapper.address);
       const tokenId = await createPosition(zapper);
-      await vault.setDepositsPaused(true);
+      await asGuardian().setDepositsPaused(true);
 
       await expect(
         vault.connect(zapper).stakeFor(alice.address, tokenId)
@@ -487,7 +545,7 @@ describe("LPStakingVault", function () {
 
     it("stays open while deposits are paused (exits are never gated)", async function () {
       const tokenId = await stakePosition(alice);
-      await vault.setDepositsPaused(true);
+      await asGuardian().setDepositsPaused(true);
 
       await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
@@ -495,8 +553,8 @@ describe("LPStakingVault", function () {
 
     it("stays open while rebalance is paused (the exit is the fallback)", async function () {
       const tokenId = await stakePosition(alice);
-      await vault.setRebalancePaused(true);
-      await vault.setDepositsPaused(true);
+      await asGuardian().setRebalancePaused(true);
+      await asGuardian().setDepositsPaused(true);
 
       await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
@@ -735,7 +793,7 @@ describe("LPStakingVault", function () {
     it("stays open while deposits are paused", async function () {
       const tokenId = await stakePosition(alice);
       await primeHappyPath(tokenId);
-      await vault.setDepositsPaused(true);
+      await asGuardian().setDepositsPaused(true);
 
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
@@ -745,7 +803,7 @@ describe("LPStakingVault", function () {
     it("reverts while rebalance is paused, and works again once it is lifted", async function () {
       const tokenId = await stakePosition(alice);
       await primeHappyPath(tokenId);
-      await vault.setRebalancePaused(true);
+      await asGuardian().setRebalancePaused(true);
 
       // the pause is the first statement, so it fires even for the staker's own position
       await expect(
@@ -754,7 +812,7 @@ describe("LPStakingVault", function () {
       // nothing moved: the position is still staked, still under the same staker
       expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
 
-      await vault.setRebalancePaused(false);
+      await asGuardian().setRebalancePaused(false);
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(vault, "Rebalanced");
@@ -763,7 +821,7 @@ describe("LPStakingVault", function () {
     it("is blocked by the rebalance pause even with no swap leg", async function () {
       const tokenId = await stakePosition(alice);
       await nfpm.setMintConsumeBps(10_000n);
-      await vault.setRebalancePaused(true);
+      await asGuardian().setRebalancePaused(true);
 
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
@@ -1062,20 +1120,22 @@ describe("LPStakingVault", function () {
       return tokenId;
     }
 
-    it("sends an unrecorded position NFT to the owner and logs it", async function () {
+    it("sends an unrecorded position NFT to the guardian, never to the owner, and logs it", async function () {
       const tokenId = await pushStrayPosition(alice);
 
-      const tx = await vault.rescuePosition(tokenId);
+      const tx = await asGuardian().rescuePosition(tokenId);
       const ts = await txTimestamp(tx);
 
-      await expect(tx).to.emit(vault, "PositionRescued").withArgs(tokenId, owner.address, ts);
-      expect(await nfpm.ownerOf(tokenId)).to.equal(owner.address);
+      // Not `owner()`: after the deploy that is a timelock contract with no way to forward
+      // an ERC-721. The two tiers are distinct signers here, so this cannot pass by accident.
+      await expect(tx).to.emit(vault, "PositionRescued").withArgs(tokenId, guardian.address, ts);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(guardian.address);
     });
 
     it("refuses to move a staked position — the record is what makes custody legitimate", async function () {
       const tokenId = await stakePosition(alice);
 
-      await expect(vault.rescuePosition(tokenId))
+      await expect(asGuardian().rescuePosition(tokenId))
         .to.be.revertedWithCustomError(vault, "PositionIsStaked")
         .withArgs(tokenId, alice.address);
 
@@ -1093,32 +1153,38 @@ describe("LPStakingVault", function () {
       await vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
 
       // the record moved with the position, so the live id is still out of reach
-      await expect(vault.rescuePosition(newTokenId))
+      await expect(asGuardian().rescuePosition(newTokenId))
         .to.be.revertedWithCustomError(vault, "PositionIsStaked")
         .withArgs(newTokenId, alice.address);
 
       // the old id has no record any more, but it was burned, so there is nothing to move
       expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
-      await expect(vault.rescuePosition(tokenId)).to.be.revertedWithCustomError(nfpm, "ERC721NonexistentToken");
+      await expect(asGuardian().rescuePosition(tokenId)).to.be.revertedWithCustomError(nfpm, "ERC721NonexistentToken");
     });
 
-    it("is owner only", async function () {
+    it("is guardian only — the owner is rejected too", async function () {
       const tokenId = await pushStrayPosition(alice);
 
-      await expect(vault.connect(alice).rescuePosition(tokenId)).to.be.revertedWithCustomError(
-        vault,
-        "OwnableUnauthorizedAccount"
-      );
+      await expect(vault.connect(alice).rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
+
+      // The recovery hatch is incident response, and the owner is a timelock that could not
+      // forward the NFT anyway, so the OWNER does not hold it either.
+      await expect(vault.rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
+
       expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
     });
 
     it("cannot pull in an NFT the vault does not hold, even one approved to it", async function () {
       // `createPosition` leaves the vault approved for the token, which is what a user does
       // before `stake`. The rescue transfers out of the vault rather than pulling into it,
-      // so the standing approval buys the owner nothing.
+      // so the standing approval buys the guardian nothing.
       const tokenId = await createPosition(alice);
 
-      await expect(vault.rescuePosition(tokenId))
+      await expect(asGuardian().rescuePosition(tokenId))
         .to.be.revertedWithCustomError(nfpm, "ERC721IncorrectOwner")
         .withArgs(vaultAddr, tokenId, alice.address);
     });
@@ -1128,8 +1194,8 @@ describe("LPStakingVault", function () {
       const staked = await stakePosition(alice);
       await vault.connect(alice).unstake(staked);
 
-      await expect(vault.rescuePosition(stray)).to.emit(vault, "PositionRescued");
-      expect(await nfpm.ownerOf(stray)).to.equal(owner.address);
+      await expect(asGuardian().rescuePosition(stray)).to.emit(vault, "PositionRescued");
+      expect(await nfpm.ownerOf(stray)).to.equal(guardian.address);
     });
   });
 
@@ -1232,7 +1298,7 @@ describe("LPStakingVault", function () {
         pool: await altPool.getAddress(),
         token0: alt0Addr,
         token1: alt1Addr,
-        initialOwner: opts.ownerIsToken0 ? alt0Addr : owner.address,
+        guardian: opts.guardianIsToken0 ? alt0Addr : guardian.address,
       });
       const altVaultAddr = await altVault.getAddress();
 
@@ -1321,11 +1387,11 @@ describe("LPStakingVault", function () {
     });
 
     it("cannot be re-entered by a token hook calling rescuePosition during a rebalance", async function () {
-      // the vault's owner is the token itself, so the re-entrant call clears `onlyOwner` —
-      // which runs before `nonReentrant` — and the guard is all that is left to stop it
+      // the vault's GUARDIAN is the token itself, so the re-entrant call clears `onlyGuardian`
+      // — which runs before `nonReentrant` — and the guard is all that is left to stop it
       const { altVault, altVaultAddr, alt0, alt0Addr, alt1Addr, tokenId } = await deployAltVault(
         "MockHookERC20",
-        { ownerIsToken0: true }
+        { guardianIsToken0: true }
       );
 
       // a stray NFT with no staker record: exactly what `rescuePosition` exists to move
@@ -1354,6 +1420,12 @@ describe("LPStakingVault", function () {
         vault,
         "OwnableUnauthorizedAccount"
       );
+
+      // Calibrating the guard is a program parameter, not incident response, so the GUARDIAN
+      // does not hold it — `setRebalancePaused` is the switch for that.
+      await expect(asGuardian().setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
 
       await expect(vault.setTwapParams(1200, 100))
         .to.emit(vault, "TwapParamsSet")
@@ -1386,39 +1458,53 @@ describe("LPStakingVault", function () {
       expect(await vault.twapWindow()).to.equal(3600);
     });
 
-    it("toggles the deposit pause, owner only", async function () {
-      await expect(vault.connect(alice).setDepositsPaused(true)).to.be.revertedWithCustomError(
-        vault,
-        "OwnableUnauthorizedAccount"
-      );
+    it("toggles the deposit pause, guardian only — the owner is rejected too", async function () {
+      await expect(vault.connect(alice).setDepositsPaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
 
-      await expect(vault.setDepositsPaused(true)).to.emit(vault, "DepositsPausedSet").withArgs(true);
+      // The pause is the fast mitigation. Routing it through the timelock would mean waiting
+      // out the delay before a live bug can be stopped, so the OWNER does not hold it.
+      await expect(vault.setDepositsPaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
+
+      await expect(asGuardian().setDepositsPaused(true)).to.emit(vault, "DepositsPausedSet").withArgs(true);
       expect(await vault.depositsPaused()).to.equal(true);
 
-      await expect(vault.setDepositsPaused(false)).to.emit(vault, "DepositsPausedSet").withArgs(false);
+      await expect(asGuardian().setDepositsPaused(false)).to.emit(vault, "DepositsPausedSet").withArgs(false);
       expect(await vault.depositsPaused()).to.equal(false);
     });
 
-    it("toggles the rebalance pause, owner only", async function () {
-      await expect(vault.connect(alice).setRebalancePaused(true)).to.be.revertedWithCustomError(
-        vault,
-        "OwnableUnauthorizedAccount"
-      );
+    it("toggles the rebalance pause, guardian only — the owner is rejected too", async function () {
+      await expect(vault.connect(alice).setRebalancePaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(alice.address, guardian.address);
 
-      await expect(vault.setRebalancePaused(true)).to.emit(vault, "RebalancePausedSet").withArgs(true);
+      await expect(vault.setRebalancePaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(owner.address, guardian.address);
+
+      await expect(asGuardian().setRebalancePaused(true)).to.emit(vault, "RebalancePausedSet").withArgs(true);
       expect(await vault.rebalancePaused()).to.equal(true);
       // the two switches are independent
       expect(await vault.depositsPaused()).to.equal(false);
 
-      await expect(vault.setRebalancePaused(false)).to.emit(vault, "RebalancePausedSet").withArgs(false);
+      await expect(asGuardian().setRebalancePaused(false)).to.emit(vault, "RebalancePausedSet").withArgs(false);
       expect(await vault.rebalancePaused()).to.equal(false);
     });
 
-    it("sets and clears the zapper, owner only, carrying both sides", async function () {
+    it("sets and clears the zapper, owner only — the guardian is rejected — carrying both sides", async function () {
       await expect(vault.connect(alice).setZapper(alice.address)).to.be.revertedWithCustomError(
         vault,
         "OwnableUnauthorizedAccount"
       );
+
+      // Pointing the deposit path at new code is a code change in all but name, so it takes
+      // the timelock's delay; stopping the existing zapper is `setDepositsPaused`.
+      await expect(asGuardian().setZapper(alice.address))
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
 
       await expect(vault.setZapper(zapper.address)).to.emit(vault, "ZapperSet").withArgs(ZERO, zapper.address);
       expect(await vault.zapper()).to.equal(zapper.address);
@@ -1480,6 +1566,265 @@ describe("LPStakingVault", function () {
       expect(preview.twapTick).to.equal(-250);
       expect(preview.maxDeviationTicks).to.equal(500);
       expect(preview.withinBounds).to.equal(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("setGuardian", function () {
+    it("is owner only, rejects address(0) and emits GuardianSet", async function () {
+      await expect(asGuardian().setGuardian(alice.address))
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
+
+      await expect(vault.setGuardian(ZERO)).to.be.revertedWithCustomError(vault, "ZeroAddress");
+
+      await expect(vault.setGuardian(stranger.address))
+        .to.emit(vault, "GuardianSet")
+        .withArgs(guardian.address, stranger.address);
+      expect(await vault.guardian()).to.equal(stranger.address);
+    });
+
+    it("moves the whole fast-path tier in one call", async function () {
+      await vault.setGuardian(stranger.address);
+
+      await expect(asGuardian().setDepositsPaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardian")
+        .withArgs(guardian.address, stranger.address);
+
+      await vault.connect(stranger).setDepositsPaused(true);
+      expect(await vault.depositsPaused()).to.equal(true);
+
+      await vault.connect(stranger).setRebalancePaused(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
+    });
+
+    it("redirects the rescue destination with it", async function () {
+      const tokenId = await createPosition(alice);
+      await nfpm.connect(alice).transferFrom(alice.address, vaultAddr, tokenId);
+
+      await vault.setGuardian(stranger.address);
+      await vault.connect(stranger).rescuePosition(tokenId);
+
+      expect(await nfpm.ownerOf(tokenId)).to.equal(stranger.address);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Upgradeability", function () {
+    // `constructor` / `state-variable-immutable`: the two patterns the spec chose on purpose
+    // (immutable protocol references, `_disableInitializers()` in the implementation ctor).
+    // `missing-initializer`: V2 is an upgrade of an ALREADY-initialized proxy, so it declares
+    // no `initializer` of its own — its `initializeV2` is a `reinitializer(2)`, and re-running
+    // V1's `initialize` is precisely what must not happen.
+    const V2_ARGS = {
+      unsafeAllow: ["constructor", "state-variable-immutable", "missing-initializer"],
+    };
+
+    function constructorArgs() {
+      return [nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr];
+    }
+
+    async function v2Factory() {
+      return ethers.getContractFactory("LPStakingVaultV2Mock");
+    }
+
+    it("passes the plugin's own implementation-safety check", async function () {
+      const V2 = await v2Factory();
+      await upgrades.validateImplementation(V2, {
+        kind: "uups",
+        constructorArgs: constructorArgs(),
+        ...V2_ARGS,
+      });
+    });
+
+    it("keeps the staker ledger, the switches and both roles across upgradeProxy", async function () {
+      const tokenId = await stakePosition(alice);
+      await vault.setZapper(zapper.address);
+      await asGuardian().setRebalancePaused(true);
+
+      const V2 = await v2Factory();
+      const upgraded = await upgrades.upgradeProxy(vaultAddr, V2, {
+        kind: "uups",
+        constructorArgs: constructorArgs(),
+        ...V2_ARGS,
+      });
+
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.getAddress()).to.equal(vaultAddr);
+      expect(await upgraded.stakerOf(tokenId)).to.equal(alice.address);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+      expect(await upgraded.zapper()).to.equal(zapper.address);
+      expect(await upgraded.rebalancePaused()).to.equal(true);
+      expect(await upgraded.depositsPaused()).to.equal(false);
+      expect(await upgraded.guardian()).to.equal(guardian.address);
+      expect(await upgraded.owner()).to.equal(owner.address);
+      expect(await upgraded.twapWindow()).to.equal(TWAP_WINDOW);
+      expect(await upgraded.maxTwapDeviationTicks()).to.equal(MAX_DEVIATION_TICKS);
+
+      // And the exit still works against the new code.
+      await vault.connect(alice).unstake(tokenId);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+    });
+
+    it("cannot initialise the implementation behind the proxy", async function () {
+      const implAddr = await upgrades.erc1967.getImplementationAddress(vaultAddr);
+      const impl = await ethers.getContractAt("LPStakingVault", implAddr);
+
+      await expect(
+        impl.initialize(alice.address, alice.address, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+      ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
+    });
+
+    it("cannot initialise the proxy a second time", async function () {
+      await expect(
+        vault.initialize(alice.address, alice.address, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+      ).to.be.revertedWithCustomError(vault, "InvalidInitialization");
+    });
+
+    it("rejects upgradeToAndCall from a stranger and from the guardian", async function () {
+      const V2 = await v2Factory();
+      const impl = await V2.deploy(...constructorArgs());
+      await impl.waitForDeployment();
+      const implAddr = await impl.getAddress();
+
+      for (const caller of [alice, guardian, stranger]) {
+        await expect(vault.connect(caller).upgradeToAndCall(implAddr, "0x"))
+          .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+          .withArgs(caller.address);
+      }
+
+      // ...and the owner can.
+      await expect(vault.upgradeToAndCall(implAddr, "0x"))
+        .to.emit(vault, "Upgraded")
+        .withArgs(implAddr);
+    });
+
+    it("refuses renounceOwnership, so the upgrade path can never be frozen", async function () {
+      await expect(vault.renounceOwnership()).to.be.revertedWithCustomError(
+        vault,
+        "RenounceDisabled"
+      );
+      expect(await vault.owner()).to.equal(owner.address);
+
+      // A stranger still gets the standard Ownable rejection, not the reason.
+      await expect(vault.connect(alice).renounceOwnership())
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+    });
+
+    describe("under a TimelockController", function () {
+      const MIN_DELAY = 60n;
+      let timelock, timelockAddr;
+
+      // OZ operation ids are keccak of the whole call tuple; the helper keeps schedule and
+      // execute reading from the same arguments so they can never drift apart.
+      const PREDECESSOR = ethers.ZeroHash;
+      const SALT = ethers.ZeroHash;
+
+      async function schedule(target, data) {
+        return timelock.connect(stranger).schedule(target, 0, data, PREDECESSOR, SALT, MIN_DELAY);
+      }
+
+      async function execute(target, data) {
+        return timelock.connect(stranger).execute(target, 0, data, PREDECESSOR, SALT);
+      }
+
+      beforeEach(async function () {
+        // `stranger` stands in for the multisig here: proposer, executor and canceller.
+        // admin = address(0) leaves the timelock self-administered from block one.
+        const Timelock = await ethers.getContractFactory("LPTimelock");
+        timelock = await Timelock.deploy(
+          MIN_DELAY,
+          [stranger.address],
+          [stranger.address],
+          ethers.ZeroAddress
+        );
+        timelockAddr = await timelock.getAddress();
+      });
+
+      async function handOver() {
+        const accept = vault.interface.encodeFunctionData("acceptOwnership", []);
+        await vault.transferOwnership(timelockAddr);
+        await schedule(vaultAddr, accept);
+        await time.increase(Number(MIN_DELAY) + 1);
+        await execute(vaultAddr, accept);
+      }
+
+      it("takes ownership only through a scheduled acceptOwnership, after the delay", async function () {
+        await vault.transferOwnership(timelockAddr);
+        expect(await vault.owner()).to.equal(owner.address);
+        expect(await vault.pendingOwner()).to.equal(timelockAddr);
+
+        const accept = vault.interface.encodeFunctionData("acceptOwnership", []);
+        await schedule(vaultAddr, accept);
+
+        // Ready-at has not arrived: the operation exists but cannot run.
+        await expect(execute(vaultAddr, accept)).to.be.revertedWithCustomError(
+          timelock,
+          "TimelockUnexpectedOperationState"
+        );
+
+        await time.increase(Number(MIN_DELAY) + 1);
+        await execute(vaultAddr, accept);
+
+        expect(await vault.owner()).to.equal(timelockAddr);
+        expect(await vault.pendingOwner()).to.equal(ZERO);
+      });
+
+      it("upgrades only through the timelock once it owns the proxy", async function () {
+        await handOver();
+
+        const V2 = await v2Factory();
+        const impl = await V2.deploy(...constructorArgs());
+        await impl.waitForDeployment();
+        const implAddr = await impl.getAddress();
+
+        // The multisig itself holds no upgrade right — only the timelock does.
+        await expect(vault.connect(stranger).upgradeToAndCall(implAddr, "0x"))
+          .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+          .withArgs(stranger.address);
+
+        const upgrade = vault.interface.encodeFunctionData("upgradeToAndCall", [implAddr, "0x"]);
+        await schedule(vaultAddr, upgrade);
+
+        await expect(execute(vaultAddr, upgrade)).to.be.revertedWithCustomError(
+          timelock,
+          "TimelockUnexpectedOperationState"
+        );
+
+        await time.increase(Number(MIN_DELAY) + 1);
+        await expect(execute(vaultAddr, upgrade))
+          .to.emit(vault, "Upgraded")
+          .withArgs(implAddr);
+
+        expect(
+          await (await ethers.getContractAt("LPStakingVaultV2Mock", vaultAddr)).version()
+        ).to.equal(2n);
+      });
+
+      it("leaves the guardian tier undelayed while the timelock owns the proxy", async function () {
+        await handOver();
+
+        // No schedule, no delay: the incident switches still work in one transaction.
+        await asGuardian().setDepositsPaused(true);
+        expect(await vault.depositsPaused()).to.equal(true);
+        await asGuardian().setRebalancePaused(true);
+        expect(await vault.rebalancePaused()).to.equal(true);
+      });
+
+      it("shortens its own delay only through itself", async function () {
+        // Not even the proposer/executor: shortening the delay is itself a delayed operation.
+        await expect(timelock.connect(stranger).updateDelay(1))
+          .to.be.revertedWithCustomError(timelock, "TimelockUnauthorizedCaller")
+          .withArgs(stranger.address);
+
+        const update = timelock.interface.encodeFunctionData("updateDelay", [1]);
+        await schedule(timelockAddr, update);
+        await time.increase(Number(MIN_DELAY) + 1);
+        await expect(execute(timelockAddr, update))
+          .to.emit(timelock, "MinDelayChange")
+          .withArgs(MIN_DELAY, 1n);
+      });
     });
   });
 });

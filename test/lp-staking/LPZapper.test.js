@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("LPZapper", function () {
@@ -158,17 +158,18 @@ describe("LPZapper", function () {
     await asset.transfer(routerAddr, ASSET(1_000_000));
     await usdc.transfer(routerAddr, USDC(1_000_000));
 
+    // The vault is a UUPS proxy (spec 01 revision 2026-08-26); the zapper is not. `owner` is
+    // both its owner and its guardian here — this suite is about the zapper, and the two
+    // tiers are split where that is the subject ({LPStakingVault.test.js}).
     const Vault = await ethers.getContractFactory("LPStakingVault");
-    vault = await Vault.deploy(
-      nfpmAddr,
-      poolAddr,
-      token0Addr,
-      token1Addr,
-      FEE,
-      routerAddr,
-      owner.address,
-      TWAP_WINDOW,
-      MAX_DEVIATION_TICKS
+    vault = await upgrades.deployProxy(
+      Vault,
+      [owner.address, owner.address, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+      {
+        kind: "uups",
+        constructorArgs: [nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr],
+        unsafeAllow: ["constructor", "state-variable-immutable"],
+      }
     );
     vaultAddr = await vault.getAddress();
 

@@ -667,21 +667,27 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         await (await swapUsdcForAsset(deployer, WARMUP_SWAP_USDC)).wait();
       }
 
-      // 7. Deploy the stack against the real pool.
+      // 7. Deploy the stack against the real pool. The vault is a UUPS proxy: implementation
+      //    (six immutables + the live pool triple check + disabled initializers) then
+      //    LPProxy, whose constructor runs `initialize` in the same transaction — the shape
+      //    scripts/deploy-lp-staking.js deploys.
       const Vault = await ethers.getContractFactory("LPStakingVault", deployer);
-      vault = await Vault.deploy(
-        NPM_ADDR,
-        POOL_ADDR,
-        ASSET_ADDR,
-        USDC_ADDR,
-        FEE,
-        ROUTER_ADDR,
-        deployer.address,
-        TWAP_WINDOW,
-        MAX_DEVIATION_TICKS
+      const vaultImpl = await Vault.deploy(NPM_ADDR, POOL_ADDR, ASSET_ADDR, USDC_ADDR, FEE, ROUTER_ADDR);
+      await vaultImpl.waitForDeployment();
+
+      const VaultProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
+      const vaultProxy = await VaultProxyFactory.deploy(
+        await vaultImpl.getAddress(),
+        Vault.interface.encodeFunctionData("initialize", [
+          deployer.address, // owner, handed to the multisig below — `setZapper` runs first
+          multisig.address, // guardian — the fast path, never behind a timelock
+          TWAP_WINDOW,
+          MAX_DEVIATION_TICKS,
+        ])
       );
-      await vault.waitForDeployment();
-      vaultAddr = await vault.getAddress();
+      await vaultProxy.waitForDeployment();
+      vaultAddr = await vaultProxy.getAddress();
+      vault = await ethers.getContractAt("LPStakingVault", vaultAddr, deployer);
 
       const Zapper = await ethers.getContractFactory("LPZapper", deployer);
       zapper = await Zapper.deploy(
@@ -701,6 +707,11 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       await zapper.waitForDeployment();
       zapperAddr = await zapper.getAddress();
       await (await vault.setZapper(zapperAddr)).wait();
+
+      // Ownable2Step: the transfer nominates, and the multisig has to accept. `setZapper`
+      // above is owner-only, so the handover can only happen after the wiring.
+      await (await vault.transferOwnership(multisig.address)).wait();
+      await (await vault.connect(multisig).acceptOwnership()).wait();
 
       // 8. Deploy the reward leg in the order scripts/deploy-lp-staking.js fixes: TokenX
       //    first, then the distributor that becomes its minter, then the epoch armed by
@@ -1328,6 +1339,13 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await distributor.guardian()).to.equal(multisig.address);
       expect(await distributor.paused()).to.equal(false);
       expect(await distributor.assetClaimsEnabled()).to.equal(false);
+
+      expect(await vault.zapper()).to.equal(zapperAddr);
+      expect(await vault.owner()).to.equal(multisig.address);
+      expect(await vault.pendingOwner()).to.equal(ethers.ZeroAddress);
+      expect(await vault.guardian()).to.equal(multisig.address);
+      expect(await vault.depositsPaused()).to.equal(false);
+      expect(await vault.rebalancePaused()).to.equal(false);
 
       // The domain the back office must sign against, as the contract reports it.
       expect(voucherDomain.name).to.equal("RealLPRewards");

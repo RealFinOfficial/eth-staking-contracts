@@ -253,16 +253,16 @@ contract PositionLifecycleTest is ForkHarness {
         vm.prank(multisig);
         vault.rescuePosition(tokenId);
 
-        assertEq(npm.ownerOf(tokenId), multisig, "the rescue must send the NFT to the owner multisig");
+        assertEq(npm.ownerOf(tokenId), multisig, "the rescue must send the NFT to the guardian multisig");
     }
 
-    function test_RescuePosition_IsOwnerOnly() public {
+    function test_RescuePosition_IsGuardianOnly() public {
         uint256 tokenId = _mintAroundSpot(alice, 600);
         vm.prank(alice);
         npm.transferFrom(alice, address(vault), tokenId);
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, alice, multisig));
         vault.rescuePosition(tokenId);
     }
 

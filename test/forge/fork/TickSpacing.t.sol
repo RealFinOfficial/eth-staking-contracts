@@ -209,7 +209,7 @@ contract TickSpacingTest is ForkHarness {
         assertEq(vault.stakerOf(tokenId), address(vault), "the vault is recorded as its own staker");
         assertEq(npm.ownerOf(tokenId), address(vault), "and custody is real");
 
-        // The owner's recovery path is closed by the record it just wrote.
+        // The guardian's recovery path is closed by the record it just wrote.
         vm.prank(multisig);
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.PositionIsStaked.selector, tokenId, address(vault)));
         vault.rescuePosition(tokenId);

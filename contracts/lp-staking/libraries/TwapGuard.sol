@@ -44,6 +44,16 @@ struct SwapParams {
  *  parameters, the event and the errors in one piece, and only have to expose their own
  *  `onlyOwner` setter (the guard deliberately knows nothing about access control).
  *
+ *  The two parameters live in an ERC-7201 namespace rather than in ordinary slots, because
+ *  one of the two inheritors — `LPStakingVault` — runs behind a UUPS proxy and every slot it
+ *  owns has to be immune to what an upgrade does to the inheritance layout above it. The
+ *  namespace costs the other inheritor — the non-upgradeable `LPZapper` — nothing: it is a
+ *  fixed slot either way. The `pool` reference stays `immutable`, so it is bytecode on both.
+ *
+ *  The constructor therefore takes ONLY the pool. The parameters are seeded by whoever knows
+ *  when it is safe to write storage: the zapper's own constructor, and the vault's
+ *  `initialize` — an inline field initializer or a base constructor never runs behind a proxy.
+ *
  *  Mechanics:
  *    - Arithmetic-mean tick over `twapWindow` from `pool.observe([window, 0])`.
  *    - Spot tick from `pool.slot0()`.
@@ -87,15 +97,36 @@ abstract contract TwapGuard {
     ///         a 20% price move — the loosest the guard may ever be configured.
     uint24 public constant MAX_TWAP_DEVIATION_TICKS = 1823;
 
-    // ──────────────────────── State ────────────────────────────
+    // ──────────────────────── Immutables ───────────────────────
 
     /// @notice Uniswap V3 pool this contract reads its oracle from.
+    /// @dev Implementation bytecode, not storage — see the note above.
     IUniswapV3Pool public immutable pool;
 
-    /// @notice TWAP lookback window in seconds.
-    uint32 public twapWindow;
-    /// @notice Maximum tolerated spot-vs-TWAP deviation, in ticks.
-    uint24 public maxTwapDeviationTicks;
+    // ──────────────────────── Storage ──────────────────────────
+
+    /// @custom:storage-location erc7201:real.lp.storage.TwapGuard
+    struct TwapGuardStorage {
+        /// TWAP lookback window in seconds.
+        uint32 twapWindow;
+        /// Maximum tolerated spot-vs-TWAP deviation, in ticks.
+        uint24 maxTwapDeviationTicks;
+    }
+
+    /**
+     * @dev ERC-7201 slot for {TwapGuardStorage}, computed as
+     *      `keccak256(abi.encode(uint256(keccak256("real.lp.storage.TwapGuard")) - 1)) & ~bytes32(uint256(0xff))`.
+     *      Pinned as a literal so it can never move under an upgrade of the vault.
+     *      `test/forge/unit/VaultBranches.t.sol` recomputes it and fails if it drifts.
+     */
+    bytes32 private constant TWAP_GUARD_STORAGE =
+        0xd1f904d9e9754969ffa2d33531f67fbdbb15fde03cb30a2cfdee997f4aa0c300;
+
+    function _twapGuardStorage() private pure returns (TwapGuardStorage storage $) {
+        assembly {
+            $.slot := TWAP_GUARD_STORAGE
+        }
+    }
 
     // ──────────────────────── Events ───────────────────────────
 
@@ -113,13 +144,26 @@ abstract contract TwapGuard {
 
     /**
      * @param _pool Uniswap V3 pool used as the price oracle.
-     * @param _twapWindow Initial TWAP window in seconds (MIN_TWAP_WINDOW..MAX_TWAP_WINDOW).
-     * @param _maxTwapDeviationTicks Initial deviation ceiling in ticks (0 < x <= MAX_TWAP_DEVIATION_TICKS).
+     * @dev The parameters are NOT set here. A constructor never runs against proxy storage,
+     *      and this guard is inherited by one contract that has some — see the note above.
+     *      Every inheritor must call {_setTwapParams} itself: the zapper from its own
+     *      constructor, the vault from `initialize`.
      */
-    constructor(address _pool, uint32 _twapWindow, uint24 _maxTwapDeviationTicks) {
+    constructor(address _pool) {
         if (_pool == address(0)) revert InvalidPool();
         pool = IUniswapV3Pool(_pool);
-        _setTwapParams(_twapWindow, _maxTwapDeviationTicks);
+    }
+
+    // ──────────────────────── Parameter views ──────────────────
+
+    /// @notice TWAP lookback window in seconds.
+    function twapWindow() public view returns (uint32) {
+        return _twapGuardStorage().twapWindow;
+    }
+
+    /// @notice Maximum tolerated spot-vs-TWAP deviation, in ticks.
+    function maxTwapDeviationTicks() public view returns (uint24) {
+        return _twapGuardStorage().maxTwapDeviationTicks;
     }
 
     // ──────────────────────── Internal helpers ─────────────────
@@ -133,15 +177,16 @@ abstract contract TwapGuard {
         if (_maxDeviationTicks == 0 || _maxDeviationTicks > MAX_TWAP_DEVIATION_TICKS) {
             revert InvalidTwapDeviation(_maxDeviationTicks, MAX_TWAP_DEVIATION_TICKS);
         }
-        twapWindow = _window;
-        maxTwapDeviationTicks = _maxDeviationTicks;
+        TwapGuardStorage storage $ = _twapGuardStorage();
+        $.twapWindow = _window;
+        $.maxTwapDeviationTicks = _maxDeviationTicks;
         emit TwapParamsSet(_window, _maxDeviationTicks);
     }
 
     /// @dev Arithmetic-mean tick over `twapWindow`, rounded toward negative infinity
     ///      (matching Uniswap's own OracleLibrary), plus the current spot tick.
     function _twapAndSpotTicks() internal view returns (int24 twapTick, int24 currentTick) {
-        uint32 window = twapWindow;
+        uint32 window = _twapGuardStorage().twapWindow;
 
         uint32[] memory secondsAgos = new uint32[](2);
         secondsAgos[0] = window;
@@ -167,7 +212,7 @@ abstract contract TwapGuard {
         (int24 twapTick, int24 currentTick) = _twapAndSpotTicks();
 
         // Safe: maxTwapDeviationTicks is bounded by MAX_TWAP_DEVIATION_TICKS (1823) << 2**23.
-        int24 maxDeviationTicks = int24(maxTwapDeviationTicks);
+        int24 maxDeviationTicks = int24(_twapGuardStorage().maxTwapDeviationTicks);
 
         int24 deviation = currentTick - twapTick;
         if (deviation < 0) deviation = -deviation;
@@ -193,7 +238,7 @@ abstract contract TwapGuard {
         returns (int24 currentTick, int24 twapTick, int24 maxDeviationTicks, bool withinBounds)
     {
         (twapTick, currentTick) = _twapAndSpotTicks();
-        maxDeviationTicks = int24(maxTwapDeviationTicks);
+        maxDeviationTicks = int24(_twapGuardStorage().maxTwapDeviationTicks);
 
         int24 deviation = currentTick - twapTick;
         if (deviation < 0) deviation = -deviation;

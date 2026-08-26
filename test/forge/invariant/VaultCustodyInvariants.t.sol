@@ -31,7 +31,7 @@ contract VaultCustodyHandler is Test {
     MockERC20Permit internal immutable asset;
     MockERC20Permit internal immutable usdc;
     address internal immutable router;
-    address internal immutable vaultOwner;
+    address internal immutable vaultGuardian;
     uint24 internal immutable fee;
 
     address[] internal actors;
@@ -69,7 +69,7 @@ contract VaultCustodyHandler is Test {
         MockERC20Permit _asset,
         MockERC20Permit _usdc,
         address _router,
-        address _vaultOwner,
+        address _vaultGuardian,
         uint24 _fee,
         address[] memory _actors
     ) {
@@ -78,7 +78,7 @@ contract VaultCustodyHandler is Test {
         asset = _asset;
         usdc = _usdc;
         router = _router;
-        vaultOwner = _vaultOwner;
+        vaultGuardian = _vaultGuardian;
         fee = _fee;
         actors = _actors;
     }
@@ -132,8 +132,8 @@ contract VaultCustodyHandler is Test {
         } catch {}
     }
 
-    /// @dev The owner repeatedly attacking its own recovery hatch. Every one of these MUST
-    ///      be refused; the flag it would set is the invariant's teeth.
+    /// @dev The GUARDIAN repeatedly attacking the recovery hatch it holds. Every one of
+    ///      these MUST be refused; the flag it would set is the invariant's teeth.
     function rescueStaked(uint256 idSeed) external {
         calls++;
         _prime();
@@ -142,7 +142,7 @@ contract VaultCustodyHandler is Test {
         uint256 tokenId = staked[bound(idSeed, 0, staked.length - 1)];
         rescueAttempts++;
 
-        vm.prank(vaultOwner);
+        vm.prank(vaultGuardian);
         try vault.rescuePosition(tokenId) {
             rescueEverMovedAStakedPosition = true;
         } catch {}
@@ -225,8 +225,12 @@ contract VaultCustodyInvariantsTest is LocalHarness {
         actors[2] = carol;
         actors[3] = stranger;
 
-        handler =
-            new VaultCustodyHandler(vault, npmMock, asset, usdcToken, address(routerMock), address(this), FEE, actors);
+        // `rescuePosition` is guardian tier; the local harness gives the vault the same
+        // address for owner and guardian, so this reads it off the contract rather than
+        // assuming which of the two it is.
+        handler = new VaultCustodyHandler(
+            vault, npmMock, asset, usdcToken, address(routerMock), vault.guardian(), FEE, actors
+        );
 
         // The position manager pays every `collect` out of its own balance, so it is funded
         // once here rather than on every fabricated position inside the campaign.

@@ -497,8 +497,17 @@ contract ZapperBranchesTest is LocalHarness {
     ///      because both the vault's and the zapper's manager are immutable.
     function _deployEvilStack() private returns (LPStakingVault v, LPZapper z, MaliciousNPM n) {
         n = new MaliciousNPM();
-        v = new LPStakingVault(
-            address(n), address(poolMock), token0, token1, FEE, address(routerMock), address(this), MIN_TWAP_WINDOW, 500
+        v = _deployVaultProxy(
+            address(n),
+            address(poolMock),
+            token0,
+            token1,
+            FEE,
+            address(routerMock),
+            address(this),
+            address(this),
+            MIN_TWAP_WINDOW,
+            500
         );
         z = new LPZapper(
             address(v),

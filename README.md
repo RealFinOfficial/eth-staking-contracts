@@ -308,11 +308,14 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 - **Hardhat** 2.x — unit suites, the fork suites, the 45-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
 - **OpenZeppelin Contracts** v5 — Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA
-- **OpenZeppelin Contracts Upgradeable** v5 + **hardhat-upgrades** — `RewardsDistributor` is a
-  UUPS (ERC-1967) proxy: its `claimed[user]` ledger is cumulative, so a bug fixed by redeploying
-  would make every outstanding lifetime voucher payable twice. The proxy owner is a
-  `TimelockController`; a separate `guardian` (the multisig, no delay) holds the pause, the
-  signer rotation and `recoverExcessAsset`. See `docs/lp-staking-audit-notes.md` item 14
+- **OpenZeppelin Contracts Upgradeable** v5 + **hardhat-upgrades** — `RewardsDistributor` and
+  `LPStakingVault` are UUPS (ERC-1967) proxies. The distributor's `claimed[user]` ledger is
+  cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
+  payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
+  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Each proxy's
+  owner is a `TimelockController`; a separate `guardian` (the multisig, no delay) holds the
+  pause switches, the signer rotation, the rescues and `recoverExcessAsset`. `TokenX` and
+  `LPZapper` stay non-upgradeable. See `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
 
 ## Development
@@ -321,12 +324,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
-npx hardhat test                 # 551 tests: unit suites + three fork suites
+npx hardhat test                 # 565 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 365 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 380 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -486,19 +489,20 @@ the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 99.08% (108/109) | 100.00% (21/21) |
-| `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
+| `LPStakingVault.sol` | 97.26% (142/146) | 100.00% (24/24) |
+| `LPZapper.sol` | 98.67% (74/75) | 100.00% (15/15) |
 | `RewardsDistributor.sol` | 96.34% (79/82) | 100.00% (13/13) |
 | `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
-| `libraries/TwapGuard.sol` | 100.00% (37/37) | 100.00% (7/7) |
+| `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The six uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:537`,
-`LPZapper.sol:389`), `_rollPendingEpoch();` (`TokenX.sol:155`), and the distributor's
-`$.slot := REWARDS_DISTRIBUTOR_STORAGE` / `_disableInitializers();` / `__Ownable2Step_init();`
-(`RewardsDistributor.sol:160`, `:206`, `:217`). Each is reached by tests that assert its
-effect, so all six are demonstrably executed — `--ir-minimum` loses the inlined call site's
-mapping and the assembly body's. They are named in the checker and in the audit notes rather
-than chased with contrived tests.
+The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:751`,
+`LPZapper.sol:396`), `_rollPendingEpoch();` (`TokenX.sol:155`), the two ERC-7201 assembly
+bodies (`LPStakingVault.sol:147`, `libraries/TwapGuard.sol:127`, plus
+`RewardsDistributor.sol:160`), and each proxy's `_disableInitializers();` /
+`__Ownable2Step_init();` (`LPStakingVault.sol:274`, `:294`; `RewardsDistributor.sol:206`,
+`:217`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
+— `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
+in the checker and in the audit notes rather than chased with contrived tests.
 
 ### Foundry beside Hardhat
 

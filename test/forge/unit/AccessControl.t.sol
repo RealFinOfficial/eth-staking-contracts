@@ -10,15 +10,19 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {RejectingReceiver} from "../utils/attackers/Receivers.sol";
 
 /**
- * @notice Why this file exists: `docs/lp-staking-audit-notes.md` §3 states that all four
- *         contracts use one-step `Ownable`, that `renounceOwnership` is live, and that a
- *         wrong address in either call bricks every admin path permanently. That is a
- *         four-by-N matrix of consequences, and a claim of that shape is only worth what its
- *         assertions are worth.
+ * @notice Why this file exists: `docs/lp-staking-audit-notes.md` §3 states what each
+ *         contract's ownership can and cannot do to it — and since the 2026-08-26 revision
+ *         the stack has TWO shapes of that claim. `TokenX` and `LPZapper` keep one-step
+ *         `Ownable` with a live `renounceOwnership`, where a wrong address bricks every admin
+ *         path permanently. The two proxies (`LPStakingVault`, `RewardsDistributor`) are
+ *         `Ownable2Step` with `renounceOwnership` disabled and a second, undelayed `guardian`
+ *         tier beside the owner. A claim of that shape is only worth what its assertions are
+ *         worth.
  *
  *  The matrix is stated per contract: what DIES with the owner, and — the half that matters
  *  to a staker — what SURVIVES. The design promise is that exits are unconditional, so a
- *  fully renounced stack must still let every user out with their position and their rewards.
+ *  stack whose owners are all gone or unreachable must still let every user out with their
+ *  position and their rewards.
  */
 contract AccessControlTest is LocalHarness {
     uint256 internal constant AWARD = 1_000e18;
@@ -36,46 +40,97 @@ contract AccessControlTest is LocalHarness {
         assertEq(tokenX.owner(), address(this), "TokenX starts under the deployer");
     }
 
-    /// @dev One-step: the new owner is in force immediately, with nothing to accept.
-    function test_Ownership_TransferTakesEffectWithNoAcceptanceStep() public {
+    /**
+     * @dev Two shapes in one stack. The two PROXIES are `Ownable2Step`: a transfer only
+     *      nominates, and the nominee has to accept before it can do anything. `TokenX` and
+     *      `LPZapper` stay plain `Ownable`, where the new owner is in force immediately.
+     */
+    function test_Ownership_TransferRequiresAcceptanceForTheProxies() public {
         vault.transferOwnership(multisig);
 
-        assertEq(vault.owner(), multisig, "the new owner is in force at once");
+        assertEq(vault.owner(), address(this), "a nomination must not move the vault's owner");
+        assertEq(vault.pendingOwner(), multisig, "the nominee must be recorded");
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.setDepositsPaused(true);
+        // The nominee is still not the owner until it says so.
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        vault.setZapper(address(1));
 
         vm.prank(multisig);
-        vault.setDepositsPaused(true);
-        assertTrue(vault.depositsPaused(), "and the new owner can act immediately");
-    }
+        vault.acceptOwnership();
 
-    function test_Ownership_TransferToTheZeroAddressIsRejected() public {
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        vault.transferOwnership(address(0));
+        assertEq(vault.owner(), multisig, "accepting is what moves the owner");
+        assertEq(vault.pendingOwner(), address(0), "and it clears the nomination");
+        vm.prank(multisig);
+        vault.setZapper(address(1));
+        assertEq(vault.zapper(), address(1), "the new owner can act");
+
+        // ...and the plain half of the stack has no such step.
+        zapper.transferOwnership(multisig);
+        assertEq(zapper.owner(), multisig, "the zapper's new owner is in force at once");
+        tokenX.transferOwnership(multisig);
+        assertEq(tokenX.owner(), multisig, "and so is TokenX's");
     }
 
     /**
-     * @dev The audit note's "a wrong address bricks every admin path permanently", measured:
-     *      ownership moves to a contract that cannot call anything, and there is no path back
-     *      — not for the old owner, not for anybody.
+     * @dev `Ownable2Step` does not reject the zero address the way plain `Ownable` does, and
+     *      it does not have to: on a proxy a zero transfer is a CANCELLATION — it clears the
+     *      standing nomination and leaves the owner exactly where it is. Plain `Ownable`
+     *      still reverts, because there the same call would take effect immediately.
      */
-    function test_Ownership_ATransferToAnUnusableAddressIsUnrecoverable() public {
+    function test_Ownership_TransferToZeroClearsThePendingOwnerOnTheProxies() public {
+        vault.transferOwnership(multisig);
+        distributor.transferOwnership(multisig);
+        assertEq(vault.pendingOwner(), multisig, "precondition: the vault has a nomination");
+        assertEq(distributor.pendingOwner(), multisig, "precondition: the distributor has one too");
+
+        vault.transferOwnership(address(0));
+        assertEq(vault.pendingOwner(), address(0), "a zero transfer clears the nomination");
+        assertEq(vault.owner(), address(this), "and leaves the owner untouched");
+
+        distributor.transferOwnership(address(0));
+        assertEq(distributor.pendingOwner(), address(0), "the distributor behaves the same way");
+        assertEq(distributor.owner(), address(this), "and keeps its owner too");
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        tokenX.transferOwnership(address(0));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
+        zapper.transferOwnership(address(0));
+    }
+
+    /**
+     * @dev The audit note's "a wrong address bricks every admin path permanently" now holds
+     *      only for the plain contracts. On a proxy a mistyped nominee never becomes the
+     *      owner unless it accepts, so the mistake is undone by nominating again — which is
+     *      the whole reason the two-step handshake is there.
+     */
+    function test_Ownership_AnUnacceptedTransferIsRecoverable() public {
         RejectingReceiver blackHole = new RejectingReceiver();
+
         vault.transferOwnership(address(blackHole));
+        assertEq(vault.owner(), address(this), "the vault's owner has not moved");
+
+        vault.setZapper(address(1)); // the old owner still acts
+        vault.transferOwnership(multisig); // and can re-nominate
+        assertEq(vault.pendingOwner(), multisig, "the mistake is undone by nominating again");
+
+        // The zapper has no such step, so the same mistake there is terminal.
+        zapper.transferOwnership(address(blackHole));
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.transferOwnership(address(this));
+        zapper.transferOwnership(address(this));
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        vault.setZapper(address(1));
+        zapper.setTwapParams(600, 100);
 
-        assertEq(vault.owner(), address(blackHole), "and the owner stays where it was mistyped to");
+        assertEq(zapper.owner(), address(blackHole), "and the owner stays where it was mistyped to");
     }
 
     /// @dev The four owners are independent slots; moving one must not move any other.
     function test_Ownership_EachContractIsOwnedIndependently() public {
         vault.transferOwnership(multisig);
+        vm.prank(multisig);
+        vault.acceptOwnership();
 
         assertEq(vault.owner(), multisig, "only the vault's owner moved");
         assertEq(zapper.owner(), address(this), "the zapper's owner is untouched");
@@ -84,30 +139,40 @@ contract AccessControlTest is LocalHarness {
     }
 
     function test_Ownership_RenouncingOneLeavesTheOtherThreeIntact() public {
-        vault.renounceOwnership();
+        zapper.renounceOwnership();
 
-        assertEq(vault.owner(), address(0), "the vault is ownerless");
-        assertEq(zapper.owner(), address(this), "the zapper still has its owner");
+        assertEq(zapper.owner(), address(0), "the zapper is ownerless");
+        assertEq(vault.owner(), address(this), "the vault still has its owner");
         assertEq(distributor.owner(), address(this), "the distributor still has its owner");
         assertEq(tokenX.owner(), address(this), "TokenX still has its owner");
 
-        zapper.setTwapParams(600, 100);
+        vault.setTwapParams(600, 100);
         distributor.setPaused(true);
         tokenX.setEpochCap(2, 1e18);
     }
 
     /**
-     * @dev The distributor proxy is the exception to the matrix above: renouncing would leave
+     * @dev The two proxies are the exception to the matrix above: renouncing would leave
      *      `_authorizeUpgrade` with no caller and freeze the implementation forever, so the
      *      call is disabled outright rather than merely discouraged in a runbook.
      */
-    function test_Ownership_TheDistributorProxyCannotBeRenounced() public {
+    function test_Ownership_TheProxiesCannotBeRenounced() public {
+        vm.expectRevert(LPStakingVault.RenounceDisabled.selector);
+        vault.renounceOwnership();
+        assertEq(vault.owner(), address(this), "the vault keeps its owner");
+
         vm.expectRevert(RewardsDistributor.RenounceDisabled.selector);
         distributor.renounceOwnership();
         assertEq(distributor.owner(), address(this), "the distributor keeps its owner");
+
+        // The plain half can still be renounced, which is what makes this a real difference.
+        zapper.renounceOwnership();
+        tokenX.renounceOwnership();
+        assertEq(zapper.owner(), address(0), "the zapper can still be renounced");
+        assertEq(tokenX.owner(), address(0), "and so can TokenX");
     }
 
-    /// @dev And its handover is two-step: nominating does not move the owner, accepting does.
+    /// @dev The distributor's handover is two-step in the same way the vault's is.
     function test_Ownership_TheDistributorHandoverNeedsAcceptance() public {
         distributor.transferOwnership(multisig);
 
@@ -156,15 +221,17 @@ contract AccessControlTest is LocalHarness {
         vm.stopPrank();
     }
 
-    /// @dev The zapper is a stakeFor right, not an admin right.
+    /// @dev The zapper is a stakeFor right, not an admin right — in NEITHER tier.
     function test_Roles_TheZapperHasNoAdminPowerOverTheVault() public {
         vm.startPrank(address(zapper));
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(zapper), address(this)));
         vault.setDepositsPaused(true);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(zapper), address(this)));
         vault.setRebalancePaused(true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
         vault.setZapper(address(zapper));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
+        vault.setGuardian(address(zapper));
         vm.stopPrank();
     }
 
@@ -180,14 +247,36 @@ contract AccessControlTest is LocalHarness {
 
     // ──────────────────────── Renounce matrix ──────────────────
 
-    function test_Renounce_VaultLosesFiveAdminCallsAndNothingElse() public {
-        vault.renounceOwnership();
+    /**
+     * @dev The vault cannot be renounced at all, so its matrix entry is not "what dies" but
+     *      "what a HANDOVER costs the old holder". Two tiers, measured separately: the old
+     *      owner loses three calls when ownership is accepted elsewhere, and the old guardian
+     *      loses three when the guardian is rotated.
+     */
+    function test_Renounce_VaultOwnerLosesThreeAdminCallsOnHandover() public {
+        vault.transferOwnership(multisig);
+        vm.prank(multisig);
+        vault.acceptOwnership();
 
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setZapper, (address(1))));
-        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)));
-        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)));
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)));
-        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.rescuePosition, (1)));
+        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setGuardian, (carol)));
+
+        // The guardian tier is a separate slot and is untouched by the ownership move.
+        vault.setDepositsPaused(true);
+        assertTrue(vault.depositsPaused(), "the guardian keeps its tier across an ownership handover");
+    }
+
+    function test_Renounce_VaultGuardianLosesThreeAdminCallsOnRotation() public {
+        vault.setGuardian(carol);
+
+        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)), carol);
+        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), carol);
+        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.rescuePosition, (1)), carol);
+
+        // The owner tier is a separate slot and is untouched by the guardian move.
+        vault.setZapper(address(1));
+        assertEq(vault.zapper(), address(1), "the owner keeps its tier across a guardian rotation");
     }
 
     function test_Renounce_ZapperLosesThreeAdminCallsAndNothingElse() public {
@@ -220,9 +309,9 @@ contract AccessControlTest is LocalHarness {
     function test_Renounce_DistributorGuardianLosesThreeAdminCallsOnRotation() public {
         distributor.setGuardian(carol);
 
-        _expectNotGuardian(abi.encodeCall(RewardsDistributor.setSigner, (carol)), carol);
-        _expectNotGuardian(abi.encodeCall(RewardsDistributor.setPaused, (true)), carol);
-        _expectNotGuardian(abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), carol);
+        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.setSigner, (carol)), carol);
+        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.setPaused, (true)), carol);
+        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), carol);
 
         // The owner tier is a separate slot and is untouched by the guardian move.
         distributor.setAssetClaimsEnabled(true);
@@ -249,13 +338,18 @@ contract AccessControlTest is LocalHarness {
     function test_Renounce_AFullyOwnerlessStackStillServesEveryUserPath() public {
         uint256 aliceToken = _stakePosition(alice);
 
-        vault.renounceOwnership();
         zapper.renounceOwnership();
         tokenX.renounceOwnership();
-        // The distributor proxy cannot be renounced (see
-        // {test_Ownership_TheDistributorProxyCannotBeRenounced}), so the closest equivalent is
-        // an owner that will never act again: a black hole that has accepted the handover.
+        // Neither proxy can be renounced (see {test_Ownership_TheProxiesCannotBeRenounced}),
+        // so the closest equivalent is a set of roles that will never act again: a black hole
+        // holding both tiers, having accepted the handover.
         RejectingReceiver blackHole = new RejectingReceiver();
+        vault.setGuardian(address(blackHole));
+        vault.transferOwnership(address(blackHole));
+        vm.prank(address(blackHole));
+        vault.acceptOwnership();
+
+        distributor.setGuardian(address(blackHole));
         distributor.transferOwnership(address(blackHole));
         vm.prank(address(blackHole));
         distributor.acceptOwnership();
@@ -312,13 +406,12 @@ contract AccessControlTest is LocalHarness {
 
     // ──────────────────────── Helpers ──────────────────────────
 
-    /// @dev Calls `data` on the distributor from this contract and requires the guardian
-    ///      rejection, naming `expectedGuardian` as the address that would have been allowed.
-    function _expectNotGuardian(bytes memory data, address expectedGuardian) private {
-        vm.expectRevert(
-            abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), expectedGuardian)
-        );
-        (bool ok,) = address(distributor).call(data);
+    /// @dev Calls `data` on `target` from this contract and requires the guardian rejection,
+    ///      naming `expectedGuardian` as the address that would have been allowed. Both
+    ///      proxies declare `NotGuardian(address,address)`, so one selector serves both.
+    function _expectNotGuardian(address target, bytes memory data, address expectedGuardian) private {
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), expectedGuardian));
+        (bool ok,) = target.call(data);
         ok; // the cheatcode asserts; the boolean is only here to satisfy the compiler
     }
 

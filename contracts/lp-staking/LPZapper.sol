@@ -155,7 +155,14 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         address _initialOwner,
         uint32 _twapWindow,
         uint24 _maxTwapDeviationTicks
-    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationTicks) {
+    ) Ownable(_initialOwner) TwapGuard(_pool) {
+        // {TwapGuard} no longer seeds its own parameters: they live in an ERC-7201 namespace
+        // shared with the vault, whose proxy cannot be written from a base constructor. The
+        // zapper is a plain contract, so its constructor is the right place — and calling it
+        // first keeps the emitted order (`OwnershipTransferred`, `TwapParamsSet`) and the
+        // bounds-check-before-anything-else behaviour exactly as they were.
+        _setTwapParams(_twapWindow, _maxTwapDeviationTicks);
+
         if (_vault == address(0) || _positionManager == address(0) || _swapRouter == address(0)) {
             revert ZeroAddress();
         }

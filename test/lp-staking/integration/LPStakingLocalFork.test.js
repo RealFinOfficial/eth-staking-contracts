@@ -312,8 +312,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         `scripts/deploy-lp-staking.js exited ${deployRun.code}\n${deployRun.stdout}\n${deployRun.stderr}`
       );
     }
-    deployToBlock = await head();
-
     const registry = runner.readRegistry(registryFile)["31337"];
     tokenXAddr = registry.TokenX.address;
     distributorAddr = registry.RewardsDistributor.address;
@@ -324,6 +322,15 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     zapper = await contractAt("LPZapper", zapperAddr);
     tokenX = await contractAt("TokenX", tokenXAddr);
     distributor = await contractAt("RewardsDistributor", distributorAddr);
+
+    // The vault proxy is Ownable2Step, so the script can only NOMINATE the multisig — it
+    // holds no multisig key. The acceptance is the second half of the same deployment and is
+    // sent here, before `deployToBlock` closes the window, so the scenario below starts from
+    // the state the runbook describes and its step numbering is untouched. When the
+    // TimelockController lands this becomes the timelock's first scheduled operation.
+    await chain.send(vault.connect(w.multisig).acceptOwnership());
+
+    deployToBlock = await head();
 
     voucherDomain = await signing.readEip712Domain(distributor);
 
@@ -682,10 +689,20 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           "SignerChanged",
           "Initialized",
         ],
+        // The vault is a UUPS proxy too, and its deploy tx is the PROXY's: `Upgraded` names
+        // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
+        // transaction (owner = deployer, guardian, TWAP parameters) and `Initialized` closes
+        // it. `ZapperSet` is the owner-only wiring the deployer must still be able to do, and
+        // the run ends with the Ownable2Step pair: `OwnershipTransferStarted` from the
+        // script's nomination, then `OwnershipTransferred` from the multisig's acceptance.
         [vaultAddr.toLowerCase()]: [
+          "Upgraded",
           "OwnershipTransferred",
+          "GuardianSet",
           "TwapParamsSet",
+          "Initialized",
           "ZapperSet",
+          "OwnershipTransferStarted",
           "OwnershipTransferred",
         ],
         [zapperAddr.toLowerCase()]: [
@@ -1716,9 +1733,13 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       const decoded = chain.decodeLogs(await logsFrom(vaultAddr), ifaces);
       const deployTime = decoded.filter((d) => d.blockNumber <= deployToBlock).map((d) => d.name);
       expect(deployTime).to.deep.equal([
+        "Upgraded",
         "OwnershipTransferred",
+        "GuardianSet",
         "TwapParamsSet",
+        "Initialized",
         "ZapperSet",
+        "OwnershipTransferStarted",
         "OwnershipTransferred",
       ]);
     });

@@ -245,7 +245,7 @@ abstract contract ForkHarness is BaseForge {
     function _deployStack() private {
         tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
         distributor = _deployDistributorProxy(address(tokenX), profile.asset, address(this), multisig, voucherSigner);
-        vault = new LPStakingVault(
+        vault = _deployVaultProxy(
             profile.npm,
             address(poolRef),
             token0,
@@ -253,6 +253,7 @@ abstract contract ForkHarness is BaseForge {
             FEE,
             profile.router,
             address(this),
+            multisig,
             profile.twapWindow,
             profile.maxDevTicks
         );
@@ -278,13 +279,18 @@ abstract contract ForkHarness is BaseForge {
 
         // Ownership to the multisig, as the script does before the oracle warm-up.
         tokenX.transferOwnership(multisig);
-        vault.transferOwnership(multisig);
         zapper.transferOwnership(multisig);
 
-        // The distributor proxy is Ownable2Step: the transfer only nominates, and the new
-        // owner has to accept. Production makes that acceptance the timelock's first
-        // scheduled operation; here the multisig accepts directly, which is the same two
-        // transactions with a shorter path.
+        // Both proxies are Ownable2Step: the transfer only nominates, and the new owner has
+        // to accept. Production makes that acceptance the timelock's first scheduled
+        // operation; here the multisig accepts directly, which is the same two transactions
+        // with a shorter path. The multisig is also each proxy's guardian, so the fast-path
+        // calls the fork tests make (`setDepositsPaused`, `rescuePosition`, `setSigner`)
+        // reach the tier they are meant to.
+        vault.transferOwnership(multisig);
+        vm.prank(multisig);
+        vault.acceptOwnership();
+
         distributor.transferOwnership(multisig);
         vm.prank(multisig);
         distributor.acceptOwnership();

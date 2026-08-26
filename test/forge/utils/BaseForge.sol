@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {Profiles} from "./Profiles.sol";
 
+import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 
@@ -135,6 +136,35 @@ abstract contract BaseForge is Test {
         LPProxy proxy =
             new LPProxy(address(impl), abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, signer_)));
         return RewardsDistributor(address(proxy));
+    }
+
+    /**
+     * @notice Deploys the vault the way production does: an implementation carrying the six
+     *         immutables (and running the live pool triple check on them), then an {LPProxy}
+     *         whose constructor delegatecalls `initialize`.
+     * @dev Same reason as {_deployDistributorProxy} for living on this rung: {LocalHarness},
+     *      {ForkHarness} and the two guard-math files all need the identical two-transaction
+     *      shape, and a bare implementation is a contract nobody deploys — its `initialize`
+     *      is burnt, so it has no storage to test against at all.
+     */
+    function _deployVaultProxy(
+        address positionManager_,
+        address pool_,
+        address token0_,
+        address token1_,
+        uint24 fee_,
+        address swapRouter_,
+        address owner_,
+        address guardian_,
+        uint32 twapWindow_,
+        uint24 maxDeviationTicks_
+    ) internal returns (LPStakingVault) {
+        LPStakingVault impl = new LPStakingVault(positionManager_, pool_, token0_, token1_, fee_, swapRouter_);
+        LPProxy proxy = new LPProxy(
+            address(impl),
+            abi.encodeCall(LPStakingVault.initialize, (owner_, guardian_, twapWindow_, maxDeviationTicks_))
+        );
+        return LPStakingVault(address(proxy));
     }
 
     // ──────────────────────── Tick helpers ─────────────────────

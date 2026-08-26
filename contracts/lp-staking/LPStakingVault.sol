@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 
 import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/ISwapRouter02.sol";
@@ -30,15 +33,57 @@ import "./libraries/TwapGuard.sol";
  *    3. `unstake` returns the NFT to its staker.
  *
  *  Exits are unconditional: `unstake` is never gated by a pause switch, by a signature, or
- *  by backend liveness. Deposits and `rebalance` are each pausable behind their own owner
- *  switch — `rebalance` is the most complex function here and the contract is immutable, so
- *  a bug found post-deploy has to have a mitigation. Zaps stop with the deposit pause,
- *  because `zapIn` finishes through `stakeFor`.
+ *  by backend liveness. Deposits and `rebalance` are each pausable behind their own guardian
+ *  switch. Zaps stop with the deposit pause, because `zapIn` finishes through `stakeFor`.
  *
  *  The vault holds no fungible tokens between transactions. Any token0/token1 balance left
  *  at the end of a `rebalance` is refunded to the staker in the same transaction.
+ *
+ *  UPGRADEABILITY (spec 01 revision 2026-08-26). This contract is the implementation behind a
+ *  UUPS (ERC-1967) proxy — see `contracts/lp-staking/deploy/LPProxy.sol`.
+ *
+ *    - Why it is upgradeable at all: `stakers` is the ONLY record of who owns each custodied
+ *      position. Fixing a bug by deploying a replacement vault would leave every staked NFT
+ *      behind at an address whose code is the bug, with no way to move the record with it. A
+ *      proxy is what lets the code be replaced while custody and the ledger stay put.
+ *    - Mutable state therefore lives in ONE ERC-7201 namespaced struct, not in ordinary slots:
+ *      an upgrade may append fields to it, and nothing an inherited OZ contract does to its
+ *      own namespace can move ours. {TwapGuard}'s two parameters have a namespace of their
+ *      own, shared with the (non-upgradeable) zapper.
+ *    - `positionManager`, `swapRouter`, `token0`, `token1`, `fee` and `pool` stay `immutable`.
+ *      They are fixed protocol references, they live in the implementation's bytecode rather
+ *      than in proxy storage, and an upgrade that changed one would be a different market,
+ *      not a fix. The live `pool.token0()/token1()/fee()` triple check that proves them
+ *      consistent therefore stays in the implementation constructor, where they are set.
+ *    - The implementation's own initializers are disabled in its constructor, so the bare
+ *      implementation can never be initialised and taken over.
+ *    - `initialize` seeds the ERC-721 receive guard. An inline field initializer is
+ *      constructor code and never runs behind a proxy, which would leave the guard at zero —
+ *      not at {NOT_RECEIVING} — and `onERC721Received` would then reject nothing.
+ *
+ *  TWO-TIER ADMIN. `owner` is a `TimelockController` (48 h minimum delay on mainnet);
+ *  `guardian` is the multisig, directly, with no delay:
+ *
+ *    | tier               | functions                                                     |
+ *    |--------------------|---------------------------------------------------------------|
+ *    | owner (timelock)   | `_authorizeUpgrade`, `setTwapParams`, `setZapper`, `setGuardian` |
+ *    | guardian (multisig)| `setDepositsPaused`, `setRebalancePaused`, `rescuePosition`    |
+ *
+ *  The split follows response time, not importance. The two pause switches are now the FAST
+ *  mitigation for a bug in the deposit or rebalance path — they act in one transaction — and
+ *  an upgrade is the slow one, publicly scheduled and visible for two days before it can run.
+ *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled:
+ *  renouncing would freeze `_authorizeUpgrade` forever, which is the opposite of why the
+ *  proxy exists.
  */
-contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
+contract LPStakingVault is
+    Initializable,
+    UUPSUpgradeable,
+    Ownable2StepUpgradeable,
+    ReentrancyGuard,
+    TwapGuard,
+    IERC721Receiver
+{
     using SafeERC20 for IERC20;
 
     // ──────────────────────── Constants ────────────────────────
@@ -50,30 +95,58 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     uint256 private constant NOT_RECEIVING = 1;
     uint256 private constant RECEIVING = 2;
 
-    // ──────────────────────── State ────────────────────────────
+    // ──────────────────────── Immutables ───────────────────────
 
     /// @notice Uniswap V3 NonfungiblePositionManager holding the staked NFTs.
+    /// @dev Implementation bytecode, not proxy storage — see the upgradeability note above.
     INonfungiblePositionManager public immutable positionManager;
     /// @notice SwapRouter02 used for the rebalance swap leg.
+    /// @dev Implementation bytecode, not proxy storage — see the upgradeability note above.
     ISwapRouter02 public immutable swapRouter;
     /// @notice First token of the accepted pool, sorted ascending by address.
+    /// @dev Implementation bytecode, not proxy storage — see the upgradeability note above.
     address public immutable token0;
     /// @notice Second token of the accepted pool.
+    /// @dev Implementation bytecode, not proxy storage — see the upgradeability note above.
     address public immutable token1;
     /// @notice Fee tier of the accepted pool, in hundredths of a bip.
+    /// @dev Implementation bytecode, not proxy storage — see the upgradeability note above.
     uint24 public immutable fee;
 
-    /// @notice Zapper allowed to call `stakeFor`. Zero disables the path.
-    address public zapper;
-    /// @notice When true, no new positions can be taken into custody. Never blocks exits.
-    bool public depositsPaused;
-    /// @notice When true, `rebalance` reverts. Never blocks `unstake` — the exit stays open.
-    bool public rebalancePaused;
+    // ──────────────────────── Storage ──────────────────────────
 
-    /// @dev tokenId => staker. Zero means "not staked here".
-    mapping(uint256 => address) private _stakers;
-    /// @dev NOT_RECEIVING outside an expected NFT receipt, RECEIVING during one.
-    uint256 private _receiveGuard = NOT_RECEIVING;
+    /// @custom:storage-location erc7201:real.lp.storage.LPStakingVault
+    struct LPStakingVaultStorage {
+        /// Zapper allowed to call `stakeFor`. Zero disables the path.
+        address zapper;
+        /// Fast-path incident responder (the multisig), set and rotated by the owner.
+        address guardian;
+        /// When true, no new positions can be taken into custody. Never blocks exits.
+        bool depositsPaused;
+        /// When true, `rebalance` reverts. Never blocks `unstake` — the exit stays open.
+        bool rebalancePaused;
+        /// NOT_RECEIVING outside an expected NFT receipt, RECEIVING during one.
+        uint256 receiveGuard;
+        /// tokenId => staker. Zero means "not staked here".
+        mapping(uint256 => address) stakers;
+    }
+
+    /**
+     * @dev ERC-7201 slot for {LPStakingVaultStorage}, computed as
+     *      `keccak256(abi.encode(uint256(keccak256("real.lp.storage.LPStakingVault")) - 1)) & ~bytes32(uint256(0xff))`.
+     *      Pinned as a literal because it must never move: `stakers` IS the custody ledger,
+     *      and a moved namespace would read every staked position as unstaked — which is
+     *      exactly the state `rescuePosition` is allowed to act on.
+     *      `test/forge/unit/VaultBranches.t.sol` recomputes it and fails if it drifts.
+     */
+    bytes32 private constant LP_STAKING_VAULT_STORAGE =
+        0x4c835a63e69815f7352ca18e845a5d8023cea9abbc2e923eb7a3a481844a6500;
+
+    function _vaultStorage() private pure returns (LPStakingVaultStorage storage $) {
+        assembly {
+            $.slot := LP_STAKING_VAULT_STORAGE
+        }
+    }
 
     // ──────────────────────── Events ───────────────────────────
 
@@ -113,9 +186,12 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     /// @notice Whitelisted zapper changed. Carries both sides for auditability.
     event ZapperSet(address previousZapper, address newZapper);
 
-    /// @notice A position NFT with no staker record left the vault for the owner. Never
+    /// @notice A position NFT with no staker record left the vault for the guardian. Never
     ///         fires for a staked position — see {rescuePosition}.
     event PositionRescued(uint256 indexed tokenId, address indexed to, uint256 timestamp);
+
+    /// @notice The fast-path guardian changed. Carries both sides for auditability.
+    event GuardianSet(address previousGuardian, address newGuardian);
 
     // ──────────────────────── Errors ───────────────────────────
 
@@ -133,19 +209,42 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     error UnsolicitedPosition(address operator, address from, uint256 tokenId);
     error SwapAmountExceedsBalance(address tokenIn, uint256 amountIn, uint256 balance);
     error PositionIsStaked(uint256 tokenId, address staker);
+    /// @dev A guardian-tier function was called by someone else — the owner included.
+    error NotGuardian(address caller, address guardian);
+    /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
+    error RenounceDisabled();
+
+    // ──────────────────────── Modifiers ────────────────────────
+
+    /// @dev The fast-path tier. Deliberately NOT satisfied by `owner()`: the timelock has no
+    ///      business holding an undelayed switch, and an operator who reaches for one of
+    ///      these must reach for the multisig.
+    modifier onlyGuardian() {
+        address guardian_ = _vaultStorage().guardian;
+        if (msg.sender != guardian_) revert NotGuardian(msg.sender, guardian_);
+        _;
+    }
 
     // ──────────────────────── Constructor ──────────────────────
 
     /**
+     * @notice Deploys the IMPLEMENTATION. It holds no state of its own and is never called
+     *         directly; the proxy in front of it runs {initialize}.
      * @param _positionManager Uniswap V3 NonfungiblePositionManager address.
      * @param _pool The single ASSET-USDC pool whose positions this vault accepts.
      * @param _token0 Expected pool token0 (must sort below `_token1`).
      * @param _token1 Expected pool token1.
      * @param _fee Expected pool fee tier.
      * @param _swapRouter SwapRouter02 address used by `rebalance`.
-     * @param _initialOwner Owner (multisig) for the admin setters.
-     * @param _twapWindow Initial TWAP window in seconds.
-     * @param _maxTwapDeviationTicks Initial spot-vs-TWAP deviation ceiling, in ticks.
+     * @dev Everything here is `immutable`, so it all belongs to the implementation and every
+     *      check on it fires on the implementation deploy, before any proxy exists. That
+     *      includes the live pool triple check: the three values it compares are immutables
+     *      set in this very constructor, so this is the only place where checking them means
+     *      anything.
+     *
+     *      `_disableInitializers()` is what stops anyone from initialising the bare
+     *      implementation and owning a contract that, being un-proxied, custodies nothing —
+     *      but would still be a confusing entry in every explorer and indexer.
      */
     constructor(
         address _positionManager,
@@ -153,11 +252,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         address _token0,
         address _token1,
         uint24 _fee,
-        address _swapRouter,
-        address _initialOwner,
-        uint32 _twapWindow,
-        uint24 _maxTwapDeviationTicks
-    ) Ownable(_initialOwner) TwapGuard(_pool, _twapWindow, _maxTwapDeviationTicks) {
+        address _swapRouter
+    ) TwapGuard(_pool) {
         if (_positionManager == address(0) || _swapRouter == address(0)) revert ZeroAddress();
         if (_token0 == address(0) || _token1 == address(0)) revert ZeroAddress();
         if (_token0 >= _token1) revert TokensNotSorted(_token0, _token1);
@@ -174,6 +270,39 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         token0 = _token0;
         token1 = _token1;
         fee = _fee;
+
+        _disableInitializers();
+    }
+
+    // ──────────────────────── Initializer ──────────────────────
+
+    /**
+     * @notice One-time setup, executed on the PROXY in its own deployment transaction.
+     * @param owner_ Owner: the `TimelockController` (§2.5). Upgrades and slow parameters.
+     * @param guardian_ Guardian: the multisig, directly. Both pauses and the rescue.
+     * @param twapWindow_ Initial TWAP window in seconds.
+     * @param maxDeviationTicks_ Initial spot-vs-TWAP deviation ceiling, in ticks.
+     * @dev `receiveGuard` is seeded here rather than at its declaration: an inline field
+     *      initializer is constructor code, a proxy never runs the implementation's
+     *      constructor, and a guard left at zero is a guard that rejects nothing.
+     */
+    function initialize(address owner_, address guardian_, uint32 twapWindow_, uint24 maxDeviationTicks_)
+        external
+        initializer
+    {
+        __Ownable_init(owner_);
+        __Ownable2Step_init();
+
+        if (guardian_ == address(0)) revert ZeroAddress();
+
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        $.guardian = guardian_;
+        $.receiveGuard = NOT_RECEIVING;
+
+        // Mirrors the pools: the guardian is followable from logs alone, from block one.
+        emit GuardianSet(address(0), guardian_);
+
+        _setTwapParams(twapWindow_, maxDeviationTicks_);
     }
 
     // ──────────────────────── User functions ───────────────────
@@ -218,7 +347,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @param tokenId The Uniswap V3 position NFT to stake.
      */
     function stakeFor(address user, uint256 tokenId) external nonReentrant {
-        address zapper_ = zapper;
+        address zapper_ = _vaultStorage().zapper;
         if (msg.sender != zapper_ || zapper_ == address(0)) revert NotZapper(msg.sender, zapper_);
         if (user == address(0)) revert ZeroAddress();
         _stake(user, tokenId);
@@ -240,10 +369,12 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @param tokenId The staked position NFT to withdraw.
      */
     function unstake(uint256 tokenId) external nonReentrant {
-        address staker = _stakers[tokenId];
+        LPStakingVaultStorage storage $ = _vaultStorage();
+
+        address staker = $.stakers[tokenId];
         if (staker != msg.sender) revert NotStaker(tokenId, msg.sender, staker);
 
-        delete _stakers[tokenId];
+        delete $.stakers[tokenId];
 
         positionManager.transferFrom(address(this), msg.sender, tokenId);
 
@@ -272,9 +403,10 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      *      mint, which together bound the round trip. Set them from a fresh quote.
      *
      *      Works while deposits are paused: re-ranging is part of exiting risk, not a deposit.
-     *      It has its own switch instead — `setRebalancePaused` — because this is the most
-     *      complex function in an immutable contract and a bug found after deploy needs a
-     *      mitigation that is not "no mitigation at all". Pausing it never touches `unstake`:
+     *      It has its own switch instead — `setRebalancePaused`, held by the guardian —
+     *      because this is the most complex function here and an upgrade cannot execute
+     *      before the timelock's public delay, so the immediate mitigation has to be a
+     *      switch the multisig can throw by itself. Pausing it never touches `unstake`:
      *      a staker locked out of re-ranging can always take the NFT out and manage it on
      *      Uniswap directly.
      *      No cooldown — gas, swap fees and slippage all fall on the caller, and abusive
@@ -294,9 +426,11 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         SwapParams calldata swap,
         uint256 deadline
     ) external nonReentrant returns (uint256 newTokenId) {
-        if (rebalancePaused) revert RebalanceIsPaused();
+        LPStakingVaultStorage storage $ = _vaultStorage();
 
-        address staker = _stakers[tokenId];
+        if ($.rebalancePaused) revert RebalanceIsPaused();
+
+        address staker = $.stakers[tokenId];
         if (staker != msg.sender) revert NotStaker(tokenId, msg.sender, staker);
 
         _withdrawAll(tokenId, deadline);
@@ -310,8 +444,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
 
         // Effects before the remaining interactions: the record moves to the new NFT and
         // the old id becomes unstakeable in the same breath.
-        delete _stakers[tokenId];
-        _stakers[newTokenId] = staker;
+        delete $.stakers[tokenId];
+        $.stakers[newTokenId] = staker;
 
         (uint256 refund0, uint256 refund1) = _refundDust(staker);
 
@@ -352,7 +486,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         returns (bytes4)
     {
         if (msg.sender != address(positionManager)) revert UnexpectedNftSender(msg.sender);
-        if (_receiveGuard != RECEIVING) revert UnsolicitedPosition(operator, from, tokenId);
+        if (_vaultStorage().receiveGuard != RECEIVING) revert UnsolicitedPosition(operator, from, tokenId);
         return IERC721Receiver.onERC721Received.selector;
     }
 
@@ -362,10 +496,68 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @notice Retunes the spot-vs-TWAP guard used by `rebalance`.
      * @param window New TWAP window in seconds (MIN_TWAP_WINDOW..MAX_TWAP_WINDOW).
      * @param maxDeviationTicks New deviation ceiling in ticks (0 < x <= MAX_TWAP_DEVIATION_TICKS).
+     * @dev Owner tier: the guard's calibration is a program parameter, not incident response.
+     *      When it needs to stop mattering RIGHT NOW, the answer is {setRebalancePaused},
+     *      which the guardian holds.
      */
     function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOwner {
         _setTwapParams(window, maxDeviationTicks);
     }
+
+    /**
+     * @notice Sets the single address allowed to call `stakeFor`.
+     * @dev The zapper is replaceable periphery; set to the zero address to disable the
+     *      path entirely.
+     *
+     *      Owner tier: pointing the deposit path at a new contract is a code change in all
+     *      but name, so it takes the timelock's delay like an upgrade does. Stopping the
+     *      existing zapper needs no delay — {setDepositsPaused} reverts every `zapIn`.
+     * @param newZapper New zapper address, or zero to disable.
+     */
+    function setZapper(address newZapper) external onlyOwner {
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        emit ZapperSet($.zapper, newZapper);
+        $.zapper = newZapper;
+    }
+
+    /**
+     * @notice Rotates the fast-path guardian.
+     * @param newGuardian The new guardian (the multisig).
+     * @dev Owner tier: the guardian cannot rotate itself, so losing the multisig is
+     *      recoverable through the timelock rather than terminal.
+     */
+    function setGuardian(address newGuardian) external onlyOwner {
+        if (newGuardian == address(0)) revert ZeroAddress();
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        emit GuardianSet($.guardian, newGuardian);
+        $.guardian = newGuardian;
+    }
+
+    /**
+     * @notice UUPS upgrade hook. The owner is the timelock, so every code change is
+     *         scheduled on-chain with full calldata and cannot execute before the delay.
+     * @dev Empty body on purpose: `onlyOwner` is the whole authorization.
+     */
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    /**
+     * @notice Disabled. Renouncing would leave `_authorizeUpgrade` with no caller, freezing
+     *         the implementation forever — the exact failure the proxy exists to avoid.
+     * @dev Kept `onlyOwner` so a stranger still gets the standard Ownable rejection and the
+     *      owner gets a reason.
+     *
+     *      solc says "state mutability can be restricted to view" here, and that is left
+     *      alone on purpose: marking it `view` would change the ABI entry's
+     *      `stateMutability`, and every wallet, explorer and indexer that reads this ABI
+     *      would then present the call as a read. It has to keep looking like the
+     *      transaction it overrides, so that anyone who tries it gets the revert reason
+     *      on-chain.
+     */
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceDisabled();
+    }
+
+    // ──────────────────────── Guardian functions ───────────────
 
     /**
      * @notice Pauses or resumes new deposits.
@@ -375,41 +567,38 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      *      This is also the zap kill switch. `LPZapper.zapIn` ends in `stakeFor`, so the
      *      whole zap reverts with {DepositsArePaused} while this is on — the zapper needs
      *      no pause state of its own.
+     *
+     *      Guardian tier: this is the fast half of the mitigation pair. A bug in a deposit
+     *      path is stopped here in one transaction, and only then fixed by an upgrade that
+     *      the timelock makes public for two days first.
      * @param paused True to block new deposits.
      */
-    function setDepositsPaused(bool paused) external onlyOwner {
-        depositsPaused = paused;
+    function setDepositsPaused(bool paused) external onlyGuardian {
+        _vaultStorage().depositsPaused = paused;
         emit DepositsPausedSet(paused);
     }
 
     /**
      * @notice Pauses or resumes `rebalance`.
-     * @dev The incident switch for the one complex path in an immutable contract. It gates
+     * @dev The incident switch for the most complex path in the contract. It gates
      *      `rebalance` and nothing else: `unstake` stays open at all times, so a paused
      *      rebalance never traps a position — the staker withdraws the NFT and re-ranges it
      *      on Uniswap directly.
+     *
+     *      Guardian tier, and that is the whole point of the split: the code CAN now be
+     *      fixed, but only after the timelock's public delay, so the immediate mitigation
+     *      still has to be a switch the multisig can throw by itself.
      * @param paused True to block `rebalance`.
      */
-    function setRebalancePaused(bool paused) external onlyOwner {
-        rebalancePaused = paused;
+    function setRebalancePaused(bool paused) external onlyGuardian {
+        _vaultStorage().rebalancePaused = paused;
         emit RebalancePausedSet(paused);
-    }
-
-    /**
-     * @notice Sets the single address allowed to call `stakeFor`.
-     * @dev The zapper is replaceable periphery; set to the zero address to disable the
-     *      path entirely.
-     * @param newZapper New zapper address, or zero to disable.
-     */
-    function setZapper(address newZapper) external onlyOwner {
-        emit ZapperSet(zapper, newZapper);
-        zapper = newZapper;
     }
 
     /**
      * @notice Recovers a position NFT the vault holds with no staker behind it.
      *
-     * @dev Restricted to `_stakers[tokenId] == address(0)`, and that single condition is
+     * @dev Restricted to `stakers[tokenId] == address(0)`, and that single condition is
      *      what makes the function safe. **A position in legitimate custody always carries
      *      a staker record.** Every path that takes an NFT in writes the record in the same
      *      transaction: `_stake` sets it before pulling custody, and `rebalance` moves it
@@ -419,33 +608,36 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      *      and destroyed together, so a zero record on an NFT the vault owns can only mean
      *      the NFT arrived without going through a stake path — which is exactly what this
      *      function exists to undo. A staked position is unreachable here by construction,
-     *      no matter who the owner is.
+     *      no matter who the guardian is.
      *
      *      `onERC721Received` already rejects safe transfers arriving outside a stake flow,
      *      but a plain `transferFrom` never consults the hook, so an NFT can still be pushed
      *      in by mistake and would otherwise stay here forever.
      *
      *      `nonReentrant` closes the one window where the invariant is momentarily open:
-     *      inside `rebalance`, between the `mint` and the `_stakers[newTokenId] = staker`
+     *      inside `rebalance`, between the `mint` and the `stakers[newTokenId] = staker`
      *      write, the vault owns a new NFT that has no record yet, and between that write
      *      and the `burn` it owns an old NFT whose record has just been cleared. Sharing the
      *      reentrancy guard with `stake`, `unstake` and `rebalance` means this call can
      *      never execute inside one of them.
      *
-     *      The destination is `owner()` rather than a caller-supplied address, matching
-     *      `RewardsDistributor.recoverExcessAsset`. A position NFT is unique and a mistyped
-     *      recipient is unrecoverable, so the recovery path offers no place to mistype one;
-     *      the owner multisig forwards it to the rightful holder off-chain. A plain
-     *      `transferFrom` is used for the same reason {unstake} uses one — a multisig
-     *      without an `onERC721Received` hook must not be locked out of its own recovery
-     *      path.
+     *      Guardian tier, and the destination is `guardian()` rather than a caller-supplied
+     *      address — matching `RewardsDistributor.recoverExcessAsset`. Not `owner()`, which
+     *      after the deploy is a `TimelockController` with no way to forward an ERC-721. A
+     *      position NFT is unique and a mistyped recipient is unrecoverable, so the recovery
+     *      path offers no place to mistype one; the guardian multisig forwards it to the
+     *      rightful holder off-chain. A plain `transferFrom` is used for the same reason
+     *      {unstake} uses one — a multisig without an `onERC721Received` hook must not be
+     *      locked out of its own recovery path.
      * @param tokenId Unrecorded position NFT held by this vault.
      */
-    function rescuePosition(uint256 tokenId) external onlyOwner nonReentrant {
-        address staker = _stakers[tokenId];
+    function rescuePosition(uint256 tokenId) external onlyGuardian nonReentrant {
+        LPStakingVaultStorage storage $ = _vaultStorage();
+
+        address staker = $.stakers[tokenId];
         if (staker != address(0)) revert PositionIsStaked(tokenId, staker);
 
-        address to = owner();
+        address to = $.guardian;
         positionManager.transferFrom(address(this), to, tokenId);
 
         emit PositionRescued(tokenId, to, block.timestamp);
@@ -459,7 +651,27 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      * @return The staker address, or zero when the NFT is not staked here.
      */
     function stakerOf(uint256 tokenId) external view returns (address) {
-        return _stakers[tokenId];
+        return _vaultStorage().stakers[tokenId];
+    }
+
+    /// @notice Zapper allowed to call `stakeFor`. Zero disables the path.
+    function zapper() external view returns (address) {
+        return _vaultStorage().zapper;
+    }
+
+    /// @notice The fast-path incident responder (the multisig).
+    function guardian() external view returns (address) {
+        return _vaultStorage().guardian;
+    }
+
+    /// @notice True while no new position can be taken into custody. Never blocks exits.
+    function depositsPaused() external view returns (bool) {
+        return _vaultStorage().depositsPaused;
+    }
+
+    /// @notice True while `rebalance` reverts. Never blocks `unstake`.
+    function rebalancePaused() external view returns (bool) {
+        return _vaultStorage().rebalancePaused;
     }
 
     // ──────────────────────── Internal helpers ─────────────────
@@ -467,18 +679,20 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     /// @dev Shared body of every stake path. Validates the position, records the staker,
     ///      then pulls custody from `msg.sender`.
     function _stake(address user, uint256 tokenId) internal {
-        if (depositsPaused) revert DepositsArePaused();
+        LPStakingVaultStorage storage $ = _vaultStorage();
 
-        address existing = _stakers[tokenId];
+        if ($.depositsPaused) revert DepositsArePaused();
+
+        address existing = $.stakers[tokenId];
         if (existing != address(0)) revert AlreadyStaked(tokenId, existing);
 
         (int24 tickLower, int24 tickUpper, uint128 liquidity) = _validatePosition(tokenId);
 
-        _stakers[tokenId] = user;
+        $.stakers[tokenId] = user;
 
-        _receiveGuard = RECEIVING;
+        $.receiveGuard = RECEIVING;
         positionManager.safeTransferFrom(msg.sender, address(this), tokenId);
-        _receiveGuard = NOT_RECEIVING;
+        $.receiveGuard = NOT_RECEIVING;
 
         emit Staked(user, tokenId, tickLower, tickUpper, liquidity, block.timestamp);
     }
@@ -580,7 +794,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         // The canonical position manager uses `_mint`, not `_safeMint`, so no receipt hook
         // fires here. The guard is opened anyway so the flow stays correct against any
         // position manager that does call back.
-        _receiveGuard = RECEIVING;
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        $.receiveGuard = RECEIVING;
         (tokenId, liquidity, , ) = positionManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -596,7 +811,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
                 deadline: deadline
             })
         );
-        _receiveGuard = NOT_RECEIVING;
+        $.receiveGuard = NOT_RECEIVING;
 
         IERC20(token0).forceApprove(address(positionManager), 0);
         IERC20(token1).forceApprove(address(positionManager), 0);

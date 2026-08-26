@@ -41,13 +41,14 @@ contract TwapTickFuzzTest is LocalHarness {
         _deployLocalStack();
 
         rawPool = new RawTickPool(token0, token1, FEE);
-        guard = new LPStakingVault(
+        guard = _deployVaultProxy(
             address(npmMock),
             address(rawPool),
             token0,
             token1,
             FEE,
             address(routerMock),
+            address(this),
             address(this),
             MIN_TWAP_WINDOW,
             500
