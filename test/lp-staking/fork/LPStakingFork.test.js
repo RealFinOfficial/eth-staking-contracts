@@ -710,6 +710,12 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       // Ownable2Step: the transfer nominates, and the multisig has to accept. `setZapper`
       // above is owner-only, so the handover can only happen after the wiring.
+      //
+      // This tier deliberately puts the MULTISIG in the owner seat rather than a timelock:
+      // these tests are about the contracts against the real pool, and a delay between every
+      // admin call would add nothing but blocks. The timelock path — schedule, delay, execute,
+      // and a premature execute that reverts — is proven in the unit suites' "under a
+      // TimelockController" blocks and end to end in both integration suites.
       await (await vault.transferOwnership(multisig.address)).wait();
       await (await vault.connect(multisig).acceptOwnership()).wait();
 

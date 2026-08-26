@@ -26,10 +26,20 @@
  * Two further gates guard the two irreversible, one-time actions. Both are off by default,
  * because each one writes a fact the team then has to live with:
  *   SEPOLIA_LIVE_CREATE_POOL=1   create the tREAL/tUSDC pool (one real tx, forever)
- *   SEPOLIA_LIVE_DEPLOY=1        deploy the four contracts and RECORD them in the tracked
+ *   SEPOLIA_LIVE_DEPLOY=1        deploy the five contracts and RECORD them in the tracked
  *                                deployments.json under chain 11155111
  * Without them, a run with nothing deployed fails and says which flag to add. A run with
  * everything already deployed reuses it and touches neither.
+ *
+ * ── The deploy waits out a real timelock delay ────────────────────────────────────────
+ *
+ * On Sepolia the deploying wallet IS `LP_MULTISIG`, so it holds the timelock's proposer and
+ * executor roles and the deploy script finishes the Ownable2Step handover itself: it
+ * schedules both `acceptOwnership` operations, sleeps `LP_TIMELOCK_MIN_DELAY + 1` seconds of
+ * WALL time, and executes them. Set `LP_TIMELOCK_MIN_DELAY=300` for staging — the run then
+ * takes roughly ten minutes, which is why the script timeout below is what it is. Mainnet is
+ * the other branch: the Safe schedules, waits 48 h and executes, and the script only prints
+ * the payloads.
  *
  * ── Idempotence ───────────────────────────────────────────────────────────────────────
  *
@@ -70,8 +80,15 @@ const ZAP_USDC = 1n * 10n ** 6n; // 1 tUSDC through the zapper
 const RANGE_HALF_WIDTH_TICKS = 1200;
 const FAR_DEADLINE = 10n ** 12n;
 
-/** A real deploy on a real network is nothing like a fork's; give the scripts room. */
-const LIVE_SCRIPT_TIMEOUT_MS = 20 * 60 * 1000;
+/**
+ * A real deploy on a real network is nothing like a fork's; give the scripts room.
+ *
+ * The deploy run does not only send transactions at Sepolia block times — it also SLEEPS out
+ * the timelock's own delay between scheduling the two `acceptOwnership` operations and
+ * executing them (see the header). At the staging figure of `LP_TIMELOCK_MIN_DELAY=300` that
+ * is five minutes of the budget before a single confirmation is counted.
+ */
+const LIVE_SCRIPT_TIMEOUT_MS = 30 * 60 * 1000;
 
 const missing = [];
 if (process.env.SEPOLIA_LIVE !== "1") missing.push("SEPOLIA_LIVE=1");
@@ -103,8 +120,8 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     "function allowance(address,address) view returns (uint256)",
     "function approve(address,uint256) returns (bool)",
   ];
-  let vault, zapper, tokenX, distributor;
-  let vaultAddr, zapperAddr, tokenXAddr, distributorAddr, poolAddr;
+  let vault, zapper, tokenX, distributor, timelock;
+  let vaultAddr, zapperAddr, tokenXAddr, distributorAddr, poolAddr, timelockAddr;
   let assetIsToken0, token0, token1, zeroForOne;
   let tickSpacing;
   let oracleReady = false;
@@ -271,8 +288,14 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     console.log(`  [sepolia-live] pool    ${EXPLORER}/address/${poolAddr}`);
   });
 
-  it("3. has the four contracts, deploying them only when explicitly asked", async function () {
-    const kinds = ["TokenX", "RewardsDistributor", "LPStakingVault", "LPZapper"];
+  it("3. has the five contracts, deploying them only when explicitly asked", async function () {
+    const kinds = [
+      "TokenX",
+      "RewardsDistributor",
+      "LPStakingVault",
+      "LPZapper",
+      "TimelockController",
+    ];
     const recorded = Object.fromEntries(kinds.map((k) => [k, registryEntry(k)]));
 
     if (kinds.some((k) => !recorded[k])) {
@@ -284,6 +307,9 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
             "an explicit go: re-run with SEPOLIA_LIVE_DEPLOY=1."
         );
       }
+      // `LP_TIMELOCK_MIN_DELAY` is forwarded by liveScriptEnv along with every other LP_*
+      // key: it is the operator's decision, and on staging it is the difference between a
+      // five-minute run and a two-day one.
       const run = await runner.runHardhatScript(
         "scripts/deploy-lp-staking.js",
         liveScriptEnv({
@@ -304,17 +330,20 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     distributorAddr = recorded.RewardsDistributor.address;
     vaultAddr = recorded.LPStakingVault.address;
     zapperAddr = recorded.LPZapper.address;
+    timelockAddr = recorded.TimelockController.address;
 
     vault = await hre.ethers.getContractAt("LPStakingVault", vaultAddr, signer);
     zapper = await hre.ethers.getContractAt("LPZapper", zapperAddr, signer);
     tokenX = await hre.ethers.getContractAt("TokenX", tokenXAddr, signer);
     distributor = await hre.ethers.getContractAt("RewardsDistributor", distributorAddr, signer);
+    timelock = await hre.ethers.getContractAt("LPTimelock", timelockAddr, signer);
 
     for (const [label, address] of [
       ["TokenX", tokenXAddr],
       ["RewardsDistributor", distributorAddr],
       ["LPStakingVault", vaultAddr],
       ["LPZapper", zapperAddr],
+      ["LPTimelock", timelockAddr],
     ]) {
       expect(await hre.ethers.provider.getCode(address), `${label} has no code`).to.not.equal("0x");
       console.log(`  [sepolia-live] ${label.padEnd(19)} ${EXPLORER}/address/${address}`);

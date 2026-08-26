@@ -388,8 +388,8 @@ Management requirement, recorded in `docs/specs/00-architecture-overview.md` dec
 `docs/specs/01-contracts.md` §1/§2.1/§2.4: `RewardsDistributor` and `LPStakingVault` become
 UUPS (ERC-1967) proxies owned by a `TimelockController`. `TokenX` and `LPZapper` stay
 non-upgradeable — TokenX's escape hatch is minter re-pointing, and the zapper is stateless
-periphery the vault can replace with `setZapper`. **The `TimelockController` itself is wired in
-by the next commit; until then both proxies are owned by the multisig.**
+periphery the vault can replace with `setZapper`. The `TimelockController` is deployed and wired
+in by `scripts/deploy-lp-staking.js`; the runbook for operating it is at the end of this item.
 
 ### Why the distributor, specifically
 
@@ -422,7 +422,11 @@ multisig can throw by itself.
   repo owns the artifact (the indexer only vendors artifacts whose `sourceName` starts with
   `contracts/lp-staking/`) and so one name means one proxy across script, suites and explorer.
 - `contracts/lp-staking/deploy/LPTimelock.sol` — OZ `TimelockController`, nothing added, for the
-  same two reasons.
+  same two reasons. Constructed with `(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig],
+  address(0))`: the multisig is the only proposer, the only executor — execution is
+  deliberately NOT open — and, because the OZ constructor grants it alongside `PROPOSER_ROLE`,
+  the only canceller. `admin = address(0)` leaves the timelock its own `DEFAULT_ADMIN_ROLE`
+  holder, so even a role change is a scheduled, publicly visible operation.
 - The implementation constructor takes the two immutables (`tokenX`, `asset`), keeps their zero
   checks, and ends with `_disableInitializers()`. `initialize(owner_, guardian_, signer_)` runs
   on the proxy, inside the proxy's own deployment transaction.
@@ -510,24 +514,96 @@ the GUARDIAN role instead, since `rescuePosition` is the call they attack. The v
   transaction in that script carries an explicit nonce. The proxy's `initialize` runs in the
   proxy's deployment transaction — an uninitialized proxy is one `initialize` race away from
   belonging to whoever calls it first.
+- Before each implementation deploy the script runs `upgrades.validateImplementation` (proxy
+  safety, from the build info alone), and after each proxy deploy `upgrades.forceImport`, which
+  writes the storage layout into the `hardhat-upgrades` manifest. On a named network that is
+  `.openzeppelin/<network>.json` and it is **committed** — it is the baseline every future
+  `validateUpgrade` grades a new implementation against. On a development chain (31337, a
+  spawned `hardhat node`) the plugin writes into the OS temp directory instead, so fork runs
+  leave nothing behind.
 - `LP_GUARDIAN` (default `LP_MULTISIG`) names the fast-path guardian on both proxies.
+  `LP_TIMELOCK_MIN_DELAY` (default 172800 = 48 h) is the timelock's own delay; Sepolia staging
+  runs 300 and the fork suites 60.
 - The post-deploy checks read the ERC-1967 implementation slot off each proxy, so "the
   registry's proxy really delegates to the registry's implementation" is asserted rather than
-  assumed. Each proxy needs TWO `hardhat verify` commands — implementation, then proxy
-  (implementation address + the `initialize` calldata) — and the script prints both.
-- The two proxies bootstrap differently, and `setZapper` is the reason. The distributor has no
-  owner-only wiring step, so its `initialize` names the multisig as the owner from block one.
-  The vault does: `setZapper` is owner-only and must run before the handover, so its
-  `initialize` names the DEPLOYER and the run ends with `transferOwnership(multisig)`. Being
-  `Ownable2Step`, that only NOMINATES — **the multisig must send its own `acceptOwnership`**,
-  and until it does, the deployer key is still the vault's owner. The post-deploy check
-  therefore asserts `pendingOwner == multisig`, not `owner`. The integration suites send that
-  acceptance in the fixture, immediately after the script returns.
-- The 2-step handover and the timelock path are exercised in the suites (`ForkHarness`, both
-  Hardhat fork suites, and the `under a TimelockController` blocks in
-  `test/lp-staking/RewardsDistributor.test.js` and `test/lp-staking/LPStakingVault.test.js`),
-  which schedule `acceptOwnership`, prove a premature `execute` reverts
-  `TimelockUnexpectedOperationState`, and then upgrade through the same path.
+  assumed, and the ERC-1967 ADMIN slot is asserted EMPTY — a value there would mean a second,
+  unowned upgrade path. Each proxy needs TWO `hardhat verify` commands — implementation, then
+  proxy (implementation address + the `initialize` calldata) — and the script prints both,
+  plus one for the timelock's four constructor arguments.
+- Both proxies bootstrap the same way, and `setZapper` is the reason there is a bootstrap at
+  all: it is owner-only and must run before the handover, so `initialize` names the DEPLOYER on
+  both, and the run ends with `transferOwnership(timelock)` twice. Being `Ownable2Step`, that
+  only NOMINATES; `acceptOwnership` is itself a timelock operation. See the runbook below for
+  which of the two branches a given network takes.
+
+### Runbook — operating the timelock
+
+Everything owner-tier goes through `scripts/lp-timelock.js`. `hardhat run` takes no positional
+arguments, so the subcommand and its operands arrive as environment variables, the same way
+every other script in this repo reads its inputs:
+
+```bash
+# schedule, then (after minDelay) execute — the SAME operands both times
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
+  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
+  TIMELOCK_ARGS=600,400 CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
+
+TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=status  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
+```
+
+The owner tier is exactly: `acceptOwnership`, `setTwapParams`, `setZapper`, `setGuardian`,
+`setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. Nothing else is routable, and
+nothing else needs to be.
+
+**Salt.** `salt = keccak256(abi.encode("real.lp.timelock.v1", target, keccak256(calldata),
+tag))`, `predecessor = 0`. Deriving it from the call means schedule and execute agree without
+anyone writing a value down, and a third party can recompute a pending operation's id from the
+public calldata. The cost is that an identical call cannot be scheduled twice — once executed
+its state is `Done` and OZ refuses to re-schedule that id — so a repeat needs
+`TIMELOCK_SALT_TAG=<anything-new>`. OZ emits `CallSalt(id, salt)` next to every `CallScheduled`
+whenever the salt is non-zero, which here is always.
+
+**Mainnet bootstrap.** The deploy script cannot sign for the Safe, so it stops after nominating
+the timelock on both proxies and prints, for each, the `schedule(...)` payload and the later
+`execute(...)` payload with the operation id. The Safe sends the two schedules, waits out
+`minDelay`, then sends the two executes. **Between the deploy and the second execute the
+DEPLOYER key is still the owner of both proxies** (`pendingOwner` = the timelock) — the
+post-deploy checks assert exactly that interim state, and it is the one window in the runbook
+where the deploying key still matters. Sepolia staging takes the other branch: the deploying
+wallet IS `LP_MULTISIG`, so the script schedules, sleeps `minDelay + 1` seconds and executes in
+the same run, ending with `owner == timelock` and `pendingOwner == 0`.
+
+**Upgrades.** Build the new implementation, deploy it, then
+`TIMELOCK_FN=upgradeToAndCall TIMELOCK_ARGS=<impl>,0x` (the second argument is the
+reinitializer call, `0x` for none). The scheduled log carries the whole calldata, so the
+implementation address is public for the full delay; `unstake` stays permissionless throughout,
+which is what makes the delay an exit window rather than a formality. Run
+`npm run validate:upgrades -- --network <net>` first: it grades the new layout against the
+committed manifest and refuses a reordered or retyped field.
+
+**Expected-implementation bookkeeping.** After an upgrade executes, update the recorded
+`implementation` for that proxy in `deployments.json` (the deploy script writes it; an upgrade
+does not) and re-commit `.openzeppelin/<network>.json`. The backend reconciler reads the same
+figure and raises a CRITICAL alert when the indexed implementation is not the expected one, so
+a stale record reads as an incident.
+
+**Emergencies do not go through here.** Pausing deposits or rebalance, pausing claims, rotating
+the voucher signer, rescuing a stranded NFT and `recoverExcessAsset` are all guardian-tier: one
+transaction from the multisig, no delay, no schedule. If an incident needs a code change, the
+guardian switch is the immediate mitigation and the upgrade is the slow follow-up.
+
+**`updateDelay` is self-only.** Shortening the delay is itself a scheduled operation on the
+timelock's own address (`TIMELOCK_TARGET=TimelockController TIMELOCK_FN=updateDelay`), so it
+cannot be used to escape the delay it is changing.
+
+- The 2-step handover and the timelock path are exercised in the suites (`ForkHarness`, the
+  `under a TimelockController` blocks in `test/lp-staking/RewardsDistributor.test.js` and
+  `test/lp-staking/LPStakingVault.test.js`, and both Hardhat integration suites, which run the
+  handover in the fixture and then route steps A19/A28/A41 and the A46–A48 rehearsal upgrade
+  through `schedule -> increaseTime -> execute`).
 
 ### Sizes
 

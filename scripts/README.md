@@ -127,6 +127,49 @@ CONFIRM=yes npx hardhat run scripts/deploy-weighted.js --network mainnet
 DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 ```
 
+## The LP staking stack
+
+| Script | Purpose |
+|---|---|
+| `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
+| `deploy-lp-staking.js` | Deploy and wire the whole stack: TokenX, the two UUPS proxies, the zapper and the `LPTimelock` that owns the proxies |
+| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending` |
+| `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
+
+`deploy-lp-staking.js` ends by handing TokenX and the zapper to `LP_MULTISIG` and NOMINATING
+the timelock on both proxies. `acceptOwnership` is itself a timelock operation, so how the run
+finishes depends on who holds the timelock's roles:
+
+- `LP_MULTISIG == deployer` (Sepolia staging): the script schedules both operations, sleeps
+  `LP_TIMELOCK_MIN_DELAY + 1` seconds and executes them. Budget the delay into the run.
+- otherwise (mainnet, a real Safe): the script prints the two `schedule` payloads and the two
+  later `execute` payloads with their operation ids, and leaves both proxies with
+  `owner == deployer`, `pendingOwner == timelock` until the Safe finishes the handover.
+
+`hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
+operands from the environment. `schedule` and `execute` take the SAME operands — the operation
+id is a hash of the whole call, so an execute that names a different argument is a different
+operation rather than a typo that goes through:
+
+```bash
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
+  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+
+TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
+  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+
+TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
+Owner tier, and therefore routable: `acceptOwnership`, `setTwapParams`, `setZapper`,
+`setGuardian`, `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. The guardian tier —
+both vault pauses, `rescuePosition`, `setSigner`, `setPaused`, `recoverExcessAsset` — is
+deliberately NOT here: those are one-transaction incident calls the multisig sends directly.
+The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", target,
+keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
+identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.
+The full runbook is in `docs/lp-staking-audit-notes.md` item 14.
+
 ## Test tooling (plain Node, not `hardhat run`)
 
 Two scripts here are not deployment scripts at all. They take no network and no signer; run

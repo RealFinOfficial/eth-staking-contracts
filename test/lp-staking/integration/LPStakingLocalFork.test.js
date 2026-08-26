@@ -25,7 +25,8 @@
  *   S4     MaxUint256 approvals to the position manager and the router
  *   S5     create + initialize the pool at 0.50 tUSDC per tASSET   [pool script]
  *   S6     deployer seeds a wide position, 1e24 tASSET / 5e11 tUSDC
- *   S7     deploy + wire + hand to the multisig + grow the oracle  [deploy script]
+ *   S7     deploy + wire + nominate the timelock + grow the oracle  [deploy script]
+ *   S7b    the timelock accepts both proxies: schedule -> +61 s -> execute, twice
  *   S8     warm the oracle: 8 round trips, 60 s apart
  *
  *   A1  alice mints P1                 A22 carol claims 1750 TokenX (pays 750)
@@ -34,7 +35,7 @@
  *   A4  bob mints P2                   A25 multisig arms it again
  *   A5  bob stakes P2 by NFT permit    A26 clock jumps past the boundary
  *   A6  carol approves the zapper      A27 dave's claim rolls epoch 2 in
- *   A7  carol zaps in -> P3            A28 multisig enables the ASSET leg
+ *   A7  carol zaps in -> P3            A28 ASSET leg enabled via the timelock
  *   A8  dave zaps in by permit -> P4   A29 deployer funds the distributor
  *   A9  trading generates real fees    A30 bob claims 3000 tASSET
  *   A10 alice rebalances P1 -> P5      A31 multisig recovers 1000 tASSET
@@ -46,12 +47,15 @@
  *   A16 carol's stake reverts          A37 stray NFT rescued from the vault
  *   A17 multisig unpauses deposits     A38 stray NFT rescued from the zapper
  *   A18 carol stakes P7                A39 stray tUSDC swept from the zapper
- *   A19 multisig retunes the vault     A40 snapshot, stake P10, revert, re-mine
- *   A20 multisig retunes the zapper    A41 multisig cycles the zapper wiring
+ *   A19 vault retuned via the timelock A40 snapshot, stake P10, revert, re-mine
+ *   A20 multisig retunes the zapper    A41 zapper wiring cycled via the timelock
  *   A21 carol claims 1000 TokenX       A42 multisig cycles the minter wiring
  *                                      A43 multisig pauses rebalance
  *                                      A44 alice's rebalance reverts
  *                                      A45 multisig resumes rebalance
+ *                                      A46 upgrade to V2 scheduled
+ *                                      A47 premature execute reverts
+ *                                      A48 upgrade executes; state survives
  *
  * ── Skip vs fail ──────────────────────────────────────────────────────────────────────
  *
@@ -81,6 +85,7 @@ const chain = require("../helpers/chain");
 const uni = require("../helpers/uniswap");
 const signing = require("../helpers/signing");
 const runner = require("../helpers/scripts");
+const lpTimelock = require("../../../scripts/lp-timelock");
 const { Ledger } = require("../helpers/ledger");
 
 /**
@@ -104,8 +109,11 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
   let w = null; // named wallets
 
   let assetAddr, usdcAddr, poolAddr, vaultAddr, zapperAddr, tokenXAddr, distributorAddr;
+  let timelockAddr, vaultV2ImplAddr;
   let asset, usdc, pool, npm, npmRead, router, factory;
-  let vault, zapper, tokenX, distributor;
+  let vault, zapper, tokenX, distributor, timelock;
+  /** The scheduled vault upgrade, built in A46 and re-used by A47 and A48. */
+  let upgradeOperation = null;
   let assetIsToken0, token0, token1, zeroForOne, initialSqrtPriceX96;
   let voucherDomain;
 
@@ -195,6 +203,51 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       user: w[role].address,
       cumulativeAmount,
     });
+
+  /**
+   * Runs one owner-tier call the only way it can be run once the timelock owns the proxy:
+   * schedule it, let `minDelay` elapse, execute it.
+   *
+   * Two transactions in two blocks, both recorded, so the block-progression and log-retrieval
+   * sections see the timelock's own `CallScheduled`/`CallExecuted` pair alongside the target's
+   * event. `execute` emits the target's events FIRST and `CallExecuted` last (OZ v5 calls
+   * `_execute` before it emits), which is the order `expected` states.
+   *
+   * The salt comes from scripts/lp-timelock.js, so the suite and the operator script derive
+   * the same operation id from the same call — an execute that named different arguments than
+   * its schedule would be a different operation, not a typo that goes through.
+   */
+  async function throughTimelock(step, label, { target, fn, args = [], tag = "", expected = [] }) {
+    const op = lpTimelock.buildOperation({ target, fn, args, tag });
+
+    const scheduled = await chain.send(
+      timelock
+        .connect(w.multisig)
+        .schedule(op.target, op.value, op.data, op.predecessor, op.salt, C.TIMELOCK_MIN_DELAY)
+    );
+    ledger.record(step, `${label} (schedule)`, scheduled, [
+      { address: timelockAddr, name: "CallScheduled" },
+      // OZ v5 emits `CallSalt(id, salt)` alongside `CallScheduled` whenever the salt is not
+      // zero, and every salt this repo derives is non-zero. Two logs per schedule, one per
+      // execute — an indexer that registers only `CallScheduled` sees half the story.
+      { address: timelockAddr, name: "CallSalt" },
+    ]);
+    expect(await timelock.isOperationPending(op.id), `${label} is not pending`).to.equal(true);
+    expect(await timelock.isOperationReady(op.id), `${label} is ready too early`).to.equal(false);
+
+    await rpc.increaseTime(provider, C.TIMELOCK_MIN_DELAY + 1);
+
+    const executed = await chain.send(
+      timelock.connect(w.multisig).execute(op.target, op.value, op.data, op.predecessor, op.salt)
+    );
+    ledger.record(step, `${label} (execute)`, executed, [
+      ...expected,
+      { address: timelockAddr, name: "CallExecuted" },
+    ]);
+    expect(await timelock.isOperationDone(op.id), `${label} is not done`).to.equal(true);
+
+    return { op, scheduled, executed };
+  }
 
   // ─────────────────────────────────────────────────────────────
   before(async function () {
@@ -317,18 +370,52 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     distributorAddr = registry.RewardsDistributor.address;
     vaultAddr = registry.LPStakingVault.address;
     zapperAddr = registry.LPZapper.address;
+    timelockAddr = registry.TimelockController.address;
 
     vault = await contractAt("LPStakingVault", vaultAddr);
     zapper = await contractAt("LPZapper", zapperAddr);
     tokenX = await contractAt("TokenX", tokenXAddr);
     distributor = await contractAt("RewardsDistributor", distributorAddr);
+    timelock = await contractAt("LPTimelock", timelockAddr);
 
-    // The vault proxy is Ownable2Step, so the script can only NOMINATE the multisig — it
-    // holds no multisig key. The acceptance is the second half of the same deployment and is
-    // sent here, before `deployToBlock` closes the window, so the scenario below starts from
-    // the state the runbook describes and its step numbering is untouched. When the
-    // TimelockController lands this becomes the timelock's first scheduled operation.
-    await chain.send(vault.connect(w.multisig).acceptOwnership());
+    // S7b — the second half of the same deployment.
+    //
+    // Both proxies are Ownable2Step and the script nominated the TIMELOCK on each of them; it
+    // could not go further, because the timelock's proposer and executor roles belong to the
+    // multisig and the script holds no multisig key. (On Sepolia staging LP_MULTISIG IS the
+    // deploying wallet, so the script does this itself — see the `stagingBootstrap` branch in
+    // scripts/deploy-lp-staking.js.) Here the suite plays the multisig and sends the real
+    // flow: schedule, wait out minDelay, execute — twice, once per proxy.
+    //
+    // It happens before `deployToBlock` closes the window on purpose: the scenario below then
+    // starts from the state the runbook describes, and its step numbering is untouched.
+    // Both operations are scheduled first and executed after ONE wait, exactly as the
+    // script's staging branch does it — two delays would be two windows in which the deployer
+    // is still the owner of one of the proxies.
+    const handovers = [
+      { label: "RewardsDistributor", contract: distributor, address: distributorAddr },
+      { label: "LPStakingVault", contract: vault, address: vaultAddr },
+    ].map((entry) => ({
+      ...entry,
+      op: lpTimelock.buildOperation({ target: entry.address, fn: "acceptOwnership" }),
+    }));
+
+    for (const { op } of handovers) {
+      await chain.send(
+        timelock
+          .connect(w.multisig)
+          .schedule(op.target, op.value, op.data, op.predecessor, op.salt, C.TIMELOCK_MIN_DELAY)
+      );
+    }
+    await rpc.increaseTime(provider, C.TIMELOCK_MIN_DELAY + 1);
+    for (const { label, contract, op } of handovers) {
+      await chain.send(
+        timelock.connect(w.multisig).execute(op.target, op.value, op.data, op.predecessor, op.salt)
+      );
+      if ((await contract.owner()) !== timelockAddr) {
+        throw new Error(`${label} did not end up owned by the timelock`);
+      }
+    }
 
     deployToBlock = await head();
 
@@ -365,6 +452,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       `tASSET=${assetAddr} tUSDC=${usdcAddr} assetIsToken0=${assetIsToken0} zeroForOne=${zeroForOne}`,
       `pool=${poolAddr} sqrtPriceX96=${initialSqrtPriceX96} tick=${await uni.currentTick(pool)}`,
       `vault=${vaultAddr} zapper=${zapperAddr} tokenX=${tokenXAddr} distributor=${distributorAddr}`,
+      `timelock=${timelockAddr} minDelay=${C.TIMELOCK_MIN_DELAY}s`,
       `scripts: create-sepolia-pool ${poolRun.durationMs} ms, deploy-lp-staking ${deployRun.durationMs} ms`
     );
   });
@@ -418,6 +506,12 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       LP_FEE: String(C.FEE),
       LP_SIGNER: w.backOffice.address,
       LP_MULTISIG: w.multisig.address,
+      // helpers/scripts.js strips every LP_* key out of the child's environment, so the two
+      // upgradeability knobs have to be supplied here like everything else. The guardian is
+      // the multisig, which is also the script's own default — stated rather than assumed,
+      // because every guardian-tier step below sends from `w.multisig`.
+      LP_GUARDIAN: w.multisig.address,
+      LP_TIMELOCK_MIN_DELAY: String(C.TIMELOCK_MIN_DELAY),
       LP_TOKENX_NAME: C.TOKENX_NAME,
       LP_TOKENX_SYMBOL: C.TOKENX_SYMBOL,
       LP_TWAP_WINDOW: String(C.TWAP_WINDOW),
@@ -596,7 +690,13 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(deployRun.stdout).to.not.include("FAIL");
 
       const registry = runner.readRegistry(registryFile)["31337"];
-      for (const kind of ["TokenX", "RewardsDistributor", "LPStakingVault", "LPZapper"]) {
+      for (const kind of [
+        "TokenX",
+        "RewardsDistributor",
+        "LPStakingVault",
+        "LPZapper",
+        "TimelockController",
+      ]) {
         const entry = registry[kind];
         const receipt = await provider.getTransactionReceipt(entry.deployTx);
         expect(receipt, `${kind} deploy tx ${entry.deployTx} is not on chain`).to.not.equal(null);
@@ -606,15 +706,46 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
     });
 
-    it("handed all four contracts to the multisig and wired them together", async function () {
+    it("handed the proxies to the timelock, TokenX and the zapper to the multisig", async function () {
+      // The two non-upgradeable contracts are plain `Ownable` and belong to the multisig
+      // outright; there is no code to change on either, so there is nothing for a delay to
+      // make visible.
       for (const [label, contract] of [
         ["tokenX", tokenX],
-        ["distributor", distributor],
-        ["vault", vault],
         ["zapper", zapper],
       ]) {
         expect(await contract.owner(), `${label}.owner`).to.equal(w.multisig.address);
       }
+
+      // The two proxies are owned by the timelock — the only address that can upgrade them —
+      // with the multisig holding the undelayed guardian tier beside it. `pendingOwner` is
+      // clear, which is the proof the Ownable2Step handover completed rather than stalling
+      // halfway with the deployer still in charge.
+      for (const [label, contract] of [
+        ["distributor", distributor],
+        ["vault", vault],
+      ]) {
+        expect(await contract.owner(), `${label}.owner`).to.equal(timelockAddr);
+        expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
+        expect(await contract.guardian(), `${label}.guardian`).to.equal(w.multisig.address);
+      }
+
+      // The timelock itself: the multisig proposes, executes and cancels; nobody else does,
+      // and the timelock is its own admin, so even a role change is a scheduled operation.
+      expect(await timelock.getMinDelay()).to.equal(BigInt(C.TIMELOCK_MIN_DELAY));
+      const roles = {
+        PROPOSER_ROLE: await timelock.PROPOSER_ROLE(),
+        EXECUTOR_ROLE: await timelock.EXECUTOR_ROLE(),
+        CANCELLER_ROLE: await timelock.CANCELLER_ROLE(),
+      };
+      for (const [name, role] of Object.entries(roles)) {
+        expect(await timelock.hasRole(role, w.multisig.address), `multisig ${name}`).to.equal(true);
+        expect(await timelock.hasRole(role, w.deployer.address), `deployer ${name}`).to.equal(false);
+      }
+      const adminRole = await timelock.DEFAULT_ADMIN_ROLE();
+      expect(await timelock.hasRole(adminRole, timelockAddr)).to.equal(true);
+      expect(await timelock.hasRole(adminRole, w.deployer.address)).to.equal(false);
+      expect(await timelock.hasRole(adminRole, w.multisig.address)).to.equal(false);
 
       expect(await tokenX.minter()).to.equal(distributorAddr);
       expect(await tokenX.name()).to.equal(C.TOKENX_NAME);
@@ -679,22 +810,24 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         ],
         // The distributor is a UUPS proxy, so its deploy tx is the PROXY's: `Upgraded` names
         // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
-        // transaction (owner, guardian, signer) and `Initialized` closes it. There is no
-        // second `OwnershipTransferred` because `initialize` names the multisig directly —
-        // an Ownable2Step handover would need the multisig to send an `acceptOwnership`.
+        // transaction (owner = DEPLOYER, guardian, signer) and `Initialized` closes it. The
+        // run then nominates the timelock (`OwnershipTransferStarted`), and the acceptance
+        // the timelock executes in S7b is the final `OwnershipTransferred`.
         [distributorAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
           "GuardianSet",
           "SignerChanged",
           "Initialized",
+          "OwnershipTransferStarted",
+          "OwnershipTransferred",
         ],
         // The vault is a UUPS proxy too, and its deploy tx is the PROXY's: `Upgraded` names
         // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
         // transaction (owner = deployer, guardian, TWAP parameters) and `Initialized` closes
         // it. `ZapperSet` is the owner-only wiring the deployer must still be able to do, and
         // the run ends with the Ownable2Step pair: `OwnershipTransferStarted` from the
-        // script's nomination, then `OwnershipTransferred` from the multisig's acceptance.
+        // script's nomination, then `OwnershipTransferred` from the timelock's execution.
         [vaultAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
@@ -709,6 +842,24 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           "OwnershipTransferred",
           "TwapParamsSet",
           "OwnershipTransferred",
+        ],
+        // The timelock's constructor grants four roles — DEFAULT_ADMIN to itself, PROPOSER
+        // and CANCELLER to the multisig (OZ grants both to every proposer), EXECUTOR to the
+        // multisig — and closes with `MinDelayChange(0, minDelay)`. Then S7b's two handovers,
+        // scheduled first and executed after one shared wait. `CallSalt` rides along with
+        // every `CallScheduled` because the salt is derived and therefore never zero.
+        [timelockAddr.toLowerCase()]: [
+          "RoleGranted",
+          "RoleGranted",
+          "RoleGranted",
+          "RoleGranted",
+          "MinDelayChange",
+          "CallScheduled",
+          "CallSalt",
+          "CallScheduled",
+          "CallSalt",
+          "CallExecuted",
+          "CallExecuted",
         ],
       };
 
@@ -792,6 +943,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         "LPStakingVault",
         "LPZapper",
         "RewardsDistributor",
+        "TimelockController",
         "TokenX",
         "UniswapV3Pool",
       ]);
@@ -799,7 +951,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  describe("2. the forty-five step scenario, one transaction per block", function () {
+  describe("2. the forty-eight step scenario, one transaction per block", function () {
     it("A1: alice mints P1", async function () {
       const { receipt, tokenId, tickLower, tickUpper } = await mintFor(
         "alice",
@@ -1145,15 +1297,24 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await vault.stakerOf(positions.P7)).to.equal(w.carol.address);
     });
 
-    it("A19: the multisig retunes the vault's TWAP guard", async function () {
-      const receipt = await chain.send(
+    it("A19: the vault's TWAP guard is retuned through the timelock", async function () {
+      // `setTwapParams` is owner-tier, and the owner is the timelock — the multisig cannot
+      // send it directly however many keys it holds.
+      await chain.expectCustomError(
+        provider,
         vault
           .connect(w.multisig)
-          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS)
+          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS),
+        vault.interface,
+        "OwnableUnauthorizedAccount"
       );
-      ledger.record("A19", "multisig retunes the vault", receipt, [
-        { address: vaultAddr, name: "TwapParamsSet" },
-      ]);
+
+      const { executed: receipt } = await throughTimelock("A19", "retune the vault", {
+        target: vaultAddr,
+        fn: "setTwapParams",
+        args: [C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS],
+        expected: [{ address: vaultAddr, name: "TwapParamsSet" }],
+      });
 
       const args = chain.parseEvent(receipt, vault.interface, vaultAddr, "TwapParamsSet");
       expect(args.window).to.equal(BigInt(C.RETUNED_TWAP_WINDOW));
@@ -1167,7 +1328,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(preview.withinBounds).to.equal(true);
     });
 
-    it("A20: the multisig retunes the zapper's TWAP guard", async function () {
+    it("A20: the multisig retunes the zapper's TWAP guard directly", async function () {
+      // The zapper is NOT upgradeable and NOT behind the timelock: plain `Ownable`, owner =
+      // the multisig. Same call, same guard, one transaction — the contrast with A19 is the
+      // point of running both.
       const receipt = await chain.send(
         zapper
           .connect(w.multisig)
@@ -1304,11 +1468,19 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect((await tokenX.pendingEpoch()).activatesAt).to.equal(0n);
     });
 
-    it("A28: the multisig enables the ASSET reward leg", async function () {
-      const receipt = await chain.send(distributor.connect(w.multisig).setAssetClaimsEnabled(true));
-      ledger.record("A28", "multisig enables the ASSET leg", receipt, [
-        { address: distributorAddr, name: "AssetClaimsEnabled" },
-      ]);
+    it("A28: the ASSET reward leg is enabled through the timelock", async function () {
+      // Switching a whole reward leg on is owner-tier: visible on-chain for the delay before
+      // it can happen, like every other program decision.
+      const { executed } = await throughTimelock("A28", "enable the ASSET leg", {
+        target: distributorAddr,
+        fn: "setAssetClaimsEnabled",
+        args: [true],
+        expected: [{ address: distributorAddr, name: "AssetClaimsEnabled" }],
+      });
+      expect(
+        chain.parseEvent(executed, distributor.interface, distributorAddr, "AssetClaimsEnabled")
+          .enabled
+      ).to.equal(true);
       expect(await distributor.assetClaimsEnabled()).to.equal(true);
     });
 
@@ -1534,20 +1706,27 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(reorg.headAfterRevert).to.equal(reorg.headBeforeSnapshot);
     });
 
-    it("A41: the multisig cycles the zapper wiring off and back on", async function () {
-      const off = await chain.send(vault.connect(w.multisig).setZapper(C.ZERO_ADDRESS));
-      ledger.record("A41", "multisig disables the zapper", off, [
-        { address: vaultAddr, name: "ZapperSet" },
-      ]);
+    it("A41: the zapper wiring is cycled off and back on through the timelock", async function () {
+      // Two full round trips. The salt scripts/lp-timelock.js derives folds the arguments in,
+      // so "point the vault at nothing" and "point it back at the zapper" are two different
+      // operation ids rather than one id that cannot be scheduled twice.
+      const { executed: off } = await throughTimelock("A41", "disable the zapper", {
+        target: vaultAddr,
+        fn: "setZapper",
+        args: [C.ZERO_ADDRESS],
+        expected: [{ address: vaultAddr, name: "ZapperSet" }],
+      });
       let args = chain.parseEvent(off, vault.interface, vaultAddr, "ZapperSet");
       expect(args.previousZapper).to.equal(zapperAddr);
       expect(args.newZapper).to.equal(C.ZERO_ADDRESS);
       expect(await vault.zapper()).to.equal(C.ZERO_ADDRESS);
 
-      const on = await chain.send(vault.connect(w.multisig).setZapper(zapperAddr));
-      ledger.record("A41", "multisig re-enables the zapper", on, [
-        { address: vaultAddr, name: "ZapperSet" },
-      ]);
+      const { executed: on } = await throughTimelock("A41", "re-enable the zapper", {
+        target: vaultAddr,
+        fn: "setZapper",
+        args: [zapperAddr],
+        expected: [{ address: vaultAddr, name: "ZapperSet" }],
+      });
       args = chain.parseEvent(on, vault.interface, vaultAddr, "ZapperSet");
       expect(args.previousZapper).to.equal(C.ZERO_ADDRESS);
       expect(args.newZapper).to.equal(zapperAddr);
@@ -1613,6 +1792,140 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       ).to.equal(false);
       expect(await vault.rebalancePaused()).to.equal(false);
     });
+
+    it("A46: the multisig schedules an upgrade of the vault to V2", async function () {
+      // A rehearsal of the real thing, on a chain that already holds four staked positions.
+      // The V2 mock adds a `version()` marker and one variable in its own ERC-7201 namespace;
+      // it changes nothing about custody, which is exactly what makes A48's assertions mean
+      // something.
+      const artifact = await hre.artifacts.readArtifact("LPStakingVaultV2Mock");
+      const V2 = new ethers.ContractFactory(artifact.abi, artifact.bytecode, w.deployer);
+      const impl = await (
+        await V2.deploy(C.NPM_ADDR, poolAddr, token0, token1, C.FEE, C.ROUTER_ADDR)
+      ).waitForDeployment();
+      vaultV2ImplAddr = await impl.getAddress();
+      ledger.record(
+        "A46",
+        "deploy the V2 implementation",
+        await impl.deploymentTransaction().wait()
+      );
+
+      // Not even the multisig can upgrade: `_authorizeUpgrade` is onlyOwner and the owner is
+      // the timelock. This is the whole point of the revision.
+      await chain.expectCustomError(
+        provider,
+        vault.connect(w.multisig).upgradeToAndCall(vaultV2ImplAddr, "0x"),
+        vault.interface,
+        "OwnableUnauthorizedAccount"
+      );
+
+      upgradeOperation = lpTimelock.buildOperation({
+        target: vaultAddr,
+        fn: "upgradeToAndCall",
+        args: [vaultV2ImplAddr, "0x"],
+      });
+      const scheduled = await chain.send(
+        timelock
+          .connect(w.multisig)
+          .schedule(
+            upgradeOperation.target,
+            upgradeOperation.value,
+            upgradeOperation.data,
+            upgradeOperation.predecessor,
+            upgradeOperation.salt,
+            C.TIMELOCK_MIN_DELAY
+          )
+      );
+      ledger.record("A46", "multisig schedules the vault upgrade", scheduled, [
+        { address: timelockAddr, name: "CallScheduled" },
+        { address: timelockAddr, name: "CallSalt" },
+      ]);
+
+      // The whole calldata is in the log, which is what makes an upgrade public before it can
+      // run: anyone watching the timelock sees which implementation is coming.
+      const args = chain.parseEvent(scheduled, timelock.interface, timelockAddr, "CallScheduled");
+      expect(args.id).to.equal(upgradeOperation.id);
+      expect(args.target).to.equal(vaultAddr);
+      expect(args.data).to.equal(upgradeOperation.data);
+      expect(args.delay).to.equal(BigInt(C.TIMELOCK_MIN_DELAY));
+
+      expect(await timelock.isOperationPending(upgradeOperation.id)).to.equal(true);
+      expect(await timelock.isOperationReady(upgradeOperation.id)).to.equal(false);
+    });
+
+    it("A47: executing it early reverts TimelockUnexpectedOperationState and mines nothing", async function () {
+      const { headBefore } = await chain.expectCustomError(
+        provider,
+        timelock
+          .connect(w.multisig)
+          .execute(
+            upgradeOperation.target,
+            upgradeOperation.value,
+            upgradeOperation.data,
+            upgradeOperation.predecessor,
+            upgradeOperation.salt
+          ),
+        timelock.interface,
+        "TimelockUnexpectedOperationState"
+      );
+      ledger.recordRevert(
+        "A47",
+        "the upgrade is not ready yet",
+        headBefore,
+        "TimelockUnexpectedOperationState"
+      );
+
+      // The code behind the proxy is untouched: V1 has no `version()`, so the call finds no
+      // selector and the proxy reverts rather than answering 2.
+      const asV2 = await contractAt("LPStakingVaultV2Mock", vaultAddr);
+      await chain.expectReverted(asV2.version(), "version() before the upgrade executes");
+      expect(await timelock.isOperationDone(upgradeOperation.id)).to.equal(false);
+    });
+
+    it("A48: after the delay the upgrade executes and every staked position survives it", async function () {
+      const stakedBefore = {
+        P5: await vault.stakerOf(positions.P5),
+        P3: await vault.stakerOf(positions.P3),
+        P7: await vault.stakerOf(positions.P7),
+      };
+      expect(stakedBefore.P5).to.equal(w.alice.address);
+
+      await rpc.increaseTime(provider, C.TIMELOCK_MIN_DELAY + 1);
+      const executed = await chain.send(
+        timelock
+          .connect(w.multisig)
+          .execute(
+            upgradeOperation.target,
+            upgradeOperation.value,
+            upgradeOperation.data,
+            upgradeOperation.predecessor,
+            upgradeOperation.salt
+          )
+      );
+      ledger.record("A48", "multisig executes the vault upgrade", executed, [
+        { address: vaultAddr, name: "Upgraded" },
+        { address: timelockAddr, name: "CallExecuted" },
+      ]);
+
+      const upgraded = chain.parseEvent(executed, vault.interface, vaultAddr, "Upgraded");
+      expect(upgraded.implementation).to.equal(vaultV2ImplAddr);
+      expect(await timelock.isOperationDone(upgradeOperation.id)).to.equal(true);
+
+      const asV2 = await contractAt("LPStakingVaultV2Mock", vaultAddr);
+      expect(await asV2.version()).to.equal(2n);
+
+      // The reason the vault is a proxy at all: the staker ledger and custody are the same
+      // after the code changed as they were before it.
+      expect(await vault.stakerOf(positions.P5)).to.equal(stakedBefore.P5);
+      expect(await vault.stakerOf(positions.P3)).to.equal(stakedBefore.P3);
+      expect(await vault.stakerOf(positions.P7)).to.equal(stakedBefore.P7);
+      expect(await npm.ownerOf(positions.P5)).to.equal(vaultAddr);
+      // And so are the admin tiers and the guard's calibration.
+      expect(await vault.owner()).to.equal(timelockAddr);
+      expect(await vault.guardian()).to.equal(w.multisig.address);
+      expect(await vault.zapper()).to.equal(zapperAddr);
+      expect(await vault.twapWindow()).to.equal(BigInt(C.RETUNED_TWAP_WINDOW));
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1644,13 +1957,14 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
     });
 
-    it("mined nothing for any of the three reverted calls", async function () {
+    it("mined nothing for any of the four reverted calls", async function () {
       const reverts = ledger.reverts;
-      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A33", "A44"]);
+      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A33", "A44", "A47"]);
       expect(reverts.map((r) => r.errorName)).to.deep.equal([
         "DepositsArePaused",
         "ClaimsPaused",
         "RebalanceIsPaused",
+        "TimelockUnexpectedOperationState",
       ]);
     });
 
@@ -1712,7 +2026,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
     it("returns each contract's whole event sequence in ledger order", async function () {
       const ifaces = ifacesByAddress();
-      for (const address of [vaultAddr, zapperAddr, tokenXAddr, distributorAddr]) {
+      for (const address of [vaultAddr, zapperAddr, tokenXAddr, distributorAddr, timelockAddr]) {
         const decoded = chain.decodeLogs(await logsFrom(address), ifaces);
         const scenarioNames = decoded
           .filter((d) => d.blockNumber > deployToBlock)
@@ -1970,6 +2284,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       [zapperAddr.toLowerCase()]: zapper.interface,
       [tokenXAddr.toLowerCase()]: tokenX.interface,
       [distributorAddr.toLowerCase()]: distributor.interface,
+      [timelockAddr.toLowerCase()]: timelock.interface,
       [poolAddr.toLowerCase()]: pool.interface,
       [assetAddr.toLowerCase()]: asset.interface,
       [usdcAddr.toLowerCase()]: usdc.interface,

@@ -97,6 +97,16 @@ const RETUNED_MAX_DEVIATION_TICKS = 400;
 // and 150 leaves margin for the burst of trading a crash produces.
 const OBSERVATION_CARDINALITY = 150;
 
+/**
+ * The timelock's `minDelay` for the fork suites, in seconds.
+ *
+ * Mainnet runs 48 h and Sepolia staging 300 s; a fork run wants the flow, not the wait. 60 s
+ * is short enough that `evm_increaseTime(61)` between schedule and execute costs nothing, and
+ * long enough that the two are genuinely different blocks with a real ready-at between them.
+ * It must stay well below the TWAP window's warm-up history, which the same clock consumes.
+ */
+const TIMELOCK_MIN_DELAY = 60;
+
 const ASSET = (n) => BigInt(n) * 10n ** ASSET_DECIMALS;
 const USDC = (n) => BigInt(n) * 10n ** USDC_DECIMALS;
 const TOKENS = (n) => BigInt(n) * 10n ** 18n; // TokenX, 18 decimals like ASSET
@@ -229,6 +239,7 @@ module.exports = {
   RETUNED_TWAP_WINDOW,
   RETUNED_MAX_DEVIATION_TICKS,
   OBSERVATION_CARDINALITY,
+  TIMELOCK_MIN_DELAY,
   ASSET,
   USDC,
   TOKENS,

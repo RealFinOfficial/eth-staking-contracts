@@ -9,6 +9,7 @@
     "test:integration": "hardhat test test/lp-staking/integration/LPStakingLocalFork.test.js",
     "test:integration:sepolia": "hardhat test test/lp-staking/integration/LPStakingSepoliaFork.test.js",
     "test:sepolia:live": "hardhat test test-live/sepolia/SepoliaLive.test.js --network sepolia",
+    "validate:upgrades": "hardhat run scripts/validate-upgrade-safety.js",
     "test:coverage": "hardhat coverage",
     "test:coverage:unit": "hardhat coverage --testfiles \"test/lp-staking/{LPStakingVault,LPZapper,RewardsDistributor,TokenX}.test.js\"",
     "test:forge": "node scripts/run-forge.mjs test",

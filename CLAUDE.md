@@ -104,7 +104,7 @@ role — are written up in `docs/lp-staking-audit-notes.md` (upgradeability is i
 1. `TokenX(name, symbol, deployer)`
 2. `RewardsDistributor(tokenX, asset)` — the **implementation**; its own initializers are
    disabled in that constructor
-3. `LPProxy(distributorImpl, initialize(multisig, guardian, signer))` — the proxy runs
+3. `LPProxy(distributorImpl, initialize(deployer, guardian, signer))` — the proxy runs
    `initialize` in its own deployment transaction, so there is no window in which an
    uninitialized proxy can be claimed. `LP_GUARDIAN` defaults to `LP_MULTISIG`
 4. `LPStakingVault(positionManager, pool, token0, token1, fee, router)` — the
@@ -115,18 +115,34 @@ role — are written up in `docs/lp-staking-audit-notes.md` (upgradeability is i
 6. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationTicks)`
 7. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
 8. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
-9. `transferOwnership(multisig)` on TokenX, the vault and the zapper. TokenX and the zapper
-   are plain `Ownable`, so it takes effect at once. The vault is `Ownable2Step`, so it only
-   NOMINATES — **the multisig must send its own `acceptOwnership`**, and the post-deploy check
-   asserts `pendingOwner == multisig`. The distributor is not in this list at all: it is
-   already owned by the multisig from step 3
-10. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
+9. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))` — stock OZ
+   `TimelockController`. The multisig is the only proposer, the only executor (execution is
+   deliberately not open) and, because OZ grants it alongside `PROPOSER_ROLE`, the only
+   canceller; `admin = 0` leaves the timelock its own `DEFAULT_ADMIN_ROLE` holder
+10. `transferOwnership` on all four: TokenX and the zapper to the **multisig** (plain
+    `Ownable`, effective at once), the two proxies to the **timelock** (`Ownable2Step`, so this
+    only NOMINATES)
+11. `acceptOwnership()` on both proxies — itself a timelock operation, so `schedule` → wait out
+    `minDelay` → `execute`. Two branches:
+    - **staging** (`LP_MULTISIG == deployer`, the Sepolia rehearsal): the script holds the
+      roles, so it schedules both, sleeps `minDelay + 1` seconds and executes both; the checks
+      assert `owner == timelock`, `pendingOwner == 0`
+    - **mainnet** (a real Safe): the script prints the two `schedule` payloads and the two
+      later `execute` payloads with their operation ids and stops; the checks assert the
+      documented interim state `owner == deployer`, `pendingOwner == timelock`
+12. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
 
-The deployer owns TokenX, the vault and the zapper through steps 7–8 because that wiring is
-`onlyOwner`; ownership moves only at step 9. Etherscan verification replays the **deployer**
-address, not the multisig — that is what the constructors actually saw. Each proxy needs two
-verify commands: one for the implementation and one for the proxy (implementation address +
-the `initialize` calldata); the script prints all four.
+The deployer owns everything through steps 7–8 because that wiring is `onlyOwner`; ownership
+moves at steps 10–11. Etherscan verification replays the **deployer** address, not the
+multisig — that is what the constructors actually saw. Each proxy needs two verify commands:
+one for the implementation and one for the proxy (implementation address + the `initialize`
+calldata); the script prints all six, plus one for the timelock.
+
+Before each implementation deploy the script runs `upgrades.validateImplementation`, and after
+each proxy deploy `upgrades.forceImport`, which records the storage layout in the
+`hardhat-upgrades` manifest — `.openzeppelin/<network>.json`, committed, the baseline every
+future `validateUpgrade` grades against. On a development chain the plugin writes into the OS
+temp directory instead, so fork runs leave nothing behind.
 
 The script fails before spending gas when `pool.token0/token1/fee` disagree with the sorted
 `(LP_ASSET, LP_USDC, LP_FEE)`, or when the token decimals are not ASSET 18 / USDC 6. The
@@ -188,10 +204,10 @@ test/                — Hardhat test files (Mocha + Chai). 565 tests, 0 pending
                                   scripts, ledger, constants, profiles
     helpers/profiles.js         — the network profile (sepolia default, mainnet phase 2)
     integration/LPStakingLocalFork.test.js
-                                — 86 tests on a spawned `hardhat node --fork`, mainnet-pinned;
+                                — 89 tests on a spawned `hardhat node --fork`, mainnet-pinned;
                                   deploys via the repo's own scripts. Same skip rule as fork/
     integration/LPStakingSepoliaFork.test.js
-                                — 89 tests, the same scenario driven through the profile
+                                — 92 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
 test/forge/          — Foundry tier. 380 tests: 100 fork, 241 unit, 21 fuzz, 18 invariant
@@ -213,14 +229,20 @@ docs/                — Design and review notes
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, Ledger nonce workaround
-  deploy-lp-staking.js      — Deploys and wires the whole LP stack, then hands it to the multisig
+  deploy-lp-staking.js      — Deploys and wires the whole LP stack, then hands the proxies to
+                              the timelock and TokenX/the zapper to the multisig
+  lp-timelock.js            — Operator front end for the timelock: schedule / execute / cancel /
+                              status / pending, plus the calldata builders the suites reuse
+  validate-upgrade-safety.js — UUPS implementation safety (network-free) and, against a
+                              committed manifest, the storage-layout check. CI runs it
   create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
   run-forge.mjs             — forge wrapper: loads .env, resolves the fork endpoint, runs forge
   check-coverage.mjs        — Blocking coverage gate; check-coverage.test.mjs tests it
 abi/                 — Checked-in ABIs for both pools and the four LP contracts
 deployments.json     — Deployed addresses keyed by chain id
 .env.example         — Every variable hardhat.config.js and the scripts read
-.github/workflows/ci.yml — Two jobs: hardhat (unit + three fork suites) and forge
+.github/workflows/ci.yml — Two jobs: hardhat (compile, upgrade-safety, unit + three fork
+                           suites) and forge
 ```
 
 Every script is network- and pool-agnostic: the address comes from
@@ -232,6 +254,7 @@ scripts refuse to run on chain 1 without `CONFIRM=yes`.
 
 ```bash
 npx hardhat compile                 # Compile contracts (Hardhat)
+npm run validate:upgrades           # UUPS implementation safety + layout vs the manifest
 npx hardhat test                    # Everything Hardhat owns: unit + three fork suites
 npm run test:integration            # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia    # Just the profile-driven fork integration suite
@@ -413,7 +436,7 @@ over HTTP. On that node it deploys two `MockERC20Permit` tokens (tASSET 18 dec, 
 6 dec), creates a **fresh** Uniswap V3 pool for them through the real factory and position
 manager, and then deploys the whole stack by running `scripts/create-sepolia-pool.js` and
 `scripts/deploy-lp-staking.js` as child processes — unmodified, through
-`hardhat run --network localhost`. Forty-five scenario steps follow, one transaction per
+`hardhat run --network localhost`. Forty-eight scenario steps follow, one transaction per
 block, and the last three sections assert that everything they emitted is stored on that
 chain and retrievable from it: by address, by indexed topic, by block hash, in chunked
 ranges, and from receipts. A snapshot revert proves an orphaned block really disappears.

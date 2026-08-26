@@ -48,6 +48,14 @@ jobs:
       - name: Compile
         run: npx hardhat compile
 
+      # Upgrade safety for the two UUPS proxies, from the build info alone: no RPC, no
+      # secrets, no deployed contract. It rejects proxy-hostile code (selfdestruct,
+      # delegatecall, a constructor that writes state, a missing `_authorizeUpgrade`) before
+      # the suites get a chance to pass anyway. The storage-layout half runs only against a
+      # committed `.openzeppelin/<network>.json`, so it stays out of this network-free step.
+      - name: Validate upgrade safety
+        run: npx hardhat run scripts/validate-upgrade-safety.js
+
       # `npx hardhat test` runs four tiers, three of which need a fork:
       #   * the mock-only unit suites                        (no network)
       #   * test/lp-staking/fork/            — in-process mainnet fork, block 25,750,000

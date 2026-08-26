@@ -305,7 +305,7 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 ## Tech Stack
 
 - **Solidity** — pragma `^0.8.20`, compiled with 0.8.28 (optimizer on, 200 runs, cancun)
-- **Hardhat** 2.x — unit suites, the fork suites, the 45-step scenario, the deploy scripts
+- **Hardhat** 2.x — unit suites, the fork suites, the 48-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
 - **OpenZeppelin Contracts** v5 — Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA
 - **OpenZeppelin Contracts Upgradeable** v5 + **hardhat-upgrades** — `RewardsDistributor` and
@@ -313,9 +313,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
   payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
   NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Each proxy's
-  owner is a `TimelockController`; a separate `guardian` (the multisig, no delay) holds the
-  pause switches, the signer rotation, the rescues and `recoverExcessAsset`. `TokenX` and
-  `LPZapper` stay non-upgradeable. See `docs/lp-staking-audit-notes.md` item 14
+  owner is a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet), so an upgrade is
+  public for the whole delay before it can run and `unstake` — never pausable — is the exit
+  window; a separate `guardian` (the multisig, no delay) holds the pause switches, the signer
+  rotation, the rescues and `recoverExcessAsset`. `TokenX` and `LPZapper` stay
+  non-upgradeable. Operating the timelock is `scripts/lp-timelock.js`; the runbook and the
+  reasoning are in `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
 
 ## Development
@@ -324,7 +327,8 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
-npx hardhat test                 # 565 tests: unit suites + three fork suites
+npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
+npx hardhat test                 # 571 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
@@ -339,7 +343,7 @@ npm run test:coverage:unit       # solidity-coverage over the four LP unit suite
 
 ### Test tiers
 
-Nine tiers across two toolchains. Hardhat owns the 45-step scenario and the deployment
+Nine tiers across two toolchains. Hardhat owns the 48-step scenario and the deployment
 scripts; Foundry adds the adversarial and branch-coverage work, because `forge coverage`
 reports real per-branch numbers and `vm.createSelectFork` reaches live Uniswap without
 spawning a node.
@@ -366,11 +370,13 @@ forks Sepolia at block 11,562,000.
   the contracts against the real Uniswap V3 pool.
 - `test/lp-staking/integration/LPStakingLocalFork.test.js` starts its own `hardhat node --fork`
   on a free port, creates a fresh pool from mock tokens, deploys the stack with the repo's own
-  scripts (`hardhat run --network localhost`), drives a forty-five step scenario one transaction
-  per block, and asserts the resulting logs are retrievable from the chain. It writes to a
-  scratch registry, never to `deployments.json`.
+  scripts (`hardhat run --network localhost`), drives a forty-eight step scenario one
+  transaction per block, and asserts the resulting logs are retrievable from the chain. It
+  writes to a scratch registry, never to `deployments.json`. The last three steps rehearse an
+  upgrade end to end: schedule it on the timelock, watch a premature `execute` revert, then
+  execute it after the delay and prove every staked position survived.
 - `test/lp-staking/integration/LPStakingSepoliaFork.test.js` is the same scenario driven
-  through the network profile — the same 45 steps against the team's real tREAL/tUSDC and the
+  through the network profile — the same 48 steps against the team's real tREAL/tUSDC and the
   Uniswap Sepolia deployment.
 
 ### Test maps
