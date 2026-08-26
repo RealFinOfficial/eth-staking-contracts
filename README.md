@@ -305,7 +305,7 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 ## Tech Stack
 
 - **Solidity** — pragma `^0.8.20`, compiled with 0.8.28 (optimizer on, 200 runs, cancun)
-- **Hardhat** 2.x — unit suites, the fork suites, the 42-step scenario, the deploy scripts
+- **Hardhat** 2.x — unit suites, the fork suites, the 45-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
 - **OpenZeppelin Contracts** v5 — Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA
 - **Ethers.js** v6
@@ -316,12 +316,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
-npx hardhat test                 # 524 tests: unit suites + three fork suites
+npx hardhat test                 # 534 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 345 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 348 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -331,7 +331,7 @@ npm run test:coverage:unit       # solidity-coverage over the four LP unit suite
 
 ### Test tiers
 
-Nine tiers across two toolchains. Hardhat owns the 42-step scenario and the deployment
+Nine tiers across two toolchains. Hardhat owns the 45-step scenario and the deployment
 scripts; Foundry adds the adversarial and branch-coverage work, because `forge coverage`
 reports real per-branch numbers and `vm.createSelectFork` reaches live Uniswap without
 spawning a node.
@@ -358,11 +358,11 @@ forks Sepolia at block 11,562,000.
   the contracts against the real Uniswap V3 pool.
 - `test/lp-staking/integration/LPStakingLocalFork.test.js` starts its own `hardhat node --fork`
   on a free port, creates a fresh pool from mock tokens, deploys the stack with the repo's own
-  scripts (`hardhat run --network localhost`), drives a forty-two step scenario one transaction
+  scripts (`hardhat run --network localhost`), drives a forty-five step scenario one transaction
   per block, and asserts the resulting logs are retrievable from the chain. It writes to a
   scratch registry, never to `deployments.json`.
 - `test/lp-staking/integration/LPStakingSepoliaFork.test.js` is the same scenario driven
-  through the network profile — the same 42 steps against the team's real tREAL/tUSDC and the
+  through the network profile — the same 45 steps against the team's real tREAL/tUSDC and the
   Uniswap Sepolia deployment.
 
 ### Test maps
@@ -469,19 +469,19 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Measured 2026-08-25. Branch coverage is 100% on all five files, so every branch floor is also
+Measured 2026-08-26. Branch coverage is 100% on all five files, so every branch floor is also
 the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 99.05% (104/105) | 100.00% (20/20) |
+| `LPStakingVault.sol` | 99.08% (108/109) | 100.00% (21/21) |
 | `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
 | `RewardsDistributor.sol` | 100.00% (43/43) | 100.00% (10/10) |
 | `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 100.00% (36/36) | 100.00% (7/7) |
 
 The three uncovered lines are the call sites `_checkTwapDeviation();`
-(`LPStakingVault.sol:504`, `LPZapper.sol:382`) and `_rollPendingEpoch();` (`TokenX.sol:155`).
+(`LPStakingVault.sol:537`, `LPZapper.sol:389`) and `_rollPendingEpoch();` (`TokenX.sol:155`).
 Each callee reports 100% of its own body in the same run, so all three are demonstrably
 executed — `--ir-minimum` loses the inlined call site's mapping. They are named in the checker
 and in the audit notes rather than chased with contrived tests.

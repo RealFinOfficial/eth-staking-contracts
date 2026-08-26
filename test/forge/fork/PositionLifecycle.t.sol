@@ -188,6 +188,30 @@ contract PositionLifecycleTest is ForkHarness {
         assertEq(npm.ownerOf(rebalanced), alice, "a pause must not block the exit");
     }
 
+    /// @dev F6's mitigation, measured against real Uniswap: the rebalance switch stops the
+    ///      complex path and touches nothing else. `unstake` is the fallback it leaves open.
+    function test_RebalancePaused_BlocksRebalanceButNeverUnstake() public {
+        uint256 tokenId = _mintAndStake(alice, 600);
+
+        vm.prank(multisig);
+        vault.setRebalancePaused(true);
+
+        int24 tick = _alignDown(_currentTick());
+        vm.prank(alice);
+        vm.expectRevert(LPStakingVault.RebalanceIsPaused.selector);
+        vault.rebalance(tokenId, tick - 1200, tick + 1200, _noSwap(), FAR_DEADLINE);
+
+        assertEq(vault.stakerOf(tokenId), alice, "the rejected rebalance must leave the record intact");
+        assertEq(npm.ownerOf(tokenId), address(vault), "and custody where it was");
+
+        // the exit is unconditional, with BOTH switches on
+        vm.prank(multisig);
+        vault.setDepositsPaused(true);
+        vm.prank(alice);
+        vault.unstake(tokenId);
+        assertEq(npm.ownerOf(tokenId), alice, "the exit must survive both pauses");
+    }
+
     function test_DepositsPaused_BlocksTheZapPathToo() public {
         vm.prank(multisig);
         vault.setDepositsPaused(true);

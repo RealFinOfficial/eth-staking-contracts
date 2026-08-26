@@ -4,7 +4,7 @@
  * Same shape as test/lp-staking/integration/LPStakingLocalFork.test.js: a long-lived
  * `hardhat node --fork <chain> --fork-block-number <pinned>` started by the suite itself and
  * driven over HTTP, the whole stack deployed by running the repo's own scripts as child
- * processes, forty-two scenario steps each in its own block, and then assertions that
+ * processes, forty-five scenario steps each in its own block, and then assertions that
  * everything they emitted is stored on that chain and retrievable from it.
  *
  * ── What is different, and why ────────────────────────────────────────────────────────
@@ -68,6 +68,9 @@
  *   A19 multisig retunes the vault     A40 snapshot, stake P10, revert, re-mine
  *   A20 multisig retunes the zapper    A41 multisig cycles the zapper wiring
  *   A21 carol claims 1000 TokenX       A42 multisig cycles the minter wiring
+ *                                      A43 multisig pauses rebalance
+ *                                      A44 alice's rebalance reverts
+ *                                      A45 multisig resumes rebalance
  *
  * ── Skip vs fail ──────────────────────────────────────────────────────────────────────
  *
@@ -958,7 +961,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
   });
 
   // ═══════════════════════════════════════════════════════════════════════
-  describe("2. the forty-two step scenario, one transaction per block", function () {
+  describe("2. the forty-five step scenario, one transaction per block", function () {
     it("A1: alice mints P1", async function () {
       const { receipt, tokenId, tickLower, tickUpper } = await mintFor(
         "alice",
@@ -1752,6 +1755,47 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(args.newMinter).to.equal(distributorAddr);
       expect(await tokenX.minter()).to.equal(distributorAddr);
     });
+
+    it("A43: the multisig pauses rebalance", async function () {
+      const receipt = await chain.send(vault.connect(w.multisig).setRebalancePaused(true));
+      ledger.record("A43", "multisig pauses rebalance", receipt, [
+        { address: vaultAddr, name: "RebalancePausedSet" },
+      ]);
+      expect(
+        chain.parseEvent(receipt, vault.interface, vaultAddr, "RebalancePausedSet").rebalancePaused
+      ).to.equal(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
+      // the other switch is untouched, and so is the exit
+      expect(await vault.depositsPaused()).to.equal(false);
+    });
+
+    it("A44: alice's rebalance reverts with RebalanceIsPaused and mines nothing", async function () {
+      const c = await centre();
+      const { headBefore } = await chain.expectCustomError(
+        provider,
+        vault
+          .connect(w.alice)
+          .rebalance(positions.P5, c - TICK_SPACING, c + TICK_SPACING, swapLeg(0n), C.FAR_DEADLINE),
+        vault.interface,
+        "RebalanceIsPaused"
+      );
+      ledger.recordRevert("A44", "alice's rebalance is refused", headBefore, "RebalanceIsPaused");
+
+      // the position is exactly where it was: same id, same staker, same custody
+      expect(await vault.stakerOf(positions.P5)).to.equal(w.alice.address);
+      expect(await npm.ownerOf(positions.P5)).to.equal(vaultAddr);
+    });
+
+    it("A45: the multisig resumes rebalance", async function () {
+      const receipt = await chain.send(vault.connect(w.multisig).setRebalancePaused(false));
+      ledger.record("A45", "multisig resumes rebalance", receipt, [
+        { address: vaultAddr, name: "RebalancePausedSet" },
+      ]);
+      expect(
+        chain.parseEvent(receipt, vault.interface, vaultAddr, "RebalancePausedSet").rebalancePaused
+      ).to.equal(false);
+      expect(await vault.rebalancePaused()).to.equal(false);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -1788,10 +1832,14 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
     });
 
-    it("mined nothing for either reverted call", async function () {
+    it("mined nothing for any of the three reverted calls", async function () {
       const reverts = ledger.reverts;
-      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A33"]);
-      expect(reverts.map((r) => r.errorName)).to.deep.equal(["DepositsArePaused", "ClaimsPaused"]);
+      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A33", "A44"]);
+      expect(reverts.map((r) => r.errorName)).to.deep.equal([
+        "DepositsArePaused",
+        "ClaimsPaused",
+        "RebalanceIsPaused",
+      ]);
     });
 
     it("chains every block from the head back to the pinned block", async function () {

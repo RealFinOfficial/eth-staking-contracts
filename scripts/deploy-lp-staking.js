@@ -437,6 +437,7 @@ async function main() {
   check("LPStakingVault.fee", await vault.fee(), fee);
   check("LPStakingVault.zapper", await vault.zapper(), zapperDeploy.address);
   check("LPStakingVault.depositsPaused", await vault.depositsPaused(), false);
+  check("LPStakingVault.rebalancePaused", await vault.rebalancePaused(), false);
   check("LPStakingVault.twapWindow", await vault.twapWindow(), twapWindow);
   check("LPStakingVault.maxTwapDeviationBps", await vault.maxTwapDeviationBps(), twapMaxDeviationBps);
   check("LPStakingVault.owner", await vault.owner(), multisig);

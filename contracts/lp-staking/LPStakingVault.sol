@@ -29,8 +29,11 @@ import "./libraries/TwapGuard.sol";
  *       new one staked under the same staker. Trading fees compound into the new range.
  *    3. `unstake` returns the NFT to its staker.
  *
- *  Exits are unconditional. `unstake` and `rebalance` are never gated by the pause switch,
- *  by a signature, or by backend liveness. Only new deposits can be paused.
+ *  Exits are unconditional: `unstake` is never gated by a pause switch, by a signature, or
+ *  by backend liveness. Deposits and `rebalance` are each pausable behind their own owner
+ *  switch — `rebalance` is the most complex function here and the contract is immutable, so
+ *  a bug found post-deploy has to have a mitigation. Zaps stop with the deposit pause,
+ *  because `zapIn` finishes through `stakeFor`.
  *
  *  The vault holds no fungible tokens between transactions. Any token0/token1 balance left
  *  at the end of a `rebalance` is refunded to the staker in the same transaction.
@@ -64,6 +67,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     address public zapper;
     /// @notice When true, no new positions can be taken into custody. Never blocks exits.
     bool public depositsPaused;
+    /// @notice When true, `rebalance` reverts. Never blocks `unstake` — the exit stays open.
+    bool public rebalancePaused;
 
     /// @dev tokenId => staker. Zero means "not staked here".
     mapping(uint256 => address) private _stakers;
@@ -102,6 +107,9 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     /// @notice Deposit pause switch changed. Full new state.
     event DepositsPausedSet(bool depositsPaused);
 
+    /// @notice Rebalance pause switch changed. Full new state.
+    event RebalancePausedSet(bool rebalancePaused);
+
     /// @notice Whitelisted zapper changed. Carries both sides for auditability.
     event ZapperSet(address previousZapper, address newZapper);
 
@@ -115,6 +123,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     error TokensNotSorted(address tokenA, address tokenB);
     error PoolMismatch(address poolToken0, address poolToken1, uint24 poolFee);
     error DepositsArePaused();
+    error RebalanceIsPaused();
     error AlreadyStaked(uint256 tokenId, address staker);
     error NotStaker(uint256 tokenId, address caller, address staker);
     error NotZapper(address caller, address zapper);
@@ -217,7 +226,7 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
 
     /**
      * @notice Returns a staked position NFT to its staker.
-     * @dev Permissionless by design: never gated by the pause switch, a signature, or
+     * @dev Permissionless by design: never gated by either pause switch, a signature, or
      *      backend liveness. Off-chain this is the early-exit signal.
      *
      *      The exit uses a plain `transferFrom`, not `safeTransferFrom`, and that is
@@ -263,6 +272,11 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
      *      mint, which together bound the round trip. Set them from a fresh quote.
      *
      *      Works while deposits are paused: re-ranging is part of exiting risk, not a deposit.
+     *      It has its own switch instead — `setRebalancePaused` — because this is the most
+     *      complex function in an immutable contract and a bug found after deploy needs a
+     *      mitigation that is not "no mitigation at all". Pausing it never touches `unstake`:
+     *      a staker locked out of re-ranging can always take the NFT out and manage it on
+     *      Uniswap directly.
      *      No cooldown — gas, swap fees and slippage all fall on the caller, and abusive
      *      patterns are neutralized in off-chain scoring instead of in the contract.
      *
@@ -280,6 +294,8 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
         SwapParams calldata swap,
         uint256 deadline
     ) external nonReentrant returns (uint256 newTokenId) {
+        if (rebalancePaused) revert RebalanceIsPaused();
+
         address staker = _stakers[tokenId];
         if (staker != msg.sender) revert NotStaker(tokenId, msg.sender, staker);
 
@@ -354,12 +370,29 @@ contract LPStakingVault is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver 
     /**
      * @notice Pauses or resumes new deposits.
      * @dev Gates `stake`, `stakeWithPermit` and `stakeFor` only. `unstake` and `rebalance`
-     *      stay available at all times.
+     *      stay available; `rebalance` has its own switch, see {setRebalancePaused}.
+     *
+     *      This is also the zap kill switch. `LPZapper.zapIn` ends in `stakeFor`, so the
+     *      whole zap reverts with {DepositsArePaused} while this is on — the zapper needs
+     *      no pause state of its own.
      * @param paused True to block new deposits.
      */
     function setDepositsPaused(bool paused) external onlyOwner {
         depositsPaused = paused;
         emit DepositsPausedSet(paused);
+    }
+
+    /**
+     * @notice Pauses or resumes `rebalance`.
+     * @dev The incident switch for the one complex path in an immutable contract. It gates
+     *      `rebalance` and nothing else: `unstake` stays open at all times, so a paused
+     *      rebalance never traps a position — the staker withdraws the NFT and re-ranges it
+     *      on Uniswap directly.
+     * @param paused True to block `rebalance`.
+     */
+    function setRebalancePaused(bool paused) external onlyOwner {
+        rebalancePaused = paused;
+        emit RebalancePausedSet(paused);
     }
 
     /**

@@ -243,6 +243,11 @@
   },
   {
     "inputs": [],
+    "name": "RebalanceIsPaused",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "ReentrancyGuardReentrantCall",
     "type": "error"
   },
@@ -407,6 +412,19 @@
       }
     ],
     "name": "PositionRescued",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "rebalancePaused",
+        "type": "bool"
+      }
+    ],
+    "name": "RebalancePausedSet",
     "type": "event"
   },
   {
@@ -810,6 +828,19 @@
   },
   {
     "inputs": [],
+    "name": "rebalancePaused",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "renounceOwnership",
     "outputs": [],
     "stateMutability": "nonpayable",
@@ -837,6 +868,19 @@
       }
     ],
     "name": "setDepositsPaused",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "paused",
+        "type": "bool"
+      }
+    ],
+    "name": "setRebalancePaused",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

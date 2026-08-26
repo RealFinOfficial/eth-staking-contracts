@@ -28,7 +28,9 @@ bound the exposure:
   states. The TokenX leg is unaffected: it mints, and minting is bounded separately by the
   token's epoch cap.
 
-Net effect: the ASSET leg's solvency reduces to trust in the owner multisig. Accepted.
+Net effect: the ASSET leg's solvency reduces to trust in the owner multisig. Accepted, and
+since the 2026-08-26 review the same sentence is in the function's own NatSpec, so a reader
+of the contract meets the assumption without opening this file.
 
 ## 2. TwapGuard compares bps against ticks, and errs loose
 
@@ -63,11 +65,13 @@ What dies with the owner, per contract:
 |---|---|---|
 | `TokenX` | `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` | transfers, `permit`, `burn`; `mint` keeps working until the running epoch's cap is reached, then reverts `EpochMintCapExceeded` forever — **minting dies when the cap runs out** |
 | `RewardsDistributor` | `setSigner`, `setPaused`, `setAssetClaimsEnabled`, `recoverExcessAsset` | claims against already-signed vouchers, for as long as the signer key and the TokenX cap allow |
-| `LPStakingVault` | `setTwapParams`, `setDepositsPaused`, `setZapper`, `rescuePosition` | `stake`, `unstake` and `rebalance` — **user exits are never gated by the owner**, by design |
+| `LPStakingVault` | `setTwapParams`, `setDepositsPaused`, `setRebalancePaused`, `setZapper`, `rescuePosition` | `stake` and `unstake` — **the exit is never gated by the owner**, by design; `rebalance` too unless the owner left it paused (see item 13) |
 | `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
-because `unstake` and `rebalance` are permissionless. The program-facing consequence is
+because `unstake` is permissionless and unpausable. A renounce with `rebalancePaused` left on
+freezes re-ranging forever, which is why the ops runbook must read the flag before renouncing;
+the exit still works, so no position is trapped. The program-facing consequence is
 severe: rewards stop when the armed cap is exhausted and no new one can be armed.
 
 **Before deployment:** confirm the multisig address by executing a no-op transaction from it
@@ -278,3 +282,31 @@ test rather than left to be rediscovered.
   `claimedAsset` is left where it was — so the user can retry once the token is fixed.
   (`test/lp-staking/RewardsDistributor.test.js`: "rejects an ASSET whose transfer returns false
   instead of reverting, and books nothing")
+
+## 13. Rebalance pause (review F6, 2026-08-26)
+
+`rebalance` used to be unpausable, alongside `unstake`. The 2026-08-26 spec review (F6) called
+that out: the exit invariant only requires `unstake` to be unstoppable, and `rebalance` is the
+most complex function in an immutable contract (burn -> collect -> swap -> mint), so a bug
+found after deploy had no mitigation at all.
+
+`LPStakingVault` now carries a second switch:
+
+| Switch | Gates | Never gates |
+|---|---|---|
+| `setDepositsPaused(bool)` | `stake`, `stakeWithPermit`, `stakeFor` — and therefore the whole `LPZapper.zapIn` flow, which ends in `stakeFor` | `unstake`, `rebalance` |
+| `setRebalancePaused(bool)` | `rebalance`, with or without a swap leg | `unstake`, deposits |
+
+`if (rebalancePaused) revert RebalanceIsPaused();` is the first statement of `rebalance`, so a
+paused call reads no storage past the flag and mines nothing. `RebalancePausedSet(bool)` carries
+the full new state, like every other admin event here.
+
+The zapper gets no state of its own (review recommendation 4 asks for "rebalance and zap
+pausable"): the deposit pause already stops every zap through `stakeFor`, so a second flag
+would only add a second thing to get wrong — and the zapper is replaceable periphery the vault
+can also de-whitelist with `setZapper(address(0))`.
+
+What this deliberately does NOT do is make the exit conditional. With both switches on, a
+staker can still `unstake` and manage the position on Uniswap directly; that is asserted on the
+fork (`test/forge/fork/PositionLifecycle.t.sol:test_RebalancePaused_BlocksRebalanceButNeverUnstake`)
+and in both integration scenarios (steps A43-A45).

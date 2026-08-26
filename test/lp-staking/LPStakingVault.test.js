@@ -169,6 +169,7 @@ describe("LPStakingVault", function () {
       expect(await vault.twapWindow()).to.equal(TWAP_WINDOW);
       expect(await vault.maxTwapDeviationBps()).to.equal(MAX_DEVIATION_BPS);
       expect(await vault.depositsPaused()).to.equal(false);
+      expect(await vault.rebalancePaused()).to.equal(false);
       expect(await vault.zapper()).to.equal(ZERO);
 
       await expect(vault.deploymentTransaction())
@@ -482,6 +483,15 @@ describe("LPStakingVault", function () {
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
     });
 
+    it("stays open while rebalance is paused (the exit is the fallback)", async function () {
+      const tokenId = await stakePosition(alice);
+      await vault.setRebalancePaused(true);
+      await vault.setDepositsPaused(true);
+
+      await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
+      expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+    });
+
     it("cannot be replayed after the NFT has left", async function () {
       const tokenId = await stakePosition(alice);
       await vault.connect(alice).unstake(tokenId);
@@ -720,6 +730,34 @@ describe("LPStakingVault", function () {
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(vault, "Rebalanced");
+    });
+
+    it("reverts while rebalance is paused, and works again once it is lifted", async function () {
+      const tokenId = await stakePosition(alice);
+      await primeHappyPath(tokenId);
+      await vault.setRebalancePaused(true);
+
+      // the pause is the first statement, so it fires even for the staker's own position
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
+      ).to.be.revertedWithCustomError(vault, "RebalanceIsPaused");
+      // nothing moved: the position is still staked, still under the same staker
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+
+      await vault.setRebalancePaused(false);
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
+      ).to.emit(vault, "Rebalanced");
+    });
+
+    it("is blocked by the rebalance pause even with no swap leg", async function () {
+      const tokenId = await stakePosition(alice);
+      await nfpm.setMintConsumeBps(10_000n);
+      await vault.setRebalancePaused(true);
+
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.be.revertedWithCustomError(vault, "RebalanceIsPaused");
     });
 
     it("rejects a caller that is not the staker", async function () {
@@ -1335,6 +1373,21 @@ describe("LPStakingVault", function () {
 
       await expect(vault.setDepositsPaused(false)).to.emit(vault, "DepositsPausedSet").withArgs(false);
       expect(await vault.depositsPaused()).to.equal(false);
+    });
+
+    it("toggles the rebalance pause, owner only", async function () {
+      await expect(vault.connect(alice).setRebalancePaused(true)).to.be.revertedWithCustomError(
+        vault,
+        "OwnableUnauthorizedAccount"
+      );
+
+      await expect(vault.setRebalancePaused(true)).to.emit(vault, "RebalancePausedSet").withArgs(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
+      // the two switches are independent
+      expect(await vault.depositsPaused()).to.equal(false);
+
+      await expect(vault.setRebalancePaused(false)).to.emit(vault, "RebalancePausedSet").withArgs(false);
+      expect(await vault.rebalancePaused()).to.equal(false);
     });
 
     it("sets and clears the zapper, owner only, carrying both sides", async function () {

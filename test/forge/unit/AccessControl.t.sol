@@ -126,6 +126,8 @@ contract AccessControlTest is LocalHarness {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
         vault.setDepositsPaused(true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
+        vault.setRebalancePaused(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
         vault.setZapper(address(zapper));
         vm.stopPrank();
     }
@@ -142,11 +144,12 @@ contract AccessControlTest is LocalHarness {
 
     // ──────────────────────── Renounce matrix ──────────────────
 
-    function test_Renounce_VaultLosesFourAdminCallsAndNothingElse() public {
+    function test_Renounce_VaultLosesFiveAdminCallsAndNothingElse() public {
         vault.renounceOwnership();
 
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setZapper, (address(1))));
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)));
+        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)));
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)));
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.rescuePosition, (1)));
     }

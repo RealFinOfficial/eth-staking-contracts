@@ -240,6 +240,14 @@ contract RewardsDistributor is Ownable, ReentrancyGuard, EIP712 {
     /// @param amount ASSET amount to transfer to the owner.
     /// @dev Emits {ExcessAssetRecovered}, like every other owner action, so a treasury
     ///      withdrawal is followable from logs alone rather than only from ERC-20 transfers.
+    ///
+    ///      Trust assumption, stated rather than mitigated: there is no reserve for signed
+    ///      but unclaimed ASSET vouchers, so the owner can withdraw the whole ASSET leg at
+    ///      any moment and leave outstanding `claimAsset` calls unpayable. That is accepted
+    ///      because the owner is also the party that funds this balance — the ASSET leg is
+    ///      pre-funded treasury money, not user deposits, and no staker principal is
+    ///      reachable from here. The TokenX leg is unaffected: it is minted on claim under
+    ///      the token's own per-epoch cap and has no balance to drain.
     function recoverExcessAsset(uint256 amount) external onlyOwner {
         if (amount == 0) revert ZeroAmount();
         asset.safeTransfer(owner(), amount);

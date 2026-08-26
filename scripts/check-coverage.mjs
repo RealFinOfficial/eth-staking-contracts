@@ -41,11 +41,11 @@ import {pathToFileURL} from "node:url";
 // re-ratification of the floors, not a configuration tweak.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, measured 2026-08-25 ──────────────────────────────────────────────────────
+// ── Pinned floors, re-measured 2026-08-26 (rebalance pause added) ───────────────────────────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  99.05% (104/105)| 100.00% (20/20) |
+// | LPStakingVault.sol      |  99.08% (108/109)| 100.00% (21/21) |
 // | LPZapper.sol            |  98.65% (73/74)  | 100.00% (15/15) |
 // | RewardsDistributor.sol  | 100.00% (43/43)  | 100.00% (10/10) |
 // | TokenX.sol              |  97.62% (41/42)  | 100.00% (7/7)   |
@@ -57,8 +57,8 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // The three uncovered LINES are all call sites, and all three are an `--ir-minimum` line
 // attribution artefact rather than a gap:
 //
-//   * `contracts/lp-staking/LPStakingVault.sol:504`  `_checkTwapDeviation();`
-//   * `contracts/lp-staking/LPZapper.sol:382`        `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPStakingVault.sol:537`  `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPZapper.sol:389`        `_checkTwapDeviation();`
 //   * `contracts/lp-staking/TokenX.sol:155`          `_rollPendingEpoch();`
 //
 // Each callee reports 100% coverage of its own body in the same run, so all three are
@@ -67,8 +67,8 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 105, minHit: 104},
-    branches: {found: 20, minHit: 20},
+    lines: {found: 109, minHit: 108},
+    branches: {found: 21, minHit: 21},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 74, minHit: 73},

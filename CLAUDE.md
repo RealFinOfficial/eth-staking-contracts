@@ -41,8 +41,10 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   each one, and lets the staker `rebalance` (pull all liquidity and fees, optional swap,
   mint a new range, refund dust, burn the emptied NFT) without ever losing custody. It
   computes no rewards and stores no dollar values — scoring is off-chain, from the
-  full-state events. `unstake` and `rebalance` are never gated by the pause switch, a
-  signature or backend liveness; only new deposits can be paused
+  full-state events. `unstake` is never gated by a pause switch, a signature or backend
+  liveness. Deposits and `rebalance` have one owner switch each — `setDepositsPaused`
+  (which also stops zaps, because `zapIn` ends in `stakeFor`) and `setRebalancePaused`,
+  the incident switch for the one complex path in an immutable contract
 - **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
   `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
   no funds and no NFTs between transactions. The vault must whitelist it with `setZapper`
@@ -126,11 +128,11 @@ contracts/           — Solidity source files
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
     mocks/                    — Test-only Uniswap doubles, permit token and reentrancy attackers
-test/                — Hardhat test files (Mocha + Chai). 524 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 534 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 71 tests
+    LPStakingVault.test.js      — 75 tests
     RewardsDistributor.test.js  — 46 tests
     TokenX.test.js              — 47 tests
     LPZapper.test.js            — 44 tests
@@ -139,13 +141,13 @@ test/                — Hardhat test files (Mocha + Chai). 524 tests, 0 pending
                                   scripts, ledger, constants, profiles
     helpers/profiles.js         — the network profile (sepolia default, mainnet phase 2)
     integration/LPStakingLocalFork.test.js
-                                — 83 tests on a spawned `hardhat node --fork`, mainnet-pinned;
+                                — 86 tests on a spawned `hardhat node --fork`, mainnet-pinned;
                                   deploys via the repo's own scripts. Same skip rule as fork/
     integration/LPStakingSepoliaFork.test.js
-                                — 86 tests, the same scenario driven through the profile
+                                — 89 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 345 tests: 99 fork, 208 unit, 20 fuzz, 18 invariant
+test/forge/          — Foundry tier. 348 tests: 100 fork, 210 unit, 20 fuzz, 18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
@@ -303,19 +305,19 @@ un-optimized build hits "Stack too deep" in `WeightedStakingPool.sol` without it
 script passes `LP_COVERAGE_BASIS=forge-1.7-ir-minimum` and the checker refuses to grade a run
 without it.
 
-Measured 2026-08-25 — branch coverage is 100% on all five files, so every branch floor is also
+Measured 2026-08-26 — branch coverage is 100% on all five files, so every branch floor is also
 the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 99.05% (104/105) | 100.00% (20/20) |
+| `LPStakingVault.sol` | 99.08% (108/109) | 100.00% (21/21) |
 | `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
 | `RewardsDistributor.sol` | 100.00% (43/43) | 100.00% (10/10) |
 | `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 100.00% (36/36) | 100.00% (7/7) |
 
-The three uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:504`,
-`LPZapper.sol:382`) and `_rollPendingEpoch();` (`TokenX.sol:155`). Every callee reports 100% of
+The three uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:537`,
+`LPZapper.sol:389`) and `_rollPendingEpoch();` (`TokenX.sol:155`). Every callee reports 100% of
 its own body in the same run, so all three are demonstrably executed — this is `--ir-minimum`
 losing the inlined call site's mapping, not a gap. They are named in the checker and in the
 audit notes instead of being chased with contrived tests.
@@ -364,7 +366,7 @@ over HTTP. On that node it deploys two `MockERC20Permit` tokens (tASSET 18 dec, 
 6 dec), creates a **fresh** Uniswap V3 pool for them through the real factory and position
 manager, and then deploys the whole stack by running `scripts/create-sepolia-pool.js` and
 `scripts/deploy-lp-staking.js` as child processes — unmodified, through
-`hardhat run --network localhost`. Forty-two scenario steps follow, one transaction per
+`hardhat run --network localhost`. Forty-five scenario steps follow, one transaction per
 block, and the last three sections assert that everything they emitted is stored on that
 chain and retrievable from it: by address, by indexed topic, by block hash, in chunked
 ranges, and from receipts. A snapshot revert proves an orphaned block really disappears.
@@ -400,7 +402,7 @@ resets to.
 ## Tech Stack
 
 - Solidity pragma ^0.8.20, compiled with 0.8.28 (optimizer 200 runs, cancun)
-- Hardhat 2.x — unit suites, the fork suites, the 42-step scenario, the deploy scripts
+- Hardhat 2.x — unit suites, the fork suites, the 45-step scenario, the deploy scripts
 - Foundry 1.7 — fork, unit, fuzz and invariant tiers, plus the blocking coverage gate
 - OpenZeppelin Contracts v5 (Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA)
 - Ethers.js v6 (via hardhat-toolbox)

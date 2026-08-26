@@ -1,7 +1,7 @@
 # Foundry lives BESIDE Hardhat in this repo, not instead of it.
 #
 # The Hardhat suites (unit + mainnet fork + local-fork integration) are unchanged and stay
-# the reference for the 42-step scenario. Foundry adds the adversarial / branch-coverage
+# the reference for the 45-step scenario. Foundry adds the adversarial / branch-coverage
 # tier under `test/forge/`, where `forge coverage` gives real per-branch numbers and
 # `vm.createSelectFork` reaches live Uniswap without spawning a node.
 #

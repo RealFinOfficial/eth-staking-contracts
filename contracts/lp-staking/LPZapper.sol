@@ -49,6 +49,11 @@ interface ILPStakingVault {
  *
  *  The vault must whitelist this address via `setZapper` before zapping works.
  *
+ *  There is no pause switch here, and that is deliberate: every zap ends in
+ *  `vault.stakeFor`, so `LPStakingVault.setDepositsPaused(true)` already reverts the whole
+ *  `zapIn` with `DepositsArePaused`, and `setZapper(address(0))` takes the path out
+ *  altogether. A flag of its own would only be a second thing to get wrong.
+ *
  *  Zap-out is out of scope for V1: `unstake` returns the position NFT itself.
  */
 contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
@@ -363,6 +368,8 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         // Per-token approval rather than `setApprovalForAll`: the zapper never holds an NFT
         // across transactions, and the vault's pull clears the approval on transfer.
         positionManager.approve(address(vault), tokenId);
+        // The vault's deposit pause reaches the zap here: a paused vault reverts this call
+        // with `DepositsArePaused` and takes the whole zap with it.
         vault.stakeFor(msg.sender, tokenId);
 
         (uint256 usdcRefunded, uint256 assetRefunded) = _refundDust(msg.sender);

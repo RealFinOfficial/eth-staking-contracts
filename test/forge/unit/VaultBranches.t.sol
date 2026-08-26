@@ -172,6 +172,7 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(vault.token1(), token1, "token1 must be stored");
         assertEq(vault.fee(), FEE, "the fee tier must be stored");
         assertFalse(vault.depositsPaused(), "a fresh vault must accept deposits");
+        assertFalse(vault.rebalancePaused(), "a fresh vault must allow rebalancing");
     }
 
     // ──────────────────────── Stake validation ─────────────────
@@ -375,6 +376,31 @@ contract VaultBranchesTest is LocalHarness {
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swap, FAR_DEADLINE);
     }
 
+    /// @dev The pause is the first statement of `rebalance`, so it fires before the staker
+    ///      check and before a single position read — with and without a swap leg.
+    function test_Rebalance_RevertsWhilePaused() public {
+        uint256 tokenId = _stakePosition(alice);
+        vault.setRebalancePaused(true);
+
+        vm.prank(alice);
+        vm.expectRevert(LPStakingVault.RebalanceIsPaused.selector);
+        vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
+
+        SwapParams memory swap =
+            SwapParams({zeroForOne: true, amountIn: P_ASSET / 10, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+        vm.prank(alice);
+        vm.expectRevert(LPStakingVault.RebalanceIsPaused.selector);
+        vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swap, FAR_DEADLINE);
+
+        assertEq(vault.stakerOf(tokenId), alice, "a rejected rebalance must leave the record untouched");
+
+        // and the identical call goes through once the switch is lifted, so nothing but the
+        // pause rejected it
+        vault.setRebalancePaused(false);
+        vm.prank(alice);
+        vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
+    }
+
     /// @dev `amountIn == 0` skips `_executeSwap` entirely — no approval, no router call.
     function test_Rebalance_ZeroAmountInNeverTouchesTheRouter() public {
         uint256 tokenId = _stakePosition(alice);
@@ -538,6 +564,19 @@ contract VaultBranchesTest is LocalHarness {
         vault.setDepositsPaused(false);
     }
 
+    function test_SetRebalancePaused_EmitsTheFullNewState() public {
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.RebalancePausedSet(true);
+        vault.setRebalancePaused(true);
+        assertTrue(vault.rebalancePaused(), "the flag must follow the event");
+        assertFalse(vault.depositsPaused(), "the deposit switch must be untouched by it");
+
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.RebalancePausedSet(false);
+        vault.setRebalancePaused(false);
+        assertFalse(vault.rebalancePaused(), "the flag must follow the event back");
+    }
+
     function test_RescuePosition_RefusesAStakedPosition() public {
         uint256 tokenId = _stakePosition(alice);
 
@@ -566,6 +605,9 @@ contract VaultBranchesTest is LocalHarness {
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
         vault.setDepositsPaused(true);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        vault.setRebalancePaused(true);
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
         vault.setTwapParams(600, 100);
