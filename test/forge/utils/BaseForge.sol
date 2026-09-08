@@ -159,12 +159,42 @@ abstract contract BaseForge is Test {
         uint32 twapWindow_,
         uint24 maxDeviationTicks_
     ) internal returns (LPStakingVault) {
-        LPStakingVault impl = new LPStakingVault(positionManager_, pool_, token0_, token1_, fee_, swapRouter_);
+        address impl = _deployVaultImpl(positionManager_, pool_, token0_, token1_, fee_, swapRouter_);
         LPProxy proxy = new LPProxy(
-            address(impl),
-            abi.encodeCall(LPStakingVault.initialize, (owner_, guardian_, twapWindow_, maxDeviationTicks_))
+            impl, abi.encodeCall(LPStakingVault.initialize, (owner_, guardian_, twapWindow_, maxDeviationTicks_))
         );
         return LPStakingVault(address(proxy));
+    }
+
+    /**
+     * @dev The vault implementation's `new`, in a frame of its own. Nothing else lives here.
+     *
+     *      This split is a BUILD requirement, not a style choice. Foundry's test preprocessor
+     *      ("dynamic test linking") rewrites every `new X(...)` in a test source into a
+     *      generated `FoundryPpConstructorArgs(...)` call plus a create, and that rewrite costs
+     *      extra stack slots at the site. Inside {_deployVaultProxy} — ten parameters, a return
+     *      slot and two locals already live — the six constructor arguments then push
+     *      `positionManager_` one slot past the EVM's sixteen, and solc 0.8.28 fails the build
+     *      with "Stack too deep" (LValue.cpp) pointing at the rewritten line.
+     *
+     *      The preprocessor is off by default in forge 1.7.1 and on in the `stable` toolchain
+     *      CI installs, so this broke CI only. Reproduce it locally with
+     *      `forge build --dynamic-test-linking`. Six parameters and no other live values leave
+     *      the site far under the limit either way.
+     *
+     *      The alternative fixes are both worse: `via_ir` would make Foundry and Hardhat compile
+     *      different bytecode (foundry.toml's opening note), and pinning the preprocessor off in
+     *      foundry.toml would hide the problem rather than remove it.
+     */
+    function _deployVaultImpl(
+        address positionManager_,
+        address pool_,
+        address token0_,
+        address token1_,
+        uint24 fee_,
+        address swapRouter_
+    ) private returns (address) {
+        return address(new LPStakingVault(positionManager_, pool_, token0_, token1_, fee_, swapRouter_));
     }
 
     // ──────────────────────── Tick helpers ─────────────────────
