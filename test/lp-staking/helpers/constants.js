@@ -7,7 +7,7 @@
  *
  * The minimal ABI fragments below are the same ones test/lp-staking/fork/LPStakingFork.test.js
  * declares (L159–197). Keep the two in sync — they describe the same real contracts.
- * The four LP-staking contracts are NOT listed here: their ABIs are read from the
+ * The repo's own LP-staking contracts are NOT listed here: their ABIs are read from the
  * compiled artifacts at runtime, so a Solidity change can never drift past this file.
  */
 

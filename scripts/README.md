@@ -177,6 +177,17 @@ multisig and reports the missing allowlist entry as a WARN, not a failure; until
 `depositFor` reverts `NotZapper` and nothing else is affected. See the env table at the top of
 the script; `.env.example` carries the same block commented out.
 
+On a stack that is ALREADY deployed the adapter is added to an EXISTING vault, and that call has
+a precondition: the live proxy has to be running an implementation that HAS `setStakeOperator`.
+A vault proxy deployed before this round does not, so `schedule` would be accepted by the
+timelock and `execute` would revert on the proxy. Deploying and activating that implementation
+is an ordinary UUPS upgrade with a runbook already written — **"Activating a new implementation
+(Sepolia test stack #5)"** below. Use it as written: `IMPL_TARGET=LPStakingVault npx hardhat run
+scripts/deploy-implementation.js --network <net>` for the implementation,
+`scripts/validate-upgrade-safety.js --network <net>` as the gate, then the timelock's
+`upgradeToAndCall`. Only once the proxy runs the new implementation does the
+`setStakeOperator(adapter, true)` operation above become executable.
+
 `hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
 operands from the environment. `schedule` and `execute` take the SAME operands — the operation
 id is a hash of the whole call, so an execute that names a different argument is a different
@@ -330,7 +341,7 @@ them with `node`, or through the npm scripts that already pass their arguments.
 | Script | Purpose |
 |---|---|
 | `run-forge.mjs` | Wraps `forge`. Forge does not read `.env`, so this loads it, resolves the fork endpoint and hands the rest of the argv straight through |
-| `check-coverage.mjs` | The blocking coverage gate: per-file line and branch floors for the four LP contracts and `libraries/TwapGuard.sol` |
+| `check-coverage.mjs` | The blocking coverage gate: per-file line and branch floors for the six LP contracts and `libraries/TwapGuard.sol` |
 | `check-coverage.test.mjs` | Tests the gate itself, by running it as a subprocess against synthetic lcov. Node builtins only — no forge, no network |
 
 ```bash
