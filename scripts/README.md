@@ -216,7 +216,7 @@ them with `node`, or through the npm scripts that already pass their arguments.
 | Script | Purpose |
 |---|---|
 | `run-forge.mjs` | Wraps `forge`. Forge does not read `.env`, so this loads it, resolves the fork endpoint and hands the rest of the argv straight through |
-| `check-coverage.mjs` | The blocking coverage gate: per-file line and branch floors for the four LP contracts and `libraries/TwapGuard.sol` |
+| `check-coverage.mjs` | The blocking coverage gate: per-file line and branch floors for the six LP contracts and `libraries/TwapGuard.sol` |
 | `check-coverage.test.mjs` | Tests the gate itself, by running it as a subprocess against synthetic lcov. Node builtins only — no forge, no network |
 
 ```bash

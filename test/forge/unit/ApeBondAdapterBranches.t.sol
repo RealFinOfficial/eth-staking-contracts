@@ -648,6 +648,28 @@ contract ApeBondAdapterBranchesTest is LocalHarness {
         adapter.setGuardian(address(0));
     }
 
+    /// @dev The rotation itself, not only its zero check. Both undelayed switches move with the
+    ///      seat in the same transaction: the old guardian keeps neither, the new one holds both.
+    function test_Admin_RotatingTheGuardianMovesBothUndelayedSwitches() public {
+        vm.expectEmit(false, false, false, true, address(adapter));
+        emit ApeBondPositionAdapter.GuardianSet(multisig, alice);
+        adapter.setGuardian(alice);
+
+        assertEq(adapter.guardian(), alice, "the seat must move to the new guardian");
+
+        vm.prank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotGuardian.selector, multisig, alice));
+        adapter.setDepositsPaused(true);
+
+        vm.startPrank(alice);
+        adapter.setDepositsPaused(true);
+        adapter.setPurchaseSigner(bob);
+        vm.stopPrank();
+
+        assertTrue(adapter.depositsPaused(), "the new guardian holds the pause");
+        assertEq(adapter.purchaseSigner(), bob, "and the signer rotation with it");
+    }
+
     /// @dev A SoulZap caller is a `depositFor` right, not an admin right — in NEITHER tier.
     function test_Admin_ASoulZapCallerHasNoAdminPower() public {
         vm.startPrank(address(soulZap));

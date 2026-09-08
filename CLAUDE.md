@@ -49,11 +49,13 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   record of who owns each custodied NFT and the NFTs sit at this address: a replacement
   contract would strand both. THREE admin tiers, all on the proxy — **owner** (a
   `TimelockController`, `deploy/LPTimelock.sol`, and the owner from the proxy's own
-  deployment transaction onwards): upgrades, `setZapper`, `setGuardian`, `setOperator`;
-  **guardian** (a hot key, no delay): the two pauses and nothing else; **operator** (a
-  multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to the operator), and
-  those two pauses as well, as the cold fallback for a lost guardian key. Ownership is
-  two-step and `renounceOwnership` reverts
+  deployment transaction onwards): upgrades, `setZapper`, `setStakeOperator`, `setGuardian`,
+  `setOperator`; **guardian** (a hot key, no delay): the two pauses and nothing else;
+  **operator** (a multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to the
+  operator), and those two pauses as well, as the cold fallback for a lost guardian key.
+  Ownership is two-step and `renounceOwnership` reverts. `stakeFor` takes two routes in: the
+  single `zapper` slot, and the `setStakeOperator` allowlist a second deposit route uses
+  without displacing the zapper
 - **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
   `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
   no funds and no NFTs between transactions. The vault must whitelist it, which the vault's
@@ -82,6 +84,33 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   `recoverExcessAsset` (funds go to the operator), and `setPaused` as well. Ownership is
   two-step and `renounceOwnership` reverts — a renounce would freeze the upgrade path
 
+The ApeBond route (integration spec §6) is two more contracts beside the stack above, deployed
+only when `LP_APEBOND_ENABLED=1`. An un-flagged run is byte-for-byte the stack it was:
+
+- **`BonusEscrow.sol`** — custodian for the guaranteed ApeBond campaign bonus and for nothing
+  else, behind a **UUPS proxy** (`deploy/LPProxy.sol`). The adapter `reserve`s against a
+  balance the escrow ALREADY holds: an underfunded reserve reverts and takes the whole SoulZap
+  purchase with it, so a bonus can never be sold before the money to pay it exists. Anyone may
+  trigger a `claim` after that reservation's own cliff, and only the beneficiary recorded at
+  reserve time is ever paid. `recoverSurplus` moves `balance - totalReserved` and not one wei
+  more. It is upgradeable because `reservations` is the only record of what is owed to whom and
+  campaigns outlive a fix. **No pause and no guardian, deliberately** — a reservation is already
+  funded and already owed, so there is nothing a pause could do but withhold it. **Owner** (the
+  same `TimelockController`): upgrades, `setAdapter`, `recoverSurplus`; `setAdapter(address(0))`
+  closes the reserve path and is the wind-down lever, leaving every reservation intact
+- **`ApeBondPositionAdapter.sol`** — the narrow gate between SoulZap and the vault, and a plain
+  contract on purpose: it holds nothing between transactions and its only state is spent
+  purchase ids and nonces, so it is REPLACED rather than upgraded (deploy the new one, then
+  `vault.setStakeOperator(old, false)` / `(new, true)` and `escrow.setAdapter(new)`).
+  `depositFor` takes one freshly minted position from an allowlisted SoulZap caller, verifies
+  REAL's own EIP-712 `PurchaseAuthorization` over it (domain `RealApeBondPurchase`, distinct
+  from the voucher domain), re-validates the NFT against the signed pair, fee tier, exact tick
+  range and liquidity floor, stakes it for the buyer through `stakeFor` and reserves the bonus
+  — all in the caller's own transaction, all or nothing. No rescue, no sweep, no arbitrary
+  call. Two tiers — **owner** (the timelock): `setSoulZapCaller`, `setGuardian`; **guardian**
+  (the multisig, no delay): `setPurchaseSigner`, `setDepositsPaused`, the ApeBond-only pause
+  that leaves ordinary REAL stakers running
+
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
 deviates from the pool TWAP by more than `maxTwapDeviationTicks`. The guard's `pool` is
 `immutable` on both; its two parameters live in an ERC-7201 namespace shared by both, which
@@ -104,9 +133,9 @@ in the same transaction, a staked position can never be reached by it.
 
 Deliberate design choices an auditor is expected to question — the `recoverExcessAsset`
 timing, the tick-vs-bps bound, two-step non-renounceable ownership on all four contracts,
-the two proxies and their three-tier admin, the whole-balance mint/refund and the epoch cap's
+the proxies and their three-tier admin, the whole-balance mint/refund and the epoch cap's
 role — are written up in `docs/lp-staking-audit-notes.md` (ownership is item 3, upgradeability
-item 14).
+item 14, the replaceable adapter item 15, the escrow item 16).
 
 ### Deploy order
 
@@ -148,24 +177,51 @@ bootstrap (finding N-7) the run schedules nothing and waits out no delay:
    is never lost, and only then asserted equal to `predictedZapper`. If it is not, the run
    throws and names the one repair — `setZapper` through the timelock — and everything except
    the zap path already works
-10. Wire and arm: `tokenX.setMinter(distributor)`, then the optional
-    `tokenX.setEpochCap(epochId, cap)`
-11. `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
-    `Ownable2Step`, so both only NOMINATE; the operator multisig finishes with one plain
-    `acceptOwnership()` per contract, no timelock. Skipped entirely when the operator IS the
-    deploying key, which is the staging case
-12. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
-13. Post-deploy verification (owner == timelock and `pendingOwner == 0` on both proxies,
+10. **`LP_APEBOND_ENABLED=1` only** — predict the adapter the same way: `predictedAdapter =
+    getCreateAddress({from: deployer, nonce: M + 2})`, where `M` is the nonce the escrow
+    implementation is about to use (escrow implementation = M, escrow proxy = M + 1,
+    adapter = M + 2)
+11. **flag-gated** — `BonusEscrow(LP_APEBOND_BONUS_TOKEN)`, the **implementation**; its one
+    immutable (no upgrade can change which token a bonus is paid in) and `_disableInitializers()`
+12. **flag-gated** — `LPProxy(escrowImpl, initialize(timelock, predictedAdapter))`. The adapter
+    IS an argument, for exactly the reason the zapper is one on the vault: the escrow is born
+    owned by the timelock, and `setAdapter` is owner-tier, so no key could ever wire it
+    afterwards without a scheduled operation. `AdapterSet(0, adapter)` is logged in that same
+    transaction
+13. **flag-gated** — `ApeBondPositionAdapter(positionManager, vaultProxy, escrowProxy, token0,
+    token1, fee, deployer, LP_APEBOND_GUARDIAN, LP_APEBOND_PURCHASE_SIGNER)` — plain `Ownable`,
+    no proxy. Recorded first, then asserted equal to `predictedAdapter`. The signer may be zero,
+    which deploys the route closed
+14. Wire and arm: `tokenX.setMinter(distributor)`, then the optional
+    `tokenX.setEpochCap(epochId, cap)` — and, with the flag, one
+    `adapter.setSoulZapCaller(c, true)` per `LP_APEBOND_SOULZAP_CALLERS` entry, which is the
+    deployer's last chance at them: after step 15 each costs a scheduled operation
+15. With the flag: `adapter.transferOwnership(timelock)` — plain `Ownable`, effective at once,
+    because its owner tier is the SoulZap allowlist and the guardian seat, not an incident
+    switch. Then `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
+    `Ownable2Step`, so those two only NOMINATE; the operator multisig finishes with one plain
+    `acceptOwnership()` per contract, no timelock. Both are skipped entirely when the operator
+    IS the deploying key, which is the staging case
+16. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
+17. Post-deploy verification (owner == timelock and `pendingOwner == 0` on every proxy,
     guardian, operator, signer, zapper, both pause flags, the TWAP params, the ERC-1967
     implementation slot read off each proxy and the ADMIN slot asserted empty, TokenX/zapper
-    ownership per the operator rule), the address summary and the verify commands
+    ownership per the operator rule, and with the flag the escrow's adapter and the adapter's
+    own immutables), the address summary and the verify commands
 
-The deployer owns TokenX and the zapper through steps 10–11 because that wiring is `onlyOwner`;
-it never owns either proxy, not for one block. Etherscan verification replays the **deployer**
-address for TokenX and the zapper, not the operator — that is what the constructors actually
-saw. Each proxy needs two verify commands: one for the implementation and one for the proxy
-(implementation address + the `initialize` calldata, six arguments for the vault and four for
-the distributor); the script prints all six, plus one for the timelock.
+The deployer owns TokenX and the zapper through steps 14–15 because that wiring is `onlyOwner`;
+it never owns any proxy, not for one block. Etherscan verification replays the **deployer**
+address for TokenX, the zapper and the adapter, not the operator or the timelock — that is what
+the constructors actually saw. Each proxy needs two verify commands: one for the implementation
+and one for the proxy (implementation address + the `initialize` calldata, six arguments for the
+vault, four for the distributor and two for the escrow); the script prints all six — eight with
+the escrow — plus one for the timelock and one for the adapter.
+
+**One owner-tier call the deploy cannot make.** `vault.setStakeOperator(adapter, true)` is what
+lets the adapter call `stakeFor`, and the vault is owned by the timelock from its own deployment
+transaction, so the deploying key has no way to send it. The run prints the exact
+`schedule`/`execute` line for the multisig and reports the missing entry as a WARN, not a
+failure. Until it executes, `depositFor` reverts `NotZapper` and nothing else is affected.
 
 Before each implementation deploy the script runs `upgrades.validateImplementation`, and after
 each proxy deploy `upgrades.forceImport`, which records the storage layout in the
@@ -214,43 +270,55 @@ contracts/           — Solidity source files
     TokenX.sol                — LP reward token; one minter, per-epoch mint cap
     RewardsDistributor.sol    — EIP-712 cumulative-voucher claims (TokenX and ASSET legs);
                                 the implementation behind a UUPS proxy
+    BonusEscrow.sol           — ApeBond guaranteed-bonus custody: reserve, cliff, claim;
+                                the implementation behind a UUPS proxy. No pause, no guardian
+    ApeBondPositionAdapter.sol — SoulZap in, staked position + reserved bonus out; plain
+                                contract, replaced rather than upgraded
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
     mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers,
-                                the two V2 mocks (upgrade tests) and the two swap harnesses
-                                LPStakingVaultSwapHarness.sol / LPZapperSwapHarness.sol, which
-                                expose their parent's internal `_executeSwap` so the ZeroAmount
-                                arm can be reached (no production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 599 tests, 0 pending
+                                the SoulZap caller double, the three V2 mocks (upgrade tests)
+                                and the two swap harnesses LPStakingVaultSwapHarness.sol /
+                                LPZapperSwapHarness.sol, which expose their parent's internal
+                                `_executeSwap` so the ZeroAmount arm can be reached (no
+                                production path can reach it)
+test/                — Hardhat test files (Mocha + Chai). 718 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 97 tests, incl. the upgrade and timelock paths
+    LPStakingVault.test.js      — 102 tests, incl. the upgrade, timelock and stake-operator paths
     RewardsDistributor.test.js  — 65 tests, incl. the upgrade and timelock paths
     TokenX.test.js              — 53 tests
     LPZapper.test.js            — 54 tests
+    ApeBondPositionAdapter.test.js — 58 tests: the ordered checklist, both admin tiers, the
+                                  EIP-712 digest against `ethers.TypedDataEncoder`
+    BonusEscrow.test.js         — 40 tests: the funding invariant, the cliff, the open claim
+                                  trigger, `recoverSurplus`, and the upgrade path
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
     helpers/profiles.js         — the network profile (sepolia default, mainnet phase 2)
     integration/LPStakingLocalFork.test.js
-                                — 90 tests on a spawned `hardhat node --fork`, mainnet-pinned;
-                                  deploys via the repo's own scripts. Same skip rule as fork/
+                                — 106 tests on a spawned `hardhat node --fork`, mainnet-pinned;
+                                  deploys via the repo's own scripts. Same skip rule as fork/.
+                                  Section 7 is the ApeBond scenario, steps B1–B10, on a SECOND
+                                  stack deployed with LP_APEBOND_ENABLED=1
     integration/LPStakingSepoliaFork.test.js
                                 — 93 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 403 tests in 24 suites: 101 fork, 263 unit, 21 fuzz,
-                       18 invariant
+test/forge/          — Foundry tier. 493 tests in 26 suites: 101 fork, 353 unit,
+                       21 fuzz, 18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
     LocalHarness.sol            — the stack against the repo's own mocks, deterministic
     Profiles.sol                — the same network facts as helpers/profiles.js
     RawTickPool.sol             — a pool whose `observe` returns raw, caller-chosen cumulatives
-    attackers/                  — hostile tokens, malicious NPM, reentrant router, receivers
+    attackers/                  — hostile tokens, malicious NPM, reentrant router, receivers,
+                                  a vault that misreports its custody
   fork/ unit/ fuzz/ invariant/  — *.t.sol; the taxonomy is the directory
 foundry.toml         — solc/evm/optimizer mirror hardhat.config.js; profiles, fmt, lint
 remappings.txt       — @openzeppelin -> node_modules, forge-std -> lib/forge-std
@@ -258,7 +326,8 @@ lib/forge-std        — git submodule; CI must check out with `submodules: recu
 .solcover.js         — solidity-coverage skipFiles: mocks, interfaces, the two legacy pools
 docs/                — Design and review notes
   lp-staking-audit-notes.md — Deliberate properties of the LP stack an auditor will flag,
-                              plus the five SEC-0x findings and the behaviours tests now pin
+                              plus the five SEC-0x findings, the behaviours tests now pin, and
+                              the ApeBond route's two contracts (items 15 and 16)
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, Ledger nonce workaround
@@ -276,7 +345,7 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
   create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
   run-forge.mjs             — forge wrapper: loads .env, resolves the fork endpoint, runs forge
   check-coverage.mjs        — Blocking coverage gate; check-coverage.test.mjs tests it
-abi/                 — Checked-in ABIs for both pools and the four LP contracts
+abi/                 — Checked-in ABIs for both pools and the six LP contracts
 deployments.json     — Deployed addresses keyed by chain id
 .env.example         — Every variable hardhat.config.js and the scripts read
 .github/workflows/ci.yml — Two jobs: hardhat (compile, upgrade-safety, unit + three fork
@@ -328,6 +397,14 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 
 `npx hardhat test` runs the first four (`paths.tests` is `./test`). It does **not** and must
 never run `test-live/`.
+
+The **ApeBond route has no tier of its own.** Its unit coverage sits in the Hardhat unit tier
+(`ApeBondPositionAdapter.test.js`, `BonusEscrow.test.js`) and the Foundry unit tier
+(`ApeBondAdapterBranches.t.sol`, `BonusEscrowBranches.t.sol`), and its end-to-end scenario is
+section 7 of the mainnet-pinned **local-fork** suite — the only tier that runs the real deploy
+script as a child process, which is what a flag-gated deployment has to be proven through. It
+deploys a SECOND stack there with `LP_APEBOND_ENABLED=1` and asserts that the first, un-flagged
+one has no ApeBond route at all.
 
 **Test maps** — generated from the test files at the branch head on 2026-08-25; private
 artifacts, shared by the repository owner on request.
@@ -408,7 +485,7 @@ npm run test:coverage:unit     # solidity-coverage over the four Hardhat unit su
 ```
 
 `scripts/check-coverage.mjs` is the blocking one. It recomputes totals from the raw `DA:` /
-`BRDA:` records (never from the optional `LF` / `BRF` summary lines), scopes to the four LP
+`BRDA:` records (never from the optional `LF` / `BRF` summary lines), scopes to the six LP
 contracts plus `libraries/TwapGuard.sol`, and pins both the floors and their DENOMINATORS —
 so a moved measurement basis fails loudly instead of being graded against a bar that no longer
 describes it. `--ir-minimum` is not optional: coverage disables the optimizer and the
@@ -418,23 +495,26 @@ without it. The `forge-1.7` half names the toolchain, which is why CI pins
 `foundry-rs/foundry-toolchain` to `v1.7.1` instead of `stable` — a newer forge attributes
 `--ir-minimum` coverage differently. Bump the pin and the basis together, never one alone.
 
-Re-measured 2026-09-10 — branch coverage is 100% on all five files, so every branch floor is
-also the ceiling:
+Re-measured 2026-09-11 — branch coverage is 100% on all seven files, so every branch floor is
+also the ceiling. The adapter's LINE floor is its ceiling too, being the one file with nothing
+uncovered at all:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `ApeBondPositionAdapter.sol` | 100.00% (97/97) | 100.00% (25/25) |
+| `BonusEscrow.sol` | 95.45% (63/66) | 100.00% (12/12) |
+| `LPStakingVault.sol` | 97.71% (171/175) | 100.00% (29/29) |
 | `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
 | `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The ten uncovered lines are the two `_checkTwapDeviation();` call sites, `_rollPendingEpoch();`,
-the three ERC-7201 assembly bodies and each proxy's `_disableInitializers();` /
-`__Ownable2Step_init();`. Every callee reports 100% of its own body in the same run, so all ten
-are demonstrably executed — this is `--ir-minimum` losing the inlined call site's mapping and
-the assembly body's, not a gap. They are named with their line numbers in the checker and in
-the audit notes instead of being chased with contrived tests.
+The thirteen uncovered lines are all `--ir-minimum` line attribution: the two
+`_checkTwapDeviation();` call sites, `_rollPendingEpoch();`, the four ERC-7201 assembly bodies,
+and each proxy's `_disableInitializers();` / `__Ownable2Step_init();`. Every callee reports
+100% of its own body in the same run, so all thirteen are demonstrably executed — the inlined
+call site simply loses its mapping. They are named line by line in the checker and in the audit
+notes instead of being chased with contrived tests.
 
 ### Foundry beside Hardhat
 
@@ -546,3 +626,22 @@ resets to.
 - **`totalWeightedStaked`** tracks `Σ(amount × multiplier)` and drives global accrual, mirroring the role `totalStaked` plays in `StakingPool`
 - **Weight scale** — accrued weights are 1000x the `StakingPool` equivalents because multipliers are stored in `BASE_WEIGHT` units; the factor cancels in the reward ratio
 - **Full state checkpoints in events** — `StakeUpdated` and `GlobalUpdated` carry absolute post-call state (not deltas) with a clamped timestamp, so an indexer can rebuild pool state from logs alone
+
+### LP staking — the ApeBond round (2026-09-08)
+
+- **The escrow is upgradeable and the adapter is not** — team decision, vikinatora, 2026-09-08.
+  The split is by what a contract HOLDS, not by how important it is. `BonusEscrow` custodies
+  campaign money and the ledger of who is owed what, for months and across campaigns, so its
+  code has to be fixable without moving the obligations: it is a third UUPS proxy behind the
+  same `TimelockController`. `ApeBondPositionAdapter` holds nothing between transactions and
+  its only state is spent purchase ids and nonces, so it is REPLACED — deploy the new one,
+  `vault.setStakeOperator(old, false)` / `(new, true)`, `escrow.setAdapter(new)`, no migration
+  and nothing stranded. The vault's `stakeFor` allowlist exists so that replacement never has
+  to take the zapper's single slot
+- **The campaign numbers are SAMPLES until the team closes §14 of the integration spec.** The
+  five in `test/lp-staking/helpers/constants.js` are the rehearsal's figures, not committed
+  terms: a **10,000 tASSET gross input**, a **1% SoulZap fee** (9,900 net), a **500 bps
+  guaranteed bonus** (495), a **7-day cliff**, and a **±1200-tick approved range**. Nothing
+  on-chain hard-codes any of them — every one arrives inside the signed
+  `PurchaseAuthorization`, and the adapter only checks the position against what was signed —
+  so closing §14 changes the backend's numbers, not a contract

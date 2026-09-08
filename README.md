@@ -311,21 +311,24 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   ECDSA. All four LP contracts are `Ownable2Step` and every one of them overrides
   `renounceOwnership()` to revert `RenounceDisabled()`: an ownership move needs the new owner to
   call `acceptOwnership`, and no contract in the stack can be left ownerless
-- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — `RewardsDistributor` and
-  `LPStakingVault` are UUPS (ERC-1967) proxies. The distributor's `claimed[user]` ledger is
-  cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
-  payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
-  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Both proxies
-  are **born owned** by a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet):
-  `initialize` names it inside the proxy's own deployment transaction, so no key ever holds the
-  owner tier, and an upgrade is public for the whole delay before it can run while `unstake` —
-  never pausable — is the exit window. Two further tiers sit outside the timelock: a
-  `guardian`, a hot key holding the three pause switches and nothing else, and an `operator`
-  multisig holding `setTwapParams`, `rescuePosition`, `setSigner` and `recoverExcessAsset` —
-  plus those same pause switches as the cold fallback for a lost guardian key. `TokenX` and
-  `LPZapper` stay non-upgradeable and are owned by the operator. Operating the timelock is
-  `scripts/lp-timelock.js`; the runbook and the reasoning are in
-  `docs/lp-staking-audit-notes.md` item 14
+- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — `RewardsDistributor`,
+  `LPStakingVault` and (with `LP_APEBOND_ENABLED=1`) `BonusEscrow` are UUPS (ERC-1967) proxies.
+  The distributor's `claimed[user]` ledger is cumulative, so a bug fixed by redeploying would
+  make every outstanding lifetime voucher payable twice; the vault's `stakers[tokenId]` is the
+  only record of who owns each custodied NFT, and the NFTs sit at the vault's address, so a
+  redeploy would strand both; the escrow's `reservations` are the only record of which campaign
+  bonus is owed to whom, and campaigns outlive a fix. Every proxy is **born owned** by a
+  `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet): `initialize` names it inside
+  the proxy's own deployment transaction, so no key ever holds the owner tier, and an upgrade is
+  public for the whole delay before it can run while `unstake` — never pausable — is the exit
+  window. Two further tiers sit outside the timelock: a `guardian`, a hot key holding the three
+  pause switches and nothing else, and an `operator` multisig holding `setTwapParams`,
+  `rescuePosition`, `setSigner` and `recoverExcessAsset` — plus those same pause switches as the
+  cold fallback for a lost guardian key. `TokenX` and `LPZapper` stay non-upgradeable and are
+  owned by the operator; `ApeBondPositionAdapter` stays non-upgradeable too — deliberately,
+  because it holds nothing and is replaced rather than fixed in place — and is owned by the
+  timelock. Operating the timelock is `scripts/lp-timelock.js`; the runbook and the reasoning
+  are in `docs/lp-staking-audit-notes.md` items 14–16
 - **Ethers.js** v6
 
 ## Development
@@ -335,12 +338,12 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 599 tests: unit suites + three fork suites
+npx hardhat test                 # 718 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 403 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 493 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -488,7 +491,7 @@ npm run test:coverage:unit     # the Hardhat unit-only signal
 ```
 
 `scripts/check-coverage.mjs` recomputes totals from the raw `DA:` / `BRDA:` records rather than
-trusting the optional `LF` / `BRF` summary lines, scopes to the four LP contracts plus
+trusting the optional `LF` / `BRF` summary lines, scopes to the six LP contracts plus
 `libraries/TwapGuard.sol`, and pins both the floors and their denominators — a moved
 measurement basis fails loudly instead of being graded against a bar that no longer describes
 it. `--ir-minimum` is not optional: coverage disables the optimizer and the un-optimized build
@@ -499,26 +502,30 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Re-measured 2026-09-10, after the three-role split and the `Ownable2Step` round moved four of
-the five denominators. Branch coverage is 100% on all five files, so every branch floor is also
-the ceiling:
+Re-measured 2026-09-11, with the ApeBond round rebased onto the three-role base. Branch coverage
+is 100% on all seven files, so every branch floor is also the ceiling; the adapter's line floor
+is its ceiling too, being the one file with nothing uncovered at all:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `ApeBondPositionAdapter.sol` | 100.00% (97/97) | 100.00% (25/25) |
+| `BonusEscrow.sol` | 95.45% (63/66) | 100.00% (12/12) |
+| `LPStakingVault.sol` | 97.71% (171/175) | 100.00% (29/29) |
 | `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
 | `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:841`,
-`LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the three ERC-7201 assembly
-bodies (`LPStakingVault.sol:155`, `RewardsDistributor.sol:168`,
-`libraries/TwapGuard.sol:127`), and each proxy's `_disableInitializers();` /
-`__Ownable2Step_init();` (`LPStakingVault.sol:304`, `:335`; `RewardsDistributor.sol:228`,
-`:245`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
-— `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
-in the checker and in the audit notes rather than chased with contrived tests.
+The thirteen uncovered lines are the two `_checkTwapDeviation();` call sites
+(`LPStakingVault.sol:841`, `LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the
+four ERC-7201 assembly bodies (`LPStakingVault.sol:155`, `RewardsDistributor.sol:168`,
+`BonusEscrow.sol:162`, `libraries/TwapGuard.sol:127`), and each proxy's
+`_disableInitializers();` / `__Ownable2Step_init();` (`LPStakingVault.sol:304`, `:335`;
+`RewardsDistributor.sol:228`, `:245`; `BonusEscrow.sol:186`,
+`:209`). Each is reached by tests that assert its effect, so all thirteen are
+demonstrably executed — `--ir-minimum` loses the inlined call site's mapping and the assembly
+body's. They are named in the checker and in the audit notes rather than chased with contrived
+tests.
 
 ### Foundry beside Hardhat
 

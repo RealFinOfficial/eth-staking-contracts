@@ -106,7 +106,7 @@ jobs:
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
 
-      # Blocking gate: per-file line and branch floors for the four LP-staking contracts and
+      # Blocking gate: per-file line and branch floors for the six LP-staking contracts and
       # the guard they share. `--ir-minimum` is not a tuning knob — coverage disables the
       # optimizer and the un-optimized build hits "Stack too deep" in WeightedStakingPool.sol
       # without it — so the npm script pins it and passes the basis in through

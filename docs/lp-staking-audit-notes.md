@@ -1,9 +1,10 @@
 # LP staking — audit notes
 
 Known and deliberate properties of the V1 LP staking stack (`LPStakingVault`, `LPZapper`,
-`TokenX`, `RewardsDistributor`, `libraries/TwapGuard`). Each item is something a reviewer
-is expected to flag; each is recorded here with the reasoning behind the decision so the
-answer does not have to be reconstructed from the diff.
+`TokenX`, `RewardsDistributor`, `libraries/TwapGuard`) and of the ApeBond deposit route beside
+it (`ApeBondPositionAdapter`, `BonusEscrow` — items 15 and 16). Each item is something a
+reviewer is expected to flag; each is recorded here with the reasoning behind the decision so
+the answer does not have to be reconstructed from the diff.
 
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
@@ -715,6 +716,23 @@ the script prints both target addresses. Until it does, the deploying key still 
 minter wiring and the zapper's `sweep`; neither can touch a staker's position or a user's funds.
 On staging the operator IS the deploying key, so the script skips the nominations entirely.
 
+**And with `LP_APEBOND_ENABLED=1`, one scheduled operation.** `LPStakingVault.setStakeOperator`
+is owner-tier, and the vault is owned by the timelock from its own deployment transaction, so
+the deploying key cannot allowlist the adapter — the same constraint the zapper prediction
+solves for `setZapper` and the adapter prediction solves for `setAdapter`, except that
+`stakeOperators` is a mapping with no `initialize` argument to carry it. The run therefore
+prints the operation and reports the missing entry as a WARN:
+
+```bash
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setStakeOperator \
+  TIMELOCK_ARGS=<adapter>,true npx hardhat run scripts/lp-timelock.js --network mainnet
+# …wait out minDelay, then the same command with TIMELOCK_ACTION=execute CONFIRM=yes
+```
+
+Until it executes, every ApeBond `depositFor` reverts `NotZapper`. Nothing else is affected:
+staking, zapping, claims and rebalances all work, and no purchase can have been made, so the
+escrow owes nobody anything.
+
 **Upgrades.** Build the new implementation, deploy it, then
 `TIMELOCK_FN=upgradeToAndCall TIMELOCK_ARGS=<impl>,0x` (the second argument is the
 reinitializer call, `0x` for none). The scheduled log carries the whole calldata, so the
@@ -754,27 +772,252 @@ cannot be used to escape the delay it is changing.
 
 ### Sizes
 
-`forge build --sizes`, 2026-09-10, optimizer as configured in `foundry.toml`:
+`forge build --sizes`, re-measured 2026-09-11 after the ApeBond round was rebased onto the
+three-role base, optimizer as configured in `foundry.toml`:
 
 | contract | runtime (B) | EIP-170 margin (B) |
 |---|---|---|
-| `LPStakingVault` (implementation) | 15,256 | 9,320 |
-| `LPStakingVaultV2Mock` | 15,684 | 8,892 |
-| `RewardsDistributor` (implementation) | 8,935 | 15,641 |
+| `LPStakingVault` (implementation) | 15,637 | 8,939 |
+| `LPStakingVaultV2Mock` | 16,065 | 8,511 |
 | `LPZapper` | 9,244 | 15,332 |
+| `RewardsDistributor` (implementation) | 8,935 | 15,641 |
+| `ApeBondPositionAdapter` | 8,785 | 15,791 |
 | `TokenX` | 6,193 | 18,383 |
+| `BonusEscrow` (implementation) | 5,658 | 18,918 |
 
-The vault implementation has grown 10,819 -> 14,378 -> 15,256 B: first the namespaced storage
-and its getters, then the 2026-09-09/10 round — the third admin tier with its two modifiers, the
-`operator()` getter, `setOperator`, the five extra `initialize` emissions, and the `SelfCredit`
-and `ZeroAmount` guards. The distributor moved 8,390 -> 8,935 B and the zapper 8,763 -> 9,244 B
-for the same reasons on their side, the zapper also carrying `Ownable2Step`, the disabled
-`renounceOwnership` and the paused-vault pre-check. 9,320 B of headroom against the 24,576 B
-limit is the number to re-check before any future feature lands in the vault; raising the
-optimizer runs is NOT the remedy if it ever gets close (Hardhat and Foundry must produce
-identical bytecode) — refactoring is.
+The vault implementation has grown 10,819 -> 14,378 -> 15,256 -> 15,637 B: first the namespaced
+storage and its getters, then the 2026-09-09/10 round — the third admin tier with its two modifiers, the `operator()` getter,
+`setOperator`, the five extra `initialize` emissions, and the `SelfCredit` and `ZeroAmount`
+guards — and finally +381 B for `setStakeOperator`, `isStakeOperator`, the appended mapping and
+the widened `stakeFor` authorization (item 15). The distributor moved 8,390 -> 8,935 B and the zapper 8,763 -> 9,244 B for the
+same reasons on their side, the zapper also carrying `Ownable2Step`, the disabled
+`renounceOwnership` and the paused-vault pre-check. 8,939 B of headroom against the
+24,576 B limit is the number to re-check before any future feature lands in the vault; raising
+the optimizer runs is NOT the remedy if it ever gets close (Hardhat and Foundry must produce
+identical bytecode) — refactoring is. The two ApeBond contracts cost the vault almost nothing
+further: the adapter is a separate deployment and the escrow is behind its own proxy, which is
+half of why the route was built as a gate beside the vault rather than as more functions inside
+it.
 
-`LPStakingVaultSwapHarness` (15,344 B) and `LPZapperSwapHarness` (9,328 B) appear in the same
-table and are NOT part of the deployment: they are test-only mocks under
-`contracts/lp-staking/mocks/`, each exposing its parent's internal `_executeSwap` so the
-`ZeroAmount` arm can be reached, which no production entry point can do.
+`LPStakingVaultSwapHarness` (15,725 B) and `LPZapperSwapHarness` (9,328 B) appear in the same table and are NOT part
+of the deployment: they are test-only mocks under `contracts/lp-staking/mocks/`, each exposing
+its parent's internal `_executeSwap` so the `ZeroAmount` arm can be reached, which no production
+entry point can do.
+
+## 15. `ApeBondPositionAdapter` — a replaceable, non-custodial gate
+
+The ApeBond route (integration spec §6.1) is one new external function on one new contract:
+SoulZap arrives with a finished Uniswap V3 position, `depositFor` decides whether REAL accepts
+it, and if it does the NFT goes into the vault and the campaign bonus is reserved — all inside
+the caller's own transaction. The adapter swaps nothing, mints nothing, prices nothing and
+holds nothing between transactions.
+
+**It is deliberately NOT upgradeable**, which is the opposite call from the one item 14 makes
+for the vault and the distributor — and for the same reason, applied the other way. Item 14's
+argument is that a proxy is what lets code be replaced while a LEDGER stays where it is. The
+adapter has no ledger worth keeping: everything it stores is spent state (`consumedPurchaseIds`,
+`consumedNonces`), and every entry in it belongs to a purchase that already completed. Nothing
+is owed to anybody at this address, and at rest nothing is held here. So the cheap answer is
+the right one: replace the contract.
+
+The replacement runbook is one deploy plus three scheduled operations, and no migration:
+
+1. deploy the new adapter;
+2. `LPStakingVault.setStakeOperator(newAdapter, true)` and `setStakeOperator(oldAdapter, false)`
+   — the allowlist `stakeFor` gained on 2026-09-08 so the ApeBond route does not have to take
+   the single `zapper` slot the zapper occupies;
+3. `BonusEscrow.setAdapter(newAdapter)` — one address, so the old adapter loses the reserve
+   right in the same transaction the new one gains it.
+
+The one thing a replacement does not inherit is the spent-id book. That is safe only because
+the backend must never re-sign a `purchaseId` or a `nonce` anyway; both are one-use by
+construction, and re-signing one is a backend bug whichever adapter is deployed. Removing the
+old adapter urgently does NOT need the timelock: `setDepositsPaused(true)` is guardian-tier and
+stops every caller in one multisig transaction.
+
+**The trust boundary is two things at once, from two different places** (spec §4.1). The
+caller must be an allowlisted SoulZap contract — address authentication, owner-tier, so
+admitting one waits out the timelock and is public before it can run — AND the call must carry
+a `PurchaseAuthorization` signed by REAL's own backend key under the EIP-712 domain
+`RealApeBondPurchase`. Neither half is sufficient: an allowlisted caller presenting a signature
+that is not the signer's is refused by the `recovered != signer` comparison
+(`InvalidSignature(recovered, expected)`), and a valid signature presented by anybody else is
+refused before that, by `NotSoulZapCaller` or `CallerMismatch`. The domain is deliberately distinct from the voucher domain (`RealLPRewards`),
+so even if the same key were configured in both places by mistake, neither contract's
+signatures could be replayed as the other's.
+
+**The `tokenId` is not in the signed struct, and cannot be.** It does not exist when the
+backend signs: the mint happens later, inside the same SoulZap transaction (§7). A reviewer is
+expected to flag that as an unbound authorization, so here is what actually bounds it. The
+`purchaseId` and the `nonce` are each spent exactly once and are independent books, so one
+authorization can be used for one deposit and never again. The presenting caller is on an
+allowlist and is named in the signature. And the NFT itself is re-validated against every part
+of the purchase that a minted position can prove: the issuer (only the configured position
+manager), the pair and fee tier, the EXACT signed tick range — not "inside" it, because the
+campaign priced the bonus against one range and a wider or narrower position is a different
+product — a non-zero liquidity, and a liquidity floor. What an attacker could substitute is
+therefore a different NFT that is identical in issuer, pair, fee, range and liquidity floor to
+the one the quote produced, presented by the one contract allowed to present it, once.
+
+**SEC-05 (item 11) is why the beneficiary check rejects four addresses, not one.** Crediting
+the vault itself produces a position no `unstake` can release and no `rescuePosition` can reach.
+`depositFor` therefore rejects `address(0)`, `address(this)`, `address(vault)` and
+`address(positionManager)` before it does anything else. Item 11 was FIXED on 2026-09-10 on the
+vault's own side, where `stakeFor` now reverts `SelfCredit` for the vault and the zapper; this
+check is wider than that one because the adapter can name two more addresses the vault cannot,
+and it runs first, so the new route never reaches the vault's guard at all.
+
+**No rescue, no sweep, no arbitrary call**, and that is a decision rather than an omission
+(§6.1: "do not expose arbitrary-call capability"). The vault and the zapper each carry a rescue
+path because each has a real window in which it legitimately holds something. This contract's
+window is three statements wide, inside one `nonReentrant` call, and `onERC721Received` rejects
+every safe transfer that is not part of a live deposit. A plain `transferFrom` still bypasses
+that hook, so a misdirected position NFT — or a stray ERC-20, which this contract never touches
+at all — is unrecoverable HERE and would have to be written off. Accepted: an owner function
+that can move an arbitrary token is a much larger surface than the one it would rescue, and the
+addresses people actually send positions to (the vault, the zapper) both keep theirs.
+
+**Effects before interactions, and atomicity underneath it.** The purchase id and the nonce are
+marked spent between the last check and the first external call. It is worth being exact about
+what that buys, because the usual reason does not apply: the whole call is atomic inside
+SoulZap's, so a later revert un-spends the id along with everything else (§4.2 — one
+transaction succeeds completely or reverts completely). What the ordering stops is a RE-ENTRANT
+second `depositFor`, through the receipt hook of a hostile position manager or through the
+vault, spending the same authorization twice inside one transaction. `nonReentrant` blocks that
+too; two independent guards are cheap enough to keep both.
+
+**A zero bonus skips the escrow leg.** `BonusEscrow.reserve` rejects a zero amount, so calling
+it unconditionally would make a bonus-free campaign purchase impossible to stake through this
+route at all. Zero therefore means "no bonus leg": the event still carries
+`guaranteedBonusAmount = 0`, and the escrow's book stays free of empty rows.
+
+**An unset signer closes the path, and no extra check says so.** OZ's `ECDSA.recover` never
+returns `address(0)` — it reverts on a malformed signature instead — so no signature can ever
+equal a zero `purchaseSigner`, and the same single comparison that verifies a real signer is
+what refuses every signature while the path is closed. The adapter can therefore be deployed
+with `_purchaseSigner = address(0)` and opened later by the guardian.
+
+**Guardian tier, and why the signer sits in it.** `setSoulZapCaller` and `setGuardian` are
+owner-tier: admitting a caller is a code change in all but name, so it waits out the timelock
+and is public first. `setPurchaseSigner` and `setDepositsPaused` are guardian-tier, for exactly
+item 14's reason — response time, not importance. The adapter keeps TWO tiers rather than the
+stack's three: it has no equivalent of the operator's routine work (no TWAP to calibrate, no
+stray NFT to rescue, no excess balance to recover), so a third seat would hold nothing. Its
+guardian is therefore configured to the same multisig the stack calls the OPERATOR
+(`LP_APEBOND_GUARDIAN` defaults to `LP_OPERATOR`), because signer rotation is operator-tier on
+the distributor and the two seats should not disagree about who rotates a signing key. A leaked purchase
+signer cannot wait out a timelock: every second of the delay is another authorization an
+attacker can mint, so the rotation has to be one multisig transaction with no delay, and setting
+it to `address(0)` closes the path outright. The pause is the narrower switch of the two: the
+vault's own `setDepositsPaused` also stops this adapter (every deposit ends in `stakeFor`), but
+it stops ordinary REAL stakers and the zapper with it — this one takes the ApeBond route out
+and leaves everything else running.
+
+Tests: `test/forge/unit/ApeBondAdapterBranches.t.sol` — every rejection by selector and by the
+values the error carries, including `test_DepositFor_RevertsForEveryStrandingBeneficiary`,
+`test_DepositFor_RevertsForEverySignatureOnceTheSignerIsUnset`,
+`test_DepositFor_RevertsOnAReplayInsideOneTransaction`,
+`test_DepositFor_UnwindsCompletelyWhenTheEscrowIsUnderfunded`,
+`test_DepositFor_RevertsWhenTheAdapterIsNoLongerAStakeOperator`,
+`test_DepositFor_SkipsTheEscrowForAZeroBonus`,
+`test_OnERC721Received_RejectsAnUnsolicitedPosition`,
+`test_Admin_TheTwoTiersDoNotOverlap`,
+`test_Admin_RotatingTheGuardianMovesBothUndelayedSwitches`,
+`test_Admin_ASignerRotationInvalidatesOutstandingAuthorizations`, plus the four fuzzed
+boundaries (`testFuzz_TickRange_OnlyTheExactSignedRangeIsAccepted`,
+`testFuzz_Liquidity_TheFloorIsInclusiveAndZeroIsAlwaysRejected`,
+`testFuzz_Deadline_TheBoundaryIsInclusive`, `testFuzz_ReplayBooks_AreIndependent`);
+`test/lp-staking/ApeBondPositionAdapter.test.js` for the same surface against the mocks and the
+`ethers.TypedDataEncoder` digest; and steps B1–B10 of
+`test/lp-staking/integration/LPStakingLocalFork.test.js`, which drive the whole route through
+the real deploy script on a spawned fork.
+
+## 16. `BonusEscrow` — the one new upgradeable contract
+
+The guaranteed campaign bonus (spec §6.3) is promised at purchase time and paid after a cliff.
+Between those two moments the money has to sit somewhere it cannot be spent twice, cannot be
+spent on someone else, and cannot be walked back by an admin. `BonusEscrow` is that somewhere,
+and it custodies the bonus and nothing else — no vault balance, no distributor balance, its own
+`bonusToken` and its own book.
+
+**It is upgradeable and the adapter is not, and the split is by what the contract holds.**
+Team decision, vikinatora, 2026-09-08: the money-holding contract gets the proxy, the gate in
+front of it does not. The argument is item 14's, third time: `reservations` and `totalReserved`
+are the only record of what is owed to whom, and campaigns run for months, so fixing a bug by
+deploying a replacement would leave the ledger behind in a contract whose code is the thing
+being replaced — and every outstanding bonus with it. Mutable state therefore lives in ONE
+ERC-7201 namespace, `erc7201:real.lp.storage.BonusEscrow`, at
+`0x206c24b685fdfe8aa4f7e59e2f442e89924a4d38c64044591f2a80ed05456200`, pinned as a literal and
+re-derived by a test: if that slot moved, every reservation would read as "no such id".
+`bonusToken` stays `immutable` on purpose — an upgrade that changed it would be settling the
+obligations in a different currency, which is a different program rather than a fix. The owner
+is the same `TimelockController`, ownership is two-step, and `renounceOwnership` reverts.
+
+**Born owned and born pointing at its adapter.** `initialize(owner_, adapter_)` takes both,
+which is the N-7 bootstrap applied a third time. The escrow names the timelock as its owner
+inside the proxy's own deployment transaction, so no key holds its owner tier for even one
+block — and because `setAdapter` is owner-tier, a deployer that could not name the adapter in
+`initialize` could never point the escrow at one afterwards without a scheduled operation. The
+adapter's constructor needs the escrow's address, so the two cannot both be deployed first;
+`scripts/deploy-lp-staking.js` breaks the cycle by PRE-COMPUTING the adapter's CREATE address
+from the deployer's nonce (escrow implementation at M, escrow proxy at M + 1, adapter at M + 2)
+and asserting the adapter landed there, exactly as it does for the zapper. `adapter_ =
+address(0)` stays legal and means "born with the reserve path closed", which is what the unit
+harnesses use before calling `setAdapter` themselves.
+
+**The funding invariant is the whole design.** `reserve` is not a promise to fund later: it
+reverts with `Underfunded(available, requested)` unless the UNRESERVED balance —
+`balanceOf(this) - totalReserved`, floored at zero rather than subtracted bare, so a
+short balance reports a reason instead of panicking — already covers the amount. Because the
+adapter calls `reserve` inside the SoulZap purchase, that revert takes the entire purchase with
+it. A buyer is therefore never sold a bond whose promised bonus does not exist yet, and an
+underfunded campaign fails loudly on its first transaction rather than accruing IOUs nobody can
+pay. `totalReserved` is the sum of everything still owed, and it is the only thing standing
+between the owner and the balance.
+
+**Claims are never pausable, and there is no guardian at all.** The rest of the stack runs the
+three-tier admin of item 14 because it has fast paths worth stopping — a leaked voucher signer, a
+claim function paying the wrong amount. Nothing here has that shape. A reservation is already
+funded, already priced and already owed; the only thing a pause could do is withhold money this
+contract has already been paid to hold. So `claim` has no switch in front of it and no role
+could add one without an upgrade. What the owner does have is the reserve path: `setAdapter` is
+one address, so `setAdapter(address(0))` closes new reservations outright — the wind-down lever
+and the closest thing to a pause here — while leaving every reservation already made exactly
+where it is. Re-pointing it at a replacement adapter is the same single call (item 15, step 3).
+
+**Anyone may trigger a claim; only the recorded beneficiary is ever paid.** The payout address
+comes from storage written at reserve time and is never taken as an argument, so an open
+trigger cannot redirect a single wei — it can only pay someone else's bonus for them, and pay
+their gas doing it. That is what lets a campaign be swept by a keeper or by the frontend on the
+user's behalf with no signature scheme. `claimed` is set and `totalReserved` decremented BEFORE
+the transfer, so a callback token that re-entered mid-payout would find a reservation already
+spent — and `nonReentrant` stops it before it can look. `claimable(purchaseId)` is deliberately
+total rather than reverting, returning zero for an unknown id, a spent one or one still locked,
+because a keeper asks it about ids it does not know are ripe.
+
+**`recoverSurplus` is bounded by arithmetic, not by policy, and carries no `nonReentrant`.**
+The amount is not an argument and cannot be: it is recomputed as `balanceOf(this) -
+totalReserved`, which is exactly the money nobody is owed, and the call reverts with
+`NoSurplus` rather than emitting a zero transfer. There is no argument an owner could pass, and
+no order the owner could give the timelock, that reaches a reservation. The missing guard is
+the same documented asymmetry as `RewardsDistributor.recoverExcessAsset` (§14, "What is NOT
+guarded") and `LPZapper.sweep` (item 12): the transfer is the last thing the function does, the
+amount is derived from the live balance rather than carried across the call, and a callback
+that re-entered `claim` would only pay a beneficiary out of money that was never the surplus.
+Guarding it would instead let a hostile token brick the owner's recovery.
+
+Tests: `test/forge/unit/BonusEscrowBranches.t.sol` —
+`test_Reserve_GateOrderingIsAdapterFirstAndFundingLast`,
+`test_Reserve_TheFundingBoundaryIsExact`, `test_Reserve_NeverFundsTwoPromisesFromTheSameWei`,
+`test_Reserve_SpendsAPurchaseIdExactlyOnce`,
+`test_Claim_PaysTheRecordedBeneficiaryWhoeverTriggersIt`,
+`test_Claim_MarksTheReservationSpentBeforeTheTransfer`,
+`test_Claim_CannotBeReenteredThroughACallbackToken`,
+`test_RecoverSurplus_CannotReachAReservedWei`,
+`test_SetAdapter_ZeroClosesTheReservePathAndLeavesTheBookIntact`,
+`test_Storage_LivesAtThePinnedErc7201Slot`, `test_Upgrade_PreservesTheBookAndTheRoles`,
+plus the four fuzzed conservation properties
+(`testFuzz_Reserve_NeverCommitsMoreThanTheBalance`, `testFuzz_Claim_PaysExactlyWhatWasReserved`,
+`testFuzz_Claim_TheCliffBoundaryHoldsAtAnyTimestamp`,
+`testFuzz_RecoverSurplus_LeavesExactlyTotalReserved`);
+`test/lp-staking/BonusEscrow.test.js` for the same surface plus the timelock-owned upgrade path.

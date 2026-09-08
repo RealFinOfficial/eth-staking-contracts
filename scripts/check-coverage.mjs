@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Blocking coverage gate for the four LP-staking contracts plus the guard they share.
+ * Blocking coverage gate for the six LP-staking contracts plus the guard they share.
  *
  * Reads the lcov file `forge coverage --report lcov` writes and enforces three things:
  *
@@ -15,7 +15,7 @@
  *   (c) the per-file line and branch FLOORS are met, expressed as a minimum number of
  *       covered entities rather than a percentage so no rounding can creep in.
  *
- * Scope is `contracts/lp-staking/{the four contracts}` + `libraries/TwapGuard.sol`. The mocks,
+ * Scope is `contracts/lp-staking/{the six contracts}` + `libraries/TwapGuard.sol`. The mocks,
  * the interfaces and the two legacy staking pools are deliberately out of scope: they are
  * test scaffolding and frozen pre-LP code, and including them would dilute the number in both
  * directions.
@@ -46,27 +46,43 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-ratified 2026-09-11 (stakeOperators on the three-role base) ──────────
+// ── Pinned floors, re-ratified 2026-09-11 (the ApeBond round on the three-role base) ───────
 //
-// | file                    | lines            | branches        |
-// |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  97.71% (171/175)| 100.00% (29/29) |
-// | LPZapper.sol            |  98.73% (78/79)  | 100.00% (17/17) |
-// | RewardsDistributor.sol  |  96.97% (96/99)  | 100.00% (15/15) |
-// | TokenX.sol              |  97.87% (46/47)  | 100.00% (7/7)   |
-// | libraries/TwapGuard.sol |  97.67% (42/43)  | 100.00% (7/7)   |
+// | file                        | lines            | branches        |
+// |-----------------------------|------------------|-----------------|
+// | ApeBondPositionAdapter.sol  | 100.00% (97/97)  | 100.00% (25/25) |
+// | BonusEscrow.sol             |  95.45% (63/66)  | 100.00% (12/12) |
+// | LPStakingVault.sol          |  97.71% (171/175)| 100.00% (29/29) |
+// | LPZapper.sol                |  98.73% (78/79)  | 100.00% (17/17) |
+// | RewardsDistributor.sol      |  96.97% (96/99)  | 100.00% (15/15) |
+// | TokenX.sol                  |  97.87% (46/47)  | 100.00% (7/7)   |
+// | libraries/TwapGuard.sol     |  97.67% (42/43)  | 100.00% (7/7)   |
 //
-// Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate.
+// Branch coverage is 100% on all seven, so every branch floor is the ceiling: one newly
+// uncovered branch fails the gate. The adapter's LINE floor is its ceiling too — it is the one
+// file in scope with nothing uncovered at all, so any new line it grows must arrive covered.
 //
-// 2026-09-11, the vault only: `stakeFor` gained a second route in — an allowlist of trusted
-// stake operators beside the single zapper (integration spec §6.2) — with `setStakeOperator`,
-// `isStakeOperator` and one appended mapping behind it. Branches 28 -> 29 for the second arm
-// of the `stakeFor` authorization, lines 167 -> 175 for the two new functions and the widened
-// check. The new arm is taken both ways (`test_StakeFor_AcceptsAnAllowlistedOperator`,
+// 2026-09-11, the ApeBond round, rebased onto the three-role base. The two new contracts join
+// the gate: `ApeBondPositionAdapter.sol` and `BonusEscrow.sol`, both at 100% branches.
+// Reaching full line coverage on the adapter took one test rather than one lowered bar:
+// `setGuardian`'s zero check was asserted but its successful rotation was not, so
+// `test_Admin_RotatingTheGuardianMovesBothUndelayedSwitches` now rotates the seat and proves
+// both undelayed switches move with it. The escrow's three uncovered lines are the same
+// `--ir-minimum` artefacts the distributor has, one for one — see below.
+//
+// The vault moved in the same round: `stakeFor` gained a second route in — an allowlist of
+// trusted stake operators beside the single zapper (integration spec §6.2) — with
+// `setStakeOperator`, `isStakeOperator` and one appended mapping behind it. Branches 28 -> 29
+// for the second arm of the `stakeFor` authorization, lines 167 -> 175 for the two new
+// functions and the widened check. The new arm is taken both ways
+// (`test_StakeFor_AcceptsAnAllowlistedOperator`,
 // `test_StakeFor_RevertsForADeAllowlistedOperator`) and `setStakeOperator`'s zero check is
 // asserted, so the file's four uncovered lines are the same four it already had — see below —
 // and nothing new joined them.
+//
+// The escrow's `initialize` also gained one line in the same round: it now takes the adapter as
+// an argument and writes it (`adapter_`, born-owned bootstrap N-7), which moved its lines
+// 65 -> 66. The new line is covered; its three uncovered ones are unchanged.
 //
 // The 2026-09-09 role split (owner = timelock, guardian = hot pause-only key, operator =
 // multisig) moved both proxies' denominators:
@@ -103,9 +119,9 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // (a namespace, its accessor and two getters), and the zapper 74 -> 75 for the
 // `_setTwapParams` call its constructor now makes itself.
 //
-// The ten uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
-// gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
-// run, so all ten are demonstrably executed; the inlined site simply loses its own mapping:
+// The thirteen uncovered LINES are all an `--ir-minimum` line attribution artefact rather than
+// a gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
+// run, so all thirteen are demonstrably executed; the inlined site simply loses its own mapping:
 //
 //   * `contracts/lp-staking/LPStakingVault.sol:162`     `$.slot := LP_STAKING_VAULT_STORAGE`
 //     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
@@ -123,10 +139,24 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //   * `contracts/lp-staking/RewardsDistributor.sol:168` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
 //   * `contracts/lp-staking/RewardsDistributor.sol:228` `_disableInitializers();`
 //   * `contracts/lp-staking/RewardsDistributor.sol:245` `__Ownable2Step_init();`
+//   * `contracts/lp-staking/BonusEscrow.sol:162`        `$.slot := BONUS_ESCROW_STORAGE`
+//     — read by every view and every reservation;
+//     `test_Storage_LivesAtThePinnedErc7201Slot` reads the resulting slot directly.
+//   * `contracts/lp-staking/BonusEscrow.sol:186`        `_disableInitializers();` — asserted by
+//     `test_Constructor_DisablesTheImplementationsInitializers`.
+//   * `contracts/lp-staking/BonusEscrow.sol:209`        `__Ownable2Step_init();`
 //
 // They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
+  "contracts/lp-staking/ApeBondPositionAdapter.sol": {
+    lines: {found: 97, minHit: 97},
+    branches: {found: 25, minHit: 25},
+  },
+  "contracts/lp-staking/BonusEscrow.sol": {
+    lines: {found: 66, minHit: 63},
+    branches: {found: 12, minHit: 12},
+  },
   "contracts/lp-staking/LPStakingVault.sol": {
     lines: {found: 175, minHit: 171},
     branches: {found: 29, minHit: 29},
