@@ -486,7 +486,9 @@ trusting the optional `LF` / `BRF` summary lines, scopes to the four LP contract
 measurement basis fails loudly instead of being graded against a bar that no longer describes
 it. `--ir-minimum` is not optional: coverage disables the optimizer and the un-optimized build
 hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script passes
-`LP_COVERAGE_BASIS=forge-1.7-ir-minimum` and the checker refuses to grade a run without it.
+`LP_COVERAGE_BASIS=forge-1.7-ir-minimum` and the checker refuses to grade a run without it. The
+`forge-1.7` half names the toolchain, which is why CI pins `foundry-rs/foundry-toolchain` to
+`v1.7.1` rather than `stable` — bump the pin and the basis together, never one alone.
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 

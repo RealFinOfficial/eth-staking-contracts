@@ -39,6 +39,11 @@ import {pathToFileURL} from "node:url";
 // therefore not a tuning knob but the only way this repo measures at all — and it is also what
 // costs the three uncovered lines named below. Changing this string is a deliberate
 // re-ratification of the floors, not a configuration tweak.
+//
+// The `forge-1.7` half names the TOOLCHAIN, and it is a real dependency: a newer forge
+// attributes `--ir-minimum` coverage differently (it moved TokenX's line denominator from 42
+// to 43). `.github/workflows/ci.yml` therefore pins the toolchain to `v1.7.1` rather than
+// `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
 // ── Pinned floors, re-measured 2026-08-26 (LPStakingVault behind a UUPS proxy) ─────────────

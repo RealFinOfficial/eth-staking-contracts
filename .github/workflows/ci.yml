@@ -78,9 +78,11 @@ jobs:
         with:
           submodules: recursive # lib/forge-std is a submodule; without it nothing compiles
 
+      # Pinned to the coverage gate's basis (LP_COVERAGE_BASIS=forge-1.7-ir-minimum) — bump both
+      # together, never one alone: a newer forge attributes `--ir-minimum` coverage differently.
       - uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.7.1
 
       - uses: actions/setup-node@v4
         with:

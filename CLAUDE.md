@@ -373,7 +373,9 @@ so a moved measurement basis fails loudly instead of being graded against a bar 
 describes it. `--ir-minimum` is not optional: coverage disables the optimizer and the
 un-optimized build hits "Stack too deep" in `WeightedStakingPool.sol` without it. The npm
 script passes `LP_COVERAGE_BASIS=forge-1.7-ir-minimum` and the checker refuses to grade a run
-without it.
+without it. The `forge-1.7` half names the toolchain, which is why CI pins
+`foundry-rs/foundry-toolchain` to `v1.7.1` instead of `stable` — a newer forge attributes
+`--ir-minimum` coverage differently. Bump the pin and the basis together, never one alone.
 
 Measured 2026-08-26 — branch coverage is 100% on all five files, so every branch floor is also
 the ceiling:
