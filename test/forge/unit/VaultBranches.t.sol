@@ -524,6 +524,85 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(vault.stakerOf(tokenId), bob, "the credited user must be the one named, not the caller");
     }
 
+    // ──────────────────────── stakeFor: stake operators ────────
+    //
+    // The second route in (integration spec §6.2). `carol` stands in for the ApeBond adapter:
+    // the vault checks nothing about an operator but its address, so a plain account reaches
+    // exactly the code the adapter will.
+
+    /// @dev The allowlist sits BESIDE the zapper rather than replacing it — the OR's second
+    ///      operand, with the first one false.
+    function test_StakeFor_AcceptsAnAllowlistedOperator() public {
+        vault.setStakeOperator(carol, true);
+        uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+
+        vm.startPrank(carol);
+        npmMock.approve(address(vault), tokenId);
+        vault.stakeFor(bob, tokenId);
+        vm.stopPrank();
+
+        assertEq(vault.stakerOf(tokenId), bob, "an operator credits the user it names");
+        assertEq(npmMock.ownerOf(tokenId), address(vault), "and the vault takes custody from it");
+        assertEq(vault.zapper(), address(zapper), "while the zapper's own route is untouched");
+    }
+
+    /// @dev Revoking is immediate: the same caller, the same NFT, the same call, rejected.
+    function test_StakeFor_RevertsForADeAllowlistedOperator() public {
+        vault.setStakeOperator(carol, true);
+        vault.setStakeOperator(carol, false);
+        uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+
+        vm.startPrank(carol);
+        npmMock.approve(address(vault), tokenId);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotZapper.selector, carol, address(zapper)));
+        vault.stakeFor(bob, tokenId);
+        vm.stopPrank();
+
+        assertFalse(vault.isStakeOperator(carol), "and the allowlist reads false for it");
+    }
+
+    /// @dev The two routes are independent. With `zapper` at zero the whole zapper half is
+    ///      false — see {test_StakeFor_IsClosedWhenTheZapperIsUnset} — and an operator still
+    ///      gets in, which is what makes this an OR of two separate rights.
+    function test_StakeFor_AnOperatorWorksWhileTheZapperIsUnset() public {
+        vault.setZapper(address(0));
+        vault.setStakeOperator(carol, true);
+        uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+
+        vm.startPrank(carol);
+        npmMock.approve(address(vault), tokenId);
+        vault.stakeFor(alice, tokenId);
+        vm.stopPrank();
+
+        assertEq(vault.stakerOf(tokenId), alice, "the operator route must not depend on the zapper");
+    }
+
+    /// @dev The pause lives inside `_stake`, so it gates every operator too — that is why an
+    ///      operator needs no kill switch of its own.
+    function test_StakeFor_TheOperatorPathIsGatedByTheDepositPause() public {
+        vault.setStakeOperator(carol, true);
+        uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+        vault.setDepositsPaused(true);
+
+        vm.startPrank(carol);
+        npmMock.approve(address(vault), tokenId);
+        vm.expectRevert(LPStakingVault.DepositsArePaused.selector);
+        vault.stakeFor(alice, tokenId);
+        vm.stopPrank();
+    }
+
+    /// @dev An operator gets no more leeway on the credited user than the zapper does.
+    function test_StakeFor_AnOperatorCannotCreditTheZeroUser() public {
+        vault.setStakeOperator(carol, true);
+        uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+
+        vm.startPrank(carol);
+        npmMock.approve(address(vault), tokenId);
+        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
+        vault.stakeFor(address(0), tokenId);
+        vm.stopPrank();
+    }
+
     // ──────────────────────── Exits ────────────────────────────
 
     function test_Unstake_RevertsForANonStakerAndForAnUnknownToken() public {
@@ -762,6 +841,26 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(vault.zapper(), address(0xcafe), "the new zapper must be stored");
     }
 
+    function test_SetStakeOperator_RejectsTheZeroOperator() public {
+        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
+        vault.setStakeOperator(address(0), true);
+    }
+
+    function test_SetStakeOperator_EmitsTheFullNewStateBothWays() public {
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit LPStakingVault.StakeOperatorSet(carol, true);
+        vault.setStakeOperator(carol, true);
+        assertTrue(vault.isStakeOperator(carol), "the grant must be readable");
+
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit LPStakingVault.StakeOperatorSet(carol, false);
+        vault.setStakeOperator(carol, false);
+        assertFalse(vault.isStakeOperator(carol), "and so must the revocation");
+
+        // One address's allowance says nothing about another's — this is a mapping, not a slot.
+        assertFalse(vault.isStakeOperator(stranger), "an untouched address must stay off the allowlist");
+    }
+
     function test_SetDepositsPaused_EmitsTheFullNewState() public {
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.DepositsPausedSet(true);
@@ -842,6 +941,8 @@ contract VaultBranchesTest is LocalHarness {
         vm.startPrank(multisig);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setZapper(address(1));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.setStakeOperator(address(1), true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setGuardian(multisig);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));

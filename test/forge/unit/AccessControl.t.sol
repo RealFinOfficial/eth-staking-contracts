@@ -364,6 +364,61 @@ contract AccessControlTest is LocalHarness {
         vm.stopPrank();
     }
 
+    /**
+     * @dev A stake operator is a `stakeFor` right, not an admin right — in NONE of the three
+     *      tiers, and it cannot extend the very allowlist it sits on. Same shape as the
+     *      zapper's entry above, because the second deposit route buys exactly the same amount
+     *      of power as the first one: none.
+     */
+    function test_Roles_AStakeOperatorHasNoAdminPowerOverTheVault() public {
+        vault.setStakeOperator(carol, true);
+
+        bytes memory notPauser =
+            abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, carol, address(this), address(this));
+        bytes memory notOwner = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, carol);
+
+        vm.startPrank(carol);
+        vm.expectRevert(notPauser);
+        vault.setDepositsPaused(true);
+        vm.expectRevert(notPauser);
+        vault.setRebalancePaused(true);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, carol, address(this)));
+        vault.rescuePosition(1);
+        vm.expectRevert(notOwner);
+        vault.setStakeOperator(stranger, true);
+        vm.expectRevert(notOwner);
+        vault.setZapper(carol);
+        vm.expectRevert(notOwner);
+        vault.setGuardian(carol);
+        vm.expectRevert(notOwner);
+        vault.setOperator(carol);
+        vm.stopPrank();
+
+        assertTrue(vault.isStakeOperator(carol), "and it keeps the one right it was given");
+    }
+
+    /**
+     * @dev The allowlist is an OWNER-tier switch: adding a deposit entry point is a code change
+     *      in all but name, so it waits out the timelock like an upgrade. The guardian's answer
+     *      to a misbehaving operator is the deposit pause, which it does hold — and which stops
+     *      every operator in one transaction.
+     */
+    function test_Roles_TheGuardianCannotSetStakeOperators() public {
+        vault.setGuardian(carol);
+
+        vm.startPrank(carol);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, carol));
+        vault.setStakeOperator(address(zapper), true);
+
+        // ...and the tier it DOES hold answers in the same breath, which is what makes the
+        // split a split rather than a missing permission.
+        vault.setDepositsPaused(true);
+        vm.stopPrank();
+
+        assertTrue(vault.depositsPaused(), "the guardian keeps the switch that stops every operator");
+        assertFalse(vault.isStakeOperator(address(zapper)), "and the allowlist is exactly as the owner left it");
+    }
+
     /// @dev And the owner is not the zapper: the whitelist is an address, not a permission
     ///      level, so even the multisig cannot call `stakeFor`.
     function test_Roles_TheOwnerCannotCallStakeForWithoutBeingTheZapper() public {

@@ -46,11 +46,11 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-09-10 (two-step ownership on TokenX and the zapper) ────
+// ── Pinned floors, re-ratified 2026-09-11 (stakeOperators on the three-role base) ──────────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  97.60% (163/167)| 100.00% (28/28) |
+// | LPStakingVault.sol      |  97.71% (171/175)| 100.00% (29/29) |
 // | LPZapper.sol            |  98.73% (78/79)  | 100.00% (17/17) |
 // | RewardsDistributor.sol  |  96.97% (96/99)  | 100.00% (15/15) |
 // | TokenX.sol              |  97.87% (46/47)  | 100.00% (7/7)   |
@@ -58,6 +58,15 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //
 // Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
 // uncovered branch fails the gate.
+//
+// 2026-09-11, the vault only: `stakeFor` gained a second route in — an allowlist of trusted
+// stake operators beside the single zapper (integration spec §6.2) — with `setStakeOperator`,
+// `isStakeOperator` and one appended mapping behind it. Branches 28 -> 29 for the second arm
+// of the `stakeFor` authorization, lines 167 -> 175 for the two new functions and the widened
+// check. The new arm is taken both ways (`test_StakeFor_AcceptsAnAllowlistedOperator`,
+// `test_StakeFor_RevertsForADeAllowlistedOperator`) and `setStakeOperator`'s zero check is
+// asserted, so the file's four uncovered lines are the same four it already had — see below —
+// and nothing new joined them.
 //
 // The 2026-09-09 role split (owner = timelock, guardian = hot pause-only key, operator =
 // multisig) moved both proxies' denominators:
@@ -98,14 +107,14 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
 // run, so all ten are demonstrably executed; the inlined site simply loses its own mapping:
 //
-//   * `contracts/lp-staking/LPStakingVault.sol:155`     `$.slot := LP_STAKING_VAULT_STORAGE`
+//   * `contracts/lp-staking/LPStakingVault.sol:162`     `$.slot := LP_STAKING_VAULT_STORAGE`
 //     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
 //     reads the resulting slot directly.
-//   * `contracts/lp-staking/LPStakingVault.sol:304`     `_disableInitializers();` — asserted by
+//   * `contracts/lp-staking/LPStakingVault.sol:324`     `_disableInitializers();` — asserted by
 //     `test_Constructor_DisablesTheImplementationsInitializers`, which proves it ran.
-//   * `contracts/lp-staking/LPStakingVault.sol:335`     `__Ownable2Step_init();` — an empty OZ
+//   * `contracts/lp-staking/LPStakingVault.sol:355`     `__Ownable2Step_init();` — an empty OZ
 //     initializer, kept because the upgrades plugin validates the parent-initializer chain.
-//   * `contracts/lp-staking/LPStakingVault.sol:841`     `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPStakingVault.sol:912`     `_checkTwapDeviation();`
 //   * `contracts/lp-staking/LPZapper.sol:442`           `_checkTwapDeviation();`
 //   * `contracts/lp-staking/libraries/TwapGuard.sol:127` `$.slot := TWAP_GUARD_STORAGE`
 //     — read by `twapWindow()` on both inheritors;
@@ -119,8 +128,8 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 167, minHit: 163},
-    branches: {found: 28, minHit: 28},
+    lines: {found: 175, minHit: 171},
+    branches: {found: 29, minHit: 29},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 79, minHit: 78},

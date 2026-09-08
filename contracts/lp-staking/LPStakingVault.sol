@@ -25,8 +25,8 @@ import "./libraries/TwapGuard.sol";
  *  the full-state events emitted here.
  *
  *  Lifecycle:
- *    1. `stake` / `stakeWithPermit` (direct) or `stakeFor` (through the whitelisted
- *       zapper) takes custody of a position NFT and records the staker.
+ *    1. `stake` / `stakeWithPermit` (direct) or `stakeFor` (through the whitelisted zapper or
+ *       an allowlisted stake operator) takes custody of a position NFT and records the staker.
  *    2. `rebalance` withdraws all liquidity and accrued fees, optionally swaps, mints a
  *       new position on the same pool, refunds dust, burns the emptied NFT and keeps the
  *       new one staked under the same staker. Trading fees compound into the new range.
@@ -68,7 +68,8 @@ import "./libraries/TwapGuard.sol";
  *
  *    | tier               | functions                                                 |
  *    |--------------------|-----------------------------------------------------------|
- *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` |
+ *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setStakeOperator`,     |
+ *    |                    | `setGuardian`, `setOperator`                              |
  *    | guardian (hot key) | `setDepositsPaused`, `setRebalancePaused`                 |
  *    | operator (multisig)| `setTwapParams`, `rescuePosition`, and both pause switches |
  *
@@ -137,6 +138,12 @@ contract LPStakingVault is
         /// Routine-operations tier (multisig, no delay): TWAP calibration and NFT rescue.
         /// Appended after `stakers` so the layout stays a strict extension of revision d852f44.
         address operator;
+        /// Trusted periphery contracts allowed to call `stakeFor` BESIDE the single `zapper`.
+        /// APPENDED after `operator`, and it must stay last: an upgrade may add fields to this
+        /// namespace but may never reorder it, and everything above it is the layout the
+        /// deployed proxy already wrote. See {setStakeOperator} for what an operator is
+        /// trusted with.
+        mapping(address => bool) stakeOperators;
     }
 
     /**
@@ -194,6 +201,10 @@ contract LPStakingVault is
     /// @notice Whitelisted zapper changed. Carries both sides for auditability.
     event ZapperSet(address previousZapper, address newZapper);
 
+    /// @notice A stake operator was allowed onto, or removed from, the `stakeFor` allowlist.
+    ///         Full new state: `allowed` is what the mapping says after this transaction.
+    event StakeOperatorSet(address indexed operator, bool allowed);
+
     /// @notice A position NFT with no staker record left the vault for the operator. Never
     ///         fires for a staked position — see {rescuePosition}.
     event PositionRescued(uint256 indexed tokenId, address indexed to, uint256 timestamp);
@@ -213,6 +224,15 @@ contract LPStakingVault is
     error RebalanceIsPaused();
     error AlreadyStaked(uint256 tokenId, address staker);
     error NotStaker(uint256 tokenId, address caller, address staker);
+    /// @dev `stakeFor` was called by an address that is neither the zapper nor an allowlisted
+    ///      stake operator. ONE error for both halves of the check, on purpose: the caller
+    ///      failed every route in, and the only route that has an address to name is the
+    ///      zapper — the operator side is a mapping, with no counterpart to report. Every
+    ///      other rejection in this file names the address that WOULD have been allowed
+    ///      (`NotStaker`, `NotOperator`), so a second error carrying nothing but the caller
+    ///      would be the odd one out, and splitting the two would need a rule for which one a
+    ///      caller who is neither gets. The name is kept for the same reason the selector is:
+    ///      it is what the deployed proxy, the zapper and every decoder already speak.
     error NotZapper(address caller, address zapper);
     /// @dev `stakeFor` was asked to credit the vault itself or the zapper — a position neither
     ///      contract could ever release, since neither has a path that calls `unstake`.
@@ -389,11 +409,18 @@ contract LPStakingVault is
     }
 
     /**
-     * @notice Stakes a position NFT held by the whitelisted zapper and credits `user`
-     *         as the staker.
-     * @dev Only the zapper may call this. Custody is pulled from `msg.sender` (the zapper),
-     *      which must have approved this vault for `tokenId`. Same pool validation and
-     *      pause gate as `stake`.
+     * @notice Stakes a position NFT held by the whitelisted zapper, or by an allowlisted stake
+     *         operator, and credits `user` as the staker.
+     * @dev TWO routes in, and they are separate on purpose (integration spec §6.2). `zapper` is
+     *      the single address the REAL front end's own zap goes through and it stays exactly
+     *      what it was; `stakeOperators` is an allowlist beside it, so a second periphery
+     *      contract — the ApeBond position adapter — can deposit for its buyers without taking
+     *      the zapper slot away from ordinary users. Either route is enough on its own.
+     *
+     *      Custody is pulled from `msg.sender`, which must have approved this vault for
+     *      `tokenId`. Everything downstream is identical for both routes and for a direct
+     *      `stake`: the same pool validation, the same duplicate check, and the same deposit
+     *      pause, which lives inside `_stake` and therefore gates every operator too.
      *
      *      Crediting the vault or the zapper is rejected: neither contract can call
      *      `unstake`, and `rescuePosition` refuses recorded positions, so such a record
@@ -402,8 +429,12 @@ contract LPStakingVault is
      * @param tokenId The Uniswap V3 position NFT to stake.
      */
     function stakeFor(address user, uint256 tokenId) external nonReentrant {
-        address zapper_ = _vaultStorage().zapper;
-        if (msg.sender != zapper_ || zapper_ == address(0)) revert NotZapper(msg.sender, zapper_);
+        LPStakingVaultStorage storage $ = _vaultStorage();
+
+        address zapper_ = $.zapper;
+        bool authorized = (msg.sender == zapper_ && zapper_ != address(0)) || $.stakeOperators[msg.sender];
+        if (!authorized) revert NotZapper(msg.sender, zapper_);
+
         if (user == address(0)) revert ZeroAddress();
         if (user == address(this) || user == zapper_) revert SelfCredit(user);
         _stake(user, tokenId);
@@ -567,6 +598,37 @@ contract LPStakingVault is
     }
 
     /**
+     * @notice Allows or removes one stake operator — an address that may call `stakeFor`
+     *         beside the zapper.
+     * @dev An operator is a TRUSTED PERIPHERY CONTRACT, not a user role. It is trusted with
+     *      exactly one thing: naming which address gets credited for a position it hands over.
+     *      It cannot take a position out, cannot re-range one, cannot reach either admin tier
+     *      and cannot touch a position it did not deposit. The ApeBond adapter (integration
+     *      spec §6.1) is the first of them, and a replacement adapter is allowlisted here
+     *      rather than by moving the zapper, which stays pointed at the REAL zapper for
+     *      ordinary users.
+     *
+     *      Owner tier, exactly like {setZapper} and for the same reason: adding a deposit
+     *      entry point is a code change in all but name, so it takes the timelock's delay and
+     *      is publicly visible before it can run. Removing one needs no delay to be effective
+     *      in an incident — {setDepositsPaused} reverts every operator's `stakeFor` in one
+     *      guardian transaction, because the pause is checked inside `_stake`.
+     *
+     *      The zero address is rejected rather than treated as a switch: unlike `zapper`,
+     *      which uses zero to close its single-address path, this is a mapping and zero would
+     *      be a meaningless entry in it.
+     * @param stakeOperator The periphery contract to allow or remove. Named in full because a
+     *        bare `operator` would shadow the {operator} view, which is the unrelated
+     *        routine-operations ROLE.
+     * @param allowed True to allow `stakeFor`, false to remove the right.
+     */
+    function setStakeOperator(address stakeOperator, bool allowed) external onlyOwner {
+        if (stakeOperator == address(0)) revert ZeroAddress();
+        emit StakeOperatorSet(stakeOperator, allowed);
+        _vaultStorage().stakeOperators[stakeOperator] = allowed;
+    }
+
+    /**
      * @notice Rotates the fast-path guardian.
      * @param newGuardian The new guardian (the multisig).
      * @dev Owner tier: the guardian cannot rotate itself, so losing the multisig is
@@ -623,9 +685,11 @@ contract LPStakingVault is
      * @dev Gates `stake`, `stakeWithPermit` and `stakeFor` only. `unstake` and `rebalance`
      *      stay available; `rebalance` has its own switch, see {setRebalancePaused}.
      *
-     *      This is also the zap kill switch. `LPZapper.zapIn` ends in `stakeFor`, so the
-     *      whole zap reverts with {DepositsArePaused} while this is on — the zapper needs
-     *      no pause state of its own.
+     *      This is also the zap kill switch, and the operator kill switch with it. The check
+     *      lives inside `_stake`, which every entry point ends in, so `LPZapper.zapIn` and
+     *      every allowlisted stake operator ({setStakeOperator}) revert with
+     *      {DepositsArePaused} while this is on — no periphery contract needs a pause of its
+     *      own, and none can outlive this one.
      *
      *      Pause tier: the guardian is a hot key that can only pause, so this switch can be
      *      thrown in minutes without putting any value behind that key; the operator multisig
@@ -733,6 +797,13 @@ contract LPStakingVault is
     /// @notice Zapper allowed to call `stakeFor`. Zero disables the path.
     function zapper() external view returns (address) {
         return _vaultStorage().zapper;
+    }
+
+    /// @notice True while `stakeOperator` may call `stakeFor` beside the zapper.
+    /// @param stakeOperator The address to look up in the allowlist. Not `operator`: that name
+    ///        belongs to the routine-operations role, which this allowlist has nothing to do with.
+    function isStakeOperator(address stakeOperator) external view returns (bool) {
+        return _vaultStorage().stakeOperators[stakeOperator];
     }
 
     /// @notice The fast-path incident responder (the hot key). Pause only.
