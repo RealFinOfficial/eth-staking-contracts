@@ -4,8 +4,11 @@ pragma solidity 0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {Profiles} from "./Profiles.sol";
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {BonusEscrow} from "../../../contracts/lp-staking/BonusEscrow.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 
 /**
@@ -248,6 +251,33 @@ abstract contract BaseForge is Test {
         address swapRouter_
     ) private returns (address) {
         return address(new LPStakingVault(positionManager_, pool_, token0_, token1_, fee_, swapRouter_));
+    }
+
+    /**
+     * @notice Deploys the bonus escrow the way production does: an implementation carrying the
+     *         bonus-token immutable, then an {LPProxy} whose constructor delegatecalls
+     *         `initialize`.
+     * @dev Same reason as the two helpers above for living on this rung: the escrow is deployed
+     *      by the same two-transaction shape everywhere, and a bare implementation is a contract
+     *      nobody deploys — its `initialize` is burnt, so it has no storage to test against.
+     *      The escrow is deliberately NOT part of {LocalHarness}: it custodies an ApeBond
+     *      campaign balance and shares nothing with the four LP contracts, so the files that
+     *      test it stand one up themselves.
+     *
+     *      `adapter_` is the address `initialize` writes. Pass `address(0)` and call
+     *      {BonusEscrow-setAdapter} afterwards when the caller owns the escrow (every harness
+     *      does); pass a PRE-COMPUTED address to reproduce what the deploy script must do,
+     *      since production's escrow is born owned by the timelock and could never be pointed
+     *      at an adapter by the deploying key. {BonusEscrowBranchesTest} keeps one test on
+     *      exactly that path.
+     */
+    function _deployBonusEscrowProxy(address bonusToken_, address owner_, address adapter_)
+        internal
+        returns (BonusEscrow)
+    {
+        BonusEscrow impl = new BonusEscrow(IERC20(bonusToken_));
+        LPProxy proxy = new LPProxy(address(impl), abi.encodeCall(BonusEscrow.initialize, (owner_, adapter_)));
+        return BonusEscrow(address(proxy));
     }
 
     // ──────────────────────── Tick helpers ─────────────────────
