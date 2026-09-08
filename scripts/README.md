@@ -132,7 +132,7 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | Script | Purpose |
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
-| `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
+| `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper — plus, with `LP_APEBOND_ENABLED=1`, the `BonusEscrow` proxy (born owned by the timelock and born pointing at its adapter) and the `ApeBondPositionAdapter` in front of it. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending` |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
@@ -158,6 +158,25 @@ has to call `setMinter` and the epoch cap) and are then NOMINATED to `LP_OPERATO
 `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()`, no timelock, no delay. The step is
 skipped entirely when the operator is the deploying key.
 
+`LP_APEBOND_ENABLED=1` adds a third proxy to exactly that flow — the `BonusEscrow`, born owned
+by the timelock like the other two — and one plain `Ownable` contract, the
+`ApeBondPositionAdapter`, which the deployer hands to the timelock in a single transaction. The
+escrow needs its adapter's address in `initialize` for the same reason the vault needs the
+zapper's (`setAdapter` is owner-tier and the owner is the timelock from birth), so the script
+runs the prediction a second time: escrow implementation at nonce M, escrow proxy at M + 1,
+adapter at M + 2, and it asserts the adapter landed there.
+
+The route is deployed CLOSED: with `LP_APEBOND_PURCHASE_SIGNER` unset the adapter's signer is
+`address(0)` and every `depositFor` reverts, and with `LP_APEBOND_SOULZAP_CALLERS` empty no
+caller is allowlisted. Opening it is two deliberate acts afterwards — the guardian's undelayed
+`setPurchaseSigner`, and the timelock's delayed `setSoulZapCaller`.
+
+One call the run CANNOT make: `vault.setStakeOperator(adapter, true)` is owner-tier on a vault
+the timelock owns from birth. The script prints the exact `schedule`/`execute` line for the
+multisig and reports the missing allowlist entry as a WARN, not a failure; until it executes,
+`depositFor` reverts `NotZapper` and nothing else is affected. See the env table at the top of
+the script; `.env.example` carries the same block commented out.
+
 `hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
 operands from the environment. `schedule` and `execute` take the SAME operands — the operation
 id is a hash of the whole call, so an execute that names a different argument is a different
@@ -173,22 +192,27 @@ TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian 
 TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
 ```
 
-Owner tier, and therefore routable: `acceptOwnership`, `setZapper`, `setGuardian`,
-`setOperator`, `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. The other two tiers
-are deliberately NOT here, because routing them through a delay would defeat the reason they
-exist: the guardian tier is the three pause switches (`setDepositsPaused`, `setRebalancePaused`,
-`setPaused`), sent directly by the hot key; the operator tier is `setTwapParams`,
-`rescuePosition`, `setSigner`, `recoverExcessAsset` — plus those same three pauses as the cold
-fallback, and `setGuardian` — sent directly by the operator multisig. `setTwapParams` used to be
-owner-tier and left this list on 2026-09-09; scheduling it now would revert
-`OwnableUnauthorizedAccount` after the full delay.
+Owner tier, and therefore routable: `acceptOwnership`, `setZapper`, `setStakeOperator`,
+`setGuardian`, `setOperator`, `setAssetClaimsEnabled`, `setAdapter`, `recoverSurplus`,
+`setSoulZapCaller`, `transferOwnership`, `upgradeToAndCall`, `updateDelay`. Each is legal only
+on the registry kinds `OWNER_TIER` lists for it, so a mistyped `TIMELOCK_TARGET` is refused
+before anything is scheduled. The other two tiers are deliberately NOT here, because routing
+them through a delay would defeat the reason they exist: the guardian tier is the three pause
+switches (`setDepositsPaused`, `setRebalancePaused`, `setPaused`) plus the adapter's
+`setPurchaseSigner` and `setDepositsPaused`, sent directly by the hot key; the operator tier is
+`setTwapParams`, `rescuePosition`, `setSigner`, `recoverExcessAsset` — plus those same three
+pauses as the cold fallback, and `setGuardian` — sent directly by the operator multisig.
+`setTwapParams` used to be owner-tier and left this list on 2026-09-09; scheduling it now would
+revert `OwnableUnauthorizedAccount` after the full delay.
 
 `setGuardian` is the one call that is on BOTH sides. It stayed routable here because the owner
-can still send it, but since 2026-09-14 it is owner OR operator, so a revocation that cannot
-wait is sent DIRECTLY by the operator multisig: `setGuardian(address(0))` removes a compromised
-hot key in one transaction and leaves the guardian tier vacant, in which state only the operator
-can pause. A live address in the same call appoints a replacement. `setOperator` did not move
-and is still owner-only, so the operator cannot rotate itself.
+can still send it, but since 2026-09-14 it is owner OR operator ON THE TWO PROXIES, so a
+revocation that cannot wait is sent DIRECTLY by the operator multisig: `setGuardian(address(0))`
+removes a compromised hot key in one transaction and leaves the guardian tier vacant, in which
+state only the operator can pause. A live address in the same call appoints a replacement.
+`setOperator` did not move and is still owner-only, so the operator cannot rotate itself. The
+ApeBond adapter's own `setGuardian` did not move either — it is owner-only there and rejects
+`address(0)`.
 The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", target,
 keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.
