@@ -679,6 +679,94 @@ describe("LPStakingVault", function () {
       await expect(vault.connect(zapper).stakeFor(bob.address, tokenId)).to.emit(vault, "Staked");
       expect(await vault.stakerOf(tokenId)).to.equal(bob.address);
     });
+
+    // ── stake operators, beside the zapper (integration spec §6.2) ─────────────────────
+    // `stranger` stands in for the ApeBond adapter. The vault checks nothing about an
+    // operator but its address, so a plain signer reaches exactly the code the adapter will.
+
+    it("credits the named user for an allowlisted operator, leaving the zapper's own path intact", async function () {
+      await vault.setZapper(zapper.address);
+      await vault.setStakeOperator(stranger.address, true);
+      const operatorToken = await createPosition(stranger);
+
+      const tx = await vault.connect(stranger).stakeFor(bob.address, operatorToken);
+      const ts = await txTimestamp(tx);
+
+      await expect(tx)
+        .to.emit(vault, "Staked")
+        .withArgs(bob.address, operatorToken, TICK_LOWER, TICK_UPPER, LIQUIDITY, ts);
+      expect(await vault.stakerOf(operatorToken)).to.equal(bob.address);
+      expect(await nfpm.ownerOf(operatorToken)).to.equal(vaultAddr);
+      expect(await vault.isStakeOperator(stranger.address)).to.equal(true);
+
+      // The allowlist sits BESIDE the zapper, not instead of it: the zapper still gets in.
+      const zapperToken = await createPosition(zapper);
+      await vault.connect(zapper).stakeFor(alice.address, zapperToken);
+      expect(await vault.stakerOf(zapperToken)).to.equal(alice.address);
+    });
+
+    it("rejects an operator whose allowance was revoked", async function () {
+      await vault.setZapper(zapper.address);
+      await vault.setStakeOperator(stranger.address, true);
+      await vault.setStakeOperator(stranger.address, false);
+      const tokenId = await createPosition(stranger);
+
+      await expect(vault.connect(stranger).stakeFor(bob.address, tokenId))
+        .to.be.revertedWithCustomError(vault, "NotZapper")
+        .withArgs(stranger.address, zapper.address);
+      expect(await vault.isStakeOperator(stranger.address)).to.equal(false);
+    });
+
+    it("lets an operator in while no zapper is configured at all", async function () {
+      // The two routes are independent, so closing the zapper path never closes an operator's.
+      await vault.setStakeOperator(stranger.address, true);
+      const tokenId = await createPosition(stranger);
+
+      await vault.connect(stranger).stakeFor(alice.address, tokenId);
+
+      expect(await vault.zapper()).to.equal(ZERO);
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+    });
+
+    it("gates the operator path with the deposit pause too", async function () {
+      await vault.setStakeOperator(stranger.address, true);
+      const tokenId = await createPosition(stranger);
+      await asGuardian().setDepositsPaused(true);
+
+      await expect(
+        vault.connect(stranger).stakeFor(alice.address, tokenId)
+      ).to.be.revertedWithCustomError(vault, "DepositsArePaused");
+    });
+
+    it("allowlists and revokes an operator, owner only — the guardian is rejected — and rejects address(0)", async function () {
+      await expect(vault.connect(stranger).setStakeOperator(stranger.address, true))
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(stranger.address);
+
+      // Adding a deposit entry point is a code change in all but name, so it takes the
+      // timelock's delay; stopping an operator that already has one is `setDepositsPaused`.
+      await expect(asGuardian().setStakeOperator(stranger.address, true))
+        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+        .withArgs(guardian.address);
+
+      await expect(vault.setStakeOperator(ZERO, true)).to.be.revertedWithCustomError(
+        vault,
+        "ZeroAddress"
+      );
+
+      await expect(vault.setStakeOperator(stranger.address, true))
+        .to.emit(vault, "StakeOperatorSet")
+        .withArgs(stranger.address, true);
+      expect(await vault.isStakeOperator(stranger.address)).to.equal(true);
+
+      await expect(vault.setStakeOperator(stranger.address, false))
+        .to.emit(vault, "StakeOperatorSet")
+        .withArgs(stranger.address, false);
+      expect(await vault.isStakeOperator(stranger.address)).to.equal(false);
+
+      // One address's allowance says nothing about another's — this is a mapping, not a slot.
+      expect(await vault.isStakeOperator(alice.address)).to.equal(false);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────

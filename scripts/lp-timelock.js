@@ -1,10 +1,10 @@
 // Operator front end for the `LPTimelock` that owns the two UUPS proxies.
 //
 // Every owner-tier call on `LPStakingVault` and `RewardsDistributor` — an upgrade, the zapper
-// wiring, the guardian, the operator, the ASSET leg, and the timelock's own delay — has to go
-// through this contract: schedule it, wait out `minDelay`, execute it. The TWAP calibration is
-// NOT here: since the 2026-09-09 role split `setTwapParams` is operator-tier, sent directly by
-// the multisig with no delay. This script
+// wiring, the stake-operator allowlist, the guardian, the operator, the ASSET leg, and the
+// timelock's own delay — has to go through this contract: schedule it, wait out `minDelay`,
+// execute it. The TWAP calibration is NOT here: since the 2026-09-09 role split
+// `setTwapParams` is operator-tier, sent directly by the multisig with no delay. This script
 // is the one place that builds those three transactions, so the calldata a Safe signs and the
 // calldata the fork suites send are produced by the same code.
 //
@@ -86,6 +86,11 @@ const OWNER_TIER = {
     signature: "function setZapper(address newZapper)",
     kinds: ["LPStakingVault"],
     note: "points the deposit path at a new periphery contract, or at address(0) to close it",
+  },
+  setStakeOperator: {
+    signature: "function setStakeOperator(address stakeOperator, bool allowed)",
+    kinds: ["LPStakingVault"],
+    note: "adds or removes one trusted periphery contract on the `stakeFor` allowlist",
   },
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
