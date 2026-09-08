@@ -35,11 +35,18 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //      `initialize(owner = timelock, guardian, operator, zapper = predicted, window, ticks)`
 //   7. `LPZapper(vault, …, owner = DEPLOYER, window, ticks)`; record it, then assert the
 //      address matches the prediction
-//   8. `tokenX.setMinter(distributor)`, and the optional `tokenX.setEpochCap(id, cap)`
-//   9. `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
-//      `Ownable2Step`, so both only NOMINATE; skipped when the operator IS the deployer
-//  10. `increaseObservationCardinalityNext` on the pool (permissionless)
-//  11. post-deploy verification, the address summary, the verify commands
+//   8. ONLY with LP_APEBOND_ENABLED=1: the same prediction trick a second time — predict the
+//      adapter's address, deploy the BonusEscrow implementation + LPProxy with
+//      `initialize(owner = timelock, adapter = predicted)`, deploy
+//      `ApeBondPositionAdapter(…, owner = DEPLOYER, guardian, purchaseSigner)`, record it,
+//      then assert it landed on the predicted address
+//   9. `tokenX.setMinter(distributor)`, the optional `tokenX.setEpochCap(id, cap)`, and —
+//      with the route on — `adapter.setSoulZapCaller(c, true)` for every LP_APEBOND_SOULZAP_CALLERS entry
+//  10. `adapter.transferOwnership(timelock)` (plain `Ownable`, effective in that block), then
+//      `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
+//      `Ownable2Step`, so those two only NOMINATE; skipped when the operator IS the deployer
+//  11. `increaseObservationCardinalityNext` on the pool (permissionless)
+//  12. post-deploy verification, the address summary, the verify commands
 //
 // The one remaining bootstrap window: NONE on the proxies. TokenX and LPZapper stay owned by
 // the DEPLOYER until the operator multisig sends `acceptOwnership()` on each — two plain
@@ -57,6 +64,23 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //            distributor's `setSigner` and `recoverExcessAsset`, and those same three pause
 //            switches as the cold fallback for a lost guardian key. Also the owner of TokenX
 //            and LPZapper. Required.
+//
+// ──────────────────────── the optional ApeBond route ────────────────────────
+//
+// `BonusEscrow` is a third UUPS proxy and follows the same born-owned rule: its `initialize`
+// names the timelock as owner AND the adapter it will accept reservations from, so no key
+// holds its owner tier for even one block and `setAdapter` is never needed at bootstrap. The
+// adapter's address is predicted from the deployer's nonce exactly as the zapper's is.
+//
+// `ApeBondPositionAdapter` is plain `Ownable`, not a proxy, and goes to the TIMELOCK — not the
+// operator — in one transaction, because its owner tier is the SoulZap allowlist and the
+// guardian rotation. Its SoulZap entries are written by the DEPLOYER before that transfer.
+//
+// One call is left over, and deliberately: `vault.setStakeOperator(adapter, true)` is
+// owner-tier on a vault the timelock owns from birth, so this run cannot make it. The run
+// prints the exact schedule/execute line for the multisig and reports the missing allowlist
+// entry as a WARN rather than a failure. Until it executes, ApeBond `depositFor` reverts
+// `NotZapper` and nothing else is affected.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -98,6 +122,29 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //                               2 * ceil(LP_TWAP_WINDOW / 12): one slot per block in the
 //                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
 //                               needs >= 600
+//
+// Optional env — the ApeBond route (SoulZap integration spec §6). The whole section is OFF
+// unless LP_APEBOND_ENABLED=1, and a run without it deploys exactly the stack this script
+// deployed before the integration existed: same contracts, same transactions, same registry
+// keys. None of the variables below is read while the flag is absent; the run states in one
+// line that the route is not part of it, and that is the whole difference.
+//   LP_APEBOND_ENABLED        — 1 deploys BonusEscrow + ApeBondPositionAdapter alongside the
+//                               stack and wires them; 0 or unset deploys neither (unset)
+//   LP_APEBOND_BONUS_TOKEN    — token every campaign bonus is denominated and paid in. It is
+//                               the escrow implementation's one immutable, so it can never be
+//                               changed by an upgrade (LP_ASSET)
+//   LP_APEBOND_GUARDIAN       — the adapter's undelayed fast path: setPurchaseSigner and
+//                               setDepositsPaused. Defaults to LP_OPERATOR, the multisig that
+//                               holds the same two rights on the distributor (LP_OPERATOR)
+//   LP_APEBOND_PURCHASE_SIGNER — backend key whose EIP-712 signature authorizes a purchase.
+//                               UNSET leaves it address(0), which is the deposit path CLOSED:
+//                               every depositFor reverts InvalidSignature until the guardian
+//                               opens it with one undelayed setPurchaseSigner. That is the
+//                               deliberate default — a campaign is opened when it starts,
+//                               not when it is deployed (none)
+//   LP_APEBOND_SOULZAP_CALLERS — comma-separated SoulZap contracts allowed to present an
+//                               authorization to depositFor. Empty allowlists nobody, which
+//                               is the other half of the same closed default (none)
 //
 // Mainnet needs CONFIRM=yes, like every other state-changing script here.
 
@@ -165,6 +212,46 @@ function readAddress(name, fallback) {
   } catch {
     throw new Error(`${name} is not a valid address: ${raw}`);
   }
+}
+
+/**
+ * Reads a comma-separated address list. Unset and empty both mean the EMPTY list — never a
+ * list holding one empty entry, which is the classic way a trailing comma turns into a call
+ * against address(0). Every entry is checksummed here, and a repeat is refused rather than
+ * sent twice.
+ */
+function readAddressList(name) {
+  const raw = process.env[name];
+  if (!raw || raw.trim() === "") return [];
+
+  const seen = new Set();
+  return raw.split(",").map((entry, index) => {
+    const value = entry.trim();
+    if (!value) throw new Error(`${name} has an empty entry at position ${index}`);
+    let address;
+    try {
+      address = hre.ethers.getAddress(value);
+    } catch {
+      throw new Error(`${name} entry ${index} is not a valid address: ${value}`);
+    }
+    if (seen.has(address)) throw new Error(`${name} lists ${address} twice`);
+    seen.add(address);
+    return address;
+  });
+}
+
+/**
+ * The ApeBond section's master switch, read strictly.
+ *
+ * Only "1" turns it on and only "0" or an absent value turn it off; anything else throws.
+ * A typo (`LP_APEBOND_ENABLED=true`) must not silently deploy half a campaign — or, worse,
+ * silently skip the escrow on the run that was supposed to carry it.
+ */
+function readApeBondFlag() {
+  const raw = process.env.LP_APEBOND_ENABLED;
+  if (raw === undefined || raw.trim() === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  throw new Error(`LP_APEBOND_ENABLED must be 1, 0 or unset — got ${raw}`);
 }
 
 /** Deploys one contract with an explicit nonce and returns it with its receipt. */
@@ -273,6 +360,25 @@ async function main() {
   // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so
   // the schedule -> execute flow is rehearsable rather than theoretical.
   const timelockMinDelay = Number(process.env.LP_TIMELOCK_MIN_DELAY || DEFAULT_TIMELOCK_MIN_DELAY);
+
+  // ──── the ApeBond route, off unless asked for ────
+  //
+  // Every value below is read only when the flag is on, so an operator who never heard of the
+  // integration cannot be tripped up by a stale LP_APEBOND_* left in a shell: with the flag
+  // off nothing here is read, nothing is deployed and nothing is recorded.
+  //
+  // The two "closed" defaults are the point of the section: no purchase signer and no SoulZap
+  // caller, so a freshly deployed adapter accepts nothing from anyone. Opening it is a
+  // separate, deliberate act — the guardian's undelayed `setPurchaseSigner` for the signer,
+  // the timelock's delayed `setSoulZapCaller` for a caller.
+  const apeBond = readApeBondFlag();
+  const bonusToken = apeBond ? readAddress("LP_APEBOND_BONUS_TOKEN", asset) : null;
+  const apeBondGuardian = apeBond ? readAddress("LP_APEBOND_GUARDIAN", operator) : null;
+  const purchaseSigner =
+    apeBond && process.env.LP_APEBOND_PURCHASE_SIGNER
+      ? readAddress("LP_APEBOND_PURCHASE_SIGNER")
+      : hre.ethers.ZeroAddress;
+  const soulZapCallers = apeBond ? readAddressList("LP_APEBOND_SOULZAP_CALLERS") : [];
 
   const fee = Number(process.env.LP_FEE || 3000);
   const twapWindow = Number(process.env.LP_TWAP_WINDOW || DEFAULT_TWAP_WINDOW);
@@ -393,19 +499,45 @@ async function main() {
   console.log(
     `Observation target: ${observationCardinality} (>= ${minimumCardinality} for a ${twapWindow}s window)`
   );
+  if (apeBond) {
+    console.log(`ApeBond route:      ENABLED (LP_APEBOND_ENABLED=1)`);
+    console.log(`  bonus token:      ${bonusToken}${bonusToken === asset ? " (= ASSET)" : ""}`);
+    console.log(
+      `  guardian:         ${apeBondGuardian}${apeBondGuardian === operator ? " (= the operator)" : ""}`
+    );
+    console.log(
+      `  purchase signer:  ${
+        purchaseSigner === hre.ethers.ZeroAddress
+          ? "NOT SET — the deposit path is closed until the guardian opens it"
+          : purchaseSigner
+      }`
+    );
+    console.log(
+      `  SoulZap callers:  ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`
+    );
+  } else {
+    console.log(`ApeBond route:      not deployed (set LP_APEBOND_ENABLED=1 to add it)`);
+  }
 
   // ──────────────────────── on-chain safety checks ────────────────────────
 
   console.log("\nChecking the configuration on-chain...");
 
-  for (const [label, address] of [
+  const codeChecks = [
     ["LP_POOL", poolAddress],
     ["LP_NPM", positionManager],
     ["LP_ROUTER", swapRouter],
     ["LP_FACTORY", factoryAddress],
     ["LP_ASSET", asset],
     ["LP_USDC", usdc],
-  ]) {
+  ];
+  // The bonus token is the escrow's one immutable and no upgrade can change it, so a wrong
+  // address here is a campaign settled in the wrong currency for good. It is checked with the
+  // rest, and only when the route is being deployed.
+  if (apeBond && bonusToken !== asset && bonusToken !== usdc) {
+    codeChecks.push(["LP_APEBOND_BONUS_TOKEN", bonusToken]);
+  }
+  for (const [label, address] of codeChecks) {
     const code = await hre.ethers.provider.getCode(address);
     if (code === "0x") throw new Error(`No contract code at ${label} ${address} on chain ${chainId}`);
   }
@@ -654,10 +786,108 @@ async function main() {
   }
   console.log(`  LPZapper landed on the predicted address; the vault was born pointing at it`);
 
+  // ──────────────────────── the ApeBond route (optional) ────────────────────────
+  //
+  // Two contracts that each need the other's address, deployed under the same born-owned rule
+  // as the two core proxies (N-7). `BonusEscrow` is a UUPS proxy that must exist before the
+  // adapter's constructor can reference it, and the escrow must point at the adapter before
+  // anyone can buy a bond — but `setAdapter` is owner-tier and the owner is the timelock from
+  // the escrow's very first transaction, so the deployer could never make that call.
+  //
+  // The way out is the zapper's, applied a second time: a CREATE address is a pure function of
+  // (deployer, nonce) and every transaction here carries an explicit nonce, so the escrow
+  // implementation takes nonce M, the escrow proxy M + 1 and the adapter M + 2. The script
+  // computes M + 2 with `getCreateAddress` and hands it to the escrow's
+  // `initialize(owner = timelock, adapter = predicted)`. The escrow is therefore born owned by
+  // the timelock AND born pointing at its adapter, with no window in which any key holds its
+  // owner tier, and the run asserts the adapter really landed where it was promised.
+  //
+  // The escrow is a proxy and the adapter is NOT, which is the team's split by what a contract
+  // holds: the escrow custodies the campaign's money and the ledger of who is owed what, so
+  // its code must be fixable without moving the obligations; the adapter holds nothing across
+  // transactions and is replaced by deploying a new one and re-pointing the escrow
+  // (`setAdapter`) and the vault (`setStakeOperator`) at it — two timelock operations.
+  let escrowDeploy = null;
+  let adapterDeploy = null;
+  if (apeBond) {
+    const escrowImplNonce = await pools.resolveNonce(deployer.address);
+    const predictedAdapter = hre.ethers.getCreateAddress({
+      from: deployer.address,
+      nonce: escrowImplNonce + 2,
+    });
+    console.log(
+      `\nPredicted ApeBondPositionAdapter address: ${predictedAdapter} ` +
+        `(deployer nonce ${escrowImplNonce + 2})`
+    );
+
+    escrowDeploy = await deployProxyPair(
+      "BonusEscrow",
+      [bonusToken],
+      [timelockDeploy.address, predictedAdapter],
+      deployer
+    );
+    pools.recordDeployment(chainId, "BonusEscrow", escrowDeploy.address, {
+      deployTx: escrowDeploy.tx.hash,
+      block: escrowDeploy.receipt.blockNumber,
+      implementation: escrowDeploy.impl.address,
+      implementationTx: escrowDeploy.impl.tx.hash,
+      bonusToken,
+      owner: timelockDeploy.address,
+      adapter: predictedAdapter,
+    });
+
+    adapterDeploy = await deployContract(
+      "ApeBondPositionAdapter",
+      [
+        positionManager,
+        vaultDeploy.address,
+        escrowDeploy.address,
+        token0,
+        token1,
+        fee,
+        deployer.address,
+        apeBondGuardian,
+        purchaseSigner,
+      ],
+      deployer
+    );
+    // Recorded BEFORE the prediction is checked, for the same reason the zapper is: a contract
+    // that is already on chain must not lose its address to a failing assertion.
+    pools.recordDeployment(chainId, "ApeBondPositionAdapter", adapterDeploy.address, {
+      deployTx: adapterDeploy.tx.hash,
+      block: adapterDeploy.receipt.blockNumber,
+      vault: vaultDeploy.address,
+      escrow: escrowDeploy.address,
+      bonusToken,
+      token0,
+      token1,
+      fee,
+      guardian: apeBondGuardian,
+      purchaseSigner,
+      soulZapCallers,
+      owner: timelockDeploy.address,
+    });
+
+    if (adapterDeploy.address.toLowerCase() !== predictedAdapter.toLowerCase()) {
+      throw new Error(
+        `ApeBondPositionAdapter landed at ${adapterDeploy.address}, but BonusEscrow was ` +
+          `initialized with ${predictedAdapter}. Both contracts are deployed and recorded; the ` +
+          `escrow's reserve path points at the wrong address, so every depositFor reverts, ` +
+          `until the timelock executes BonusEscrow.setAdapter(${adapterDeploy.address}) ` +
+          `(TIMELOCK_TARGET=BonusEscrow TIMELOCK_FN=setAdapter). The core stack is unaffected.`
+      );
+    }
+    console.log(
+      "  ApeBondPositionAdapter landed on the predicted address; the escrow was born pointing at it"
+    );
+  }
+
   const tokenX = tokenXDeploy.contract;
   const distributor = distributorDeploy.contract;
   const vault = vaultDeploy.contract;
   const zapper = zapperDeploy.contract;
+  const escrow = escrowDeploy ? escrowDeploy.contract : null;
+  const adapter = adapterDeploy ? adapterDeploy.contract : null;
 
   // ──────────────────────── wiring ────────────────────────
   // What is left of it. The vault needs nothing — it was born pointing at the zapper — so
@@ -667,6 +897,25 @@ async function main() {
   await pools.send("Setting TokenX minter to the distributor", deployer, (o) =>
     tokenX.setMinter(distributorDeploy.address, o)
   );
+
+  if (apeBond) {
+    // The adapter's SoulZap allowlist, and nothing else. Two wirings that used to live here are
+    // gone since N-7: `escrow.setAdapter` (the escrow was born pointing at the adapter) and
+    // `vault.setStakeOperator` (owner-tier on a vault the timelock owns from birth — it is the
+    // one operation this run leaves for the multisig, printed below). What is left is
+    // owner-only on the ADAPTER, which the deployer still owns at this point.
+    for (const caller of soulZapCallers) {
+      await pools.send(`Allowlisting SoulZap caller ${caller}`, deployer, (o) =>
+        adapter.setSoulZapCaller(caller, true, o)
+      );
+    }
+    if (soulZapCallers.length === 0) {
+      console.log(
+        "No LP_APEBOND_SOULZAP_CALLERS — the adapter accepts nobody until the timelock adds\n" +
+          "  one with setSoulZapCaller. That is a scheduled operation from here on."
+      );
+    }
+  }
 
   if (epochId) {
     await pools.send(`Arming epoch ${epochId} with cap ${epochCapRaw} TokenX`, deployer, (o) =>
@@ -683,6 +932,16 @@ async function main() {
   // each call only NOMINATES — the operator finishes it with one plain transaction per
   // contract, no timelock in the path.
   console.log("\nTransferring ownership...");
+  if (apeBond) {
+    // The adapter is plain `Ownable`: one transaction, no acceptance, owned from this block on.
+    // Nothing is lost by the missing second step — the adapter custodies nothing, and a
+    // mis-addressed owner is repaired by deploying a replacement, which is the documented way
+    // to change the adapter anyway. The escrow appears nowhere here: it was born owned by the
+    // timelock, exactly like the vault and the distributor.
+    await pools.send("ApeBondPositionAdapter -> timelock", deployer, (o) =>
+      adapter.transferOwnership(timelockDeploy.address, o)
+    );
+  }
   const handsOverPlainContracts = operator.toLowerCase() !== deployer.address.toLowerCase();
   if (handsOverPlainContracts) {
     await pools.send("TokenX -> operator (nomination)", deployer, (o) =>
@@ -700,6 +959,31 @@ async function main() {
   } else {
     console.log(
       "TokenX and LPZapper -> operator: skipped, the operator IS the deployer and already owns both."
+    );
+  }
+
+  if (apeBond) {
+    // The ONE owner-tier call this run cannot make. Since N-7 the vault is owned by the
+    // timelock from its own deployment transaction, so `setStakeOperator` — which is what lets
+    // the adapter call `stakeFor` — is a scheduled operation like an upgrade. It is left
+    // pending on purpose rather than worked around: the alternative would be a bootstrap
+    // window in which some key holds the vault's owner tier, which is exactly what N-7 removed.
+    //
+    // Until it executes, `isStakeOperator(adapter)` is false and every ApeBond `depositFor`
+    // reverts `NotZapper`. Nothing else is affected: staking, zapping, claims and rebalances
+    // all work, and the escrow already holds and honours nothing, because no purchase can be
+    // made yet.
+    console.log(
+      `\n──────── the one timelock operation this run leaves behind ────────\n` +
+        `Send it from the multisig (${multisig}), the timelock's only proposer and executor.\n` +
+        `Target the timelock at ${timelockDeploy.address}, value 0.\n\n` +
+        `  TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault \\\n` +
+        `    TIMELOCK_FN=setStakeOperator TIMELOCK_ARGS=${adapterDeploy.address},true \\\n` +
+        `    npx hardhat run scripts/lp-timelock.js --network ${hre.network.name}\n\n` +
+        `  ...wait out the ${timelockMinDelay}s delay, then the same line with\n` +
+        `  TIMELOCK_ACTION=execute.\n\n` +
+        `Until it lands the ApeBond deposit path is CLOSED (depositFor reverts NotZapper);\n` +
+        `the core LP stack is fully live regardless.`
     );
   }
 
@@ -844,6 +1128,64 @@ async function main() {
   check("LPZapper.owner", await zapper.owner(), expectedPlainOwner);
   check("LPZapper.pendingOwner", await zapper.pendingOwner(), expectedPlainPendingOwner);
 
+  if (apeBond) {
+    // The two facts that make the route a route at all: the escrow will take a reservation
+    // only from this adapter, and the vault will take a `stakeFor` only from it. The first is
+    // checked here and must hold — the escrow was born pointing at the adapter. The second
+    // cannot hold yet, by design: it is the timelock operation this run leaves behind, so it
+    // is reported as a WARN with the exact call that closes it, not as a failure.
+    check("BonusEscrow.bonusToken", await escrow.bonusToken(), bonusToken);
+    check("BonusEscrow.adapter", await escrow.adapter(), adapterDeploy.address);
+    check("BonusEscrow.totalReserved", await escrow.totalReserved(), 0);
+    check("BonusEscrow.owner", await escrow.owner(), expectedProxyOwner);
+    check("BonusEscrow.pendingOwner", await escrow.pendingOwner(), expectedPendingOwner);
+    check(
+      "BonusEscrow.implementation (ERC-1967 slot)",
+      hre.ethers.getAddress(
+        "0x" +
+          (
+            await hre.ethers.provider.getStorage(escrowDeploy.address, ERC1967_IMPLEMENTATION_SLOT)
+          ).slice(-40)
+      ),
+      escrowDeploy.impl.address
+    );
+    const adapterIsStakeOperator = await vault.isStakeOperator(adapterDeploy.address);
+    if (adapterIsStakeOperator) {
+      check("LPStakingVault.isStakeOperator(adapter)", adapterIsStakeOperator, true);
+    } else {
+      console.log(
+        "WARN  LPStakingVault.isStakeOperator(adapter) is false — PENDING TIMELOCK OPERATION.\n" +
+          `      Schedule and execute setStakeOperator(${adapterDeploy.address}, true) from the\n` +
+          `      multisig (${multisig}); until then every ApeBond depositFor reverts NotZapper.`
+      );
+    }
+
+    // The adapter's immutables, read back off the deployed bytecode rather than trusted from
+    // the arguments a line above: this is the only proof the constructor got the pool triple
+    // and the two contracts the vault itself was deployed against.
+    check("ApeBondPositionAdapter.positionManager", await adapter.positionManager(), positionManager);
+    check("ApeBondPositionAdapter.vault", await adapter.vault(), vaultDeploy.address);
+    check("ApeBondPositionAdapter.escrow", await adapter.escrow(), escrowDeploy.address);
+    check("ApeBondPositionAdapter.token0", await adapter.token0(), token0);
+    check("ApeBondPositionAdapter.token1", await adapter.token1(), token1);
+    check("ApeBondPositionAdapter.fee", await adapter.fee(), fee);
+    check("ApeBondPositionAdapter.guardian", await adapter.guardian(), apeBondGuardian);
+    check("ApeBondPositionAdapter.purchaseSigner", await adapter.purchaseSigner(), purchaseSigner);
+    check("ApeBondPositionAdapter.depositsPaused", await adapter.depositsPaused(), false);
+    // Plain `Ownable`: no nomination to wait out, so the timelock owns it in every bootstrap.
+    check("ApeBondPositionAdapter.owner", await adapter.owner(), timelockDeploy.address);
+    for (const caller of soulZapCallers) {
+      check(`ApeBondPositionAdapter.soulZapCallers[${caller}]`, await adapter.soulZapCallers(caller), true);
+    }
+    if (purchaseSigner === hre.ethers.ZeroAddress) {
+      console.log(
+        "WARN  ApeBondPositionAdapter.purchaseSigner is 0 — every depositFor reverts until the\n" +
+          `      guardian (${apeBondGuardian}) calls setPurchaseSigner. That is the documented\n` +
+          "      default; open the route when the campaign starts."
+      );
+    }
+  }
+
   check("LPTimelock.getMinDelay", await timelock.getMinDelay(), timelockMinDelay);
   const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
   const EXECUTOR_ROLE = await timelock.EXECUTOR_ROLE();
@@ -866,12 +1208,14 @@ async function main() {
   );
 
   // UUPS keeps the upgrade authority in the implementation, so the ERC-1967 ADMIN slot must be
-  // empty on both proxies. A non-zero value there would mean a transparent proxy's ProxyAdmin
-  // got in somehow, and with it a second, unowned upgrade path.
-  for (const [label, address] of [
+  // empty on every proxy here. A non-zero value there would mean a transparent proxy's
+  // ProxyAdmin got in somehow, and with it a second, unowned upgrade path.
+  const uupsProxies = [
     ["RewardsDistributor", distributorDeploy.address],
     ["LPStakingVault", vaultDeploy.address],
-  ]) {
+  ];
+  if (apeBond) uupsProxies.push(["BonusEscrow", escrowDeploy.address]);
+  for (const [label, address] of uupsProxies) {
     check(
       `${label}.adminSlot (ERC-1967, must be empty for UUPS)`,
       await hre.upgrades.erc1967.getAdminAddress(address),
@@ -888,6 +1232,11 @@ async function main() {
   console.log(`LPStakingVault:     ${vaultDeploy.address} (proxy)`);
   console.log(`  implementation:   ${vaultImplDeploy.address}`);
   console.log(`LPZapper:           ${zapperDeploy.address}`);
+  if (apeBond) {
+    console.log(`BonusEscrow:        ${escrowDeploy.address} (proxy)`);
+    console.log(`  implementation:   ${escrowDeploy.impl.address}`);
+    console.log(`ApeBondAdapter:     ${adapterDeploy.address}`);
+  }
   console.log(`LPTimelock:         ${timelockDeploy.address} (minDelay ${timelockMinDelay}s)`);
 
   const network = hre.network.name;
@@ -917,6 +1266,20 @@ async function main() {
       `${vaultDeploy.address} ${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ` +
       `${swapRouter} ${usdc} ${asset} ${deployer.address} ${twapWindow} ${twapMaxDeviationTicks}`
   );
+  if (apeBond) {
+    console.log(
+      `npx hardhat verify --network ${network} ${escrowDeploy.impl.address} ${bonusToken}`
+    );
+    console.log(
+      `npx hardhat verify --network ${network} ${escrowDeploy.proxy.address} ` +
+        `${escrowDeploy.impl.address} ${escrowDeploy.initData}`
+    );
+    console.log(
+      `npx hardhat verify --network ${network} ${adapterDeploy.address} ` +
+        `${positionManager} ${vaultDeploy.address} ${escrowDeploy.address} ${token0} ${token1} ` +
+        `${fee} ${deployer.address} ${apeBondGuardian} ${purchaseSigner}`
+    );
+  }
   // The timelock's proposer/executor arrays are address[]; hardhat-verify wants them as JSON.
   console.log(
     `npx hardhat verify --network ${network} ${timelockDeploy.address} ` +

@@ -1,9 +1,10 @@
-// Operator front end for the `LPTimelock` that owns the two UUPS proxies.
+// Operator front end for the `LPTimelock` that owns the stack.
 //
-// Every owner-tier call on `LPStakingVault` and `RewardsDistributor` — an upgrade, the zapper
-// wiring, the stake-operator allowlist, the guardian, the operator, the ASSET leg, and the
-// timelock's own delay — has to go through this contract: schedule it, wait out `minDelay`,
-// execute it. The TWAP calibration is NOT here: since the 2026-09-09 role split
+// Every owner-tier call on `LPStakingVault`, `RewardsDistributor`, `BonusEscrow` and
+// `ApeBondPositionAdapter` — an upgrade, the zapper wiring, the stake-operator allowlist, the
+// guardians, the operator, the ASSET leg, the escrow's adapter and its surplus, the SoulZap
+// allowlist, and the timelock's own delay — has to go through this contract: schedule it, wait
+// out `minDelay`, execute it. The TWAP calibration is NOT here: since the 2026-09-09 role split
 // `setTwapParams` is operator-tier, sent directly by the multisig with no delay. This script
 // is the one place that builds those three transactions, so the calldata a Safe signs and the
 // calldata the fork suites send are produced by the same code.
@@ -68,10 +69,11 @@ const ethers = require("ethers");
 /**
  * The owner tier, in full. Everything here is `onlyOwner` on a contract the timelock owns, so
  * everything here can ONLY be reached through a scheduled operation. The guardian tier (both
- * vault pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
- * `rescuePosition`, `setSigner`, `recoverExcessAsset`, and those same pauses) are deliberately
- * absent: those are one-transaction calls the hot key and the multisig send directly, and
- * routing them through here would defeat the reason they exist.
+ * vault pauses, the distributor's `setPaused`, and the adapter's `setPurchaseSigner` and
+ * `setDepositsPaused`) and the operator tier (`setTwapParams`, `rescuePosition`, `setSigner`,
+ * `recoverExcessAsset`, and those same pauses) are deliberately absent: those are
+ * one-transaction calls the hot key and the multisig send directly, and routing them through
+ * here would defeat the reason they exist.
  *
  * `kinds` is the set of registry entries the function is legal on, which is what turns a
  * mistyped target into an error rather than a transaction that reverts after the delay.
@@ -79,7 +81,7 @@ const ethers = require("ethers");
 const OWNER_TIER = {
   acceptOwnership: {
     signature: "function acceptOwnership()",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
+    kinds: ["LPStakingVault", "RewardsDistributor", "BonusEscrow"],
     note: "the second half of the Ownable2Step handover; the timelock's first operation",
   },
   setZapper: {
@@ -94,8 +96,8 @@ const OWNER_TIER = {
   },
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
-    note: "moves the undelayed pause tier to another hot key",
+    kinds: ["LPStakingVault", "RewardsDistributor", "ApeBondPositionAdapter"],
+    note: "moves the undelayed pause tier to another hot key (on the adapter, its whole fast path)",
   },
   setOperator: {
     signature: "function setOperator(address newOperator)",
@@ -107,9 +109,31 @@ const OWNER_TIER = {
     kinds: ["RewardsDistributor"],
     note: "switches the whole ASSET reward leg on or off",
   },
+  setAdapter: {
+    signature: "function setAdapter(address newAdapter)",
+    kinds: ["BonusEscrow"],
+    note: "points the escrow at the adapter allowed to reserve, or at address(0) to close it",
+  },
+  recoverSurplus: {
+    signature: "function recoverSurplus(address to)",
+    kinds: ["BonusEscrow"],
+    note: "moves `balance - totalReserved` out; no amount argument, so no reservation is reachable",
+  },
+  setSoulZapCaller: {
+    signature: "function setSoulZapCaller(address caller, bool allowed)",
+    kinds: ["ApeBondPositionAdapter"],
+    note: "adds or removes one SoulZap contract on the depositFor allowlist",
+  },
+  transferOwnership: {
+    signature: "function transferOwnership(address newOwner)",
+    kinds: ["ApeBondPositionAdapter"],
+    note:
+      "hands the adapter on. Listed for the adapter ONLY: it is plain `Ownable`, so this is " +
+      "the whole handover, while the Ownable2Step proxies pair it with `acceptOwnership`",
+  },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
+    kinds: ["LPStakingVault", "RewardsDistributor", "BonusEscrow"],
     note: "the upgrade itself; `data` is the reinitializer call, or 0x for none",
   },
   updateDelay: {

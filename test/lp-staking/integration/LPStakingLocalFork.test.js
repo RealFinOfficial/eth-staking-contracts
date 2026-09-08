@@ -57,6 +57,23 @@
  *                                      A47 premature execute reverts
  *                                      A48 upgrade executes; state survives
  *
+ * ── The ApeBond route (section 7) ─────────────────────────────────────────────────────
+ *
+ * A SECOND full run of the same deploy script, with LP_APEBOND_ENABLED=1 and its own
+ * registry file, adds BonusEscrow and ApeBondPositionAdapter to the stack. The two runs
+ * are the two halves of one claim: the run above never sets the flag and its registry
+ * carries no ApeBond kind and its vault no stake operator; this one sets it and gets the
+ * escrow, the adapter and the wiring. It runs with LP_MULTISIG = the deployer and
+ * minDelay 0, which is what lets the one timelock operation the deploy leaves behind —
+ * `vault.setStakeOperator(adapter, true)` — be scheduled and executed inside the test.
+ *
+ *   B1  the campaign funds the escrow       B6  depositFor stakes P and reserves the bonus
+ *   B2  SoulZap mints the campaign position B7  the buyer unstakes; the bonus survives
+ *   B3  SoulZap approves; REAL signs        B8  claiming before the cliff reverts
+ *   B4  a closed adapter refuses it         B9  the timelock takes the surplus, not the bonus
+ *   B5  the guardian opens the route        B10 after the cliff a keeper triggers the payout
+ *   B5b the timelock allowlists the adapter
+ *
  * ── Skip vs fail ──────────────────────────────────────────────────────────────────────
  *
  * Exactly one phase may skip: establishing the fork, and only when no endpoint could serve
@@ -2351,6 +2368,581 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         forkNode.PUBLIC_FALLBACK_RPC,
         ...forkNode.EXTRA_PUBLIC_ARCHIVE_RPCS,
       ]);
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  /**
+   * The ApeBond route (SoulZap integration spec §6), deployed by the SAME script with
+   * LP_APEBOND_ENABLED=1 and driven end to end on the same fork.
+   *
+   * ── Why a second full deploy rather than one flagged run ──────────────────────────────
+   *
+   * The flag is optional and must stay optional: a run without it has to deploy exactly the
+   * stack the runbook has been deploying all along. Proving that takes both runs — the one
+   * above, which never sets the flag and whose registry therefore carries no ApeBond kind,
+   * and this one, which sets it and gets the escrow, the adapter and the wiring. The two
+   * stacks share the pool and nothing else, so neither can mask the other.
+   *
+   * ── The bootstrap this run rehearses ──────────────────────────────────────────────────
+   *
+   * Since N-7 there is no ownership handover left to rehearse: all three proxies — the
+   * distributor, the vault and the escrow — are born owned by the timelock inside their own
+   * deployment transactions, and the adapter is handed over in one plain `Ownable` call. What
+   * this run DOES rehearse is the one call the deploy cannot make for exactly that reason:
+   * `vault.setStakeOperator(adapter, true)` is owner-tier on a vault the timelock owns from
+   * birth, so the script prints it and leaves it pending. LP_MULTISIG is the DEPLOYER here and
+   * `LP_TIMELOCK_MIN_DELAY=0`, so this suite holds the proposer/executor roles and the
+   * operation is ready in the block it was scheduled in — B5b schedules and executes it, and
+   * B6 is the first deposit that can work only because it landed.
+   *
+   *   B1  the campaign funds the escrow       B6  depositFor stakes P and reserves the bonus
+   *   B2  SoulZap mints the campaign position B7  the buyer unstakes; the bonus survives
+   *   B3  SoulZap approves; REAL signs        B8  claiming before the cliff reverts
+   *   B4  a closed adapter refuses it         B9  the timelock takes the surplus, not the bonus
+   *   B5  the guardian opens the route        B10 after the cliff a keeper triggers the payout
+   *   B5b the timelock allowlists the adapter
+   */
+  describe("7. the ApeBond route, deployed by the same script", function () {
+    let apeRegistryFile = null;
+    let apeRun = null;
+    let apeEscrowAddr, apeAdapterAddr, apeVaultAddr, apeDistributorAddr, apeTimelockAddr;
+    let escrow, adapter, apeVault, apeTimelock;
+    let purchaseDomain = null;
+
+    /** Filled in by B2/B3 and read by every step after them. */
+    let apeTokenId = null;
+    let apeLiquidity = null;
+    let campaignRange = null;
+    let authorization = null;
+    let realSignature = null;
+    let unlockAt = null;
+
+    // Opaque ids in the contracts; REAL's own identifiers in production.
+    const purchaseId = ethers.id("real.apebond.purchase.1");
+    const campaignId = ethers.id("real.apebond.campaign.rehearsal");
+    const soulZapRequestId = ethers.id("soulzap.quote.1");
+    const PURCHASE_NONCE = 1n;
+
+    before(async function () {
+      // The outer `before` skips the whole file when no endpoint could serve the fork; this
+      // guard is what makes that true for a nested hook as well.
+      if (node === null) this.skip();
+
+      apeRegistryFile = path.join(scratchDir, "deployments-apebond.json");
+
+      // The SoulZap caller is funded and approved like any other market participant — it mints
+      // a real position with real tokens, and the adapter pulls that NFT out of it.
+      for (const [token, amount] of [
+        [asset, C.USER_ASSET],
+        [usdc, C.USER_USDC],
+      ]) {
+        await chain.send(token.connect(w.deployer).transfer(w.soulZapCaller.address, amount));
+        await chain.send(token.connect(w.soulZapCaller).approve(C.NPM_ADDR, ethers.MaxUint256));
+      }
+
+      apeRun = await runner.runHardhatScript(
+        "scripts/deploy-lp-staking.js",
+        deployScriptEnv({
+          DEPLOYMENTS_FILE: apeRegistryFile,
+          // The deploying key IS the multisig, so this suite holds the timelock's proposer
+          // and executor roles and can send the one operation the deploy leaves pending.
+          // minDelay 0 makes it ready in the block it was scheduled in (B5b).
+          LP_MULTISIG: w.deployer.address,
+          LP_TIMELOCK_MIN_DELAY: "0",
+          // Stated rather than defaulted, because every guardian-tier step below sends from
+          // `w.multisig` and LP_GUARDIAN would otherwise follow LP_MULTISIG to the deployer.
+          LP_GUARDIAN: w.multisig.address,
+          LP_APEBOND_ENABLED: "1",
+          LP_APEBOND_GUARDIAN: w.multisig.address,
+          // Two entries, comma separated: the caller this suite plays, and a second address
+          // that proves the list is parsed rather than read as one string.
+          LP_APEBOND_SOULZAP_CALLERS: `${w.soulZapCaller.address},${w.signer2.address}`,
+          // LP_APEBOND_BONUS_TOKEN is deliberately UNSET — the default is LP_ASSET, which is
+          // the staging campaign's bonus token (tASSET), and B1 asserts the escrow got it.
+          // LP_APEBOND_PURCHASE_SIGNER is deliberately UNSET too: the adapter is born with the
+          // deposit path closed, and B4/B5 are that default being exercised.
+        }),
+        { logFile: path.join(scratchDir, "scripts.log"), timeoutMs: 240_000 }
+      );
+      if (apeRun.code !== 0) {
+        throw new Error(
+          `scripts/deploy-lp-staking.js (ApeBond) exited ${apeRun.code}\n${apeRun.stdout}\n${apeRun.stderr}`
+        );
+      }
+
+      const registry = runner.readRegistry(apeRegistryFile)["31337"];
+      apeEscrowAddr = registry.BonusEscrow.address;
+      apeAdapterAddr = registry.ApeBondPositionAdapter.address;
+      apeVaultAddr = registry.LPStakingVault.address;
+      apeDistributorAddr = registry.RewardsDistributor.address;
+      apeTimelockAddr = registry.TimelockController.address;
+
+      escrow = await contractAt("BonusEscrow", apeEscrowAddr);
+      adapter = await contractAt("ApeBondPositionAdapter", apeAdapterAddr);
+      apeVault = await contractAt("LPStakingVault", apeVaultAddr);
+      apeTimelock = await contractAt("LPTimelock", apeTimelockAddr);
+
+      purchaseDomain = await signing.readEip712Domain(adapter);
+
+      notes.push(
+        `apebond: escrow=${apeEscrowAddr} adapter=${apeAdapterAddr} vault=${apeVaultAddr}`,
+        `apebond: deploy-lp-staking (LP_APEBOND_ENABLED=1) ${apeRun.durationMs} ms`
+      );
+    });
+
+    it("deployed the escrow and the adapter, and its own post-deploy checks passed", async function () {
+      expect(apeRun.code).to.equal(0);
+      expect(apeRun.stdout).to.include("ApeBond route:      ENABLED");
+      expect(apeRun.stdout).to.include("All post-deploy checks passed.");
+      expect(apeRun.stdout).to.not.include("FAIL");
+
+      const registry = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(Object.keys(registry).sort()).to.deep.equal([
+        "ApeBondPositionAdapter",
+        "BonusEscrow",
+        "LPStakingVault",
+        "LPZapper",
+        "RewardsDistributor",
+        "TimelockController",
+        "TokenX",
+        "UniswapV3Pool",
+      ]);
+
+      // The escrow is recorded in the proxy shape the other two proxies use, and every field
+      // of it is checked against the chain rather than against the script's own stdout.
+      const escrowEntry = registry.BonusEscrow;
+      expect(Object.keys(escrowEntry).sort()).to.deep.equal([
+        "adapter",
+        "address",
+        "block",
+        "bonusToken",
+        "deployTx",
+        "implementation",
+        "implementationTx",
+        "owner",
+      ]);
+      expect(escrowEntry.bonusToken).to.equal(assetAddr);
+      expect(escrowEntry.owner).to.equal(apeTimelockAddr);
+      // The adapter the escrow was BORN pointing at — the predicted address, which the run
+      // also asserted the adapter really landed on.
+      expect(escrowEntry.adapter).to.equal(apeAdapterAddr);
+      expect(apeRun.stdout).to.include("Predicted ApeBondPositionAdapter address:");
+      expect(apeRun.stdout).to.include(
+        "ApeBondPositionAdapter landed on the predicted address; the escrow was born pointing at it"
+      );
+      for (const [label, entry] of [
+        ["BonusEscrow", registry.BonusEscrow],
+        ["ApeBondPositionAdapter", registry.ApeBondPositionAdapter],
+      ]) {
+        const receipt = await provider.getTransactionReceipt(entry.deployTx);
+        expect(receipt, `${label} deploy tx is not on chain`).to.not.equal(null);
+        expect(receipt.blockNumber).to.equal(entry.block);
+        expect(receipt.contractAddress).to.equal(entry.address);
+        expect(await provider.getCode(entry.address)).to.not.equal("0x");
+      }
+      const implReceipt = await provider.getTransactionReceipt(escrowEntry.implementationTx);
+      expect(implReceipt.contractAddress).to.equal(escrowEntry.implementation);
+
+      // The adapter's record carries the configuration a reader would otherwise have to
+      // reconstruct from three contracts.
+      const adapterEntry = registry.ApeBondPositionAdapter;
+      expect(adapterEntry.vault).to.equal(apeVaultAddr);
+      expect(adapterEntry.escrow).to.equal(apeEscrowAddr);
+      expect(adapterEntry.bonusToken).to.equal(assetAddr);
+      expect(adapterEntry.guardian).to.equal(w.multisig.address);
+      expect(adapterEntry.purchaseSigner).to.equal(C.ZERO_ADDRESS);
+      expect(adapterEntry.soulZapCallers).to.deep.equal([
+        w.soulZapCaller.address,
+        w.signer2.address,
+      ]);
+      expect(adapterEntry.owner).to.equal(apeTimelockAddr);
+    });
+
+    it("left the un-flagged deployment above with no ApeBond route at all", async function () {
+      // The disabled path, asserted against the run that never set the flag: no registry kind,
+      // no line in its log, and — the one that matters on chain — no stake operator on its
+      // vault, so the only address that can call `stakeFor` there is still the zapper.
+      const plain = runner.readRegistry(registryFile)["31337"];
+      expect(plain).to.not.have.property("BonusEscrow");
+      expect(plain).to.not.have.property("ApeBondPositionAdapter");
+      expect(deployRun.stdout).to.include("ApeBond route:      not deployed");
+      expect(deployRun.stdout).to.not.include("BonusEscrow");
+
+      expect(await vault.isStakeOperator(apeAdapterAddr)).to.equal(false);
+      const operatorLogs = await rpc.getLogs(provider, {
+        address: vaultAddr,
+        fromBlock: C.PINNED_BLOCK,
+        toBlock: await head(),
+        topics: [ethers.id("StakeOperatorSet(address,bool)")],
+      });
+      expect(operatorLogs.length, "the un-flagged vault allowlisted no operator").to.equal(0);
+    });
+
+    it("was born pointing at its adapter, and left the vault allowlist to the timelock", async function () {
+      // The escrow needed no `setAdapter`: the address was an `initialize` argument, so the
+      // reserve path is pointed at the adapter from the escrow's own deployment transaction.
+      expect(await escrow.bonusToken()).to.equal(assetAddr);
+      expect(await escrow.adapter()).to.equal(apeAdapterAddr);
+      expect(await escrow.totalReserved()).to.equal(0n);
+
+      // The vault's half CANNOT be born-wired the same way — `stakeOperators` is a mapping
+      // with no `initialize` argument and the vault is owned by the timelock from birth — so
+      // the deploy leaves it pending and says so in one line. B5b is that line being executed.
+      expect(await apeVault.isStakeOperator(apeAdapterAddr)).to.equal(false);
+      expect(apeRun.stdout).to.include("the one timelock operation this run leaves behind");
+      expect(apeRun.stdout).to.include(
+        "WARN  LPStakingVault.isStakeOperator(adapter) is false — PENDING TIMELOCK OPERATION."
+      );
+
+      for (const caller of [w.soulZapCaller.address, w.signer2.address]) {
+        expect(await adapter.soulZapCallers(caller), `${caller} allowlisted`).to.equal(true);
+      }
+      // The route is deployed CLOSED: no signer, so no signature can authorize anything.
+      expect(await adapter.purchaseSigner()).to.equal(C.ZERO_ADDRESS);
+      expect(await adapter.depositsPaused()).to.equal(false);
+      expect(await adapter.guardian()).to.equal(w.multisig.address);
+
+      // The adapter's immutables, read back off the deployed bytecode.
+      expect(await adapter.vault()).to.equal(apeVaultAddr);
+      expect(await adapter.escrow()).to.equal(apeEscrowAddr);
+      expect(await adapter.positionManager()).to.equal(C.NPM_ADDR);
+      expect(await adapter.token0()).to.equal(token0);
+      expect(await adapter.token1()).to.equal(token1);
+      expect(await adapter.fee()).to.equal(BigInt(C.FEE));
+    });
+
+    it("gave the timelock all three proxies at birth and the adapter in one transaction", async function () {
+      // No handover, no interim window and no `acceptOwnership` anywhere: since N-7 every
+      // proxy names the timelock as its owner inside its own deployment transaction, so
+      // `pendingOwner` was never anything but zero.
+      for (const [label, contract] of [
+        ["escrow", escrow],
+        ["vault", apeVault],
+        ["distributor", await contractAt("RewardsDistributor", apeDistributorAddr)],
+      ]) {
+        expect(await contract.owner(), `${label}.owner`).to.equal(apeTimelockAddr);
+        expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
+      }
+      // Plain `Ownable`: one transaction, owned outright, no acceptance to wait for.
+      expect(await adapter.owner()).to.equal(apeTimelockAddr);
+      expect(await apeTimelock.getMinDelay()).to.equal(0n);
+    });
+
+    it("reports the purchase-authorization domain and type hash the back office must sign against", async function () {
+      expect(purchaseDomain.name).to.equal("RealApeBondPurchase");
+      expect(purchaseDomain.version).to.equal("1");
+      expect(purchaseDomain.chainId).to.equal(C.LOCAL_CHAIN_ID);
+      expect(purchaseDomain.verifyingContract).to.equal(apeAdapterAddr);
+      // A separate domain from the rewards voucher's, which is what stops either signer's
+      // signatures from ever being replayed as the other's — spec §6.4.
+      expect(purchaseDomain.name).to.not.equal(voucherDomain.name);
+
+      expect(await adapter.PURCHASE_AUTHORIZATION_TYPEHASH()).to.equal(
+        signing.purchaseAuthorizationTypeHash()
+      );
+    });
+
+    it("B1: the campaign funds the escrow before a single bonus is promised", async function () {
+      await chain.send(
+        asset.connect(w.deployer).transfer(apeEscrowAddr, C.APEBOND_ESCROW_FUNDING)
+      );
+      expect(await asset.balanceOf(apeEscrowAddr)).to.equal(C.APEBOND_ESCROW_FUNDING);
+      expect(await escrow.totalReserved()).to.equal(0n);
+    });
+
+    it("B2: the SoulZap caller mints the campaign's position", async function () {
+      const centreTick = uni.alignDown(await uni.currentTick(pool));
+      campaignRange = {
+        tickLower: centreTick - C.APEBOND_HALF_WIDTH_TICKS,
+        tickUpper: centreTick + C.APEBOND_HALF_WIDTH_TICKS,
+      };
+      const minted = await uni.mintPosition({
+        npm,
+        npmAddress: C.NPM_ADDR,
+        signer: w.soulZapCaller,
+        token0,
+        token1,
+        fee: C.FEE,
+        tickLower: campaignRange.tickLower,
+        tickUpper: campaignRange.tickUpper,
+        assetIsToken0,
+        assetAmount: C.APEBOND_MINT_ASSET,
+        usdcAmount: C.APEBOND_MINT_USDC,
+        recipient: w.soulZapCaller.address,
+      });
+      apeTokenId = minted.tokenId;
+
+      const position = await npmRead.positions(apeTokenId);
+      apeLiquidity = position.liquidity;
+      expect(apeLiquidity).to.be.greaterThan(0n);
+      expect(Number(position.tickLower)).to.equal(campaignRange.tickLower);
+      expect(Number(position.tickUpper)).to.equal(campaignRange.tickUpper);
+      expect(await npmRead.ownerOf(apeTokenId)).to.equal(w.soulZapCaller.address);
+    });
+
+    it("B3: the caller approves the adapter and REAL signs the authorization", async function () {
+      await chain.send(npm.connect(w.soulZapCaller).approve(apeAdapterAddr, apeTokenId));
+      expect(await npmRead.getApproved(apeTokenId)).to.equal(apeAdapterAddr);
+
+      unlockAt = BigInt((await latestTimestamp()) + C.APEBOND_CLIFF_SECONDS);
+      authorization = {
+        purchaseId,
+        campaignId,
+        soulZapRequestId,
+        beneficiary: w.alice.address,
+        soulZapCaller: w.soulZapCaller.address,
+        inputToken: assetAddr,
+        grossInputAmount: C.APEBOND_GROSS_INPUT,
+        netInputAmount: C.APEBOND_NET_INPUT,
+        guaranteedBonusAmount: C.APEBOND_BONUS,
+        bonusUnlockAt: unlockAt,
+        // The campaign's floor. In production the quote fixes it before the mint; here the
+        // mint has already happened, so it is set below what that mint produced.
+        minLiquidity: (apeLiquidity * 9n) / 10n,
+        expectedTickLower: campaignRange.tickLower,
+        expectedTickUpper: campaignRange.tickUpper,
+        nonce: PURCHASE_NONCE,
+        deadline: C.FAR_DEADLINE,
+      };
+      realSignature = await signing.signPurchaseAuthorization({
+        signer: w.apeBondSigner,
+        domain: purchaseDomain,
+        authorization,
+      });
+
+      // The digest the adapter will recover against is the one that was just signed.
+      expect(ethers.verifyTypedData(
+        purchaseDomain,
+        { PurchaseAuthorization: signing.PURCHASE_AUTHORIZATION_FIELDS },
+        authorization,
+        realSignature
+      )).to.equal(w.apeBondSigner.address);
+      expect(await adapter.hashPurchaseAuthorization(authorization)).to.equal(
+        ethers.TypedDataEncoder.hash(
+          purchaseDomain,
+          { PurchaseAuthorization: signing.PURCHASE_AUTHORIZATION_FIELDS },
+          authorization
+        )
+      );
+    });
+
+    it("B4: the deposit is refused while the purchase signer is unset, and mines nothing", async function () {
+      const { args } = await chain.expectCustomError(
+        provider,
+        adapter.connect(w.soulZapCaller).depositFor(apeTokenId, authorization, realSignature),
+        adapter.interface,
+        "InvalidSignature"
+      );
+      // A real signature by a real key, rejected because the adapter is pointed at nobody:
+      // `expected` is address(0), which is what "the path is closed" means on chain.
+      expect(args[0]).to.equal(w.apeBondSigner.address);
+      expect(args[1]).to.equal(C.ZERO_ADDRESS);
+      expect(await apeVault.stakerOf(apeTokenId)).to.equal(C.ZERO_ADDRESS);
+    });
+
+    it("B5: the guardian opens the route with one undelayed transaction", async function () {
+      const receipt = await chain.send(
+        adapter.connect(w.multisig).setPurchaseSigner(w.apeBondSigner.address)
+      );
+      const event = chain.parseEvent(receipt, adapter.interface, apeAdapterAddr, "PurchaseSignerSet");
+      expect(event.previousSigner).to.equal(C.ZERO_ADDRESS);
+      expect(event.newSigner).to.equal(w.apeBondSigner.address);
+      expect(await adapter.purchaseSigner()).to.equal(w.apeBondSigner.address);
+    });
+
+    it("B5b: the adapter still cannot stake, until the timelock allowlists it on the vault", async function () {
+      // Everything else is open now — the signer is set, the caller is allowlisted, the NFT is
+      // approved — and the deposit STILL reverts, because the vault has never heard of this
+      // adapter. `NotZapper` names the only address the vault does know, which is the zapper.
+      // `NotZapper` is declared on the VAULT, not on the adapter, so the revert data is decoded
+      // against the vault's interface — which is the point: the rejection comes from the vault.
+      const {args} = await chain.expectCustomError(
+        provider,
+        adapter.connect(w.soulZapCaller).depositFor(apeTokenId, authorization, realSignature),
+        apeVault.interface,
+        "NotZapper"
+      );
+      expect(args[0]).to.equal(apeAdapterAddr);
+      expect(await apeVault.stakerOf(apeTokenId)).to.equal(C.ZERO_ADDRESS);
+
+      // Owner tier on a vault the timelock owns from birth, so it goes the only way an
+      // owner-tier call can go: scheduled on the timelock with calldata built by
+      // scripts/lp-timelock.js. minDelay is 0 on this stack, so it is ready at once.
+      const op = lpTimelock.buildOperation({
+        target: apeVaultAddr,
+        fn: "setStakeOperator",
+        args: [apeAdapterAddr, true],
+      });
+      await chain.send(
+        apeTimelock
+          .connect(w.deployer)
+          .schedule(op.target, op.value, op.data, op.predecessor, op.salt, 0)
+      );
+      expect(await apeTimelock.isOperationReady(op.id)).to.equal(true);
+
+      const executed = await chain.send(
+        apeTimelock.connect(w.deployer).execute(op.target, op.value, op.data, op.predecessor, op.salt)
+      );
+      const set = chain.parseEvent(executed, apeVault.interface, apeVaultAddr, "StakeOperatorSet");
+      expect(set.operator).to.equal(apeAdapterAddr);
+      expect(set.allowed).to.equal(true);
+      expect(await apeVault.isStakeOperator(apeAdapterAddr)).to.equal(true);
+
+      // The zapper's own route is untouched by the allowlist: it sits BESIDE it.
+      expect(await apeVault.zapper()).to.not.equal(C.ZERO_ADDRESS);
+    });
+
+    it("B6: depositFor stakes the position for the buyer and reserves the bonus", async function () {
+      const receipt = await chain.send(
+        adapter.connect(w.soulZapCaller).depositFor(apeTokenId, authorization, realSignature)
+      );
+
+      // One transaction, three contracts: the adapter's integration event, the vault's own
+      // `Staked` — which is what the indexer joins on — and the escrow's `BonusReserved`.
+      const deposited = chain.parseEvent(
+        receipt,
+        adapter.interface,
+        apeAdapterAddr,
+        "ApeBondPositionDeposited"
+      );
+      expect(deposited.purchaseId).to.equal(purchaseId);
+      expect(deposited.campaignId).to.equal(campaignId);
+      expect(deposited.beneficiary).to.equal(w.alice.address);
+      expect(deposited.soulZapRequestId).to.equal(soulZapRequestId);
+      expect(deposited.tokenId).to.equal(apeTokenId);
+      expect(deposited.liquidity).to.equal(apeLiquidity);
+      expect(Number(deposited.tickLower)).to.equal(campaignRange.tickLower);
+      expect(Number(deposited.tickUpper)).to.equal(campaignRange.tickUpper);
+      expect(deposited.inputToken).to.equal(assetAddr);
+      expect(deposited.grossInputAmount).to.equal(C.APEBOND_GROSS_INPUT);
+      expect(deposited.netInputAmount).to.equal(C.APEBOND_NET_INPUT);
+      expect(deposited.guaranteedBonusAmount).to.equal(C.APEBOND_BONUS);
+      expect(deposited.bonusUnlockAt).to.equal(unlockAt);
+
+      const staked = chain.parseEvent(receipt, apeVault.interface, apeVaultAddr, "Staked");
+      expect(staked.user).to.equal(w.alice.address);
+      expect(staked.tokenId).to.equal(apeTokenId);
+
+      const reserved = chain.parseEvent(receipt, escrow.interface, apeEscrowAddr, "BonusReserved");
+      expect(reserved.purchaseId).to.equal(purchaseId);
+      expect(reserved.beneficiary).to.equal(w.alice.address);
+      expect(reserved.amount).to.equal(C.APEBOND_BONUS);
+
+      // Custody: the NFT is the vault's and the credit is alice's, neither the caller's.
+      expect(await npmRead.ownerOf(apeTokenId)).to.equal(apeVaultAddr);
+      expect(await apeVault.stakerOf(apeTokenId)).to.equal(w.alice.address);
+      expect(await npmRead.getApproved(apeTokenId)).to.equal(C.ZERO_ADDRESS);
+
+      // The book: one reservation, owed to alice, locked until the cliff.
+      const reservation = await escrow.reservationOf(purchaseId);
+      expect(reservation.beneficiary).to.equal(w.alice.address);
+      expect(reservation.amount).to.equal(C.APEBOND_BONUS);
+      expect(reservation.unlockAt).to.equal(unlockAt);
+      expect(reservation.claimed).to.equal(false);
+      expect(await escrow.totalReserved()).to.equal(C.APEBOND_BONUS);
+      expect(await escrow.claimable(purchaseId)).to.equal(0n);
+
+      // The authorization is spent, by both of its independent counters.
+      expect(await adapter.consumedPurchaseIds(purchaseId)).to.equal(true);
+      expect(await adapter.consumedNonces(PURCHASE_NONCE)).to.equal(true);
+    });
+
+    it("B7: the buyer unstakes, and the bonus survives it untouched", async function () {
+      await chain.send(apeVault.connect(w.alice).unstake(apeTokenId));
+
+      expect(await npmRead.ownerOf(apeTokenId)).to.equal(w.alice.address);
+      expect(await apeVault.stakerOf(apeTokenId)).to.equal(C.ZERO_ADDRESS);
+
+      // The reservation is a debt of the escrow's, not a property of the position: taking the
+      // NFT back cannot cancel it, and nothing in the unstake path can reach it.
+      const reservation = await escrow.reservationOf(purchaseId);
+      expect(reservation.beneficiary).to.equal(w.alice.address);
+      expect(reservation.amount).to.equal(C.APEBOND_BONUS);
+      expect(reservation.claimed).to.equal(false);
+      expect(await escrow.totalReserved()).to.equal(C.APEBOND_BONUS);
+    });
+
+    it("B8: claiming before the cliff reverts, and mines nothing", async function () {
+      const { args } = await chain.expectCustomError(
+        provider,
+        escrow.connect(w.alice).claim(purchaseId),
+        escrow.interface,
+        "CliffNotReached"
+      );
+      expect(args[0]).to.equal(unlockAt);
+      expect(await escrow.claimable(purchaseId)).to.equal(0n);
+    });
+
+    it("B9: the timelock takes the surplus and cannot reach the reservation", async function () {
+      const before = await asset.balanceOf(apeEscrowAddr);
+      const surplus = C.APEBOND_ESCROW_FUNDING - C.APEBOND_BONUS;
+      expect(before).to.equal(C.APEBOND_ESCROW_FUNDING);
+
+      // Owner tier, so it goes the only way an owner-tier call can go: scheduled on the
+      // timelock, with the calldata built by scripts/lp-timelock.js. minDelay is 0 on this
+      // stack, so the operation is ready in the block it was scheduled in.
+      const op = lpTimelock.buildOperation({
+        target: apeEscrowAddr,
+        fn: "recoverSurplus",
+        args: [w.multisig.address],
+      });
+      await chain.send(
+        apeTimelock
+          .connect(w.deployer)
+          .schedule(op.target, op.value, op.data, op.predecessor, op.salt, 0)
+      );
+      expect(await apeTimelock.isOperationReady(op.id)).to.equal(true);
+
+      const treasuryBefore = await asset.balanceOf(w.multisig.address);
+      const executed = await chain.send(
+        apeTimelock.connect(w.deployer).execute(op.target, op.value, op.data, op.predecessor, op.salt)
+      );
+      const recovered = chain.parseEvent(
+        executed,
+        escrow.interface,
+        apeEscrowAddr,
+        "SurplusRecovered"
+      );
+      expect(recovered.to).to.equal(w.multisig.address);
+      expect(recovered.amount).to.equal(surplus);
+      expect(await asset.balanceOf(w.multisig.address)).to.equal(treasuryBefore + surplus);
+
+      // What is left is exactly what is owed: the floor under the balance is arithmetic, not
+      // policy, so a second recovery has nothing to take.
+      expect(await asset.balanceOf(apeEscrowAddr)).to.equal(C.APEBOND_BONUS);
+      expect(await escrow.totalReserved()).to.equal(C.APEBOND_BONUS);
+    });
+
+    it("B10: after the cliff a keeper triggers the payout, and only the buyer is paid", async function () {
+      await rpc.increaseTime(provider, C.APEBOND_CLIFF_SECONDS + 1);
+      // `claimable` is total rather than reverting, which is what lets a keeper sweep a
+      // campaign without a try/catch around every id.
+      await rpc.mine(provider, 1);
+      expect(await escrow.claimable(purchaseId)).to.equal(C.APEBOND_BONUS);
+
+      const aliceBefore = await asset.balanceOf(w.alice.address);
+      const daveBefore = await asset.balanceOf(w.dave.address);
+      // Dave is nobody's beneficiary — he pays the gas and alice gets the money, because the
+      // payout address comes from storage and is never an argument.
+      const receipt = await chain.send(escrow.connect(w.dave).claim(purchaseId));
+      const claimed = chain.parseEvent(receipt, escrow.interface, apeEscrowAddr, "BonusClaimed");
+      expect(claimed.purchaseId).to.equal(purchaseId);
+      expect(claimed.beneficiary).to.equal(w.alice.address);
+      expect(claimed.amount).to.equal(C.APEBOND_BONUS);
+
+      expect(await asset.balanceOf(w.alice.address)).to.equal(aliceBefore + C.APEBOND_BONUS);
+      expect(await asset.balanceOf(w.dave.address)).to.equal(daveBefore);
+      expect(await asset.balanceOf(apeEscrowAddr)).to.equal(0n);
+      expect(await escrow.totalReserved()).to.equal(0n);
+      expect(await escrow.claimable(purchaseId)).to.equal(0n);
+
+      await chain.expectCustomError(
+        provider,
+        escrow.connect(w.alice).claim(purchaseId),
+        escrow.interface,
+        "AlreadyClaimed"
+      );
     });
   });
 

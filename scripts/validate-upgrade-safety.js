@@ -3,8 +3,8 @@ const path = require("path");
 
 const hre = require("hardhat");
 
-// Upgrade-safety gate for the two UUPS proxies. Runs in CI on every push, with no secrets and
-// no network access of its own.
+// Upgrade-safety gate for every UUPS implementation in the repo. Runs in CI on every push,
+// with no secrets and no network access of its own.
 //
 // Two questions, and they are not the same question:
 //
@@ -22,9 +22,10 @@ const hre = require("hardhat");
 //      else after an upgrade. This half runs only for networks whose manifest is checked in,
 //      because that manifest IS the baseline.
 //
-// Both contracts carry `immutable` protocol references set in the implementation constructor,
-// which the plugin flags by default — `unsafeAllow: ['constructor', 'state-variable-immutable']`
-// is the spec's own deliberate exception (`docs/specs/01-contracts.md` §1), not a silencer.
+// Every contract here carries `immutable` protocol references set in the implementation
+// constructor, which the plugin flags by default — `unsafeAllow: ['constructor',
+// 'state-variable-immutable']` is the spec's own deliberate exception
+// (`docs/specs/01-contracts.md` §1), not a silencer.
 //
 //     npx hardhat run scripts/validate-upgrade-safety.js
 //     npx hardhat run scripts/validate-upgrade-safety.js --network sepolia
@@ -45,11 +46,20 @@ const DUMMY = {
   fee: 3000,
 };
 
+/**
+ * `deployed: false` means "no committed manifest records a proxy of this contract yet", which
+ * is a fact about the deployments, not about the code: half 2 grades a layout against a
+ * DEPLOYED one, and there is nothing to grade against until the contract has been through a
+ * deploy on a network whose manifest is checked in. Flip it to `true` in the same commit that
+ * records that deployment — from then on a layout change to it is a CI failure, which is the
+ * whole point of the file.
+ */
 const CONTRACTS = [
   {
     name: "RewardsDistributor",
     // (tokenX, asset)
     constructorArgs: [DUMMY.address, DUMMY.address],
+    deployed: true,
   },
   {
     name: "LPStakingVault",
@@ -62,6 +72,15 @@ const CONTRACTS = [
       DUMMY.fee,
       DUMMY.address,
     ],
+    deployed: true,
+  },
+  {
+    name: "BonusEscrow",
+    // (bonusToken)
+    constructorArgs: [DUMMY.address],
+    // The ApeBond escrow ships with the integration and has not been deployed to Sepolia or
+    // mainnet yet, so `.openzeppelin/sepolia.json` records no proxy that implements it.
+    deployed: false,
   },
 ];
 
@@ -84,7 +103,7 @@ async function main() {
   const networkName = hre.network.name;
   const chainId = Number((await hre.ethers.provider.getNetwork()).chainId);
 
-  console.log("Validating the two UUPS implementations...");
+  console.log(`Validating the ${CONTRACTS.length} UUPS implementations...`);
   console.log(`Network:  ${networkName} (chain ${chainId})`);
   console.log(`unsafeAllow: ${UNSAFE_ALLOW.join(", ")} — the spec's deliberate exception`);
 
@@ -122,7 +141,11 @@ async function main() {
     if (proxies.length === 0) {
       console.log("  the manifest records no proxies — nothing to compare against");
     }
-    for (const { name, constructorArgs } of CONTRACTS) {
+    for (const { name, constructorArgs, deployed } of CONTRACTS) {
+      if (!deployed) {
+        console.log(`SKIP  ${name}: not deployed on any network with a committed manifest`);
+        continue;
+      }
       // The manifest keys proxies by address, not by name, so each recorded proxy is tried
       // against each factory: the one it really implements validates, the other one does not
       // and is reported as a mismatch only when NO proxy matched.
