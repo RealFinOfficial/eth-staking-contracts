@@ -1,9 +1,13 @@
 /**
- * EIP-712 signing for the local-fork suite: ERC-2612 token permits, the position
- * manager's ERC-721 permit, and the back office's claim vouchers.
+ * EIP-712 signing for the LP-staking suites: ERC-2612 token permits, the position
+ * manager's ERC-721 permit, the back office's claim vouchers, and the ApeBond purchase
+ * authorizations.
  *
- * Copied from test/lp-staking/fork/LPStakingFork.test.js L439–518 — keep in sync — with
- * the provider passed in instead of read off the Hardhat Runtime Environment.
+ * The permit/domain half is copied from test/lp-staking/fork/LPStakingFork.test.js L439–518
+ * — keep in sync — with the provider passed in instead of read off the Hardhat Runtime
+ * Environment. The two signing helpers below it (`signVoucher`, `signPurchaseAuthorization`)
+ * have no counterpart there: they take an explicit domain and touch no provider, so the
+ * fork suite signs its vouchers inline and this file is where the unit suites get theirs.
  */
 
 const ethers = require("ethers");
@@ -169,6 +173,59 @@ function claimTypeHash(leg) {
   return ethers.id(`${leg}(address user,uint256 cumulativeAmount,uint256 deadline)`);
 }
 
+/**
+ * Field list of ApeBondPositionAdapter.PurchaseAuthorization — integration spec §6.1.
+ *
+ * Order and types must match the struct as the contract declares it: this array is both what
+ * ethers signs and what `purchaseAuthorizationTypeHash()` below derives the type string from,
+ * so the adapter's `PURCHASE_AUTHORIZATION_TYPEHASH` can be asserted against it rather than
+ * against a second hand-written copy of the same 15 lines.
+ */
+const PURCHASE_AUTHORIZATION_FIELDS = [
+  { name: "purchaseId", type: "bytes32" },
+  { name: "campaignId", type: "bytes32" },
+  { name: "soulZapRequestId", type: "bytes32" },
+  { name: "beneficiary", type: "address" },
+  { name: "soulZapCaller", type: "address" },
+  { name: "inputToken", type: "address" },
+  { name: "grossInputAmount", type: "uint256" },
+  { name: "netInputAmount", type: "uint256" },
+  { name: "guaranteedBonusAmount", type: "uint256" },
+  { name: "bonusUnlockAt", type: "uint64" },
+  { name: "minLiquidity", type: "uint128" },
+  { name: "expectedTickLower", type: "int24" },
+  { name: "expectedTickUpper", type: "int24" },
+  { name: "nonce", type: "uint256" },
+  { name: "deadline", type: "uint256" },
+];
+
+/**
+ * REAL's backend authorizing one ApeBond purchase, as it would in production.
+ *
+ * `domain` is the adapter's own — name "RealApeBondPurchase", version "1" — and is
+ * deliberately NOT the rewards-voucher domain: spec §6.4 keeps the two signers and their
+ * configuration apart, and two domains mean neither one's signatures can be replayed as the
+ * other's even if the same key were used by mistake.
+ *
+ * @param {object} args
+ * @param {object} args.signer Ethers signer holding the purchase key.
+ * @param {object} args.domain EIP-712 domain of the adapter being signed for.
+ * @param {object} args.authorization The 15 fields, by name.
+ */
+async function signPurchaseAuthorization({ signer, domain, authorization }) {
+  return signer.signTypedData(
+    domain,
+    { PurchaseAuthorization: PURCHASE_AUTHORIZATION_FIELDS },
+    authorization
+  );
+}
+
+/** The type hash the adapter must be using, recomputed from the field list above. */
+function purchaseAuthorizationTypeHash() {
+  const fields = PURCHASE_AUTHORIZATION_FIELDS.map((f) => `${f.type} ${f.name}`).join(",");
+  return ethers.id(`PurchaseAuthorization(${fields})`);
+}
+
 module.exports = {
   resolveDomain,
   signErc2612,
@@ -176,4 +233,7 @@ module.exports = {
   readEip712Domain,
   signVoucher,
   claimTypeHash,
+  PURCHASE_AUTHORIZATION_FIELDS,
+  signPurchaseAuthorization,
+  purchaseAuthorizationTypeHash,
 };

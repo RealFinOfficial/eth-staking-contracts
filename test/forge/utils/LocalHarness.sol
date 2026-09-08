@@ -7,6 +7,7 @@ import {TokenX} from "../../../contracts/lp-staking/TokenX.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper, PermitData} from "../../../contracts/lp-staking/LPZapper.sol";
+import {ApeBondPositionAdapter} from "../../../contracts/lp-staking/ApeBondPositionAdapter.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {INonfungiblePositionManager} from "../../../contracts/lp-staking/interfaces/INonfungiblePositionManager.sol";
 
@@ -98,6 +99,18 @@ abstract contract LocalHarness is BaseForge {
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 internal constant ERC2612_PERMIT_TYPEHASH =
         keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
+    /// @dev {ApeBondPositionAdapter}'s EIP-712 domain, re-declared for the same reason as the
+    ///      typehash below. It is deliberately NOT the distributor's "RealLPRewards": spec §6.4
+    ///      keeps the purchase signer apart from the rewards-voucher signer.
+    string internal constant APE_BOND_DOMAIN_NAME = "RealApeBondPurchase";
+    string internal constant APE_BOND_DOMAIN_VERSION = "1";
+
+    /// @dev {ApeBondPositionAdapter-PURCHASE_AUTHORIZATION_TYPEHASH}, re-declared here so a
+    ///      change to the struct fails a test instead of quietly re-signing the new shape.
+    bytes32 internal constant PURCHASE_AUTHORIZATION_TYPEHASH = keccak256(
+        "PurchaseAuthorization(bytes32 purchaseId,bytes32 campaignId,bytes32 soulZapRequestId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline)"
+    );
 
     // ──────────────────────── The rung ─────────────────────────
 
@@ -283,6 +296,54 @@ abstract contract LocalHarness is BaseForge {
         returns (bytes memory)
     {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _voucherDigest(typehash, user, cumulativeAmount, deadline));
+        return abi.encodePacked(r, s, v);
+    }
+
+    /**
+     * @dev The adapter's EIP-712 domain separator, RECOMPUTED from the name and version the
+     *      contract declares rather than read back over a call. Two reasons, both practical:
+     *      `vm.expectRevert` attaches to the next call, so a signing helper that made one of its
+     *      own would swallow the expectation in every rejection test; and re-declaring the pair
+     *      here is the harness's usual pin — a rename in the contract fails a test instead of
+     *      quietly re-signing under the new name. That the contract really reports these two is
+     *      asserted separately, by `test_Domain_IsTheDeclaredOne`.
+     */
+    function _adapterDomainSeparator(ApeBondPositionAdapter adapter_) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes(APE_BOND_DOMAIN_NAME)),
+                keccak256(bytes(APE_BOND_DOMAIN_VERSION)),
+                block.chainid,
+                address(adapter_)
+            )
+        );
+    }
+
+    /**
+     * @dev The digest REAL's backend signs for one ApeBond purchase, computed INDEPENDENTLY of
+     *      the adapter's own `_structHash`. Every field of {PurchaseAuthorization} is a static
+     *      type, so the struct encodes as its members laid end to end and one `abi.encode` of
+     *      the whole thing is the reference form — while the contract splits the same encoding
+     *      in two to fit the stack. Signing through this helper therefore makes every accepted
+     *      signature a proof that the two agree, and `test_Digest_MatchesTheReferenceEncoding`
+     *      states it directly.
+     */
+    function _purchaseDigest(
+        ApeBondPositionAdapter adapter_,
+        ApeBondPositionAdapter.PurchaseAuthorization memory authorization
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(PURCHASE_AUTHORIZATION_TYPEHASH, authorization));
+        return keccak256(abi.encodePacked("\x19\x01", _adapterDomainSeparator(adapter_), structHash));
+    }
+
+    /// @notice REAL's backend authorizing one ApeBond purchase, as it would in production.
+    function _signPurchaseAuthorization(
+        uint256 pk,
+        ApeBondPositionAdapter adapter_,
+        ApeBondPositionAdapter.PurchaseAuthorization memory authorization
+    ) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _purchaseDigest(adapter_, authorization));
         return abi.encodePacked(r, s, v);
     }
 
