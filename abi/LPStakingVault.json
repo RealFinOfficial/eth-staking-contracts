@@ -157,14 +157,35 @@
         "internalType": "address",
         "name": "guardian",
         "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
       }
     ],
-    "name": "NotGuardian",
+    "name": "NotGuardianOrOperator",
     "type": "error"
   },
   {
     "inputs": [],
     "name": "NotInitializing",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "NotOperator",
     "type": "error"
   },
   {
@@ -319,6 +340,17 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "user",
+        "type": "address"
+      }
+    ],
+    "name": "SelfCredit",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "tokenIn",
         "type": "address"
       },
@@ -427,6 +459,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ZeroAmount",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
@@ -469,6 +506,25 @@
       }
     ],
     "name": "Initialized",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "previousOperator",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "newOperator",
+        "type": "address"
+      }
+    ],
+    "name": "OperatorSet",
     "type": "event"
   },
   {
@@ -838,6 +894,16 @@
         "type": "address"
       },
       {
+        "internalType": "address",
+        "name": "operator_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "zapper_",
+        "type": "address"
+      },
+      {
         "internalType": "uint32",
         "name": "twapWindow_",
         "type": "uint32"
@@ -870,7 +936,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "operator",
+        "name": "operator_",
         "type": "address"
       },
       {
@@ -895,6 +961,19 @@
         "internalType": "bytes4",
         "name": "",
         "type": "bytes4"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "operator",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
       }
     ],
     "stateMutability": "view",
@@ -1114,6 +1193,19 @@
       }
     ],
     "name": "setGuardian",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newOperator",
+        "type": "address"
+      }
+    ],
+    "name": "setOperator",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

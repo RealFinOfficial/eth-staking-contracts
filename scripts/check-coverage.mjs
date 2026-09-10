@@ -37,7 +37,7 @@ import {pathToFileURL} from "node:url";
 // `forge coverage` cannot run under the optimizer, and without `--ir-minimum` the un-optimized
 // build fails outright with "Stack too deep" in `WeightedStakingPool.sol`. `--ir-minimum` is
 // therefore not a tuning knob but the only way this repo measures at all — and it is also what
-// costs the three uncovered lines named below. Changing this string is a deliberate
+// costs the ten uncovered lines named below. Changing this string is a deliberate
 // re-ratification of the floors, not a configuration tweak.
 //
 // The `forge-1.7` half names the TOOLCHAIN, and it is a real dependency: a newer forge

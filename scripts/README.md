@@ -132,19 +132,30 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | Script | Purpose |
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
-| `deploy-lp-staking.js` | Deploy and wire the whole stack: TokenX, the two UUPS proxies, the zapper and the `LPTimelock` that owns the proxies |
+| `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending` |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
+| `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
-`deploy-lp-staking.js` ends by handing TokenX and the zapper to `LP_MULTISIG` and NOMINATING
-the timelock on both proxies. `acceptOwnership` is itself a timelock operation, so how the run
-finishes depends on who holds the timelock's roles:
+`deploy-lp-staking.js` deploys the `LPTimelock` FIRST and both proxies are born owned by it:
+`initialize` names the timelock inside each proxy's own deployment transaction, so no key ever
+holds the owner tier, the run schedules nothing and waits out no delay. That works because the
+one owner-only bootstrap call — `vault.setZapper(zapper)` — became an `initialize` argument. The
+script predicts the zapper's CREATE address from the deployer's nonce (vault implementation at
+N, vault proxy at N + 1, zapper at N + 2), passes it in, deploys the zapper, records it, and
+only then asserts it landed there. If it did not, the run throws and names the repair:
+`setZapper` through the timelock. Everything else already works.
 
-- `LP_MULTISIG == deployer` (Sepolia staging): the script schedules both operations, sleeps
-  `LP_TIMELOCK_MIN_DELAY + 1` seconds and executes them. Budget the delay into the run.
-- otherwise (mainnet, a real Safe): the script prints the two `schedule` payloads and the two
-  later `execute` payloads with their operation ids, and leaves both proxies with
-  `owner == deployer`, `pendingOwner == timelock` until the Safe finishes the handover.
+Three role variables are read and all three are printed before anything is deployed.
+`LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B) are both REQUIRED and have no
+defaults; the script THROWS when they are equal and WARNS when either collapses onto
+`LP_MULTISIG` or onto the deploying key, which is what staging deliberately does.
+
+What the run does NOT finish: `TokenX` and `LPZapper` are deployed deployer-owned (the deployer
+has to call `setMinter` and the epoch cap) and are then NOMINATED to `LP_OPERATOR`. Being
+`Ownable2Step`, the operator multisig completes each with one plain transaction —
+`TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()`, no timelock, no delay. The step is
+skipped entirely when the operator is the deploying key.
 
 `hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
 operands from the environment. `schedule` and `execute` take the SAME operands — the operation
@@ -152,19 +163,24 @@ id is a hash of the whole call, so an execute that names a different argument is
 operation rather than a typo that goes through:
 
 ```bash
-TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+  TIMELOCK_ARGS=0xNewGuardian npx hardhat run scripts/lp-timelock.js --network sepolia
 
-TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+  TIMELOCK_ARGS=0xNewGuardian npx hardhat run scripts/lp-timelock.js --network sepolia
 
 TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
 ```
 
-Owner tier, and therefore routable: `acceptOwnership`, `setTwapParams`, `setZapper`,
-`setGuardian`, `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. The guardian tier —
-both vault pauses, `rescuePosition`, `setSigner`, `setPaused`, `recoverExcessAsset` — is
-deliberately NOT here: those are one-transaction incident calls the multisig sends directly.
+Owner tier, and therefore routable: `acceptOwnership`, `setZapper`, `setGuardian`,
+`setOperator`, `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. The other two tiers
+are deliberately NOT here, because routing them through a delay would defeat the reason they
+exist: the guardian tier is the three pause switches (`setDepositsPaused`, `setRebalancePaused`,
+`setPaused`), sent directly by the hot key; the operator tier is `setTwapParams`,
+`rescuePosition`, `setSigner`, `recoverExcessAsset` — plus those same three pauses as the cold
+fallback — sent directly by the operator multisig. `setTwapParams` used to be owner-tier and
+left this list on 2026-09-09; scheduling it now would revert `OwnableUnauthorizedAccount` after
+the full delay.
 The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", target,
 keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.

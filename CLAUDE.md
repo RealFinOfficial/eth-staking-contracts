@@ -42,24 +42,32 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   (pull all liquidity and fees, optional swap, mint a new range, refund dust, burn the
   emptied NFT) without ever losing custody. It computes no rewards and stores no dollar
   values — scoring is off-chain, from the full-state events. `unstake` is never gated by a
-  pause switch, a signature or backend liveness. Deposits and `rebalance` have one guardian
+  pause switch, a signature or backend liveness. Deposits and `rebalance` have one pause
   switch each — `setDepositsPaused` (which also stops zaps, because `zapIn` ends in
   `stakeFor`) and `setRebalancePaused`, the FAST incident switch for the one complex path;
   an upgrade is the slow one. It is upgradeable because `stakers[tokenId]` is the only
   record of who owns each custodied NFT and the NFTs sit at this address: a replacement
-  contract would strand both. Two admin tiers, both on the proxy — **owner** (a
-  `TimelockController`, `deploy/LPTimelock.sol`): upgrades, `setTwapParams`, `setZapper`,
-  `setGuardian`; **guardian** (the multisig, no delay): both pauses and `rescuePosition`
-  (the NFT goes to the guardian). Ownership is two-step and `renounceOwnership` reverts
+  contract would strand both. THREE admin tiers, all on the proxy — **owner** (a
+  `TimelockController`, `deploy/LPTimelock.sol`, and the owner from the proxy's own
+  deployment transaction onwards): upgrades, `setZapper`, `setGuardian`, `setOperator`;
+  **guardian** (a hot key, no delay): the two pauses and nothing else; **operator** (a
+  multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to the operator), and
+  those two pauses as well, as the cold fallback for a lost guardian key. Ownership is
+  two-step and `renounceOwnership` reverts
 - **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
   `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
-  no funds and no NFTs between transactions. The vault must whitelist it with `setZapper`
-  before zapping works. Zap-out is out of scope for V1 — `unstake` returns the NFT
+  no funds and no NFTs between transactions. The vault must whitelist it, which the vault's
+  `initialize` now does with a pre-computed address (see "Deploy order"); `setZapper` is the
+  owner-tier path for changing it later. `_zapIn` reads `vault.depositsPaused()` and reverts
+  `DepositsArePaused` before any USDC moves. Owned by the operator, `Ownable2Step`,
+  non-renounceable. Zap-out is out of scope for V1 — `unstake` returns the NFT
 - **`TokenX.sol`** — the reward token. 18 decimals, EIP-2612 permit, burnable. Exactly one
   `minter` (the distributor), re-pointable by the owner as the escape hatch, plus a
   per-epoch mint cap the token enforces itself. That cap is defense in depth: a
   compromised or broken distributor can never mint past what the owner armed for the
-  running epoch
+  running epoch. Its owner is the operator multisig; `Ownable2Step`, non-renounceable, and
+  the constructor emits `MinterChanged(0, 0)` and `EpochCapSet(0, 0)` so an indexer needs no
+  hardcoded defaults
 - **`RewardsDistributor.sol`** — cumulative-voucher claims, behind a **UUPS proxy**
   (`deploy/LPProxy.sol`). `claimTokenX` mints the difference between the voucher's lifetime
   figure and what the user already claimed; `claimAsset` pays ASSET out of a pre-funded
@@ -67,10 +75,11 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   be spent on the other, and the signed `user` is always `msg.sender`, never an argument.
   It is upgradeable because `claimed[user]` must survive a fix: a replacement contract would
   restart those ledgers at zero and make every outstanding lifetime voucher payable twice.
-  Two admin tiers, both on the proxy —
-  **owner** (a `TimelockController`, `deploy/LPTimelock.sol`): upgrades,
-  `setAssetClaimsEnabled`, `setGuardian`; **guardian** (the multisig, no delay):
-  `setSigner`, `setPaused`, `recoverExcessAsset` (funds go to the guardian). Ownership is
+  THREE admin tiers, all on the proxy — **owner** (a `TimelockController`,
+  `deploy/LPTimelock.sol`, from the proxy's own deployment transaction onwards): upgrades,
+  `setAssetClaimsEnabled`, `setGuardian`, `setOperator`; **guardian** (a hot key, no delay):
+  `setPaused` and nothing else; **operator** (a multisig, no delay): `setSigner`,
+  `recoverExcessAsset` (funds go to the operator), and `setPaused` as well. Ownership is
   two-step and `renounceOwnership` reverts — a renounce would freeze the upgrade path
 
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
@@ -88,55 +97,75 @@ the guard, deliberately: a no-swap range move must stay available at any price.
 Both also refuse unsolicited position NFTs: `onERC721Received` accepts a safe transfer only
 inside their own mint/stake flow. A plain `transferFrom` bypasses the hook entirely, so both
 carry a `rescuePosition(tokenId)` that sends a stranded NFT to the address that holds the
-recovery tier — the vault's `guardian()`, the zapper's `owner()`. The vault's is restricted to
+recovery tier — the vault's `operator()`, the zapper's `owner()` (which is that same operator
+multisig). The vault's is restricted to
 `stakerOf(tokenId) == address(0)`; since record and custody are always created and destroyed
 in the same transaction, a staked position can never be reached by it.
 
 Deliberate design choices an auditor is expected to question — the `recoverExcessAsset`
-timing, the tick-vs-bps bound, one-step `Ownable` on the two non-upgradeable contracts,
-the two proxies and their two-tier admin, the whole-balance mint/refund and the epoch cap's
-role — are written up in `docs/lp-staking-audit-notes.md` (upgradeability is item 14).
+timing, the tick-vs-bps bound, two-step non-renounceable ownership on all four contracts,
+the two proxies and their three-tier admin, the whole-balance mint/refund and the epoch cap's
+role — are written up in `docs/lp-staking-audit-notes.md` (ownership is item 3, upgradeability
+item 14).
 
 ### Deploy order
 
-`scripts/deploy-lp-staking.js` does all of it in one run:
+`scripts/deploy-lp-staking.js` does all of it in one run, and since the 2026-09-10 born-owned
+bootstrap (finding N-7) the run schedules nothing and waits out no delay:
 
-1. `TokenX(name, symbol, deployer)`
-2. `RewardsDistributor(tokenX, asset)` — the **implementation**; its own initializers are
+1. Config, local validation and the on-chain checks: the pool triple (`pool.token0/token1/fee`
+   against the sorted `LP_ASSET`/`LP_USDC`/`LP_FEE`), the token decimals, and the **factory
+   check** — `factory.getPool(token0, token1, fee) == LP_POOL`. The triple check only proves
+   the contract at `LP_POOL` CLAIMS those tokens; only the factory proves it IS the canonical
+   pool the router swaps against and the position manager mints into. The TWAP guard's `pool`
+   is immutable, so a wrong address there would silently read an unrelated market forever
+2. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))` — stock OZ
+   `TimelockController`, deployed FIRST because everything below names it. The multisig is the
+   only proposer, the only executor (execution is deliberately not open) and, because OZ grants
+   it alongside `PROPOSER_ROLE`, the only canceller; `admin = 0` leaves the timelock its own
+   `DEFAULT_ADMIN_ROLE` holder
+3. `TokenX(name, symbol, deployer)` — deployer-owned, because the deployer has to call
+   `setMinter` and `setEpochCap` below
+4. `RewardsDistributor(tokenX, asset)` — the **implementation**; its own initializers are
    disabled in that constructor
-3. `LPProxy(distributorImpl, initialize(deployer, guardian, signer))` — the proxy runs
+5. `LPProxy(distributorImpl, initialize(timelock, guardian, operator, signer))` — the proxy runs
    `initialize` in its own deployment transaction, so there is no window in which an
-   uninitialized proxy can be claimed. `LP_GUARDIAN` defaults to `LP_MULTISIG`
-4. `LPStakingVault(positionManager, pool, token0, token1, fee, router)` — the
+   uninitialized proxy can be claimed AND no window in which a key owns it. `LP_GUARDIAN` and
+   `LP_OPERATOR` are required and have no defaults
+6. Predict the zapper: `predictedZapper = getCreateAddress({from: deployer, nonce: N + 2})`,
+   where `N` is the nonce the vault implementation is about to use. A CREATE address is a pure
+   function of `(deployer, nonce)` and every transaction in this script carries an explicit
+   nonce, so vault implementation = N, vault proxy = N + 1, zapper = N + 2
+7. `LPStakingVault(positionManager, pool, token0, token1, fee, router)` — the
    **implementation**; the six immutables, the live pool triple check on them, and
    `_disableInitializers()`
-5. `LPProxy(vaultImpl, initialize(deployer, guardian, twapWindow, maxDeviationTicks))` — owner
-   = the **deployer**, not the multisig, because `setZapper` below is owner-only
-6. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer, twapWindow, maxDeviationTicks)`
-7. Wire: `tokenX.setMinter(distributor)`, `vault.setZapper(zapper)`
-8. Arm the first epoch: `tokenX.setEpochCap(epochId, cap)`
-9. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))` — stock OZ
-   `TimelockController`. The multisig is the only proposer, the only executor (execution is
-   deliberately not open) and, because OZ grants it alongside `PROPOSER_ROLE`, the only
-   canceller; `admin = 0` leaves the timelock its own `DEFAULT_ADMIN_ROLE` holder
-10. `transferOwnership` on all four: TokenX and the zapper to the **multisig** (plain
-    `Ownable`, effective at once), the two proxies to the **timelock** (`Ownable2Step`, so this
-    only NOMINATES)
-11. `acceptOwnership()` on both proxies — itself a timelock operation, so `schedule` → wait out
-    `minDelay` → `execute`. Two branches:
-    - **staging** (`LP_MULTISIG == deployer`, the Sepolia rehearsal): the script holds the
-      roles, so it schedules both, sleeps `minDelay + 1` seconds and executes both; the checks
-      assert `owner == timelock`, `pendingOwner == 0`
-    - **mainnet** (a real Safe): the script prints the two `schedule` payloads and the two
-      later `execute` payloads with their operation ids and stops; the checks assert the
-      documented interim state `owner == deployer`, `pendingOwner == timelock`
+8. `LPProxy(vaultImpl, initialize(timelock, guardian, operator, predictedZapper, twapWindow,
+   maxDeviationTicks))` — owner = the **timelock**, and the zapper is whitelisted before it
+   exists. That argument is what removed the bootstrap: `setZapper` is owner-tier, so wiring it
+   afterwards would have needed a scheduled timelock operation
+9. `LPZapper(vault, positionManager, pool, token0, token1, fee, router, usdc, asset, deployer,
+   twapWindow, maxDeviationTicks)`. It is recorded in `deployments.json` FIRST, so the address
+   is never lost, and only then asserted equal to `predictedZapper`. If it is not, the run
+   throws and names the one repair — `setZapper` through the timelock — and everything except
+   the zap path already works
+10. Wire and arm: `tokenX.setMinter(distributor)`, then the optional
+    `tokenX.setEpochCap(epochId, cap)`
+11. `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
+    `Ownable2Step`, so both only NOMINATE; the operator multisig finishes with one plain
+    `acceptOwnership()` per contract, no timelock. Skipped entirely when the operator IS the
+    deploying key, which is the staging case
 12. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
+13. Post-deploy verification (owner == timelock and `pendingOwner == 0` on both proxies,
+    guardian, operator, signer, zapper, both pause flags, the TWAP params, the ERC-1967
+    implementation slot read off each proxy and the ADMIN slot asserted empty, TokenX/zapper
+    ownership per the operator rule), the address summary and the verify commands
 
-The deployer owns everything through steps 7–8 because that wiring is `onlyOwner`; ownership
-moves at steps 10–11. Etherscan verification replays the **deployer** address, not the
-multisig — that is what the constructors actually saw. Each proxy needs two verify commands:
-one for the implementation and one for the proxy (implementation address + the `initialize`
-calldata); the script prints all six, plus one for the timelock.
+The deployer owns TokenX and the zapper through steps 10–11 because that wiring is `onlyOwner`;
+it never owns either proxy, not for one block. Etherscan verification replays the **deployer**
+address for TokenX and the zapper, not the operator — that is what the constructors actually
+saw. Each proxy needs two verify commands: one for the implementation and one for the proxy
+(implementation address + the `initialize` calldata, six arguments for the vault and four for
+the distributor); the script prints all six, plus one for the timelock.
 
 Before each implementation deploy the script runs `upgrades.validateImplementation`, and after
 each proxy deploy `upgrades.forceImport`, which records the storage layout in the
@@ -189,28 +218,32 @@ contracts/           — Solidity source files
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
-    mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers
-                                and the two V2 mocks (upgrade tests)
-test/                — Hardhat test files (Mocha + Chai). 565 tests, 0 pending
+    mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers,
+                                the two V2 mocks (upgrade tests) and the two swap harnesses
+                                LPStakingVaultSwapHarness.sol / LPZapperSwapHarness.sol, which
+                                expose their parent's internal `_executeSwap` so the ZeroAmount
+                                arm can be reached (no production path can reach it)
+test/                — Hardhat test files (Mocha + Chai). 599 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 90 tests, incl. the upgrade and timelock paths
-    RewardsDistributor.test.js  — 61 tests, incl. the upgrade and timelock paths
-    TokenX.test.js              — 47 tests
-    LPZapper.test.js            — 45 tests
+    LPStakingVault.test.js      — 97 tests, incl. the upgrade and timelock paths
+    RewardsDistributor.test.js  — 65 tests, incl. the upgrade and timelock paths
+    TokenX.test.js              — 53 tests
+    LPZapper.test.js            — 54 tests
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
     helpers/profiles.js         — the network profile (sepolia default, mainnet phase 2)
     integration/LPStakingLocalFork.test.js
-                                — 89 tests on a spawned `hardhat node --fork`, mainnet-pinned;
+                                — 90 tests on a spawned `hardhat node --fork`, mainnet-pinned;
                                   deploys via the repo's own scripts. Same skip rule as fork/
     integration/LPStakingSepoliaFork.test.js
-                                — 92 tests, the same scenario driven through the profile
+                                — 93 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 380 tests: 100 fork, 241 unit, 21 fuzz, 18 invariant
+test/forge/          — Foundry tier. 403 tests in 24 suites: 101 fork, 263 unit, 21 fuzz,
+                       18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
@@ -229,8 +262,13 @@ docs/                — Design and review notes
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, Ledger nonce workaround
-  deploy-lp-staking.js      — Deploys and wires the whole LP stack, then hands the proxies to
-                              the timelock and TokenX/the zapper to the multisig
+  lib/uniswap.js            — Per-chain Uniswap V3 addresses (factory, positionManager,
+                              swapRouter02) for chain 1 and 11155111; imported by
+                              deploy-lp-staking.js and create-sepolia-pool.js so they cannot
+                              drift apart
+  deploy-lp-staking.js      — Deploys and wires the whole LP stack. The timelock goes first and
+                              both proxies are born owned by it; TokenX and the zapper are
+                              nominated to the operator multisig, which accepts them
   lp-timelock.js            — Operator front end for the timelock: schedule / execute / cancel /
                               status / pending, plus the calldata builders the suites reuse
   validate-upgrade-safety.js — UUPS implementation safety (network-free) and, against a
@@ -346,8 +384,11 @@ records the deployment in the **tracked** `deployments.json` under chain `111551
 Gates (all three, or the suite skips and names what is missing): `SEPOLIA_LIVE=1`,
 `PRIVATE_KEY`, and `SEPOLIA_RPC_URL` or `INFURA_API_KEY`. Two further one-time gates, off by
 default: `SEPOLIA_LIVE_CREATE_POOL=1` creates the pool (**permanent** — the address is fixed
-forever; needs an explicit go the first time), `SEPOLIA_LIVE_DEPLOY=1` deploys the four
-contracts and writes them into the tracked registry. Optional `LP_SIGNER_KEY` redeems a real
+forever; needs an explicit go the first time), `SEPOLIA_LIVE_DEPLOY=1` deploys the five
+contracts — TokenX, the two proxies, the zapper and the `LPTimelock` — and writes them into the
+tracked registry. There is no handover to wait for: the proxies come out of that run already
+owned by the timelock, and on staging the operator is the deploying key, so TokenX and the
+zapper need no `acceptOwnership` either. Optional `LP_SIGNER_KEY` redeems a real
 1-wei TokenX voucher; without it the suite proves a foreign voucher is refused by static call.
 Both arms are real assertions and the test title says which one ran.
 
@@ -377,22 +418,23 @@ without it. The `forge-1.7` half names the toolchain, which is why CI pins
 `foundry-rs/foundry-toolchain` to `v1.7.1` instead of `stable` — a newer forge attributes
 `--ir-minimum` coverage differently. Bump the pin and the basis together, never one alone.
 
-Measured 2026-08-26 — branch coverage is 100% on all five files, so every branch floor is also
-the ceiling:
+Re-measured 2026-09-10 — branch coverage is 100% on all five files, so every branch floor is
+also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 99.08% (108/109) | 100.00% (21/21) |
-| `LPZapper.sol` | 98.65% (73/74) | 100.00% (15/15) |
-| `RewardsDistributor.sol` | 100.00% (43/43) | 100.00% (10/10) |
-| `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
-| `libraries/TwapGuard.sol` | 100.00% (37/37) | 100.00% (7/7) |
+| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
+| `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
+| `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
+| `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The three uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:537`,
-`LPZapper.sol:389`) and `_rollPendingEpoch();` (`TokenX.sol:155`). Every callee reports 100% of
-its own body in the same run, so all three are demonstrably executed — this is `--ir-minimum`
-losing the inlined call site's mapping, not a gap. They are named in the checker and in the
-audit notes instead of being chased with contrived tests.
+The ten uncovered lines are the two `_checkTwapDeviation();` call sites, `_rollPendingEpoch();`,
+the three ERC-7201 assembly bodies and each proxy's `_disableInitializers();` /
+`__Ownable2Step_init();`. Every callee reports 100% of its own body in the same run, so all ten
+are demonstrably executed — this is `--ir-minimum` losing the inlined call site's mapping and
+the assembly body's, not a gap. They are named with their line numbers in the checker and in
+the audit notes instead of being chased with contrived tests.
 
 ### Foundry beside Hardhat
 

@@ -307,18 +307,25 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 - **Solidity** — pragma `^0.8.20`, compiled with 0.8.28 (optimizer on, 200 runs, cancun)
 - **Hardhat** 2.x — unit suites, the fork suites, the 48-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
-- **OpenZeppelin Contracts** v5 — Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA
-- **OpenZeppelin Contracts Upgradeable** v5 + **hardhat-upgrades** — `RewardsDistributor` and
+- **OpenZeppelin Contracts** v5.6 — `Ownable2Step`, IERC20, SafeERC20, ReentrancyGuard, EIP712,
+  ECDSA. All four LP contracts are `Ownable2Step` and every one of them overrides
+  `renounceOwnership()` to revert `RenounceDisabled()`: an ownership move needs the new owner to
+  call `acceptOwnership`, and no contract in the stack can be left ownerless
+- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — `RewardsDistributor` and
   `LPStakingVault` are UUPS (ERC-1967) proxies. The distributor's `claimed[user]` ledger is
   cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
   payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
-  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Each proxy's
-  owner is a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet), so an upgrade is
-  public for the whole delay before it can run and `unstake` — never pausable — is the exit
-  window; a separate `guardian` (the multisig, no delay) holds the pause switches, the signer
-  rotation, the rescues and `recoverExcessAsset`. `TokenX` and `LPZapper` stay
-  non-upgradeable. Operating the timelock is `scripts/lp-timelock.js`; the runbook and the
-  reasoning are in `docs/lp-staking-audit-notes.md` item 14
+  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Both proxies
+  are **born owned** by a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet):
+  `initialize` names it inside the proxy's own deployment transaction, so no key ever holds the
+  owner tier, and an upgrade is public for the whole delay before it can run while `unstake` —
+  never pausable — is the exit window. Two further tiers sit outside the timelock: a
+  `guardian`, a hot key holding the three pause switches and nothing else, and an `operator`
+  multisig holding `setTwapParams`, `rescuePosition`, `setSigner` and `recoverExcessAsset` —
+  plus those same pause switches as the cold fallback for a lost guardian key. `TokenX` and
+  `LPZapper` stay non-upgradeable and are owned by the operator. Operating the timelock is
+  `scripts/lp-timelock.js`; the runbook and the reasoning are in
+  `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
 
 ## Development
@@ -328,12 +335,12 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 571 tests: unit suites + three fork suites
+npx hardhat test                 # 599 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 380 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 403 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -492,23 +499,24 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Measured 2026-08-26. Branch coverage is 100% on all five files, so every branch floor is also
+Re-measured 2026-09-10, after the three-role split and the `Ownable2Step` round moved four of
+the five denominators. Branch coverage is 100% on all five files, so every branch floor is also
 the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.26% (142/146) | 100.00% (24/24) |
-| `LPZapper.sol` | 98.67% (74/75) | 100.00% (15/15) |
-| `RewardsDistributor.sol` | 96.34% (79/82) | 100.00% (13/13) |
-| `TokenX.sol` | 97.62% (41/42) | 100.00% (7/7) |
+| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
+| `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
+| `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:751`,
-`LPZapper.sol:396`), `_rollPendingEpoch();` (`TokenX.sol:155`), the two ERC-7201 assembly
-bodies (`LPStakingVault.sol:147`, `libraries/TwapGuard.sol:127`, plus
-`RewardsDistributor.sol:160`), and each proxy's `_disableInitializers();` /
-`__Ownable2Step_init();` (`LPStakingVault.sol:274`, `:294`; `RewardsDistributor.sol:206`,
-`:217`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
+The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:841`,
+`LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the three ERC-7201 assembly
+bodies (`LPStakingVault.sol:155`, `RewardsDistributor.sol:168`,
+`libraries/TwapGuard.sol:127`), and each proxy's `_disableInitializers();` /
+`__Ownable2Step_init();` (`LPStakingVault.sol:304`, `:335`; `RewardsDistributor.sol:228`,
+`:245`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
 — `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
 in the checker and in the audit notes rather than chased with contrived tests.
 

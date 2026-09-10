@@ -21,14 +21,15 @@ with no program end date on-chain, so there is no schedule a timing rule could k
 threshold would be an arbitrary number that also blocks legitimate cleanup. Two properties
 bound the exposure:
 
-- **The recipient is fixed to `owner()`.** The function takes no destination argument, so a
-  compromised or mistaken owner call cannot route funds to a third party — it can only move
-  them to the multisig that already controls the contract.
+- **The recipient is fixed to `operator()`** (it was `owner()` before the proxy split and
+  `guardian()` between 2026-08-26 and 2026-09-09). The function takes no destination argument,
+  so a compromised or mistaken call cannot route funds to a third party — it can only move them
+  to the operator multisig, which already holds the tier the call belongs to.
 - **The balance held here is the damage cap for the ASSET leg**, as the contract header
   states. The TokenX leg is unaffected: it mints, and minting is bounded separately by the
   token's epoch cap.
 
-Net effect: the ASSET leg's solvency reduces to trust in the owner multisig. Accepted, and
+Net effect: the ASSET leg's solvency reduces to trust in the operator multisig. Accepted, and
 since the 2026-08-26 review the same sentence is in the function's own NatSpec, so a reader
 of the contract meets the assumption without opening this file.
 
@@ -66,47 +67,72 @@ pricing oracle: it caps the damage of a compromised frontend feeding `amountOutM
 custodied position, and no slippage protection rests on it. The exact bounds are the
 caller's own `amountOutMin`, `amount0Min` and `amount1Min`.
 
-## 3. Ownership is one-step on the two non-upgradeable contracts, and `renounceOwnership` is live there
+## 3. Ownership: all four contracts are two-step and non-renounceable (fixed 2026-09-10)
 
-**Changed 2026-08-26 for `RewardsDistributor` and `LPStakingVault`** (see item 14): both are
-now UUPS proxies with `Ownable2StepUpgradeable`, a separate `guardian` tier, and
-`renounceOwnership` disabled. The note below therefore describes `TokenX` and `LPZapper`; the
-two proxy rows are kept for contrast and marked.
+**Fixed 2026-09-10 (finding N-1).** `TokenX` and `LPZapper` moved from OpenZeppelin `Ownable` to
+`Ownable2Step`, and both now override `renounceOwnership()` to revert `RenounceDisabled()`. The
+two proxies have had that shape since the 2026-08-26 upgradeability revision (item 14), so all
+four contracts behave identically:
 
-The two non-upgradeable contracts use OpenZeppelin `Ownable` (not `Ownable2Step`).
-`transferOwnership` takes effect immediately with no acceptance from the new owner, and the
-inherited `renounceOwnership()` is callable and sets the owner to `address(0)`. A wrong address
-in either call bricks every admin path permanently. There is no recovery.
+- `transferOwnership(newOwner)` only NOMINATES. `owner()` does not move, `pendingOwner()` is
+  set, and the handover completes only when the nominee itself calls `acceptOwnership()`. A
+  mistyped address is recoverable for as long as nobody accepts it — nominate again, or
+  `transferOwnership(address(0))` to clear the nomination.
+- `renounceOwnership()` reverts `RenounceDisabled()` for the owner and
+  `OwnableUnauthorizedAccount` for anybody else. No contract in this stack can be left
+  ownerless, by accident or on purpose.
 
-What dies with the owner, per contract:
+The original finding, kept for the record: the two non-upgradeable contracts used plain
+`Ownable`, so `transferOwnership` took effect immediately with no acceptance from the new owner
+and the inherited `renounceOwnership()` was callable and set the owner to `address(0)`. A wrong
+address in either call bricked every admin path permanently, with no recovery.
+
+Who owns what after a deployment — item 14 holds the full three-tier matrix: the two proxies are
+owned by the `LPTimelock` from their own deployment transaction onwards, and `TokenX` and
+`LPZapper` are owned by the **operator** multisig, which the deploy script nominates and which
+completes each handover with one `acceptOwnership()`.
+
+**History — what a LOST owner key still costs, per contract.** Renouncing is impossible now, but
+a key can still be lost, so this table is kept from the original finding: it is the failure
+analysis, not a description of a live risk of renouncing.
 
 | Contract | Lost | Survives |
 |---|---|---|
 | `TokenX` | `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` | transfers, `permit`, `burn`; `mint` keeps working until the running epoch's cap is reached, then reverts `EpochMintCapExceeded` forever — **minting dies when the cap runs out** |
-| `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit` |
-| `LPStakingVault` | **not applicable** — `renounceOwnership` reverts `RenounceDisabled()`, and a handover needs the new owner to call `acceptOwnership` | everything; the two tiers are independent slots, so an ownership handover leaves the guardian's pauses and rescue untouched, and a guardian rotation leaves the owner's tier untouched. `stake` and `unstake` were never the owner's to lose |
-| `RewardsDistributor` | **not applicable** — same shape as the vault | everything; the two tiers are independent slots, so an ownership handover leaves the guardian's pauses and signer rotation untouched, and a guardian rotation leaves the owner's tier untouched |
+| `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit`; and the vault's owner can point the deposit path at a replacement zapper, which is what makes this the least severe of the four |
+| `LPStakingVault` | the upgrade path, `setZapper`, `setGuardian`, `setOperator` | everything else; the three tiers are independent slots, so an ownership handover leaves the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` untouched, and a guardian or operator rotation leaves the owner's tier untouched. `stake` and `unstake` were never the owner's to lose |
+| `RewardsDistributor` | the upgrade path, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` | everything else; the same tier independence — the guardian keeps `setPaused`, the operator keeps `setSigner` and `recoverExcessAsset` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
-because `unstake` is permissionless and unpausable. A lost guardian with `rebalancePaused` left on
-freezes re-ranging forever, which is why the ops runbook must read the flag before renouncing;
-the exit still works, so no position is trapped. The program-facing consequence is
-severe: rewards stop when the armed cap is exhausted and no new one can be armed.
+because `unstake` is permissionless and unpausable. A lost guardian with `rebalancePaused` left
+on freezes re-ranging, but since the 2026-09-09 role split the operator holds the same three
+pause switches as the cold fallback and can lift it in one transaction without waiting out a
+guardian rotation through the timelock; the exit works either way, so no position is trapped.
+The program-facing consequence is severe: rewards stop when the armed cap is exhausted and no
+new one can be armed.
 
-**Before deployment:** confirm the multisig address by executing a no-op transaction from it
-first, and treat `renounceOwnership` as forbidden in the ops runbook for the two contracts
-that still allow it. `TokenX` and `LPZapper` stay plain `Ownable` on purpose — TokenX's escape
-hatch is minter re-pointing and the zapper is replaceable periphery.
+**Before deployment:** confirm every role address by executing a no-op transaction from it
+first. The "treat `renounceOwnership` as forbidden" line no longer needs to live in the ops
+runbook — the contracts enforce it.
 
-Tests: `test/forge/unit/AccessControl.t.sol` — the matrix per contract, plus
-`test_Ownership_TheProxiesCannotBeRenounced`,
-`test_Ownership_TransferRequiresAcceptanceForTheProxies`,
-`test_Ownership_TransferToZeroClearsThePendingOwnerOnTheProxies`,
-`test_Ownership_AnUnacceptedTransferIsRecoverable`,
+Tests: `test/forge/unit/AccessControl.t.sol` — the tier matrix per contract, plus
+`test_Ownership_TransferOnlyNominatesOnAllFourContracts`,
+`test_Ownership_AcceptanceIsWhatMovesTheOwnerOnAllFour`,
+`test_Ownership_OnlyTheNomineeCanAcceptOnAllFour`,
+`test_Ownership_TransferToZeroClearsThePendingOwnerOnAllFour`,
+`test_Ownership_AnUnacceptedTransferIsRecoverableOnAllFour`,
+`test_Ownership_NoneOfTheFourCanBeRenounced`,
+`test_Ownership_AStrangerIsRejectedOnRenounceByTheOwnershipCheck`,
 `test_Renounce_VaultOwnerLosesThreeAdminCallsOnHandover`,
-`test_Renounce_VaultGuardianLosesThreeAdminCallsOnRotation`,
-`test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover`,
-`test_Renounce_DistributorGuardianLosesThreeAdminCallsOnRotation`.
+`test_Renounce_VaultGuardianLosesBothPauseSwitchesOnRotation`,
+`test_Renounce_VaultOperatorLosesFourAdminCallsOnRotation`,
+`test_Renounce_DistributorOwnerLosesThreeAdminCallsOnHandover`,
+`test_Renounce_DistributorGuardianLosesThePauseSwitchOnRotation`,
+`test_Renounce_DistributorOperatorLosesThreeAdminCallsOnRotation`,
+`test_Renounce_TokenXLosesFourAdminCallsOnHandover`,
+`test_Renounce_ZapperLosesThreeAdminCallsOnHandover`. Hardhat: the two-step and
+`RenounceDisabled` cases in `test/lp-staking/TokenX.test.js` and
+`test/lp-staking/LPZapper.test.js`.
 
 ## 4. Whole-balance mint and refund award stray ERC-20 balances to the next caller
 
@@ -279,29 +305,40 @@ Tests: `test/forge/fork/RewardVoucherFork.t.sol` —
 `test_SEC04_AReplacementDistributorReplaysEveryLifetimeEntitlement`,
 `test_SEC04_TheReplacedDistributorLosesItsMintRightImmediately`.
 
-## 11. SEC-05 — `stakeFor(vault)` / `stakeFor(zapper)` strands the position permanently
+## 11. SEC-05 — `stakeFor(vault)` / `stakeFor(zapper)` stranded the position permanently (FIXED 2026-09-10)
 
-`LPStakingVault.stakeFor` validates only `user != address(0)`. Crediting the vault itself, or
-the zapper, produces a position that:
+**FIXED 2026-09-10 (finding C-1).** The guard below is in the deployed source; the description
+is kept because it is what the guard exists to prevent.
 
-* `unstake` will not release — the recorded staker is a contract, and neither contract exposes
+`LPStakingVault.stakeFor` used to validate only `user != address(0)`. Crediting the vault itself,
+or the zapper, produced a position that:
+
+* `unstake` would not release — the recorded staker is a contract, and neither contract exposes
   any call path that reaches `vault.unstake`; and
-* `rescuePosition` will not release either — it refuses any tokenId whose staker record is
-  non-zero, which is exactly what `stakeFor` just wrote.
+* `rescuePosition` would not release it either — it refuses any tokenId whose staker record is
+  non-zero, which is exactly what `stakeFor` had just written.
 
-Nothing in the DEPLOYED code can move that NFT again. Only the whitelisted zapper can call
-`stakeFor`, so the trigger is a bug in the zapper (or its successor), not an outside attack —
-but the zapper is explicitly described as replaceable periphery, which is where the risk sits.
+Nothing in the DEPLOYED code could have moved that NFT again. Only the whitelisted zapper can
+call `stakeFor`, so the trigger was a bug in the zapper (or its successor), not an outside
+attack — but the zapper is explicitly described as replaceable periphery, which is where the
+risk sat.
 
-A fix would be one line in `stakeFor`: `if (user == address(this) || user == zapper_) revert`.
-Since the 2026-08-26 upgradeability revision (item 14) that fix is reachable after the fact:
-the vault is a UUPS proxy, so a stranded position could be released by an upgrade that adds a
-recovery path — after the timelock's public delay. That makes SEC-05 recoverable rather than
-permanent; it does not make it acceptable, and the one-line guard is still the right fix.
+**The fix** is one line in `stakeFor`, guarding both addresses before `_stake` writes anything:
 
-Tests: `test/forge/fork/TickSpacing.t.sol` —
-`test_SEC05_StakeForTheVaultItselfStrandsThePositionForever`,
-`test_SEC05_StakeForTheZapperStrandsThePositionForever`.
+```solidity
+if (user == address(this) || user == zapper_) revert SelfCredit(user);
+```
+
+`SelfCredit(address user)` is a new custom error on the vault. The call now reverts, so no
+record is written and no NFT is taken into custody — the failure mode is a reverted transaction
+instead of a permanently stranded position. The upgrade path stays the second line of defence:
+the vault is a UUPS proxy, so a position stranded by some other route could still be released
+by an upgrade that adds a recovery path, after the timelock's public delay.
+
+Tests (inverted from the two that used to assert the stranding): `test/forge/fork/TickSpacing.t.sol` —
+`test_SEC05_StakeForTheVaultItselfReverts`,
+`test_SEC05_StakeForTheZapperReverts`. Hardhat: the two `SelfCredit` cases in
+`test/lp-staking/LPStakingVault.test.js`.
 
 ## 12. Smaller behaviours now pinned by tests
 
@@ -314,11 +351,6 @@ test rather than left to be rediscovered.
   several plainly-derived addresses already do. `stakeWithPermit` is unusable from such an
   account and the revert carries no message; approve-then-`stake` still works.
   (`test/forge/fork/PermitDomains.t.sol:test_NftPermit_ACodeBearingOwnerCannotUseTheEip4494Path`)
-* **`LPZapper.sweep` is the one external function with no `nonReentrant`.** A hostile owner
-  sweeping a hook-bearing token really can reenter it and sweep again in the same transaction.
-  It is `onlyOwner` and moves tokens the owner may already move freely, so it is a documented
-  asymmetry rather than a vulnerability.
-  (`test/forge/unit/Reentrancy.t.sol:test_Reentrancy_ZapperSweepIsUnguardedAndReallyDoesReenter`)
 * **A single-sided withdrawal cannot fill a two-sided range.** When spot has left a position's
   range the position holds ONE token, and a swap-free rebalance into a range that straddles
   spot reverts inside Uniswap with no message. Re-ranging an out-of-range position needs a swap
@@ -350,6 +382,10 @@ test rather than left to be rediscovered.
   `claimedAsset` is left where it was — so the user can retry once the token is fixed.
   (`test/lp-staking/RewardsDistributor.test.js`: "rejects an ASSET whose transfer returns false
   instead of reverting, and books nothing")
+* **A USDC-blacklisted staker cannot `rebalance`.** `_refundDust` sends the leftover USDC to
+  the staker and Circle's blacklist reverts that transfer, so the whole rebalance reverts.
+  `unstake` is unaffected — it moves the NFT, not USDC — so the position is never trapped; the
+  staker withdraws it and manages it on Uniswap directly.
 
 ## 13. Rebalance pause (review F6, 2026-08-26)
 
@@ -365,8 +401,8 @@ with the owner.
 
 | Switch | Caller | Gates | Never gates |
 |---|---|---|---|
-| `setDepositsPaused(bool)` | guardian | `stake`, `stakeWithPermit`, `stakeFor` — and therefore the whole `LPZapper.zapIn` flow, which ends in `stakeFor` | `unstake`, `rebalance` |
-| `setRebalancePaused(bool)` | guardian | `rebalance`, with or without a swap leg | `unstake`, deposits |
+| `setDepositsPaused(bool)` | guardian OR operator | `stake`, `stakeWithPermit`, `stakeFor` — and therefore the whole `LPZapper.zapIn` flow, which ends in `stakeFor` | `unstake`, `rebalance` |
+| `setRebalancePaused(bool)` | guardian OR operator | `rebalance`, with or without a swap leg | `unstake`, deposits |
 
 `if (rebalancePaused) revert RebalanceIsPaused();` is the first statement of `rebalance`, so a
 paused call reads no storage past the flag and mines nothing. `RebalancePausedSet(bool)` carries
@@ -412,9 +448,10 @@ replaced while custody and the ledger stay exactly where they are.
 
 Item 13's rebalance pause changes role because of this. It used to be the ONLY mitigation for a
 bug in the most complex function in the stack; it is now the FAST one, and an upgrade is the
-slow one. That is why both pause switches moved to the guardian: an upgrade cannot execute
-before the timelock's public delay, so the immediate mitigation still has to be a switch the
-multisig can throw by itself.
+slow one. That is why both pause switches sit with the guardian — and, since the 2026-09-09
+role split, with the operator as well, so a lost hot key cannot leave the stack un-pausable
+(item 14). An upgrade cannot execute before the timelock's public delay, so the immediate
+mitigation still has to be a switch a key outside the timelock can throw by itself.
 
 ### Shape
 
@@ -428,8 +465,10 @@ multisig can throw by itself.
   the only canceller. `admin = address(0)` leaves the timelock its own `DEFAULT_ADMIN_ROLE`
   holder, so even a role change is a scheduled, publicly visible operation.
 - The implementation constructor takes the two immutables (`tokenX`, `asset`), keeps their zero
-  checks, and ends with `_disableInitializers()`. `initialize(owner_, guardian_, signer_)` runs
-  on the proxy, inside the proxy's own deployment transaction.
+  checks, and ends with `_disableInitializers()`.
+  `initialize(owner_, guardian_, operator_, signer_)` runs on the proxy, inside the proxy's own
+  deployment transaction, and `owner_` is the timelock from that transaction onwards — no key
+  ever holds the owner tier on a proxy, not even for one block (finding N-7, 2026-09-10).
 - Mutable state lives in ONE ERC-7201 namespace,
   `erc7201:real.lp.storage.RewardsDistributor`, at
   `0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00`. The literal is pinned in
@@ -442,7 +481,10 @@ multisig can throw by itself.
   `pool.token0()/token1()/fee()` triple check — the three values it compares are immutables set
   in that same constructor, so the implementation deploy is the only place where checking them
   means anything — and ends with `_disableInitializers()`.
-  `initialize(owner_, guardian_, twapWindow, maxDeviationTicks)` runs on the proxy.
+  `initialize(owner_, guardian_, operator_, zapper_, twapWindow_, maxDeviationTicks_)` runs on
+  the proxy. `zapper_` is there so the vault can be born owned by the timelock: `setZapper` is
+  owner-tier, so wiring the zapper after the fact would need a scheduled timelock operation at
+  bootstrap. The deploy script predicts the zapper's CREATE address instead and passes it in.
 - The vault's mutable state lives in `erc7201:real.lp.storage.LPStakingVault`, at
   `0x4c835a63e69815f7352ca18e845a5d8023cea9abbc2e923eb7a3a481844a6500`, re-derived by
   `test_Storage_LivesAtThePinnedErc7201Slot`: if that slot ever moved, every `stakerOf` would
@@ -459,6 +501,14 @@ multisig can throw by itself.
   old inline field initializer was constructor code, which a proxy never runs; left at zero the
   guard would still reject unsolicited transfers, but `_stake` would be writing a cold slot on
   every deposit. Measured by `test_Initialize_SeedsTheReceiveGuard`.
+- **Neither `initialize` calls `__UUPSUpgradeable_init()`, and it is not an omission.**
+  OpenZeppelin 5.6.1 turned `contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol` into a
+  re-export of the plain, non-upgradeable `UUPSUpgradeable`, which declares no initializer at
+  all — the symbol does not exist in the pinned dependency, and calling it would not compile.
+  There is also nothing for it to seed: the module's only state is the ERC-1967 implementation
+  slot, and the proxy's own constructor writes that before `initialize` runs. Both `initialize`
+  bodies carry this as a comment so the next reader does not add the call back. The two
+  initializers that DO exist are called: `__Ownable_init(owner_)` and `__Ownable2Step_init()`.
 - `@openzeppelin/contracts/utils/ReentrancyGuard.sol` is used rather than a
   `ReentrancyGuardUpgradeable`: OZ v5.5 moved that guard to its own ERC-7201 namespace and
   marked it `@custom:stateless`, and v5.6 removed the upgradeable variant entirely. Its
@@ -466,46 +516,93 @@ multisig can throw by itself.
   `_reentrancyGuardEntered()` tests for `== ENTERED (2)`, so an unwritten slot reads as
   "not entered".
 
-### Two-tier admin
+### Three-tier admin
+
+The 2026-09-09 role split (change-request item R) replaced the original two tiers with three.
+The owner is still the timelock. What changed is that the old guardian tier was doing two
+different jobs — stopping an incident, and moving value or rotating a key — and only the first
+of those needs a hot key somebody can reach at three in the morning. They are separate roles
+now.
+
+| tier | holder | delay | what it is for |
+|---|---|---|---|
+| **owner** | the `TimelockController` (`deploy/LPTimelock.sol`; 48 h on mainnet, 300 s on staging) | `minDelay`, and the call is public for the whole of it | changing code, and changing who holds the other two tiers |
+| **guardian** | a HOT key that holds nothing else | none | stopping an incident: the pause switches, and nothing that moves value or sets a key |
+| **operator** | a multisig ("multisig B"), distinct from the timelock's proposer | none | routine operations: calibration, key rotation, the recovery hatches — plus the pause switches again, as the cold fallback |
 
 `RewardsDistributor`:
 
-| tier | holder | functions | why |
-|---|---|---|---|
-| owner | `TimelockController` (48 h on mainnet, short on staging) | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian` | a code change, or switching a whole reward leg on, should be visible on-chain before it can run |
-| guardian | the multisig, directly, no delay | `setSigner`, `setPaused`, `recoverExcessAsset` | a leaked signing key or a bug in the claim path has to be stoppable in minutes |
+| tier | functions | why |
+|---|---|---|
+| owner | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` | a code change, switching a whole reward leg on, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
+| guardian | `setPaused` | a bug in the claim path has to be stoppable in minutes |
+| operator | `setSigner`, `recoverExcessAsset`, **plus `setPaused`** | a leaked signing key is rotated by the multisig, not by the hot key, and ASSET leaves the contract only towards the operator |
 
 `LPStakingVault`:
 
-| tier | holder | functions | why |
-|---|---|---|---|
-| owner | `TimelockController` | `_authorizeUpgrade`, `setTwapParams`, `setZapper`, `setGuardian` | code, the guard's calibration, and pointing the deposit path at a new contract are all program decisions |
-| guardian | the multisig, directly, no delay | `setDepositsPaused`, `setRebalancePaused`, `rescuePosition` | the two incident switches (item 13) and the recovery hatch have to act in one transaction |
+| tier | functions | why |
+|---|---|---|
+| owner | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` | code, pointing the deposit path at a new periphery contract, and the tier assignments are program decisions |
+| guardian | `setDepositsPaused`, `setRebalancePaused` | the two incident switches (item 13) have to act in one transaction |
+| operator | `setTwapParams`, `rescuePosition`, **plus both pause switches** | calibrating the guard is an operations decision, not an emergency one, and a stranded NFT leaves the contract only towards the operator |
 
-The split is enforced in both directions on both contracts, and measured that way: the OWNER is
-rejected on every guardian function (`NotGuardian(caller, guardian)`), and the GUARDIAN is
-rejected on every owner function (`OwnableUnauthorizedAccount`). `recoverExcessAsset` sends to
-`guardian()`, not to `owner()`, and so does `rescuePosition` — the owner is a timelock contract
-with no way to forward an ERC-20 or an ERC-721, and the guardian is the party that funded the
-one and would forward the other off-chain. Item 1's trust note is unchanged otherwise.
+`TokenX` and `LPZapper` have no tiers of their own: they are plain `Ownable2Step` and the
+**operator** is their owner — `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` on
+the token; `setTwapParams`, `sweep`, `rescuePosition` on the zapper.
 
-`renounceOwnership()` reverts `RenounceDisabled()` on both proxies. A renounce would leave
-`_authorizeUpgrade` with no caller and freeze the implementation forever, which is the exact
-failure the proxy exists to avoid.
+Two rules follow from the matrix, and both are asserted in both directions on both proxies:
+
+- **The three pause switches accept the guardian OR the operator** (`onlyGuardianOrOperator`).
+  The guardian is the fast path; the operator is the cold fallback. If the hot key is lost or
+  compromised, replacing it means `setGuardian`, which is owner-tier and therefore 48 h away on
+  mainnet — and nothing may be un-pausable for two days. The OWNER is rejected on all three: a
+  pause routed through a 48 h delay is not a pause, and the timelock is not a party that can
+  react to anything anyway.
+- **Everything else on the operator tier is `onlyOperator`**, and the guardian is rejected there
+  with `NotOperator(caller, operator)`. Nothing the hot key can call moves value or sets a key.
+  That is the entire point of the split.
+
+A stranger is rejected everywhere: `NotGuardianOrOperator(caller, guardian, operator)` on the
+three pauses, `NotOperator(caller, operator)` on the operator-only functions, and
+`OwnableUnauthorizedAccount` on the owner functions. `NotGuardian` no longer exists on either
+contract.
+
+`recoverExcessAsset` sends to `operator()`, and so does `rescuePosition`. The owner is a
+timelock contract with no way to forward an ERC-20 or an ERC-721; the guardian is a hot key that
+should never hold value. The operator is the multisig that funded the one and would forward the
+other off-chain. Item 1's trust note is unchanged otherwise.
+
+`renounceOwnership()` reverts `RenounceDisabled()` on both proxies — and, since 2026-09-10, on
+`TokenX` and `LPZapper` as well (item 3). A renounce would leave `_authorizeUpgrade` with no
+caller and freeze the implementation forever, which is the exact failure the proxy exists to
+avoid.
+
+Measured by `test/forge/unit/AccessControl.t.sol` —
+`test_Tiers_TheOwnerIsRejectedOnEveryGuardianAndOperatorFunction`,
+`test_Tiers_TheGuardianHoldsThePausesAndNothingElse`,
+`test_Tiers_TheOperatorHoldsItsOwnCallsAndThePauses`,
+`test_Tiers_AStrangerIsRejectedEverywhere` — and by
+`test_AdminFunctions_TheThreeTiersDoNotOverlap` in both
+`test/forge/unit/VaultBranches.t.sol` and `test/forge/unit/DistributorBranches.t.sol`.
 
 ### What is NOT guarded
 
-`recoverExcessAsset` carries no `nonReentrant`, exactly like `LPZapper.sweep` (item 12's
-neighbour in `test/forge/unit/Reentrancy.t.sol`). A hostile guardian holding a hook-bearing
-ASSET really can reenter it and recover twice in one transaction — recorded as behaviour, not a
-vulnerability: it is `onlyGuardian`, the destination is the guardian itself, and the balance is
-treasury money the guardian supplied. Measured by
-`test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter`. A hostile OWNER is no
-longer expressible at all: under `Ownable2Step` a contract that never calls `acceptOwnership`
-never becomes the owner — which is why the vault's reentrancy tests now hand the hostile router
-the GUARDIAN role instead, since `rescuePosition` is the call they attack. The vault's
-`rescuePosition` IS `nonReentrant`, and that is still asserted
-(`test_Reentrancy_RouterCannotReenterRescuePositionMidRebalance`).
+`recoverExcessAsset` is the ONE external function in the stack that carries no `nonReentrant`.
+`LPZapper.sweep` used to be its neighbour in that list; it gained the modifier on 2026-09-10
+(finding C-4), which closed the asymmetry item 12 used to record. What is left is deliberate: a
+hostile OPERATOR holding a hook-bearing ASSET really can reenter `recoverExcessAsset` and
+recover twice in one transaction — recorded as behaviour, not a vulnerability. It is
+`onlyOperator`, the destination is fixed to `operator()` and is not a caller-supplied argument,
+and the balance is treasury money the operator itself supplied; the modifier would remove
+nothing the operator cannot already do in two transactions. Measured by
+`test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter`.
+
+A hostile OWNER is not expressible at all: under `Ownable2Step` a contract that never calls
+`acceptOwnership` never becomes the owner. That is why the vault's reentrancy tests hand the
+hostile router the OPERATOR role — `rescuePosition` is the call they attack and it is
+operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still asserted
+(`test_Reentrancy_RouterCannotReenterRescuePositionMidRebalance`), as is the now-guarded sweep
+(`test_Reentrancy_ZapperSweepIsGuarded`).
 
 ### Operator notes
 
@@ -521,7 +618,12 @@ the GUARDIAN role instead, since `rescuePosition` is the call they attack. The v
   `validateUpgrade` grades a new implementation against. On a development chain (31337, a
   spawned `hardhat node`) the plugin writes into the OS temp directory instead, so fork runs
   leave nothing behind.
-- `LP_GUARDIAN` (default `LP_MULTISIG`) names the fast-path guardian on both proxies.
+- **`LP_GUARDIAN` and `LP_OPERATOR` are both REQUIRED and neither has a default any more.**
+  `LP_GUARDIAN` used to fall back to `LP_MULTISIG`; it does not, because a default would
+  silently collapse the hot key onto the multisig and undo the split. The deploy script THROWS
+  when `LP_OPERATOR == LP_GUARDIAN`, and WARNS (without stopping) when either collapses onto
+  `LP_MULTISIG` or onto the deploying key — staging deliberately collapses them, mainnet must
+  not. All three addresses are printed in the config block before anything is deployed.
   `LP_TIMELOCK_MIN_DELAY` (default 172800 = 48 h) is the timelock's own delay; Sepolia staging
   runs 300 and the fork suites 60.
 - The post-deploy checks read the ERC-1967 implementation slot off each proxy, so "the
@@ -530,11 +632,17 @@ the GUARDIAN role instead, since `rescuePosition` is the call they attack. The v
   unowned upgrade path. Each proxy needs TWO `hardhat verify` commands — implementation, then
   proxy (implementation address + the `initialize` calldata) — and the script prints both,
   plus one for the timelock's four constructor arguments.
-- Both proxies bootstrap the same way, and `setZapper` is the reason there is a bootstrap at
-  all: it is owner-only and must run before the handover, so `initialize` names the DEPLOYER on
-  both, and the run ends with `transferOwnership(timelock)` twice. Being `Ownable2Step`, that
-  only NOMINATES; `acceptOwnership` is itself a timelock operation. See the runbook below for
-  which of the two branches a given network takes.
+- **The proxies have no bootstrap at all** since 2026-09-10 (finding N-7): `initialize` names
+  the timelock as the owner inside each proxy's own deployment transaction, so no key ever
+  holds the owner tier on a proxy, not for one block, and the run schedules nothing. What made
+  that possible was moving the zapper address into `initialize` — see the runbook below for the
+  nonce prediction it rests on and for what happens if the prediction misses.
+- `TokenX` and `LPZapper` ARE deployed deployer-owned, because the deployer has to call
+  `setMinter` and `setEpochCap`, and the run ends by nominating `LP_OPERATOR` on both. Being
+  `Ownable2Step` that only NOMINATES: the operator multisig finishes with two plain
+  transactions, `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()` — no timelock, no
+  delay. The script skips the two nominations when the operator IS the deploying key, which is
+  the staging case.
 
 ### Runbook — operating the timelock
 
@@ -544,19 +652,23 @@ every other script in this repo reads its inputs:
 
 ```bash
 # schedule, then (after minDelay) execute — the SAME operands both times
-TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-  TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network mainnet
-TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-  TIMELOCK_ARGS=600,400 CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+  TIMELOCK_ARGS=0xNewGuardian npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+  TIMELOCK_ARGS=0xNewGuardian CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
 
 TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network mainnet
 TIMELOCK_ACTION=status  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js --network mainnet
 TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
 ```
 
-The owner tier is exactly: `acceptOwnership`, `setTwapParams`, `setZapper`, `setGuardian`,
+The owner tier is exactly: `acceptOwnership`, `setZapper`, `setGuardian`, `setOperator`,
 `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. Nothing else is routable, and
-nothing else needs to be.
+nothing else needs to be. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
+now, sent directly by the multisig, and scheduling it here would revert
+`OwnableUnauthorizedAccount` after the full delay. `setOperator` joined it, because moving the
+tier that holds the recovery hatches is exactly the kind of decision that should be public
+before it takes effect.
 
 **Salt.** `salt = keccak256(abi.encode("real.lp.timelock.v1", target, keccak256(calldata),
 tag))`, `predecessor = 0`. Deriving it from the call means schedule and execute agree without
@@ -566,15 +678,42 @@ its state is `Done` and OZ refuses to re-schedule that id — so a repeat needs
 `TIMELOCK_SALT_TAG=<anything-new>`. OZ emits `CallSalt(id, salt)` next to every `CallScheduled`
 whenever the salt is non-zero, which here is always.
 
-**Mainnet bootstrap.** The deploy script cannot sign for the Safe, so it stops after nominating
-the timelock on both proxies and prints, for each, the `schedule(...)` payload and the later
-`execute(...)` payload with the operation id. The Safe sends the two schedules, waits out
-`minDelay`, then sends the two executes. **Between the deploy and the second execute the
-DEPLOYER key is still the owner of both proxies** (`pendingOwner` = the timelock) — the
-post-deploy checks assert exactly that interim state, and it is the one window in the runbook
-where the deploying key still matters. Sepolia staging takes the other branch: the deploying
-wallet IS `LP_MULTISIG`, so the script schedules, sleeps `minDelay + 1` seconds and executes in
-the same run, ending with `owner == timelock` and `pendingOwner == 0`.
+**Mainnet bootstrap — there is nothing to schedule.** Both proxies are born owned by the
+timelock: `initialize` names it inside the proxy's own deployment transaction, so the run ends
+with `owner == timelock` and `pendingOwner == 0` on both, on every network, with no
+`acceptOwnership` operation anywhere. The deploy script builds no timelock operation at all.
+
+That rests on one mechanism. The single owner-only call the old bootstrap needed was
+`vault.setZapper(zapper)`, and it is now an `initialize` argument instead. A CREATE address is a
+pure function of `(deployer, nonce)`, and every transaction in `deploy-lp-staking.js` carries an
+explicit nonce, so the script can compute the zapper's address before the zapper exists: the
+vault implementation takes nonce N, the vault proxy N + 1 and the zapper N + 2. It passes
+`getCreateAddress({from: deployer, nonce: N + 2})` into the vault's `initialize`, deploys the
+zapper, records it in `deployments.json`, and only then asserts that it landed on the predicted
+address.
+
+**If the prediction misses.** Anything that consumes an unexpected nonce on the deploying key
+between those transactions — a second process signing with the same key, a stuck replacement
+transaction — puts the zapper somewhere else and the assertion throws. Nothing is lost: the
+stack is deployed and every address is already recorded, staking, unstaking and rebalancing all
+work, and the only casualty is the zap path, because the vault's `zapper` field names an address
+with no code there. The repair is one owner-tier operation:
+
+```bash
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setZapper \
+  TIMELOCK_ARGS=<the address the zapper really landed on> npx hardhat run scripts/lp-timelock.js --network mainnet
+# …wait out minDelay, then the same command with TIMELOCK_ACTION=execute CONFIRM=yes
+```
+
+The thrown error names that command and both addresses, so the repair does not have to be
+reconstructed from the logs.
+
+**What still needs the Safe.** `TokenX` and `LPZapper` come out of the run owned by the DEPLOYER
+and nominated to `LP_OPERATOR`. The operator multisig completes both with one plain transaction
+each — `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()`, no timelock, no delay — and
+the script prints both target addresses. Until it does, the deploying key still holds TokenX's
+minter wiring and the zapper's `sweep`; neither can touch a staker's position or a user's funds.
+On staging the operator IS the deploying key, so the script skips the nominations entirely.
 
 **Upgrades.** Build the new implementation, deploy it, then
 `TIMELOCK_FN=upgradeToAndCall TIMELOCK_ARGS=<impl>,0x` (the second argument is the
@@ -590,33 +729,52 @@ does not) and re-commit `.openzeppelin/<network>.json`. The backend reconciler r
 figure and raises a CRITICAL alert when the indexed implementation is not the expected one, so
 a stale record reads as an incident.
 
-**Emergencies do not go through here.** Pausing deposits or rebalance, pausing claims, rotating
-the voucher signer, rescuing a stranded NFT and `recoverExcessAsset` are all guardian-tier: one
-transaction from the multisig, no delay, no schedule. If an incident needs a code change, the
-guardian switch is the immediate mitigation and the upgrade is the slow follow-up.
+**Emergencies do not go through here.** Pausing deposits, pausing rebalance and pausing claims
+are guardian-tier: one transaction from the hot key, no delay, no schedule — and the operator
+multisig can send those same three calls whenever the guardian key is unreachable. Rotating the
+voucher signer, rescuing a stranded NFT, `recoverExcessAsset` and retuning the TWAP guard are
+operator-tier: one transaction from the multisig, also undelayed. If an incident needs a code
+change, the pause is the immediate mitigation and the upgrade is the slow follow-up.
 
 **`updateDelay` is self-only.** Shortening the delay is itself a scheduled operation on the
 timelock's own address (`TIMELOCK_TARGET=TimelockController TIMELOCK_FN=updateDelay`), so it
 cannot be used to escape the delay it is changing.
 
-- The 2-step handover and the timelock path are exercised in the suites (`ForkHarness`, the
-  `under a TimelockController` blocks in `test/lp-staking/RewardsDistributor.test.js` and
-  `test/lp-staking/LPStakingVault.test.js`, and both Hardhat integration suites, which run the
-  handover in the fixture and then route steps A19/A28/A41 and the A46–A48 rehearsal upgrade
-  through `schedule -> increaseTime -> execute`).
+- The timelock path is exercised in the suites: `ForkHarness`, the `under a TimelockController`
+  blocks in `test/lp-staking/RewardsDistributor.test.js` and
+  `test/lp-staking/LPStakingVault.test.js`, and both Hardhat integration suites. The integration
+  fixtures no longer perform a handover — the deploy script hands them proxies that are already
+  timelock-owned — so what they route through `schedule -> increaseTime -> execute` is A28 (the
+  ASSET leg), A41 (cycling the zapper wiring) and the A46–A48 rehearsal upgrade. A19 changed
+  sides with the role split: `setTwapParams` is a DIRECT call from the operator with no timelock
+  in front of it, and the same step asserts that the owner is rejected on it.
+- The 2-step ownership mechanism itself is exercised on all four contracts in
+  `test/forge/unit/AccessControl.t.sol` (item 3) and, for `TokenX` and `LPZapper`, in their
+  Hardhat unit suites.
 
 ### Sizes
 
-`forge build --sizes`, 2026-08-26, optimizer as configured in `foundry.toml`:
+`forge build --sizes`, 2026-09-10, optimizer as configured in `foundry.toml`:
 
 | contract | runtime (B) | EIP-170 margin (B) |
 |---|---|---|
-| `LPStakingVault` (implementation) | 14,378 | 10,198 |
-| `LPStakingVaultV2Mock` | 14,806 | 9,770 |
-| `RewardsDistributor` (implementation) | 8,390 | 16,186 |
-| `LPZapper` | 8,763 | 15,813 |
+| `LPStakingVault` (implementation) | 15,256 | 9,320 |
+| `LPStakingVaultV2Mock` | 15,684 | 8,892 |
+| `RewardsDistributor` (implementation) | 8,935 | 15,641 |
+| `LPZapper` | 9,244 | 15,332 |
+| `TokenX` | 6,193 | 18,383 |
 
-The vault implementation grew 10,819 -> 14,378 B with the namespaced storage, the getters and
-the two-tier admin. 10 KB of headroom against the 24,576 B limit is the number to re-check
-before any future feature lands in this contract; raising the optimizer runs is NOT the remedy
-if it ever gets close (Hardhat and Foundry must produce identical bytecode) — refactoring is.
+The vault implementation has grown 10,819 -> 14,378 -> 15,256 B: first the namespaced storage
+and its getters, then the 2026-09-09/10 round — the third admin tier with its two modifiers, the
+`operator()` getter, `setOperator`, the five extra `initialize` emissions, and the `SelfCredit`
+and `ZeroAmount` guards. The distributor moved 8,390 -> 8,935 B and the zapper 8,763 -> 9,244 B
+for the same reasons on their side, the zapper also carrying `Ownable2Step`, the disabled
+`renounceOwnership` and the paused-vault pre-check. 9,320 B of headroom against the 24,576 B
+limit is the number to re-check before any future feature lands in the vault; raising the
+optimizer runs is NOT the remedy if it ever gets close (Hardhat and Foundry must produce
+identical bytecode) — refactoring is.
+
+`LPStakingVaultSwapHarness` (15,344 B) and `LPZapperSwapHarness` (9,328 B) appear in the same
+table and are NOT part of the deployment: they are test-only mocks under
+`contracts/lp-staking/mocks/`, each exposing its parent's internal `_executeSwap` so the
+`ZeroAmount` arm can be reached, which no production entry point can do.
