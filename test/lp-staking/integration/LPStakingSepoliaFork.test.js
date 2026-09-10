@@ -626,6 +626,11 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       // the multisig, which is also the script's own default — stated rather than assumed,
       // because every guardian-tier step below sends from `w.multisig`.
       LP_GUARDIAN: w.multisig.address,
+      // The routine-operations tier (2026-09-09 role split): the vault's setTwapParams and
+      // rescuePosition, the distributor's setSigner and recoverExcessAsset, plus all three
+      // pause switches as the cold fallback. Collapsed onto the multisig here, like the
+      // guardian, because every undelayed step below sends from `w.multisig`.
+      LP_OPERATOR: w.multisig.address,
       LP_TIMELOCK_MIN_DELAY: String(C.TIMELOCK_MIN_DELAY),
       LP_TOKENX_NAME: C.TOKENX_NAME,
       LP_TOKENX_SYMBOL: C.TOKENX_SYMBOL,
@@ -898,9 +903,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
 
       // The two proxies are owned by the timelock — the only address that can upgrade them —
-      // with the multisig holding the undelayed guardian tier beside it. `pendingOwner` is
-      // clear, which is the proof the Ownable2Step handover completed rather than stalling
-      // halfway with the deployer still in charge.
+      // with the multisig holding both undelayed tiers beside it: `guardian` (the pause
+      // switches) and `operator` (calibration, recovery, key rotation, and those same pause
+      // switches). `pendingOwner` is clear, which is the proof the Ownable2Step handover
+      // completed rather than stalling halfway with the deployer still in charge.
       for (const [label, contract] of [
         ["distributor", distributor],
         ["vault", vault],
@@ -908,6 +914,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         expect(await contract.owner(), `${label}.owner`).to.equal(timelockAddr);
         expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
         expect(await contract.guardian(), `${label}.guardian`).to.equal(w.multisig.address);
+        expect(await contract.operator(), `${label}.operator`).to.equal(w.multisig.address);
       }
 
       // The timelock itself: the multisig proposes, executes and cancels; nobody else does,
@@ -993,28 +1000,41 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         ],
         // The distributor is a UUPS proxy, so its deploy tx is the PROXY's: `Upgraded` names
         // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
-        // transaction (owner = DEPLOYER, guardian, signer) and `Initialized` closes it. The
-        // run then nominates the timelock (`OwnershipTransferStarted`), and the acceptance
-        // the timelock executes in S7b is the final `OwnershipTransferred`.
+        // transaction (owner = DEPLOYER, guardian, operator, signer) and `Initialized` closes
+        // it. Since the 2026-09-09 change request `initialize` announces EVERY mutable field,
+        // the two flags whose initial value is `false` included, so an indexer needs no
+        // hardcoded defaults. The run then nominates the timelock
+        // (`OwnershipTransferStarted`), and the acceptance the timelock executes in S7b is
+        // the final `OwnershipTransferred`.
         [distributorAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
           "GuardianSet",
+          "OperatorSet",
           "SignerChanged",
+          "Paused",
+          "AssetClaimsEnabled",
           "Initialized",
           "OwnershipTransferStarted",
           "OwnershipTransferred",
         ],
         // The vault is a UUPS proxy too, and its deploy tx is the PROXY's: `Upgraded` names
         // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
-        // transaction (owner = deployer, guardian, TWAP parameters) and `Initialized` closes
-        // it. `ZapperSet` is the owner-only wiring the deployer must still be able to do, and
-        // the run ends with the Ownable2Step pair: `OwnershipTransferStarted` from the
-        // script's nomination, then `OwnershipTransferred` from the timelock's execution.
+        // transaction (owner = deployer, guardian, operator, zapper, TWAP parameters) and
+        // `Initialized` closes it. The FIRST `ZapperSet` is `initialize`'s own — the script
+        // still passes zero there, so it carries (0, 0) — and the SECOND is the owner-only
+        // `setZapper` wiring the deployer must still be able to do. Both pause flags are
+        // announced at initialization too, so an indexer needs no hardcoded defaults. The run
+        // ends with the Ownable2Step pair: `OwnershipTransferStarted` from the script's
+        // nomination, then `OwnershipTransferred` from the timelock's execution.
         [vaultAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
           "GuardianSet",
+          "OperatorSet",
+          "ZapperSet",
+          "DepositsPausedSet",
+          "RebalancePausedSet",
           "TwapParamsSet",
           "Initialized",
           "ZapperSet",
@@ -1501,24 +1521,46 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await vault.stakerOf(positions.P7)).to.equal(w.carol.address);
     });
 
-    it("A19: the vault's TWAP guard is retuned through the timelock", async function () {
-      // `setTwapParams` is owner-tier, and the owner is the timelock — the multisig cannot
-      // send it directly however many keys it holds.
+    it("A19: the vault's TWAP guard is retuned by the operator, directly, and the owner is rejected", async function () {
+      // Since the 2026-09-09 role split `setTwapParams` is OPERATOR tier, not owner tier: the
+      // calibration is a routine parameter whose misuse can only grief the swap legs — the
+      // contract's own MIN/MAX bounds cap it — and can never move value, so it needs a
+      // multisig but not a delay. LP_OPERATOR is `w.multisig` in this run, so the multisig
+      // now sends the call itself, in one transaction, with no schedule and no wait.
+      //
+      // The owner is the timelock, and it is rejected. Two proofs, one off-chain and one on:
+      // first, the operator front end refuses to build the operation at all, because
+      // `setTwapParams` was removed from scripts/lp-timelock.js's OWNER_TIER allow-list — a
+      // scheduled call that would revert `NotOperator` after the delay is caught here, at the
+      // point of typing it, instead.
+      expect(() =>
+        lpTimelock.buildOperation({
+          target: vaultAddr,
+          fn: "setTwapParams",
+          args: [C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS],
+        })
+      ).to.throw(/not an owner-tier function/);
+
+      // Second, the timelock as a CALLER is rejected by the contract itself. The revert data
+      // comes out of `eth_estimateGas`, so nothing is signed, sent or mined — which is also
+      // why no key for the timelock address is needed.
       await chain.expectCustomError(
         provider,
         vault
-          .connect(w.multisig)
+          .connect(new ethers.JsonRpcSigner(provider, timelockAddr))
           .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS),
         vault.interface,
-        "OwnableUnauthorizedAccount"
+        "NotOperator"
       );
 
-      const { executed: receipt } = await throughTimelock("A19", "retune the vault", {
-        target: vaultAddr,
-        fn: "setTwapParams",
-        args: [C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS],
-        expected: [{ address: vaultAddr, name: "TwapParamsSet" }],
-      });
+      const receipt = await chain.send(
+        vault
+          .connect(w.multisig)
+          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS)
+      );
+      ledger.record("A19", "the operator retunes the vault", receipt, [
+        { address: vaultAddr, name: "TwapParamsSet" },
+      ]);
 
       const args = chain.parseEvent(receipt, vault.interface, vaultAddr, "TwapParamsSet");
       expect(args.window).to.equal(BigInt(C.RETUNED_TWAP_WINDOW));
@@ -1534,8 +1576,9 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 
     it("A20: the multisig retunes the zapper's TWAP guard directly", async function () {
       // The zapper is NOT upgradeable and NOT behind the timelock: plain `Ownable`, owner =
-      // the multisig. Same call, same guard, one transaction — the contrast with A19 is the
-      // point of running both.
+      // the multisig. Same call, same guard, one transaction — and since A19 the vault's own
+      // `setTwapParams` is undelayed too, so the two now differ only in which role holds the
+      // call: the zapper's OWNER against the vault's OPERATOR.
       const receipt = await chain.send(
         zapper
           .connect(w.multisig)
@@ -2260,6 +2303,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         "Upgraded",
         "OwnershipTransferred",
         "GuardianSet",
+        "OperatorSet",
+        "ZapperSet",
+        "DepositsPausedSet",
+        "RebalancePausedSet",
         "TwapParamsSet",
         "Initialized",
         "ZapperSet",

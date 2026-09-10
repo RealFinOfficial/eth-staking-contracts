@@ -46,63 +46,75 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-08-26 (LPStakingVault behind a UUPS proxy) ─────────────
+// ── Pinned floors, re-measured 2026-09-10 (three-role admin on both proxies) ───────────────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  97.26% (142/146)| 100.00% (24/24) |
+// | LPStakingVault.sol      |  97.60% (163/167)| 100.00% (28/28) |
 // | LPZapper.sol            |  98.67% (74/75)  | 100.00% (15/15) |
-// | RewardsDistributor.sol  |  96.34% (79/82)  | 100.00% (13/13) |
+// | RewardsDistributor.sol  |  96.97% (96/99)  | 100.00% (15/15) |
 // | TokenX.sol              |  97.62% (41/42)  | 100.00% (7/7)   |
 // | libraries/TwapGuard.sol |  97.67% (42/43)  | 100.00% (7/7)   |
 //
 // Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate. The vault's branch count moved 21 -> 24 with the guardian
-// tier: both arms of `onlyGuardian`, the `setGuardian` zero check and the `initialize`
-// guardian check are each asserted, and `renounceOwnership` reverts for the owner while a
-// stranger still gets the Ownable rejection.
+// uncovered branch fails the gate.
 //
-// The vault's line denominator moved 109 -> 146 because the proxy split its state into an
-// ERC-7201 struct behind five getters, added `initialize`, `setGuardian`, `_authorizeUpgrade`
-// and the renounce override, and gave every storage read an explicit `$` handle. TwapGuard
-// moved 37 -> 43 for the same reason (a namespace, its accessor and two getters), and the
-// zapper 74 -> 75 for the `_setTwapParams` call its constructor now makes itself.
+// The 2026-09-09 role split (owner = timelock, guardian = hot pause-only key, operator =
+// multisig) moved both proxies' denominators:
 //
-// The seven uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
+//   * The vault's branches moved 24 -> 28. `onlyGuardian` became `onlyOperator` (two arms) and
+//     `onlyGuardianOrOperator` (which is two comparisons, so three arms of its own), the
+//     `initialize` zero check now covers guardian OR operator, `setOperator` has a zero check,
+//     `stakeFor` has the `SelfCredit` pair, and `_executeSwap` has the `ZeroAmount` guard —
+//     whose reverting arm is unreachable from `rebalance` and is measured through
+//     `contracts/lp-staking/mocks/LPStakingVaultSwapHarness.sol`.
+//   * The vault's lines moved 146 -> 167 for the same reasons plus the `operator()` getter, the
+//     five extra `initialize` emissions and the second modifier's body.
+//   * The distributor's branches moved 13 -> 15 and its lines 82 -> 99: the same modifier
+//     split, `setOperator`, the operator zero check, the `operator()` getter and the two extra
+//     `initialize` emissions.
+//
+// Earlier history: the vault's line denominator moved 109 -> 146 when the proxy split its state
+// into an ERC-7201 struct behind five getters and added `initialize`, `setGuardian`,
+// `_authorizeUpgrade` and the renounce override; TwapGuard moved 37 -> 43 for the same reason
+// (a namespace, its accessor and two getters), and the zapper 74 -> 75 for the
+// `_setTwapParams` call its constructor now makes itself.
+//
+// The nine uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
 // gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
-// run, so all seven are demonstrably executed; the inlined site simply loses its own mapping:
+// run, so all nine are demonstrably executed; the inlined site simply loses its own mapping:
 //
-//   * `contracts/lp-staking/LPStakingVault.sol:147`     `$.slot := LP_STAKING_VAULT_STORAGE`
+//   * `contracts/lp-staking/LPStakingVault.sol:155`     `$.slot := LP_STAKING_VAULT_STORAGE`
 //     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
 //     reads the resulting slot directly.
-//   * `contracts/lp-staking/LPStakingVault.sol:274`     `_disableInitializers();` — asserted by
+//   * `contracts/lp-staking/LPStakingVault.sol:304`     `_disableInitializers();` — asserted by
 //     `test_Constructor_DisablesTheImplementationsInitializers`, which proves it ran.
-//   * `contracts/lp-staking/LPStakingVault.sol:294`     `__Ownable2Step_init();` — an empty OZ
+//   * `contracts/lp-staking/LPStakingVault.sol:335`     `__Ownable2Step_init();` — an empty OZ
 //     initializer, kept because the upgrades plugin validates the parent-initializer chain.
-//   * `contracts/lp-staking/LPStakingVault.sol:751`     `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPStakingVault.sol:841`     `_checkTwapDeviation();`
 //   * `contracts/lp-staking/LPZapper.sol:396`           `_checkTwapDeviation();`
 //   * `contracts/lp-staking/libraries/TwapGuard.sol:127` `$.slot := TWAP_GUARD_STORAGE`
 //     — read by `twapWindow()` on both inheritors;
 //     `test_Storage_TheTwapGuardHasItsOwnPinnedNamespace` reads the slot directly.
-//   * `contracts/lp-staking/TokenX.sol:155`             `_rollPendingEpoch();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:160` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
-//   * `contracts/lp-staking/RewardsDistributor.sol:206` `_disableInitializers();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:217` `__Ownable2Step_init();`
+//   * `contracts/lp-staking/TokenX.sol:156`             `_rollPendingEpoch();`
+//   * `contracts/lp-staking/RewardsDistributor.sol:168` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
+//   * `contracts/lp-staking/RewardsDistributor.sol:228` `_disableInitializers();`
+//   * `contracts/lp-staking/RewardsDistributor.sol:245` `__Ownable2Step_init();`
 //
 // They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 146, minHit: 142},
-    branches: {found: 24, minHit: 24},
+    lines: {found: 167, minHit: 163},
+    branches: {found: 28, minHit: 28},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 75, minHit: 74},
     branches: {found: 15, minHit: 15},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 82, minHit: 79},
-    branches: {found: 13, minHit: 13},
+    lines: {found: 99, minHit: 96},
+    branches: {found: 15, minHit: 15},
   },
   "contracts/lp-staking/TokenX.sol": {
     lines: {found: 42, minHit: 41},

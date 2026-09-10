@@ -57,9 +57,13 @@ const timelockOps = require("./lp-timelock");
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
-//   LP_GUARDIAN               — fast-path guardian on BOTH proxies: the vault's two pause
-//                               switches and rescuePosition, and the distributor's pause,
-//                               signer rotation and recoverExcessAsset — all with no delay
+//   LP_GUARDIAN               — pause tier on BOTH proxies: the vault's two pause switches and
+//                               the distributor's, with no delay and nothing else
+//                               (LP_MULTISIG)
+//   LP_OPERATOR               — routine-operations tier on BOTH proxies: the vault's
+//                               setTwapParams and rescuePosition, the distributor's setSigner
+//                               and recoverExcessAsset, plus all three pause switches as the
+//                               cold fallback for a lost guardian key — all with no delay
 //                               (LP_MULTISIG)
 //   LP_TIMELOCK_MIN_DELAY     — seconds between a scheduled operation and its earliest
 //                               execution (172800 = 48 h, the mainnet figure). Sepolia
@@ -277,6 +281,12 @@ async function main() {
   // `recoverExcessAsset`, with no timelock in front of it. Defaults to the multisig, which
   // is what it is unless a dedicated ops key is provisioned.
   const guardian = readAddress("LP_GUARDIAN", multisig);
+  // Routine-operations tier on BOTH proxies (2026-09-09 role split): the vault's TWAP
+  // calibration and NFT rescue, the distributor's signer rotation and ASSET recovery, plus
+  // all three pause switches as the cold fallback for a lost guardian key. Optional here and
+  // defaulted to the multisig; making it required, and rejecting `operator == guardian`, is
+  // part of the N-7 bootstrap rewrite.
+  const operator = readAddress("LP_OPERATOR", multisig);
 
   // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so
   // the schedule -> execute flow is rehearsable rather than theoretical.
@@ -367,6 +377,7 @@ async function main() {
   console.log(`Voucher signer:     ${signer}`);
   console.log(`Multisig:           ${multisig}`);
   console.log(`Guardian:           ${guardian}${guardian === multisig ? " (= the multisig)" : ""}`);
+  console.log(`Operator:           ${operator}${operator === multisig ? " (= the multisig)" : ""}`);
   console.log(
     `Timelock minDelay:  ${timelockMinDelay}s` +
       (timelockMinDelay === DEFAULT_TIMELOCK_MIN_DELAY ? " (48 h, the mainnet default)" : "")
@@ -503,7 +514,7 @@ async function main() {
   const distributorDeploy = await deployProxyPair(
     "RewardsDistributor",
     [tokenXDeploy.address, asset],
-    [deployer.address, guardian, signer],
+    [deployer.address, guardian, operator, signer],
     deployer
   );
   const distributorImplDeploy = distributorDeploy.impl;
@@ -520,6 +531,7 @@ async function main() {
     asset,
     signer,
     guardian,
+    operator,
   };
   pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, distributorRecord);
 
@@ -530,7 +542,7 @@ async function main() {
   const vaultDeploy = await deployProxyPair(
     "LPStakingVault",
     [positionManager, poolAddress, token0, token1, fee, swapRouter],
-    [deployer.address, guardian, twapWindow, twapMaxDeviationTicks],
+    [deployer.address, guardian, operator, hre.ethers.ZeroAddress, twapWindow, twapMaxDeviationTicks],
     deployer
   );
   const vaultImplDeploy = vaultDeploy.impl;
@@ -548,6 +560,7 @@ async function main() {
     twapWindow,
     maxTwapDeviationTicks: twapMaxDeviationTicks,
     guardian,
+    operator,
   };
   pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, vaultRecord);
 
@@ -776,6 +789,7 @@ async function main() {
   check("RewardsDistributor.owner", await distributor.owner(), expectedProxyOwner);
   check("RewardsDistributor.pendingOwner", await distributor.pendingOwner(), expectedPendingOwner);
   check("RewardsDistributor.guardian", await distributor.guardian(), guardian);
+  check("RewardsDistributor.operator", await distributor.operator(), operator);
   check("RewardsDistributor.paused", await distributor.paused(), false);
   check("RewardsDistributor.assetClaimsEnabled", await distributor.assetClaimsEnabled(), false);
   // Reads the ERC-1967 slot rather than trusting the constructor argument: this is the only
@@ -806,6 +820,7 @@ async function main() {
   check("LPStakingVault.twapWindow", await vault.twapWindow(), twapWindow);
   check("LPStakingVault.maxTwapDeviationTicks", await vault.maxTwapDeviationTicks(), twapMaxDeviationTicks);
   check("LPStakingVault.guardian", await vault.guardian(), guardian);
+  check("LPStakingVault.operator", await vault.operator(), operator);
   check("LPStakingVault.owner", await vault.owner(), expectedProxyOwner);
   check("LPStakingVault.pendingOwner", await vault.pendingOwner(), expectedPendingOwner);
   // Reads the ERC-1967 slot rather than trusting the constructor argument: this is the only

@@ -1,8 +1,10 @@
 // Operator front end for the `LPTimelock` that owns the two UUPS proxies.
 //
-// Every owner-tier call on `LPStakingVault` and `RewardsDistributor` — an upgrade, the TWAP
-// calibration, the zapper wiring, the guardian, the ASSET leg, and the timelock's own delay —
-// has to go through this contract: schedule it, wait out `minDelay`, execute it. This script
+// Every owner-tier call on `LPStakingVault` and `RewardsDistributor` — an upgrade, the zapper
+// wiring, the guardian, the operator, the ASSET leg, and the timelock's own delay — has to go
+// through this contract: schedule it, wait out `minDelay`, execute it. The TWAP calibration is
+// NOT here: since the 2026-09-09 role split `setTwapParams` is operator-tier, sent directly by
+// the multisig with no delay. This script
 // is the one place that builds those three transactions, so the calldata a Safe signs and the
 // calldata the fork suites send are produced by the same code.
 //
@@ -12,11 +14,11 @@
 // `[node, script]`), so the subcommand and its operands arrive as environment variables —
 // the same convention every other script in this repo uses for its inputs:
 //
-//   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-//     TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+//   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+//     TIMELOCK_ARGS=0xNewGuardian npx hardhat run scripts/lp-timelock.js --network sepolia
 //
-//   TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setTwapParams \
-//     TIMELOCK_ARGS=600,400 npx hardhat run scripts/lp-timelock.js --network sepolia
+//   TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian \
+//     TIMELOCK_ARGS=0xNewGuardian npx hardhat run scripts/lp-timelock.js --network sepolia
 //
 //   TIMELOCK_ACTION=status  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js --network sepolia
 //   TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js --network sepolia
@@ -65,10 +67,11 @@ const ethers = require("ethers");
 
 /**
  * The owner tier, in full. Everything here is `onlyOwner` on a contract the timelock owns, so
- * everything here can ONLY be reached through a scheduled operation. The guardian tier — both
- * vault pauses, `rescuePosition`, `setSigner`, `setPaused`, `recoverExcessAsset` — is
- * deliberately absent: those are one-transaction incident calls the multisig sends directly,
- * and routing them through here would defeat the reason they exist.
+ * everything here can ONLY be reached through a scheduled operation. The guardian tier (both
+ * vault pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
+ * `rescuePosition`, `setSigner`, `recoverExcessAsset`, and those same pauses) are deliberately
+ * absent: those are one-transaction calls the hot key and the multisig send directly, and
+ * routing them through here would defeat the reason they exist.
  *
  * `kinds` is the set of registry entries the function is legal on, which is what turns a
  * mistyped target into an error rather than a transaction that reverts after the delay.
@@ -79,11 +82,6 @@ const OWNER_TIER = {
     kinds: ["LPStakingVault", "RewardsDistributor"],
     note: "the second half of the Ownable2Step handover; the timelock's first operation",
   },
-  setTwapParams: {
-    signature: "function setTwapParams(uint32 window, uint24 maxDeviationTicks)",
-    kinds: ["LPStakingVault"],
-    note: "recalibrates the circuit breaker; window 300..3600 s, ceiling 1..1823 ticks",
-  },
   setZapper: {
     signature: "function setZapper(address newZapper)",
     kinds: ["LPStakingVault"],
@@ -92,7 +90,12 @@ const OWNER_TIER = {
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
     kinds: ["LPStakingVault", "RewardsDistributor"],
-    note: "moves the undelayed fast path to another key",
+    note: "moves the undelayed pause tier to another hot key",
+  },
+  setOperator: {
+    signature: "function setOperator(address newOperator)",
+    kinds: ["LPStakingVault", "RewardsDistributor"],
+    note: "moves the undelayed routine-operations tier to another multisig",
   },
   setAssetClaimsEnabled: {
     signature: "function setAssetClaimsEnabled(bool enabled)",

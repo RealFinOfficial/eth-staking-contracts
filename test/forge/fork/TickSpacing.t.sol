@@ -194,49 +194,60 @@ contract TickSpacingTest is ForkHarness {
     // ──────────────────────── SEC-05 ───────────────────────────
 
     /**
-     * @dev FINDING SEC-05 (P-19/P-20): `stakeFor` rejects only `user == address(0)`. Crediting
-     *      the VAULT ITSELF produces a position that:
-     *        * `unstake` will not release, because the recorded staker is a contract with no
+     * @dev FINDING SEC-05 (P-19/P-20), FIXED: `stakeFor` used to reject only
+     *      `user == address(0)`, so crediting the VAULT ITSELF produced a position that
+     *        * `unstake` would not release, because the recorded staker is a contract with no
      *          call path that reaches `vault.unstake`, and
-     *        * `rescuePosition` will not release either, because it refuses any tokenId with
+     *        * `rescuePosition` would not release either, because it refuses any tokenId with
      *          a non-zero staker record.
-     *      Nothing on-chain can move it again. Asserted as the CURRENT behaviour; the fix
-     *      would be a `user != address(this) && user != zapper` check in `stakeFor`.
+     *      Nothing on-chain could have moved it again. `stakeFor` now rejects the credit
+     *      up-front with {LPStakingVault.SelfCredit}, before any record is written, so the
+     *      state that stranded the NFT is unreachable.
      */
-    function test_SEC05_StakeForTheVaultItselfStrandsThePositionForever() public {
-        uint256 tokenId = _stakeForThroughZapper(address(vault));
+    function test_SEC05_StakeForTheVaultItselfReverts() public {
+        uint256 tokenId = _mintPositionForZapper();
 
-        assertEq(vault.stakerOf(tokenId), address(vault), "the vault is recorded as its own staker");
-        assertEq(npm.ownerOf(tokenId), address(vault), "and custody is real");
+        vm.startPrank(address(zapper));
+        npm.approve(address(vault), tokenId);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.SelfCredit.selector, address(vault)));
+        vault.stakeFor(address(vault), tokenId);
+        vm.stopPrank();
 
-        // The guardian's recovery path is closed by the record it just wrote.
-        vm.prank(multisig);
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.PositionIsStaked.selector, tokenId, address(vault)));
-        vault.rescuePosition(tokenId);
-
-        // And nobody else is the staker.
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotStaker.selector, tokenId, alice, address(vault)));
-        vault.unstake(tokenId);
+        // No record, and custody never moved: the position is still the zapper's to hand back.
+        assertEq(vault.stakerOf(tokenId), address(0), "the rejected credit must leave no staker record");
+        assertEq(npm.ownerOf(tokenId), address(zapper), "and custody must never have been pulled");
     }
 
-    /// @dev FINDING SEC-05, second arm: the zapper is equally fatal as a credited staker —
-    ///      it exposes no function that calls `vault.unstake`.
-    function test_SEC05_StakeForTheZapperStrandsThePositionForever() public {
-        uint256 tokenId = _stakeForThroughZapper(address(zapper));
+    /// @dev FINDING SEC-05, second arm, FIXED: the zapper was equally fatal as a credited
+    ///      staker — it exposes no function that calls `vault.unstake` either — and the same
+    ///      guard rejects it.
+    function test_SEC05_StakeForTheZapperReverts() public {
+        uint256 tokenId = _mintPositionForZapper();
 
-        assertEq(vault.stakerOf(tokenId), address(zapper), "the zapper is recorded as the staker");
+        vm.startPrank(address(zapper));
+        npm.approve(address(vault), tokenId);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.SelfCredit.selector, address(zapper)));
+        vault.stakeFor(address(zapper), tokenId);
+        vm.stopPrank();
 
-        vm.prank(multisig);
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.PositionIsStaked.selector, tokenId, address(zapper)));
-        vault.rescuePosition(tokenId);
-
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotStaker.selector, tokenId, alice, address(zapper)));
-        vault.unstake(tokenId);
+        assertEq(vault.stakerOf(tokenId), address(0), "the rejected credit must leave no staker record");
+        assertEq(npm.ownerOf(tokenId), address(zapper), "and custody must never have been pulled");
     }
 
-    /// @dev The one address `stakeFor` does reject.
+    /// @dev The positive control for the two tests above: the guard names exactly the vault
+    ///      and the zapper, so an ordinary user is still credited through the same path.
+    function test_StakeFor_CreditsANormalUser() public {
+        uint256 tokenId = _stakeForThroughZapper(alice);
+
+        assertEq(vault.stakerOf(tokenId), alice, "an ordinary credit must still go through");
+        assertEq(npm.ownerOf(tokenId), address(vault), "and the vault must hold the position");
+
+        vm.prank(alice);
+        vault.unstake(tokenId);
+        assertEq(npm.ownerOf(tokenId), alice, "and the exit works, which is what the guard protects");
+    }
+
+    /// @dev The other address `stakeFor` rejects.
     function test_StakeFor_RejectsTheZeroUser() public {
         uint256 tokenId = _mintPositionForZapper();
 

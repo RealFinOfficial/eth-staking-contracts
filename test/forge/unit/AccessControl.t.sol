@@ -15,9 +15,21 @@ import {RejectingReceiver} from "../utils/attackers/Receivers.sol";
  *         the stack has TWO shapes of that claim. `TokenX` and `LPZapper` keep one-step
  *         `Ownable` with a live `renounceOwnership`, where a wrong address bricks every admin
  *         path permanently. The two proxies (`LPStakingVault`, `RewardsDistributor`) are
- *         `Ownable2Step` with `renounceOwnership` disabled and a second, undelayed `guardian`
- *         tier beside the owner. A claim of that shape is only worth what its assertions are
- *         worth.
+ *         `Ownable2Step` with `renounceOwnership` disabled and TWO further undelayed tiers
+ *         beside the owner. A claim of that shape is only worth what its assertions are worth.
+ *
+ *  The proxies' three tiers, as of the 2026-09-09 role split:
+ *
+ *    | tier               | vault                                    | distributor                     |
+ *    |--------------------|------------------------------------------|---------------------------------|
+ *    | owner (timelock)   | upgrade, setZapper, setGuardian, setOperator | upgrade, setAssetClaimsEnabled, setGuardian, setOperator |
+ *    | guardian (hot key) | setDepositsPaused, setRebalancePaused    | setPaused                       |
+ *    | operator (multisig)| setTwapParams, rescuePosition, both pauses | setSigner, recoverExcessAsset, setPaused |
+ *
+ *  Two rules follow from it and are asserted in both directions below: the three pause
+ *  switches take the guardian OR the operator and reject the owner; everything else on the
+ *  operator tier takes the operator alone, so nothing the hot guardian key can call moves
+ *  value or installs a key.
  *
  *  The matrix is stated per contract: what DIES with the owner, and — the half that matters
  *  to a staker — what SURVIVES. The design promise is that exits are unconditional, so a
@@ -197,15 +209,23 @@ contract AccessControlTest is LocalHarness {
     // ──────────────────────── Non-owner roles ──────────────────
 
     /// @dev The voucher signer is a signing key, not an admin. It holds nothing on-chain —
-    ///      neither the owner tier nor the guardian tier.
+    ///      not the owner tier, not the operator tier, not even the pause tier.
     function test_Roles_TheVoucherSignerHasNoAdminPowerAnywhere() public {
         vm.startPrank(voucherSigner);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, voucherSigner, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, voucherSigner, address(this)));
         distributor.setSigner(voucherSigner);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, voucherSigner, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, voucherSigner, address(this)));
+        distributor.recoverExcessAsset(1);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RewardsDistributor.NotGuardianOrOperator.selector, voucherSigner, address(this), address(this)
+            )
+        );
         distributor.setPaused(true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, voucherSigner));
         distributor.setAssetClaimsEnabled(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, voucherSigner));
+        distributor.setOperator(voucherSigner);
         vm.expectRevert(abi.encodeWithSelector(TokenX.NotMinter.selector, voucherSigner));
         tokenX.mint(voucherSigner, 1);
         vm.stopPrank();
@@ -221,17 +241,29 @@ contract AccessControlTest is LocalHarness {
         vm.stopPrank();
     }
 
-    /// @dev The zapper is a stakeFor right, not an admin right — in NEITHER tier.
+    /// @dev The zapper is a stakeFor right, not an admin right — in NONE of the three tiers.
     function test_Roles_TheZapperHasNoAdminPowerOverTheVault() public {
+        bytes memory pauseRejection = abi.encodeWithSelector(
+            LPStakingVault.NotGuardianOrOperator.selector, address(zapper), address(this), address(this)
+        );
+        bytes memory operatorRejection =
+            abi.encodeWithSelector(LPStakingVault.NotOperator.selector, address(zapper), address(this));
+
         vm.startPrank(address(zapper));
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(zapper), address(this)));
+        vm.expectRevert(pauseRejection);
         vault.setDepositsPaused(true);
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(zapper), address(this)));
+        vm.expectRevert(pauseRejection);
         vault.setRebalancePaused(true);
+        vm.expectRevert(operatorRejection);
+        vault.setTwapParams(600, 100);
+        vm.expectRevert(operatorRejection);
+        vault.rescuePosition(1);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
         vault.setZapper(address(zapper));
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
         vault.setGuardian(address(zapper));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(zapper)));
+        vault.setOperator(address(zapper));
         vm.stopPrank();
     }
 
@@ -249,9 +281,10 @@ contract AccessControlTest is LocalHarness {
 
     /**
      * @dev The vault cannot be renounced at all, so its matrix entry is not "what dies" but
-     *      "what a HANDOVER costs the old holder". Two tiers, measured separately: the old
-     *      owner loses three calls when ownership is accepted elsewhere, and the old guardian
-     *      loses three when the guardian is rotated.
+     *      "what a HANDOVER costs the old holder". Three tiers, measured separately: the old
+     *      owner loses three calls when ownership is accepted elsewhere, the old guardian
+     *      loses the two pause switches when the guardian is rotated, and the old operator
+     *      loses four when the operator is rotated.
      */
     function test_Renounce_VaultOwnerLosesThreeAdminCallsOnHandover() public {
         vault.transferOwnership(multisig);
@@ -259,24 +292,61 @@ contract AccessControlTest is LocalHarness {
         vault.acceptOwnership();
 
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setZapper, (address(1))));
-        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)));
         _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setGuardian, (carol)));
+        _expectUnauthorized(address(vault), abi.encodeCall(LPStakingVault.setOperator, (carol)));
 
-        // The guardian tier is a separate slot and is untouched by the ownership move.
+        // The other two tiers are separate slots and are untouched by the ownership move.
         vault.setDepositsPaused(true);
-        assertTrue(vault.depositsPaused(), "the guardian keeps its tier across an ownership handover");
+        assertTrue(vault.depositsPaused(), "the pause tier survives an ownership handover");
+        vault.setTwapParams(600, 100);
+        assertEq(vault.twapWindow(), 600, "the operator tier survives an ownership handover");
     }
 
-    function test_Renounce_VaultGuardianLosesThreeAdminCallsOnRotation() public {
-        vault.setGuardian(carol);
+    function test_Renounce_VaultGuardianLosesBothPauseSwitchesOnRotation() public {
+        // The harness collapses owner, guardian and operator onto this contract, so the loss
+        // is only visible on a proxy whose three roles are three addresses.
+        LPStakingVault twin = _threeTierVault();
 
-        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)), carol);
-        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), carol);
-        _expectNotGuardian(address(vault), abi.encodeCall(LPStakingVault.rescuePosition, (1)), carol);
+        vm.prank(multisig);
+        twin.setDepositsPaused(true);
+        assertTrue(twin.depositsPaused(), "precondition: the guardian holds the pause tier");
+
+        twin.setGuardian(carol);
+
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(LPStakingVault.setDepositsPaused, (false)), multisig, carol, operatorSafe
+        );
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), multisig, carol, operatorSafe
+        );
 
         // The owner tier is a separate slot and is untouched by the guardian move.
-        vault.setZapper(address(1));
-        assertEq(vault.zapper(), address(1), "the owner keeps its tier across a guardian rotation");
+        twin.setZapper(address(1));
+        assertEq(twin.zapper(), address(1), "the owner keeps its tier across a guardian rotation");
+    }
+
+    function test_Renounce_VaultOperatorLosesFourAdminCallsOnRotation() public {
+        LPStakingVault twin = _threeTierVault();
+
+        vm.prank(operatorSafe);
+        twin.setTwapParams(600, 100);
+        assertEq(twin.twapWindow(), 600, "precondition: the operator holds the calibration");
+
+        twin.setOperator(carol);
+
+        _expectNotOperator(address(twin), abi.encodeCall(LPStakingVault.setTwapParams, (900, 100)), operatorSafe, carol);
+        _expectNotOperator(address(twin), abi.encodeCall(LPStakingVault.rescuePosition, (1)), operatorSafe, carol);
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)), operatorSafe, multisig, carol
+        );
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), operatorSafe, multisig, carol
+        );
+
+        // The guardian tier is a separate slot and is untouched by the operator move.
+        vm.prank(multisig);
+        twin.setDepositsPaused(true);
+        assertTrue(twin.depositsPaused(), "the guardian keeps its tier across an operator rotation");
     }
 
     function test_Renounce_ZapperLosesThreeAdminCallsAndNothingElse() public {
@@ -289,33 +359,66 @@ contract AccessControlTest is LocalHarness {
 
     /**
      * @dev The distributor cannot be renounced at all, so the matrix entry is not "what dies"
-     *      but "what a HANDOVER costs the old holder". Two tiers, measured separately: the
-     *      old owner loses two calls when ownership is accepted elsewhere, and the old
-     *      guardian loses three when the guardian is rotated.
+     *      but "what a HANDOVER costs the old holder". Three tiers, measured separately: the
+     *      old owner loses three calls when ownership is accepted elsewhere, the old guardian
+     *      loses `setPaused` when the guardian is rotated, and the old operator loses three
+     *      when the operator is rotated.
      */
-    function test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover() public {
+    function test_Renounce_DistributorOwnerLosesThreeAdminCallsOnHandover() public {
         distributor.transferOwnership(multisig);
         vm.prank(multisig);
         distributor.acceptOwnership();
 
         _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setAssetClaimsEnabled, (true)));
         _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setGuardian, (carol)));
+        _expectUnauthorized(address(distributor), abi.encodeCall(RewardsDistributor.setOperator, (carol)));
 
-        // The guardian tier is a separate slot and is untouched by the ownership move.
+        // The other two tiers are separate slots and are untouched by the ownership move.
         distributor.setPaused(true);
-        assertTrue(distributor.paused(), "the guardian keeps its tier across an ownership handover");
+        assertTrue(distributor.paused(), "the pause tier survives an ownership handover");
+        distributor.setSigner(carol);
+        assertEq(distributor.signer(), carol, "the operator tier survives an ownership handover");
     }
 
-    function test_Renounce_DistributorGuardianLosesThreeAdminCallsOnRotation() public {
-        distributor.setGuardian(carol);
+    function test_Renounce_DistributorGuardianLosesThePauseSwitchOnRotation() public {
+        RewardsDistributor twin = _threeTierDistributor();
 
-        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.setSigner, (carol)), carol);
-        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.setPaused, (true)), carol);
-        _expectNotGuardian(address(distributor), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), carol);
+        vm.prank(multisig);
+        twin.setPaused(true);
+        assertTrue(twin.paused(), "precondition: the guardian holds the pause tier");
+
+        twin.setGuardian(carol);
+
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(RewardsDistributor.setPaused, (false)), multisig, carol, operatorSafe
+        );
 
         // The owner tier is a separate slot and is untouched by the guardian move.
-        distributor.setAssetClaimsEnabled(true);
-        assertTrue(distributor.assetClaimsEnabled(), "the owner keeps its tier across a guardian rotation");
+        twin.setAssetClaimsEnabled(true);
+        assertTrue(twin.assetClaimsEnabled(), "the owner keeps its tier across a guardian rotation");
+    }
+
+    function test_Renounce_DistributorOperatorLosesThreeAdminCallsOnRotation() public {
+        RewardsDistributor twin = _threeTierDistributor();
+
+        vm.prank(operatorSafe);
+        twin.setSigner(carol);
+        assertEq(twin.signer(), carol, "precondition: the operator holds the signer rotation");
+
+        twin.setOperator(carol);
+
+        _expectNotOperator(address(twin), abi.encodeCall(RewardsDistributor.setSigner, (bob)), operatorSafe, carol);
+        _expectNotOperator(
+            address(twin), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), operatorSafe, carol
+        );
+        _expectNotGuardianOrOperator(
+            address(twin), abi.encodeCall(RewardsDistributor.setPaused, (true)), operatorSafe, multisig, carol
+        );
+
+        // The guardian tier is a separate slot and is untouched by the operator move.
+        vm.prank(multisig);
+        twin.setPaused(true);
+        assertTrue(twin.paused(), "the guardian keeps its tier across an operator rotation");
     }
 
     function test_Renounce_TokenXLosesFourAdminCalls() public {
@@ -342,14 +445,16 @@ contract AccessControlTest is LocalHarness {
         tokenX.renounceOwnership();
         // Neither proxy can be renounced (see {test_Ownership_TheProxiesCannotBeRenounced}),
         // so the closest equivalent is a set of roles that will never act again: a black hole
-        // holding both tiers, having accepted the handover.
+        // holding all three tiers, having accepted the handover.
         RejectingReceiver blackHole = new RejectingReceiver();
         vault.setGuardian(address(blackHole));
+        vault.setOperator(address(blackHole));
         vault.transferOwnership(address(blackHole));
         vm.prank(address(blackHole));
         vault.acceptOwnership();
 
         distributor.setGuardian(address(blackHole));
+        distributor.setOperator(address(blackHole));
         distributor.transferOwnership(address(blackHole));
         vm.prank(address(blackHole));
         distributor.acceptOwnership();
@@ -404,13 +509,226 @@ contract AccessControlTest is LocalHarness {
         _expectUnauthorized(address(tokenX), abi.encodeCall(TokenX.setEpochCap, (EPOCH_ONE, AWARD * 2)));
     }
 
+    // ──────────────────────── The three-tier matrix ────────────
+
+    /**
+     * @dev Rule one of §1 of the change request, owner side: the timelock has no undelayed
+     *      switch at all. It is rejected on both pause switches AND on every operator-tier
+     *      call, on both proxies. Measured on twins whose three roles are three addresses.
+     */
+    function test_Tiers_TheOwnerIsRejectedOnEveryGuardianAndOperatorFunction() public {
+        LPStakingVault v = _threeTierVault();
+        RewardsDistributor d = _threeTierDistributor();
+
+        assertEq(v.owner(), address(this), "precondition: this contract owns the vault twin");
+        assertEq(d.owner(), address(this), "precondition: this contract owns the distributor twin");
+
+        _expectNotGuardianOrOperator(
+            address(v), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)), address(this), multisig, operatorSafe
+        );
+        _expectNotGuardianOrOperator(
+            address(v), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), address(this), multisig, operatorSafe
+        );
+        _expectNotOperator(
+            address(v), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)), address(this), operatorSafe
+        );
+        _expectNotOperator(address(v), abi.encodeCall(LPStakingVault.rescuePosition, (1)), address(this), operatorSafe);
+
+        _expectNotGuardianOrOperator(
+            address(d), abi.encodeCall(RewardsDistributor.setPaused, (true)), address(this), multisig, operatorSafe
+        );
+        _expectNotOperator(
+            address(d), abi.encodeCall(RewardsDistributor.setSigner, (carol)), address(this), operatorSafe
+        );
+        _expectNotOperator(
+            address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), address(this), operatorSafe
+        );
+    }
+
+    /**
+     * @dev Rule two of §1: the hot guardian key holds the pause switches and NOTHING else.
+     *      Nothing it can call moves value or installs a key, which is what makes it safe to
+     *      keep hot — so it is rejected on every operator-tier call and on every owner call.
+     */
+    function test_Tiers_TheGuardianHoldsThePausesAndNothingElse() public {
+        LPStakingVault v = _threeTierVault();
+        RewardsDistributor d = _threeTierDistributor();
+
+        // What it CAN do: all three pause switches, in one transaction each.
+        vm.prank(multisig);
+        v.setDepositsPaused(true);
+        vm.prank(multisig);
+        v.setRebalancePaused(true);
+        vm.prank(multisig);
+        d.setPaused(true);
+        assertTrue(v.depositsPaused() && v.rebalancePaused() && d.paused(), "the guardian must be able to pause");
+
+        // What it CANNOT do: anything on the operator tier...
+        _expectNotOperator(address(v), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)), multisig, operatorSafe);
+        _expectNotOperator(address(v), abi.encodeCall(LPStakingVault.rescuePosition, (1)), multisig, operatorSafe);
+        _expectNotOperator(address(d), abi.encodeCall(RewardsDistributor.setSigner, (carol)), multisig, operatorSafe);
+        _expectNotOperator(
+            address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), multisig, operatorSafe
+        );
+
+        // ...and nothing on the owner tier.
+        vm.startPrank(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        v.setZapper(address(1));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        v.setGuardian(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        v.setOperator(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        d.setAssetClaimsEnabled(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        d.setOperator(multisig);
+        vm.stopPrank();
+    }
+
+    /**
+     * @dev The operator holds its own calls AND the pause switches — the cold fallback for a
+     *      lost guardian key, so a pause is never stuck for the 48 h a guardian rotation
+     *      through the timelock takes. It still holds nothing on the owner tier.
+     */
+    function test_Tiers_TheOperatorHoldsItsOwnCallsAndThePauses() public {
+        LPStakingVault v = _threeTierVault();
+        RewardsDistributor d = _threeTierDistributor();
+
+        // The pause switches, from the operator rather than from the guardian.
+        vm.prank(operatorSafe);
+        v.setDepositsPaused(true);
+        vm.prank(operatorSafe);
+        v.setRebalancePaused(true);
+        vm.prank(operatorSafe);
+        d.setPaused(true);
+        assertTrue(v.depositsPaused() && v.rebalancePaused() && d.paused(), "the operator must be able to pause too");
+
+        // Its own tier: calibration, signer rotation, and the two recovery hatches.
+        vm.prank(operatorSafe);
+        v.setTwapParams(600, 100);
+        assertEq(v.twapWindow(), 600, "the operator must be able to recalibrate the guard");
+
+        uint256 stray = _createPosition(alice, TICK_LOWER, TICK_UPPER, LIQUIDITY);
+        vm.prank(alice);
+        npmMock.transferFrom(alice, address(v), stray);
+        vm.prank(operatorSafe);
+        v.rescuePosition(stray);
+        assertEq(npmMock.ownerOf(stray), operatorSafe, "the rescue must land on operator(), not on the guardian");
+
+        vm.prank(operatorSafe);
+        d.setSigner(carol);
+        assertEq(d.signer(), carol, "the operator must be able to rotate the signer");
+
+        asset.transfer(address(d), 1_000e18);
+        vm.prank(operatorSafe);
+        d.recoverExcessAsset(1_000e18);
+        assertEq(asset.balanceOf(operatorSafe), 1_000e18, "the recovery must land on operator()");
+
+        // And nothing on the owner tier.
+        vm.startPrank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        v.setZapper(address(1));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        v.setOperator(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        d.setAssetClaimsEnabled(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        d.setGuardian(operatorSafe);
+        vm.stopPrank();
+    }
+
+    /// @dev A stranger holds no tier at all, and each rejection names the tier it failed.
+    function test_Tiers_AStrangerIsRejectedEverywhere() public {
+        LPStakingVault v = _threeTierVault();
+        RewardsDistributor d = _threeTierDistributor();
+
+        _expectNotGuardianOrOperator(
+            address(v), abi.encodeCall(LPStakingVault.setDepositsPaused, (true)), stranger, multisig, operatorSafe
+        );
+        _expectNotGuardianOrOperator(
+            address(v), abi.encodeCall(LPStakingVault.setRebalancePaused, (true)), stranger, multisig, operatorSafe
+        );
+        _expectNotGuardianOrOperator(
+            address(d), abi.encodeCall(RewardsDistributor.setPaused, (true)), stranger, multisig, operatorSafe
+        );
+
+        _expectNotOperator(address(v), abi.encodeCall(LPStakingVault.setTwapParams, (600, 100)), stranger, operatorSafe);
+        _expectNotOperator(address(v), abi.encodeCall(LPStakingVault.rescuePosition, (1)), stranger, operatorSafe);
+        _expectNotOperator(address(d), abi.encodeCall(RewardsDistributor.setSigner, (stranger)), stranger, operatorSafe);
+        _expectNotOperator(
+            address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (1)), stranger, operatorSafe
+        );
+
+        vm.startPrank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        v.setGuardian(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        v.setOperator(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        d.setGuardian(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        d.setOperator(stranger);
+        vm.stopPrank();
+    }
+
     // ──────────────────────── Helpers ──────────────────────────
 
-    /// @dev Calls `data` on `target` from this contract and requires the guardian rejection,
-    ///      naming `expectedGuardian` as the address that would have been allowed. Both
-    ///      proxies declare `NotGuardian(address,address)`, so one selector serves both.
-    function _expectNotGuardian(address target, bytes memory data, address expectedGuardian) private {
-        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotGuardian.selector, address(this), expectedGuardian));
+    /// @dev A vault proxy whose owner (this contract), guardian ({multisig}) and operator
+    ///      ({operatorSafe}) are THREE different addresses, which the shared harness
+    ///      deliberately collapses into one.
+    function _threeTierVault() private returns (LPStakingVault) {
+        return _deployVaultProxy(
+            VaultProxyParams({
+                positionManager: address(npmMock),
+                pool: address(poolMock),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: address(routerMock),
+                owner: address(this),
+                guardian: multisig,
+                operator: operatorSafe,
+                zapper: address(0),
+                twapWindow: MIN_TWAP_WINDOW,
+                maxDeviationTicks: 500
+            })
+        );
+    }
+
+    /// @dev The distributor's twin of {_threeTierVault}.
+    function _threeTierDistributor() private returns (RewardsDistributor) {
+        return
+            _deployDistributorProxy(
+                address(tokenX), address(asset), address(this), multisig, operatorSafe, voucherSigner
+            );
+    }
+
+    /// @dev Calls `data` on `target` as `caller` and requires the operator rejection, naming
+    ///      `expectedOperator` as the address that would have been allowed. Both proxies
+    ///      declare `NotOperator(address,address)`, so one selector serves both.
+    function _expectNotOperator(address target, bytes memory data, address caller, address expectedOperator) private {
+        vm.prank(caller);
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, caller, expectedOperator));
+        (bool ok,) = target.call(data);
+        ok; // the cheatcode asserts; the boolean is only here to satisfy the compiler
+    }
+
+    /// @dev The same for a pause switch, which names BOTH addresses that would have been
+    ///      allowed. Both proxies declare `NotGuardianOrOperator(address,address,address)`.
+    function _expectNotGuardianOrOperator(
+        address target,
+        bytes memory data,
+        address caller,
+        address expectedGuardian,
+        address expectedOperator
+    ) private {
+        vm.prank(caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LPStakingVault.NotGuardianOrOperator.selector, caller, expectedGuardian, expectedOperator
+            )
+        );
         (bool ok,) = target.call(data);
         ok; // the cheatcode asserts; the boolean is only here to satisfy the compiler
     }

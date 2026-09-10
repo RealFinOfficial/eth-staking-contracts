@@ -244,18 +244,26 @@ abstract contract ForkHarness is BaseForge {
     /// @dev Deploy + wiring + ownership, in exactly the order of scripts/deploy-lp-staking.js.
     function _deployStack() private {
         tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
-        distributor = _deployDistributorProxy(address(tokenX), profile.asset, address(this), multisig, voucherSigner);
+        distributor =
+            _deployDistributorProxy(address(tokenX), profile.asset, address(this), multisig, multisig, voucherSigner);
+        // Owner = the deployer (this contract) so the wiring below can run; guardian AND
+        // operator = the multisig, which is what makes the fork tier's admin calls
+        // (`setDepositsPaused`, `rescuePosition`, `setSigner`) reach their real tier.
         vault = _deployVaultProxy(
-            profile.npm,
-            address(poolRef),
-            token0,
-            token1,
-            FEE,
-            profile.router,
-            address(this),
-            multisig,
-            profile.twapWindow,
-            profile.maxDevTicks
+            BaseForge.VaultProxyParams({
+                positionManager: profile.npm,
+                pool: address(poolRef),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: profile.router,
+                owner: address(this),
+                guardian: multisig,
+                operator: multisig,
+                zapper: address(0),
+                twapWindow: profile.twapWindow,
+                maxDeviationTicks: profile.maxDevTicks
+            })
         );
         zapper = new LPZapper(
             address(vault),
@@ -284,9 +292,9 @@ abstract contract ForkHarness is BaseForge {
         // Both proxies are Ownable2Step: the transfer only nominates, and the new owner has
         // to accept. Production makes that acceptance the timelock's first scheduled
         // operation; here the multisig accepts directly, which is the same two transactions
-        // with a shorter path. The multisig is also each proxy's guardian, so the fast-path
-        // calls the fork tests make (`setDepositsPaused`, `rescuePosition`, `setSigner`)
-        // reach the tier they are meant to.
+        // with a shorter path. The multisig is also each proxy's guardian and operator, so
+        // the undelayed calls the fork tests make (`setDepositsPaused`, `rescuePosition`,
+        // `setSigner`) reach the tier they are meant to.
         vault.transferOwnership(multisig);
         vm.prank(multisig);
         vault.acceptOwnership();

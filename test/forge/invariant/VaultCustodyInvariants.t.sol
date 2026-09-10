@@ -31,7 +31,7 @@ contract VaultCustodyHandler is Test {
     MockERC20Permit internal immutable asset;
     MockERC20Permit internal immutable usdc;
     address internal immutable router;
-    address internal immutable vaultGuardian;
+    address internal immutable vaultOperator;
     uint24 internal immutable fee;
 
     address[] internal actors;
@@ -69,7 +69,7 @@ contract VaultCustodyHandler is Test {
         MockERC20Permit _asset,
         MockERC20Permit _usdc,
         address _router,
-        address _vaultGuardian,
+        address _vaultOperator,
         uint24 _fee,
         address[] memory _actors
     ) {
@@ -78,7 +78,7 @@ contract VaultCustodyHandler is Test {
         asset = _asset;
         usdc = _usdc;
         router = _router;
-        vaultGuardian = _vaultGuardian;
+        vaultOperator = _vaultOperator;
         fee = _fee;
         actors = _actors;
     }
@@ -142,7 +142,7 @@ contract VaultCustodyHandler is Test {
         uint256 tokenId = staked[bound(idSeed, 0, staked.length - 1)];
         rescueAttempts++;
 
-        vm.prank(vaultGuardian);
+        vm.prank(vaultOperator);
         try vault.rescuePosition(tokenId) {
             rescueEverMovedAStakedPosition = true;
         } catch {}
@@ -225,11 +225,11 @@ contract VaultCustodyInvariantsTest is LocalHarness {
         actors[2] = carol;
         actors[3] = stranger;
 
-        // `rescuePosition` is guardian tier; the local harness gives the vault the same
-        // address for owner and guardian, so this reads it off the contract rather than
-        // assuming which of the two it is.
+        // `rescuePosition` is OPERATOR tier; the local harness gives the vault the same
+        // address for all three roles, so this reads it off the contract rather than
+        // assuming which of them it is.
         handler = new VaultCustodyHandler(
-            vault, npmMock, asset, usdcToken, address(routerMock), vault.guardian(), FEE, actors
+            vault, npmMock, asset, usdcToken, address(routerMock), vault.operator(), FEE, actors
         );
 
         // The position manager pays every `collect` out of its own balance, so it is funded

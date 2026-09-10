@@ -680,7 +680,9 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         await vaultImpl.getAddress(),
         Vault.interface.encodeFunctionData("initialize", [
           deployer.address, // owner, handed to the multisig below — `setZapper` runs first
-          multisig.address, // guardian — the fast path, never behind a timelock
+          multisig.address, // guardian — the hot pause key, never behind a timelock
+          multisig.address, // operator — collapsed onto the multisig in this tier, see below
+          ethers.ZeroAddress, // zapper — wired by `setZapper` below, while the deployer owns it
           TWAP_WINDOW,
           MAX_DEVIATION_TICKS,
         ])
@@ -711,6 +713,11 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       // Ownable2Step: the transfer nominates, and the multisig has to accept. `setZapper`
       // above is owner-only, so the handover can only happen after the wiring.
       //
+      // The guardian and the operator are the same multisig here for the same reason: this
+      // tier is about the contracts against the real pool, not about the role split, which
+      // {LPStakingVault.test.js} and test/forge/unit/AccessControl.t.sol measure with three
+      // distinct addresses.
+      //
       // This tier deliberately puts the MULTISIG in the owner seat rather than a timelock:
       // these tests are about the contracts against the real pool, and a delay between every
       // admin call would add nothing but blocks. The timelock path — schedule, delay, execute,
@@ -740,7 +747,8 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         await distributorImpl.getAddress(),
         DistributorFactory.interface.encodeFunctionData("initialize", [
           deployer.address, // owner, handed to the multisig below
-          multisig.address, // guardian — the fast path, never behind a timelock
+          multisig.address, // guardian — the hot pause key, never behind a timelock
+          multisig.address, // operator — collapsed onto the multisig in this tier, see below
           backOffice.address, // LP_SIGNER — the back office key, never the deployer
         ])
       );
@@ -1343,6 +1351,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await distributor.owner()).to.equal(multisig.address);
       expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
       expect(await distributor.guardian()).to.equal(multisig.address);
+      expect(await distributor.operator()).to.equal(multisig.address);
       expect(await distributor.paused()).to.equal(false);
       expect(await distributor.assetClaimsEnabled()).to.equal(false);
 
@@ -1350,6 +1359,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await vault.owner()).to.equal(multisig.address);
       expect(await vault.pendingOwner()).to.equal(ethers.ZeroAddress);
       expect(await vault.guardian()).to.equal(multisig.address);
+      expect(await vault.operator()).to.equal(multisig.address);
       expect(await vault.depositsPaused()).to.equal(false);
       expect(await vault.rebalancePaused()).to.equal(false);
 

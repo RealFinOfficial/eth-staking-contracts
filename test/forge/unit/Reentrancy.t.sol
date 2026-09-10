@@ -90,13 +90,13 @@ contract ReentrancyTest is LocalHarness {
      *      `stakers[newTokenId] = staker` write the vault owns an NFT with no record, and
      *      between that write and the `burn` it owns one whose record was just cleared.
      *      `rescuePosition` shares the guard precisely so it cannot run there. The router is
-     *      made the GUARDIAN — the tier `rescuePosition` now sits in — so that ONLY the guard
+     *      made the OPERATOR — the tier `rescuePosition` now sits in — so that ONLY the guard
      *      is left standing between it and the rescue. (It could not be made the owner: the
      *      proxy's handover is two-step and the router never calls `acceptOwnership`.)
      */
     function test_Reentrancy_RouterCannotReenterRescuePositionMidRebalance() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
-        v.setGuardian(address(r));
+        v.setOperator(address(r));
         r.configure(address(v), abi.encodeCall(LPStakingVault.rescuePosition, (tokenId)));
 
         vm.prank(alice);
@@ -175,8 +175,9 @@ contract ReentrancyTest is LocalHarness {
      */
     function test_Reentrancy_AnAssetPayoutHookCannotReenterClaimAsset() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
-        RewardsDistributor d =
-            _deployDistributorProxy(address(tokenX), address(hookAsset), address(this), address(this), voucherSigner);
+        RewardsDistributor d = _deployDistributorProxy(
+            address(tokenX), address(hookAsset), address(this), address(this), address(this), voucherSigner
+        );
         d.setAssetClaimsEnabled(true);
         hookAsset.mint(address(d), 1_000_000e18);
 
@@ -225,9 +226,9 @@ contract ReentrancyTest is LocalHarness {
     /**
      * @dev FINDING (behaviour, not a vulnerability), the distributor's twin of the sweep
      *      finding above: `recoverExcessAsset` also carries NO `nonReentrant`, and it now
-     *      pays the GUARDIAN rather than the owner. A hostile guardian holding a hook-bearing
+     *      pays the OPERATOR rather than the owner. A hostile operator holding a hook-bearing
      *      ASSET therefore really can reenter it and recover twice in one transaction.
-     *      It is `onlyGuardian` and the destination is the guardian itself, so this is the
+     *      It is `onlyOperator` and the destination is the operator itself, so this is the
      *      funding party acting against a balance it funded — recorded so the asymmetry with
      *      every other entry point is a known decision rather than an oversight.
      *
@@ -236,21 +237,21 @@ contract ReentrancyTest is LocalHarness {
      */
     function test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
-        HostileOwner hostileGuardian = new HostileOwner();
+        HostileOwner hostileOperator = new HostileOwner();
         RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(hookAsset), address(this), address(hostileGuardian), voucherSigner
+            address(tokenX), address(hookAsset), address(this), address(this), address(hostileOperator), voucherSigner
         );
 
         hookAsset.mint(address(d), 200e18);
-        hookAsset.setHooked(address(hostileGuardian), true);
-        hostileGuardian.configure(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+        hookAsset.setHooked(address(hostileOperator), true);
+        hostileOperator.configure(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
 
-        hostileGuardian.execute(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+        hostileOperator.execute(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
 
-        assertEq(hostileGuardian.attempts(), 2, "the payout push must have reached the hook, recursively");
-        assertTrue(hostileGuardian.lastReenterSucceeded(), "recoverExcessAsset really is reentrant: no guard stops it");
+        assertEq(hostileOperator.attempts(), 2, "the payout push must have reached the hook, recursively");
+        assertTrue(hostileOperator.lastReenterSucceeded(), "recoverExcessAsset really is reentrant: no guard stops it");
         assertEq(hookAsset.balanceOf(address(d)), 0, "both recoveries landed in one transaction");
-        assertEq(hookAsset.balanceOf(address(hostileGuardian)), 200e18, "and the guardian took the whole balance");
+        assertEq(hookAsset.balanceOf(address(hostileOperator)), 200e18, "and the operator took the whole balance");
     }
 
     // ──────────────────────── Guard scope ──────────────────────
@@ -259,11 +260,11 @@ contract ReentrancyTest is LocalHarness {
     ///      every argument above hold for any pairing, not just the ones tested.
     function test_Reentrancy_TheVaultsGuardIsSharedAcrossEveryEntryPoint() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
-        // The router needs both tiers to reach every payload below: `setZapper` is owner
-        // tier, `rescuePosition` is guardian tier. Ownership is two-step and the router never
-        // accepts, so the guardian is the one that gets handed over.
+        // The router needs two tiers to reach every payload below: `setZapper` is owner tier,
+        // `rescuePosition` is OPERATOR tier. Ownership is two-step and the router never
+        // accepts, so the operator is the one that gets handed over.
         v.setZapper(address(r));
-        v.setGuardian(address(r));
+        v.setOperator(address(r));
 
         bytes[5] memory payloads = [
             abi.encodeCall(LPStakingVault.unstake, (tokenId)),
@@ -313,16 +314,9 @@ contract ReentrancyTest is LocalHarness {
         usdcToken.transfer(address(r), 10_000_000e6);
 
         v = _deployVaultProxy(
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(r),
-            address(this),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            _vaultParams(
+                address(npmMock), address(poolMock), token0, token1, address(r), address(this), MIN_TWAP_WINDOW, 500
+            )
         );
         z = new LPZapper(
             address(v),
@@ -368,16 +362,16 @@ contract ReentrancyTest is LocalHarness {
         MockUniswapV3Pool p = new MockUniswapV3Pool(address(t0), address(t1), FEE);
         npm2 = new MockPositionManager();
         v = _deployVaultProxy(
-            address(npm2),
-            address(p),
-            address(t0),
-            address(t1),
-            FEE,
-            address(routerMock),
-            address(this),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            _vaultParams(
+                address(npm2),
+                address(p),
+                address(t0),
+                address(t1),
+                address(routerMock),
+                address(this),
+                MIN_TWAP_WINDOW,
+                500
+            )
         );
     }
 

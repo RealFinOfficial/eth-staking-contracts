@@ -48,7 +48,7 @@ contract DistributorBranchesTest is LocalHarness {
         RewardsDistributor impl = new RewardsDistributor(address(tokenX), address(asset));
 
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), multisig, voucherSigner);
+        impl.initialize(address(this), multisig, operatorSafe, voucherSigner);
     }
 
     // ──────────────────────── Initializer ──────────────────────
@@ -57,40 +57,84 @@ contract DistributorBranchesTest is LocalHarness {
         address impl = address(new RewardsDistributor(address(tokenX), address(asset)));
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new LPProxy(impl, abi.encodeCall(RewardsDistributor.initialize, (address(0), multisig, voucherSigner)));
+        new LPProxy(
+            impl, abi.encodeCall(RewardsDistributor.initialize, (address(0), multisig, operatorSafe, voucherSigner))
+        );
     }
 
     function test_Initialize_RejectsAZeroGuardian() public {
         address impl = address(new RewardsDistributor(address(tokenX), address(asset)));
 
         vm.expectRevert(RewardsDistributor.ZeroAddress.selector);
-        new LPProxy(impl, abi.encodeCall(RewardsDistributor.initialize, (address(this), address(0), voucherSigner)));
+        new LPProxy(
+            impl,
+            abi.encodeCall(RewardsDistributor.initialize, (address(this), address(0), operatorSafe, voucherSigner))
+        );
+    }
+
+    /// @dev The operator's zero check shares the `||` with the guardian's, so it needs its own
+    ///      arm: a zero operator would leave `setSigner` and `recoverExcessAsset` callable by
+    ///      nobody and the pause switch held by the guardian alone.
+    function test_Initialize_RejectsAZeroOperator() public {
+        address impl = address(new RewardsDistributor(address(tokenX), address(asset)));
+
+        vm.expectRevert(RewardsDistributor.ZeroAddress.selector);
+        new LPProxy(
+            impl, abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, address(0), voucherSigner))
+        );
     }
 
     function test_Initialize_RejectsAZeroSigner() public {
         address impl = address(new RewardsDistributor(address(tokenX), address(asset)));
 
         vm.expectRevert(RewardsDistributor.ZeroAddress.selector);
-        new LPProxy(impl, abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, address(0))));
+        new LPProxy(
+            impl, abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, operatorSafe, address(0)))
+        );
     }
 
-    /// @dev Both roles must be followable from logs alone, from block one.
-    function test_Initialize_AnnouncesTheInitialGuardianAndSigner() public {
+    /**
+     * @dev Every mutable field must be followable from logs alone, from block one — the two
+     *      flags whose initial value is `false` included, so an indexer never has to hardcode
+     *      a default. This asserts the FULL ordered list of §6 of the change request, and the
+     *      order is the one `initialize` writes it in.
+     */
+    function test_Initialize_AnnouncesEveryInitialFieldInOrder() public {
         RewardsDistributor impl = new RewardsDistributor(address(tokenX), address(asset));
 
         vm.expectEmit(false, false, false, true);
         emit RewardsDistributor.GuardianSet(address(0), multisig);
         vm.expectEmit(false, false, false, true);
+        emit RewardsDistributor.OperatorSet(address(0), operatorSafe);
+        vm.expectEmit(false, false, false, true);
         emit RewardsDistributor.SignerChanged(address(0), voucherSigner);
-        new LPProxy(
-            address(impl), abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, voucherSigner))
+        vm.expectEmit(false, false, false, true);
+        emit RewardsDistributor.Paused(false);
+        vm.expectEmit(false, false, false, true);
+        emit RewardsDistributor.AssetClaimsEnabled(false);
+        RewardsDistributor fresh = RewardsDistributor(
+            address(
+                new LPProxy(
+                    address(impl),
+                    abi.encodeCall(
+                        RewardsDistributor.initialize, (address(this), multisig, operatorSafe, voucherSigner)
+                    )
+                )
+            )
         );
+
+        // The events are the whole state, so the state has to agree with them.
+        assertEq(fresh.guardian(), multisig, "the guardian must be what GuardianSet announced");
+        assertEq(fresh.operator(), operatorSafe, "the operator must be what OperatorSet announced");
+        assertEq(fresh.signer(), voucherSigner, "the signer must be what SignerChanged announced");
+        assertFalse(fresh.paused(), "the pause flag must be what Paused announced");
+        assertFalse(fresh.assetClaimsEnabled(), "the ASSET leg must be what AssetClaimsEnabled announced");
     }
 
     /// @dev A proxy is initialised exactly once; a second call cannot re-seat the owner.
     function test_Initialize_CannotRunTwiceOnTheProxy() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        distributor.initialize(alice, alice, alice);
+        distributor.initialize(alice, alice, alice, alice);
     }
 
     function test_Initialize_StartsPausedOffAndWithAssetClaimsDisabled() public view {
@@ -98,6 +142,7 @@ contract DistributorBranchesTest is LocalHarness {
         assertFalse(distributor.assetClaimsEnabled(), "the ASSET leg must be off until the owner enables it");
         assertEq(distributor.signer(), voucherSigner, "the configured signer must be stored");
         assertEq(distributor.guardian(), address(this), "the configured guardian must be stored");
+        assertEq(distributor.operator(), address(this), "the configured operator must be stored");
     }
 
     /**
@@ -122,6 +167,11 @@ contract DistributorBranchesTest is LocalHarness {
         // `guardian` no longer fits in slot 0, so it opens slot 1.
         uint256 slot1 = uint256(vm.load(address(distributor), bytes32(uint256(expected) + 1)));
         assertEq(address(uint160(slot1)), address(this), "namespace slot 1 must be `guardian`");
+
+        // Slots 2 and 3 are the two mappings' bases; `operator` was APPENDED after them, so it
+        // opens slot 4 and nothing that was already there moved.
+        uint256 slot4 = uint256(vm.load(address(distributor), bytes32(uint256(expected) + 4)));
+        assertEq(address(uint160(slot4)), address(this), "namespace slot 4 must be `operator`");
     }
 
     // ──────────────────────── Gate ordering ────────────────────
@@ -372,23 +422,26 @@ contract DistributorBranchesTest is LocalHarness {
     }
 
     /**
-     * @dev The destination is `guardian()` and there is no argument to mistype — not
+     * @dev The destination is `operator()` and there is no argument to mistype — not
      *      `owner()`, which after the deploy script is a timelock contract with no way to
-     *      forward an ERC-20. Measured on a twin whose two roles are DIFFERENT addresses, so
-     *      the assertion cannot pass by them being the same account.
+     *      forward an ERC-20, and not `guardian()`, which is a hot key that must never move
+     *      value. Measured on a twin whose three roles are DIFFERENT addresses, so the
+     *      assertion cannot pass by two of them being the same account.
      */
-    function test_RecoverExcessAsset_AlwaysSendsToTheGuardian() public {
+    function test_RecoverExcessAsset_AlwaysSendsToTheOperator() public {
         RewardsDistributor twin = _guardedTwin();
         asset.transfer(address(twin), 1_000e18);
-        uint256 before = asset.balanceOf(multisig);
+        uint256 before = asset.balanceOf(operatorSafe);
+        uint256 guardianBefore = asset.balanceOf(multisig);
 
         vm.expectEmit(false, false, false, true, address(twin));
-        emit RewardsDistributor.ExcessAssetRecovered(multisig, 1_000e18, block.timestamp);
-        vm.prank(multisig);
+        emit RewardsDistributor.ExcessAssetRecovered(operatorSafe, 1_000e18, block.timestamp);
+        vm.prank(operatorSafe);
         twin.recoverExcessAsset(1_000e18);
 
-        assertEq(asset.balanceOf(multisig) - before, 1_000e18, "the recovery must land on guardian()");
-        assertEq(twin.owner(), address(this), "and the owner must have received nothing");
+        assertEq(asset.balanceOf(operatorSafe) - before, 1_000e18, "the recovery must land on operator()");
+        assertEq(asset.balanceOf(multisig), guardianBefore, "and the guardian must have received nothing");
+        assertEq(twin.owner(), address(this), "nor the owner");
     }
 
     function test_RecoverExcessAsset_RevertsBeyondTheHeldBalance() public {
@@ -398,50 +451,80 @@ contract DistributorBranchesTest is LocalHarness {
         distributor.recoverExcessAsset(held + 1);
     }
 
-    /// @dev A stranger holds neither tier. Both rejections name the caller.
+    /// @dev A stranger holds none of the three tiers. Every rejection names the caller, and
+    ///      each names the tier it failed.
     function test_AdminFunctions_RejectAStranger() public {
         vm.startPrank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         distributor.setAssetClaimsEnabled(true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         distributor.setGuardian(alice);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, alice, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        distributor.setOperator(alice);
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, alice, address(this)));
         distributor.setSigner(alice);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, alice, address(this)));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RewardsDistributor.NotGuardianOrOperator.selector, alice, address(this), address(this)
+            )
+        );
         distributor.setPaused(true);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, alice, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, alice, address(this)));
         distributor.recoverExcessAsset(1);
         vm.stopPrank();
     }
 
     /**
-     * @dev The split is real in BOTH directions, which is the whole point of two tiers: the
-     *      owner cannot reach the fast-path switches, and the guardian cannot reach the slow
-     *      ones. Measured on a twin whose owner and guardian are different addresses.
+     * @dev The split is real in EVERY direction, which is the whole point of three tiers: the
+     *      owner reaches neither undelayed tier, the guardian reaches only the pause switch,
+     *      and the operator reaches its own calls plus the pause. Measured on a twin whose
+     *      three roles are three different addresses.
      */
-    function test_AdminFunctions_TheTwoTiersDoNotOverlap() public {
+    function test_AdminFunctions_TheThreeTiersDoNotOverlap() public {
         RewardsDistributor twin = _guardedTwin();
 
-        // The OWNER is rejected on every guardian function.
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), multisig));
-        twin.setSigner(carol);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), multisig));
+        // The OWNER is rejected on the pause switch and on every operator function.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                RewardsDistributor.NotGuardianOrOperator.selector, address(this), multisig, operatorSafe
+            )
+        );
         twin.setPaused(true);
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), multisig));
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, address(this), operatorSafe));
+        twin.setSigner(carol);
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, address(this), operatorSafe));
         twin.recoverExcessAsset(1);
 
-        // ...and the GUARDIAN is rejected on every owner function.
+        // The GUARDIAN is rejected on every owner function AND on every operator function.
         vm.startPrank(multisig);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setAssetClaimsEnabled(true);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setGuardian(multisig);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        twin.setOperator(multisig);
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, multisig, operatorSafe));
+        twin.setSigner(carol);
         vm.stopPrank();
 
-        // Each tier does work from its own address.
+        // The OPERATOR is rejected on every owner function.
+        vm.startPrank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        twin.setAssetClaimsEnabled(true);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        twin.setGuardian(operatorSafe);
+        vm.stopPrank();
+
+        // Each tier does work from its own address, and the pause takes either of two.
         vm.prank(multisig);
         twin.setPaused(true);
         assertTrue(twin.paused(), "the guardian must be able to pause");
+        vm.prank(operatorSafe);
+        twin.setPaused(false);
+        assertFalse(twin.paused(), "and so must the operator, as the cold fallback");
+        vm.prank(operatorSafe);
+        twin.setSigner(carol);
+        assertEq(twin.signer(), carol, "the operator must be able to rotate the signer");
         twin.setAssetClaimsEnabled(true);
         assertTrue(twin.assetClaimsEnabled(), "the owner must be able to switch the ASSET leg on");
     }
@@ -455,9 +538,34 @@ contract DistributorBranchesTest is LocalHarness {
         distributor.setGuardian(carol);
         assertEq(distributor.guardian(), carol, "the new guardian must be stored");
 
-        // The old guardian loses the tier immediately.
-        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotGuardian.selector, address(this), carol));
+        // The old guardian loses the tier immediately. This contract is still the OPERATOR
+        // here, so the rejection has to be measured from an address that is neither.
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(RewardsDistributor.NotGuardianOrOperator.selector, alice, carol, address(this))
+        );
         distributor.setPaused(true);
+    }
+
+    /// @dev The operator rotates the same way the guardian does: owner tier, zero rejected,
+    ///      both sides announced, and the old holder loses the tier in the same transaction.
+    function test_SetOperator_RejectsZeroAndAnnouncesBothSides() public {
+        vm.expectRevert(RewardsDistributor.ZeroAddress.selector);
+        distributor.setOperator(address(0));
+
+        vm.expectEmit(false, false, false, true, address(distributor));
+        emit RewardsDistributor.OperatorSet(address(this), carol);
+        distributor.setOperator(carol);
+        assertEq(distributor.operator(), carol, "the new operator must be stored");
+
+        // The old operator loses the tier immediately.
+        vm.expectRevert(abi.encodeWithSelector(RewardsDistributor.NotOperator.selector, address(this), carol));
+        distributor.setSigner(bob);
+
+        // ...and the new one holds it.
+        vm.prank(carol);
+        distributor.setSigner(bob);
+        assertEq(distributor.signer(), bob, "the new operator must be able to rotate the signer");
     }
 
     /**
@@ -551,10 +659,14 @@ contract DistributorBranchesTest is LocalHarness {
 
     // ──────────────────────── Helpers ──────────────────────────
 
-    /// @dev A second proxy whose owner (this contract) and guardian (`multisig`) are
-    ///      DIFFERENT addresses, which the shared harness deliberately collapses into one.
+    /// @dev A second proxy whose owner (this contract), guardian (`multisig`) and operator
+    ///      (`operatorSafe`) are THREE DIFFERENT addresses, which the shared harness
+    ///      deliberately collapses into one.
     function _guardedTwin() private returns (RewardsDistributor) {
-        return _deployDistributorProxy(address(tokenX), address(asset), address(this), multisig, voucherSigner);
+        return
+            _deployDistributorProxy(
+                address(tokenX), address(asset), address(this), multisig, operatorSafe, voucherSigner
+            );
     }
 
     /// @dev Reads the ERC-1967 implementation slot straight off the proxy.

@@ -130,12 +130,38 @@ abstract contract BaseForge is Test {
         address asset_,
         address owner_,
         address guardian_,
+        address operator_,
         address signer_
     ) internal returns (RewardsDistributor) {
         RewardsDistributor impl = new RewardsDistributor(tokenX_, asset_);
-        LPProxy proxy =
-            new LPProxy(address(impl), abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, signer_)));
+        LPProxy proxy = new LPProxy(
+            address(impl), abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, operator_, signer_))
+        );
         return RewardsDistributor(address(proxy));
+    }
+
+    /**
+     * @notice Every argument {_deployVaultProxy} needs, in one struct.
+     * @dev A struct rather than twelve parameters, and that is a BUILD requirement — see the
+     *      stack-depth note on {_deployVaultImpl}. Ten parameters already sat one slot under
+     *      the EVM's sixteen with the preprocessor's rewrite on top; `operator` and `zapper`
+     *      would push it over. One calldata/memory pointer costs one slot no matter how many
+     *      fields it carries, so the site cannot drift back over the limit as the vault's
+     *      `initialize` grows.
+     */
+    struct VaultProxyParams {
+        address positionManager;
+        address pool;
+        address token0;
+        address token1;
+        uint24 fee;
+        address swapRouter;
+        address owner;
+        address guardian;
+        address operator;
+        address zapper;
+        uint32 twapWindow;
+        uint24 maxDeviationTicks;
     }
 
     /**
@@ -147,23 +173,48 @@ abstract contract BaseForge is Test {
      *      shape, and a bare implementation is a contract nobody deploys — its `initialize`
      *      is burnt, so it has no storage to test against at all.
      */
-    function _deployVaultProxy(
+    function _deployVaultProxy(VaultProxyParams memory p) internal returns (LPStakingVault) {
+        address impl = _deployVaultImpl(p.positionManager, p.pool, p.token0, p.token1, p.fee, p.swapRouter);
+        LPProxy proxy = new LPProxy(
+            impl,
+            abi.encodeCall(
+                LPStakingVault.initialize,
+                (p.owner, p.guardian, p.operator, p.zapper, p.twapWindow, p.maxDeviationTicks)
+            )
+        );
+        return LPStakingVault(address(proxy));
+    }
+
+    /**
+     * @dev The harness shape used almost everywhere below: one address holds owner, guardian
+     *      and operator, the zap path starts closed, and the caller sets the zapper afterwards
+     *      (it is the owner, so it can). The files where a tier split is the SUBJECT build the
+     *      struct themselves with three distinct addresses.
+     */
+    function _vaultParams(
         address positionManager_,
         address pool_,
         address token0_,
         address token1_,
-        uint24 fee_,
         address swapRouter_,
-        address owner_,
-        address guardian_,
+        address roles_,
         uint32 twapWindow_,
         uint24 maxDeviationTicks_
-    ) internal returns (LPStakingVault) {
-        address impl = _deployVaultImpl(positionManager_, pool_, token0_, token1_, fee_, swapRouter_);
-        LPProxy proxy = new LPProxy(
-            impl, abi.encodeCall(LPStakingVault.initialize, (owner_, guardian_, twapWindow_, maxDeviationTicks_))
-        );
-        return LPStakingVault(address(proxy));
+    ) internal pure returns (VaultProxyParams memory) {
+        return VaultProxyParams({
+            positionManager: positionManager_,
+            pool: pool_,
+            token0: token0_,
+            token1: token1_,
+            fee: FEE,
+            swapRouter: swapRouter_,
+            owner: roles_,
+            guardian: roles_,
+            operator: roles_,
+            zapper: address(0),
+            twapWindow: twapWindow_,
+            maxDeviationTicks: maxDeviationTicks_
+        });
     }
 
     /**
@@ -172,10 +223,12 @@ abstract contract BaseForge is Test {
      *      This split is a BUILD requirement, not a style choice. Foundry's test preprocessor
      *      ("dynamic test linking") rewrites every `new X(...)` in a test source into a
      *      generated `FoundryPpConstructorArgs(...)` call plus a create, and that rewrite costs
-     *      extra stack slots at the site. Inside {_deployVaultProxy} — ten parameters, a return
-     *      slot and two locals already live — the six constructor arguments then push
-     *      `positionManager_` one slot past the EVM's sixteen, and solc 0.8.28 fails the build
-     *      with "Stack too deep" (LValue.cpp) pointing at the rewritten line.
+     *      extra stack slots at the site. Inside {_deployVaultProxy} — when it still took its
+     *      ten arguments one by one, with a return slot and two locals already live — the six
+     *      constructor arguments then pushed `positionManager_` one slot past the EVM's
+     *      sixteen, and solc 0.8.28 failed the build with "Stack too deep" (LValue.cpp)
+     *      pointing at the rewritten line. {VaultProxyParams} is the other half of the fix:
+     *      the caller's twelve values now reach the frame as one pointer.
      *
      *      The preprocessor is off by default in forge 1.7.1 and on in the `stable` toolchain
      *      CI installs, so this broke CI only. Reproduce it locally with

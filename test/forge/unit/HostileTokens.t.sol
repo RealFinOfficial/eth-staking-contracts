@@ -104,8 +104,9 @@ contract HostileTokensTest is LocalHarness {
     /// @dev ...and this is the reward leg, where a silent failure would mark a claim paid.
     function test_ReturnsFalse_ClaimAssetRevertsAndLeavesTheLedgerUntouched() public {
         ReturnsFalseToken liar = new ReturnsFalseToken();
-        RewardsDistributor d =
-            _deployDistributorProxy(address(tokenX), address(liar), address(this), address(this), voucherSigner);
+        RewardsDistributor d = _deployDistributorProxy(
+            address(tokenX), address(liar), address(this), address(this), address(this), voucherSigner
+        );
         d.setAssetClaimsEnabled(true);
         liar.mint(address(d), 1_000_000e18);
 
@@ -119,8 +120,9 @@ contract HostileTokensTest is LocalHarness {
 
     function test_ReturnsFalse_RecoverExcessAssetRevertsThroughSafeErc20() public {
         ReturnsFalseToken liar = new ReturnsFalseToken();
-        RewardsDistributor d =
-            _deployDistributorProxy(address(tokenX), address(liar), address(this), address(this), voucherSigner);
+        RewardsDistributor d = _deployDistributorProxy(
+            address(tokenX), address(liar), address(this), address(this), address(this), voucherSigner
+        );
         liar.mint(address(d), 1_000e18);
 
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(liar)));
@@ -158,8 +160,9 @@ contract HostileTokensTest is LocalHarness {
     ///      the entitlement spent.
     function test_Blocklist_AFrozenClaimerCannotBePaidAndKeepsTheEntitlement() public {
         BlocklistUSDC blocked = new BlocklistUSDC();
-        RewardsDistributor d =
-            _deployDistributorProxy(address(tokenX), address(blocked), address(this), address(this), voucherSigner);
+        RewardsDistributor d = _deployDistributorProxy(
+            address(tokenX), address(blocked), address(this), address(this), address(this), voucherSigner
+        );
         d.setAssetClaimsEnabled(true);
         blocked.mint(address(d), 1_000_000e6);
         blocked.setBlocked(alice, true);
@@ -247,16 +250,16 @@ contract HostileTokensTest is LocalHarness {
         MockUniswapV3Pool p = new MockUniswapV3Pool(address(t0), address(t1), FEE);
         npm2 = new MockPositionManager();
         v = _deployVaultProxy(
-            address(npm2),
-            address(p),
-            address(t0),
-            address(t1),
-            FEE,
-            address(new MockSwapRouter()),
-            address(this),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            _vaultParams(
+                address(npm2),
+                address(p),
+                address(t0),
+                address(t1),
+                address(new MockSwapRouter()),
+                address(this),
+                MIN_TWAP_WINDOW,
+                500
+            )
         );
     }
 
@@ -287,16 +290,9 @@ contract HostileTokensTest is LocalHarness {
         MockUniswapV3Pool p = new MockUniswapV3Pool(t0, t1, FEE);
         npm2 = new MockPositionManager();
         v = _deployVaultProxy(
-            address(npm2),
-            address(p),
-            t0,
-            t1,
-            FEE,
-            address(new MockSwapRouter()),
-            address(this),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            _vaultParams(
+                address(npm2), address(p), t0, t1, address(new MockSwapRouter()), address(this), MIN_TWAP_WINDOW, 500
+            )
         );
     }
 

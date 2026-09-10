@@ -12,7 +12,8 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
  *
  *  Minting:
  *    - Exactly one address — `minter` — may call `mint`. The owner (a multisig)
- *      sets it with `setMinter`. That is the escape hatch: if the rewards
+ *      sets it with `setMinter`. On mainnet that multisig is the LP operator, not
+ *      the timelock proposer. That is the escape hatch: if the rewards
  *      distributor is found to be buggy, the owner deploys a fixed distributor
  *      and re-points `minter` at it. Setting `minter` to address(0) disables
  *      minting entirely.

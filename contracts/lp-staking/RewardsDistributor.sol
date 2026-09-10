@@ -56,19 +56,21 @@ import "./TokenX.sol";
  *    - The implementation's own initializers are disabled in its constructor, so the
  *      bare implementation can never be initialised and taken over.
  *
- *  TWO-TIER ADMIN. `owner` is a `TimelockController` (48 h minimum delay on mainnet);
- *  `guardian` is the multisig, directly, with no delay:
+ *  THREE-TIER ADMIN. `owner` is a `TimelockController` (48 h minimum delay on mainnet);
+ *  `guardian` is a hot incident key that can ONLY pause; `operator` is a multisig with no
+ *  delay for key rotation and treasury recovery:
  *
- *    | tier               | functions                                            |
- *    |--------------------|------------------------------------------------------|
- *    | owner (timelock)   | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian` |
- *    | guardian (multisig)| `setSigner`, `setPaused`, `recoverExcessAsset`       |
+ *    | tier               | functions                                                     |
+ *    |--------------------|---------------------------------------------------------------|
+ *    | owner (timelock)   | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` |
+ *    | guardian (hot key) | `setPaused`                                                   |
+ *    | operator (multisig)| `setSigner`, `recoverExcessAsset`, and `setPaused`            |
  *
- *  The split follows response time, not importance: a compromised signing key or a bug in
- *  the claim path has to be stoppable in minutes, while a code change is exactly the thing
- *  that should be visible on-chain for two days before it can run. Ownership is two-step
- *  (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled: renouncing would
- *  freeze `_authorizeUpgrade` forever, which is the opposite of why the proxy exists.
+ *  A leaked signing key is contained by the guardian's pause in one transaction; the
+ *  operator then rotates the signer from the multisig within hours. Nothing the guardian
+ *  can do moves value or installs a key, which is what makes a hot guardian acceptable.
+ *  The operator can pause as well, as the cold fallback for a lost guardian key.
+ *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled.
  */
 contract RewardsDistributor is
     Initializable,
@@ -84,7 +86,7 @@ contract RewardsDistributor is
     /// @dev An argument that must reference a live address was address(0).
     error ZeroAddress();
 
-    /// @dev Both claim functions are paused by the guardian.
+    /// @dev Both claim functions are paused by the guardian or the operator.
     error ClaimsPaused();
 
     /// @dev `claimAsset` was called while the ASSET leg is disabled.
@@ -102,8 +104,11 @@ contract RewardsDistributor is
     /// @dev A zero amount was passed where a positive one is required.
     error ZeroAmount();
 
-    /// @dev A guardian-tier function was called by someone else — the owner included.
-    error NotGuardian(address caller, address guardian);
+    /// @dev An operator-tier function was called by someone else — the owner and the guardian included.
+    error NotOperator(address caller, address operator);
+
+    /// @dev A pause switch was called by someone who is neither the guardian nor the operator.
+    error NotGuardianOrOperator(address caller, address guardian, address operator);
 
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
@@ -132,18 +137,21 @@ contract RewardsDistributor is
 
     /// @custom:storage-location erc7201:real.lp.storage.RewardsDistributor
     struct RewardsDistributorStorage {
-        /// Address whose EIP-712 signature authorizes a claim. Rotatable by the guardian.
+        /// Address whose EIP-712 signature authorizes a claim. Rotatable by the operator.
         address signer;
         /// While true, both claim functions revert. Nothing else is affected.
         bool paused;
         /// The ASSET leg is off until the owner turns it on.
         bool assetClaimsEnabled;
-        /// Fast-path incident responder (the multisig), set and rotated by the owner.
+        /// Fast-path incident responder (hot key), set and rotated by the owner. Pause only.
         address guardian;
         /// Lifetime TokenX already paid to a user.
         mapping(address => uint256) claimedTokenX;
         /// Lifetime ASSET already paid to a user.
         mapping(address => uint256) claimedAsset;
+        /// Routine-operations tier (multisig, no delay): signer rotation and ASSET recovery.
+        /// Appended after the mappings so the layout stays a strict extension of revision d852f44.
+        address operator;
     }
 
     /**
@@ -176,14 +184,28 @@ contract RewardsDistributor is
     event ExcessAssetRecovered(address to, uint256 amount, uint256 timestamp);
     event GuardianSet(address previousGuardian, address newGuardian);
 
+    /// @notice The routine-operations tier changed. Carries both sides for auditability.
+    event OperatorSet(address previousOperator, address newOperator);
+
     // ──────────────────────── Modifiers ────────────────────────
 
-    /// @dev The fast-path tier. Deliberately NOT satisfied by `owner()`: the timelock has no
-    ///      business holding an undelayed switch, and an operator who reaches for one of
-    ///      these must reach for the multisig.
-    modifier onlyGuardian() {
-        address guardian_ = _distributorStorage().guardian;
-        if (msg.sender != guardian_) revert NotGuardian(msg.sender, guardian_);
+    /// @dev The routine-operations tier. Not satisfied by `owner()` or by the guardian.
+    modifier onlyOperator() {
+        address operator_ = _distributorStorage().operator;
+        if (msg.sender != operator_) revert NotOperator(msg.sender, operator_);
+        _;
+    }
+
+    /// @dev The pause tier: the guardian (hot key, fast path) or the operator (multisig, the
+    ///      cold fallback for a lost guardian key). Deliberately NOT satisfied by `owner()`:
+    ///      the timelock has no business holding an undelayed switch.
+    modifier onlyGuardianOrOperator() {
+        RewardsDistributorStorage storage $ = _distributorStorage();
+        address guardian_ = $.guardian;
+        address operator_ = $.operator;
+        if (msg.sender != guardian_ && msg.sender != operator_) {
+            revert NotGuardianOrOperator(msg.sender, guardian_, operator_);
+        }
         _;
     }
 
@@ -209,24 +231,38 @@ contract RewardsDistributor is
     // ──────────────────────── Initializer ──────────────────────
 
     /// @notice One-time setup, executed on the PROXY in its own deployment transaction.
-    /// @param owner_    Owner: the `TimelockController` (§2.5). Upgrades and slow parameters.
-    /// @param guardian_ Guardian: the multisig, directly. Pauses, signer rotation, recovery.
+    /// @param owner_    Owner: the `TimelockController`. Upgrades, the ASSET-leg switch, roles.
+    /// @param guardian_ Guardian: the hot incident key. Pause only.
+    /// @param operator_ Operator: the multisig. Signer rotation and ASSET recovery, no delay.
     /// @param signer_   Initial voucher signer.
-    function initialize(address owner_, address guardian_, address signer_) external initializer {
+    /// @dev Every mutable field is written AND emitted here, including the two flags whose
+    ///      initial value is `false`, so the state is rebuildable from logs alone.
+    function initialize(address owner_, address guardian_, address operator_, address signer_)
+        external
+        initializer
+    {
         __Ownable_init(owner_);
         __Ownable2Step_init();
+        // No `__UUPSUpgradeable_init()`: OpenZeppelin v5.6 turned
+        // `contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol` into a re-export of the plain
+        // `UUPSUpgradeable`, which declares no initializer at all. There is nothing to seed —
+        // the module's only state is the ERC-1967 implementation slot, and the proxy's own
+        // constructor writes that before this function runs.
         __EIP712_init("RealLPRewards", "1");
 
-        if (guardian_ == address(0)) revert ZeroAddress();
+        if (guardian_ == address(0) || operator_ == address(0)) revert ZeroAddress();
         if (signer_ == address(0)) revert ZeroAddress();
 
         RewardsDistributorStorage storage $ = _distributorStorage();
         $.guardian = guardian_;
+        $.operator = operator_;
         $.signer = signer_;
 
-        // Mirrors the pools: both roles are followable from logs alone, from block one.
         emit GuardianSet(address(0), guardian_);
+        emit OperatorSet(address(0), operator_);
         emit SignerChanged(address(0), signer_);
+        emit Paused(false);
+        emit AssetClaimsEnabled(false);
     }
 
     // ──────────────────────── Views ────────────────────────────
@@ -246,9 +282,14 @@ contract RewardsDistributor is
         return _distributorStorage().assetClaimsEnabled;
     }
 
-    /// @notice The fast-path incident responder (the multisig).
+    /// @notice The fast-path incident responder (the hot key). Pause only.
     function guardian() external view returns (address) {
         return _distributorStorage().guardian;
+    }
+
+    /// @notice The routine-operations tier (the multisig).
+    function operator() external view returns (address) {
+        return _distributorStorage().operator;
     }
 
     /// @notice Lifetime TokenX already paid to `user`.
@@ -366,6 +407,17 @@ contract RewardsDistributor is
         $.guardian = _guardian;
     }
 
+    /// @notice Rotate the routine-operations tier.
+    /// @param _operator The new operator (the multisig).
+    /// @dev Owner tier: the operator cannot rotate itself, so losing the multisig is
+    ///      recoverable through the timelock rather than terminal.
+    function setOperator(address _operator) external onlyOwner {
+        if (_operator == address(0)) revert ZeroAddress();
+        RewardsDistributorStorage storage $ = _distributorStorage();
+        emit OperatorSet($.operator, _operator);
+        $.operator = _operator;
+    }
+
     /// @notice UUPS upgrade hook. The owner is the timelock, so every code change is
     ///         scheduled on-chain with full calldata and cannot execute before the delay.
     /// @dev Empty body on purpose: `onlyOwner` is the whole authorization.
@@ -386,46 +438,53 @@ contract RewardsDistributor is
         revert RenounceDisabled();
     }
 
-    // ──────────────────────── Guardian functions ───────────────
+    // ──────────────────────── Pause functions (guardian or operator) ────
+
+    /// @notice Pause or unpause both claim functions. Affects nothing else.
+    /// @param _paused True to block claims.
+    /// @dev Pause tier: the incident switch. The guardian is a hot key that can only pause,
+    ///      which is exactly why it can be hot; the operator multisig can throw it too, as
+    ///      the cold fallback for a lost guardian key.
+    function setPaused(bool _paused) external onlyGuardianOrOperator {
+        _distributorStorage().paused = _paused;
+        emit Paused(_paused);
+    }
+
+    // ──────────────────────── Operator functions ───────────────
 
     /// @notice Rotate the voucher signer. Invalidates every outstanding signature.
     ///         This is the key-compromise recovery path.
     /// @param _signer The new signer.
-    /// @dev Guardian tier: a leaked signing key mints against every unpaid entitlement,
-    ///      so this cannot wait out a timelock.
-    function setSigner(address _signer) external onlyGuardian {
+    /// @dev Operator tier: rotation must not wait out a timelock, but whoever holds this call
+    ///      can install a signer of their own and mint up to the epoch cap, so it belongs to a
+    ///      multisig, not to the hot guardian key. The guardian's `setPaused` is the
+    ///      one-transaction containment; this is the follow-up.
+    function setSigner(address _signer) external onlyOperator {
         if (_signer == address(0)) revert ZeroAddress();
         RewardsDistributorStorage storage $ = _distributorStorage();
         emit SignerChanged($.signer, _signer);
         $.signer = _signer;
     }
 
-    /// @notice Pause or unpause both claim functions. Affects nothing else.
-    /// @param _paused True to block claims.
-    /// @dev Guardian tier: the incident switch.
-    function setPaused(bool _paused) external onlyGuardian {
-        _distributorStorage().paused = _paused;
-        emit Paused(_paused);
-    }
-
-    /// @notice Move ASSET out of this contract to the guardian — overfunding, a retired
+    /// @notice Move ASSET out of this contract to the operator — overfunding, a retired
     ///         reward leg, or a wind-down. Operational cleanup only.
-    /// @param amount ASSET amount to transfer to the guardian.
+    /// @param amount ASSET amount to transfer to the operator.
     /// @dev Emits {ExcessAssetRecovered}, like every other admin action, so a treasury
     ///      withdrawal is followable from logs alone rather than only from ERC-20 transfers.
     ///
     ///      Trust assumption, stated rather than mitigated: there is no reserve for signed
-    ///      but unclaimed ASSET vouchers, so the guardian can withdraw the whole ASSET leg
+    ///      but unclaimed ASSET vouchers, so the operator can withdraw the whole ASSET leg
     ///      at any moment and leave outstanding `claimAsset` calls unpayable. That is
-    ///      accepted because the guardian — the multisig — is also the party that FUNDS this
+    ///      accepted because the operator — the multisig — is also the party that FUNDS this
     ///      balance: the ASSET leg is pre-funded treasury money, not user deposits, and no
-    ///      staker principal is reachable from here. It is a guardian call rather than an
-    ///      owner call for the same reason the pause is: draining a leg that is paying out
-    ///      wrong amounts is incident response. The TokenX leg is unaffected: it is minted
-    ///      on claim under the token's own per-epoch cap and has no balance to drain.
-    function recoverExcessAsset(uint256 amount) external onlyGuardian {
+    ///      staker principal is reachable from here. It is an operator call rather than an
+    ///      owner call because moving treasury money must not wait out a timelock — and not a
+    ///      guardian call, because the hot key must never move value. The TokenX leg is
+    ///      unaffected: it is minted on claim under the token's own per-epoch cap and has no
+    ///      balance to drain.
+    function recoverExcessAsset(uint256 amount) external onlyOperator {
         if (amount == 0) revert ZeroAmount();
-        address to = _distributorStorage().guardian;
+        address to = _distributorStorage().operator;
         asset.safeTransfer(to, amount);
         emit ExcessAssetRecovered(to, amount, block.timestamp);
     }

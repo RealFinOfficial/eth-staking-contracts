@@ -159,12 +159,22 @@ describe("LPZapper", function () {
     await usdc.transfer(routerAddr, USDC(1_000_000));
 
     // The vault is a UUPS proxy (spec 01 revision 2026-08-26); the zapper is not. `owner` is
-    // both its owner and its guardian here — this suite is about the zapper, and the two
-    // tiers are split where that is the subject ({LPStakingVault.test.js}).
+    // its owner, its guardian AND its operator here — this suite is about the zapper, and the
+    // three tiers are split where that is the subject ({LPStakingVault.test.js}). The zapper
+    // is wired with `setZapper` below rather than through `initialize`, because this fixture
+    // owns the proxy and can; the pre-computed path the deploy script uses is covered in
+    // {LPStakingVault.test.js}.
     const Vault = await ethers.getContractFactory("LPStakingVault");
     vault = await upgrades.deployProxy(
       Vault,
-      [owner.address, owner.address, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+      [
+        owner.address,
+        owner.address,
+        owner.address,
+        ethers.ZeroAddress,
+        TWAP_WINDOW,
+        MAX_DEVIATION_TICKS,
+      ],
       {
         kind: "uups",
         constructorArgs: [nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr],

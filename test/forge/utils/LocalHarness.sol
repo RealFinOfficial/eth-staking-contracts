@@ -28,14 +28,16 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
  *
  *  Harness-local divergences from production, all deliberate:
  *    * The test contract stays the owner of all four contracts, and is ALSO the `guardian`
- *      of the two proxies (the vault and the distributor). Production splits those two: the
- *      owner is a timelock and the guardian is the multisig. Collapsing them here keeps every
- *      admin call in this tier callable without a prank; the files where the split itself is
- *      the subject ({AccessControlTest}, {VaultBranchesTest}, {DistributorBranchesTest})
- *      build a second proxy with a distinct guardian through {BaseForge-_deployVaultProxy}
- *      and {BaseForge-_deployDistributorProxy}. Production also transfers ownership to
- *      LP_MULTISIG at the end of the deploy script; the access-control file re-creates that
- *      split explicitly where it is the subject.
+ *      AND the `operator` of the two proxies (the vault and the distributor). Production
+ *      splits all three: the owner is a timelock, the guardian is a hot pause-only key and
+ *      the operator is a multisig. Collapsing them here keeps every admin call in this tier
+ *      callable without a prank; the files where the split itself is the subject
+ *      ({AccessControlTest}, {VaultBranchesTest}, {DistributorBranchesTest}) build a second
+ *      proxy with three distinct roles through {BaseForge-_deployVaultProxy} and
+ *      {BaseForge-_deployDistributorProxy}, using {multisig} as the guardian and
+ *      {operatorSafe} as the operator. Production also transfers ownership to LP_MULTISIG at
+ *      the end of the deploy script; the access-control file re-creates that split explicitly
+ *      where it is the subject.
  *    * `twapWindow` is {MIN_TWAP_WINDOW} (300), which is also the production default, so a
  *      test that warps past a window warps five minutes.
  *    * The pool mock reports spot == TWAP == tick 0, so the guard passes unless a test
@@ -45,6 +47,10 @@ abstract contract LocalHarness is BaseForge {
     // ──────────────────────── Actors ───────────────────────────
 
     address internal multisig;
+    /// @dev The third admin address, so a three-tier test never has to reuse a user account.
+    ///      Named `operatorSafe` rather than `operator` because `operator` is a view function
+    ///      on the vault and on the distributor.
+    address internal operatorSafe;
     address internal voucherSigner;
     uint256 internal voucherSignerPk;
     address internal alice;
@@ -105,6 +111,7 @@ abstract contract LocalHarness is BaseForge {
 
     function _makeActors() private {
         multisig = makeAddr("multisig");
+        operatorSafe = makeAddr("operatorSafe");
         (voucherSigner, voucherSignerPk) = makeAddrAndKey("voucherSigner");
         (alice, alicePk) = makeAddrAndKey("alice");
         (bob, bobPk) = makeAddrAndKey("bob");
@@ -150,19 +157,24 @@ abstract contract LocalHarness is BaseForge {
 
     function _deployStack() private {
         tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
-        distributor =
-            _deployDistributorProxy(address(tokenX), address(asset), address(this), address(this), voucherSigner);
+        distributor = _deployDistributorProxy(
+            address(tokenX), address(asset), address(this), address(this), address(this), voucherSigner
+        );
+        // `zapper_` is left at zero and set by `setZapper` below: this harness IS the owner,
+        // so it can. The deploy script cannot — its proxies are born owned by the timelock —
+        // and pre-computes the address instead; {VaultBranchesTest} keeps one test on exactly
+        // that path.
         vault = _deployVaultProxy(
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(this),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            _vaultParams(
+                address(npmMock),
+                address(poolMock),
+                token0,
+                token1,
+                address(routerMock),
+                address(this),
+                MIN_TWAP_WINDOW,
+                500
+            )
         );
         zapper = new LPZapper(
             address(vault),

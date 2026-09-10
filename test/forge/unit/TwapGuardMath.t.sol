@@ -39,16 +39,16 @@ contract TwapGuardMathTest is BaseForge {
         // the real contract keeps the test honest about which code path is measured — as a
         // proxy, because that is the only shape in which the parameters are ever seeded.
         guard = _deployVaultProxy(
-            address(new MockPositionManager()),
-            address(pool),
-            t0,
-            t1,
-            FEE,
-            address(new MockSwapRouter()),
-            address(this),
-            address(this),
-            WINDOW,
-            CEILING
+            _vaultParams(
+                address(new MockPositionManager()),
+                address(pool),
+                t0,
+                t1,
+                address(new MockSwapRouter()),
+                address(this),
+                WINDOW,
+                CEILING
+            )
         );
     }
 
