@@ -43,6 +43,23 @@ contract ReentrantRouter {
         rateDen = den;
     }
 
+    /// @notice Completes an `Ownable2Step` handover to this router.
+    /// @dev The router is handed the OWNER role of the zapper in one test, so that only the
+    ///      reentrancy guard — not the access check — is left standing between it and
+    ///      `rescuePosition`. Since N-1 the zapper is `Ownable2Step`, so a nomination is not
+    ///      enough: somebody has to call `acceptOwnership()` FROM this address. This is that
+    ///      call and nothing more; it grants the router no power the test does not hand it
+    ///      explicitly with a `transferOwnership` first.
+    /// @param target_ The `Ownable2Step` contract whose nomination this router accepts.
+    function acceptOwnership(address target_) external {
+        (bool ok, bytes memory ret) = target_.call(abi.encodeWithSignature("acceptOwnership()"));
+        if (!ok) {
+            assembly {
+                revert(add(ret, 0x20), mload(ret))
+            }
+        }
+    }
+
     function exactInputSingle(ISwapRouter02.ExactInputSingleParams calldata params)
         external
         payable

@@ -46,14 +46,14 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-09-10 (three-role admin on both proxies) ───────────────
+// ── Pinned floors, re-measured 2026-09-10 (two-step ownership on TokenX and the zapper) ────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
 // | LPStakingVault.sol      |  97.60% (163/167)| 100.00% (28/28) |
-// | LPZapper.sol            |  98.67% (74/75)  | 100.00% (15/15) |
+// | LPZapper.sol            |  98.73% (78/79)  | 100.00% (17/17) |
 // | RewardsDistributor.sol  |  96.97% (96/99)  | 100.00% (15/15) |
-// | TokenX.sol              |  97.62% (41/42)  | 100.00% (7/7)   |
+// | TokenX.sol              |  97.87% (46/47)  | 100.00% (7/7)   |
 // | libraries/TwapGuard.sol |  97.67% (42/43)  | 100.00% (7/7)   |
 //
 // Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
@@ -74,15 +74,29 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //     split, `setOperator`, the operator zero check, the `operator()` getter and the two extra
 //     `initialize` emissions.
 //
+// The 2026-09-10 N-1/N-4/N-5/N-6/C-4 round moved the other two:
+//
+//   * The zapper's branches moved 15 -> 17. `_zapIn` gained the `vault.depositsPaused()`
+//     pre-check (one arm each way) and `_executeSwap` gained the `ZeroAmount` guard — whose
+//     reverting arm is unreachable from `zapIn`, which gates the swap leg behind
+//     `amountIn > 0`, and is measured through
+//     `contracts/lp-staking/mocks/LPZapperSwapHarness.sol`.
+//   * The zapper's lines moved 75 -> 79 for the same two guards plus the disabled
+//     `renounceOwnership` body (its `revert` and the function line).
+//   * TokenX's lines moved 42 -> 47: the two constructor emissions, the disabled
+//     `renounceOwnership` body, and the `Ownable2Step` inheritance the file now carries.
+//     Its branch count is unchanged at 7 — neither the constructor emissions nor an
+//     unconditional `revert` adds an arm.
+//
 // Earlier history: the vault's line denominator moved 109 -> 146 when the proxy split its state
 // into an ERC-7201 struct behind five getters and added `initialize`, `setGuardian`,
 // `_authorizeUpgrade` and the renounce override; TwapGuard moved 37 -> 43 for the same reason
 // (a namespace, its accessor and two getters), and the zapper 74 -> 75 for the
 // `_setTwapParams` call its constructor now makes itself.
 //
-// The nine uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
+// The ten uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
 // gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
-// run, so all nine are demonstrably executed; the inlined site simply loses its own mapping:
+// run, so all ten are demonstrably executed; the inlined site simply loses its own mapping:
 //
 //   * `contracts/lp-staking/LPStakingVault.sol:155`     `$.slot := LP_STAKING_VAULT_STORAGE`
 //     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
@@ -92,11 +106,11 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //   * `contracts/lp-staking/LPStakingVault.sol:335`     `__Ownable2Step_init();` — an empty OZ
 //     initializer, kept because the upgrades plugin validates the parent-initializer chain.
 //   * `contracts/lp-staking/LPStakingVault.sol:841`     `_checkTwapDeviation();`
-//   * `contracts/lp-staking/LPZapper.sol:396`           `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPZapper.sol:442`           `_checkTwapDeviation();`
 //   * `contracts/lp-staking/libraries/TwapGuard.sol:127` `$.slot := TWAP_GUARD_STORAGE`
 //     — read by `twapWindow()` on both inheritors;
 //     `test_Storage_TheTwapGuardHasItsOwnPinnedNamespace` reads the slot directly.
-//   * `contracts/lp-staking/TokenX.sol:156`             `_rollPendingEpoch();`
+//   * `contracts/lp-staking/TokenX.sol:170`             `_rollPendingEpoch();`
 //   * `contracts/lp-staking/RewardsDistributor.sol:168` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
 //   * `contracts/lp-staking/RewardsDistributor.sol:228` `_disableInitializers();`
 //   * `contracts/lp-staking/RewardsDistributor.sol:245` `__Ownable2Step_init();`
@@ -109,15 +123,15 @@ export const PER_FILE_FLOORS = {
     branches: {found: 28, minHit: 28},
   },
   "contracts/lp-staking/LPZapper.sol": {
-    lines: {found: 75, minHit: 74},
-    branches: {found: 15, minHit: 15},
+    lines: {found: 79, minHit: 78},
+    branches: {found: 17, minHit: 17},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
     lines: {found: 99, minHit: 96},
     branches: {found: 15, minHit: 15},
   },
   "contracts/lp-staking/TokenX.sol": {
-    lines: {found: 42, minHit: 41},
+    lines: {found: 47, minHit: 46},
     branches: {found: 7, minHit: 7},
   },
   "contracts/lp-staking/libraries/TwapGuard.sol": {

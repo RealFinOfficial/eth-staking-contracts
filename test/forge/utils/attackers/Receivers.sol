@@ -93,13 +93,17 @@ contract ReentrantReceiver is IERC721Receiver, ITokenHook {
 
 /// @dev An owner that reenters the contract it owns from inside a push it receives. Models a
 ///      compromised or simply "clever" multisig. Authority: it really is the owner, because
-///      the finding under test is what an owner can do to itself — see the renounceOwnership
-///      degradation matrix.
+///      the question under test is what an owner can do to itself. Since N-1 every contract in
+///      the stack is `Ownable2Step`, so becoming the owner takes two calls — the test
+///      nominates, and this contract completes the handshake through its own `execute`.
 contract HostileOwner is ITokenHook, IERC721Receiver {
     address public target;
     bytes public payload;
     uint256 public attempts;
     bool public lastReenterSucceeded;
+    /// @dev The rejection bytes of the last reentrant call, so a test can assert WHICH error
+    ///      stopped it — the reentrancy guard's own, rather than merely "something failed".
+    bytes public lastReturnData;
 
     function configure(address target_, bytes calldata payload_) external {
         target = target_;
@@ -119,8 +123,9 @@ contract HostileOwner is ITokenHook, IERC721Receiver {
     function tokensReceived(address, address, uint256) external override {
         if (target == address(0) || payload.length == 0) return;
         attempts++;
-        (bool ok,) = target.call(payload);
+        (bool ok, bytes memory ret) = target.call(payload);
         lastReenterSucceeded = ok;
+        lastReturnData = ret;
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external pure override returns (bytes4) {

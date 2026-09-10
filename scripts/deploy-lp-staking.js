@@ -35,7 +35,10 @@ const timelockOps = require("./lp-timelock");
 //          the one window in the whole runbook where it matters that it stays safe.
 //
 // LP_GUARDIAN holds the undelayed fast path on both proxies throughout. TokenX and LPZapper
-// are plain `Ownable` and go straight to the multisig in step 4.
+// are `Ownable2Step` too (N-1), so step 4 only NOMINATES the multisig on them as well: the
+// deployer stays their owner until the multisig sends `acceptOwnership()` — two plain
+// transactions, no timelock. When the multisig IS the deployer the nomination is skipped
+// outright, because the contract is already owned by the address it would be handed to.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -643,16 +646,36 @@ async function main() {
   // ──────────────────────── ownership ────────────────────────
 
   console.log("\nTransferring ownership...");
-  await pools.send("TokenX -> multisig", deployer, (o) => tokenX.transferOwnership(multisig, o));
-  // Both proxies are Ownable2Step, so these two transactions only NOMINATE. The acceptance is
-  // the timelock's own first operation — see the bootstrap below.
+  // All four contracts are Ownable2Step, so every one of these transactions only NOMINATES.
+  // The proxies' acceptance is the timelock's own first operation (see the bootstrap below);
+  // TokenX's and the zapper's is two plain transactions from the multisig.
+  const handsOverPlainContracts = multisig.toLowerCase() !== deployer.address.toLowerCase();
+  if (handsOverPlainContracts) {
+    await pools.send("TokenX -> multisig (nomination)", deployer, (o) =>
+      tokenX.transferOwnership(multisig, o)
+    );
+  } else {
+    console.log("TokenX -> multisig: skipped, the multisig IS the deployer and already owns it");
+  }
   await pools.send("RewardsDistributor -> timelock (nomination)", deployer, (o) =>
     distributor.transferOwnership(timelockDeploy.address, o)
   );
   await pools.send("LPStakingVault -> timelock (nomination)", deployer, (o) =>
     vault.transferOwnership(timelockDeploy.address, o)
   );
-  await pools.send("LPZapper -> multisig", deployer, (o) => zapper.transferOwnership(multisig, o));
+  if (handsOverPlainContracts) {
+    await pools.send("LPZapper -> multisig (nomination)", deployer, (o) =>
+      zapper.transferOwnership(multisig, o)
+    );
+    console.log(
+      `\nTwo plain transactions for the multisig (${multisig}), no timelock involved:\n` +
+        `  TokenX.acceptOwnership()    -> ${tokenXDeploy.address}  payload 0x79ba5097\n` +
+        `  LPZapper.acceptOwnership()  -> ${zapperDeploy.address}  payload 0x79ba5097\n` +
+        "Until they land, the DEPLOYER still owns both (pendingOwner = the multisig)."
+    );
+  } else {
+    console.log("LPZapper -> multisig: skipped, the multisig IS the deployer and already owns it");
+  }
 
   // Now that the owner is known, the registry records it beside the address it belongs to.
   pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, {
@@ -768,7 +791,13 @@ async function main() {
   check("TokenX.symbol", await tokenX.symbol(), tokenXSymbol);
   check("TokenX.decimals", await tokenX.decimals(), TOKENX_DECIMALS);
   check("TokenX.minter", await tokenX.minter(), distributorDeploy.address);
-  check("TokenX.owner", await tokenX.owner(), multisig);
+  // Ownable2Step (N-1): a nomination the multisig has not accepted yet leaves the DEPLOYER
+  // the owner. When the multisig is the deployer nothing was nominated at all.
+  const [expectedPlainOwner, expectedPlainPendingOwner] = handsOverPlainContracts
+    ? [deployer.address, multisig]
+    : [multisig, hre.ethers.ZeroAddress];
+  check("TokenX.owner", await tokenX.owner(), expectedPlainOwner);
+  check("TokenX.pendingOwner", await tokenX.pendingOwner(), expectedPlainPendingOwner);
   check("TokenX.totalSupply", await tokenX.totalSupply(), 0);
   if (epochId) {
     check("TokenX.currentEpochId", await tokenX.currentEpochId(), epochId);
@@ -848,7 +877,8 @@ async function main() {
   check("LPZapper.usdcIsToken0", await zapper.usdcIsToken0(), usdc === token0);
   check("LPZapper.twapWindow", await zapper.twapWindow(), twapWindow);
   check("LPZapper.maxTwapDeviationTicks", await zapper.maxTwapDeviationTicks(), twapMaxDeviationTicks);
-  check("LPZapper.owner", await zapper.owner(), multisig);
+  check("LPZapper.owner", await zapper.owner(), expectedPlainOwner);
+  check("LPZapper.pendingOwner", await zapper.pendingOwner(), expectedPlainPendingOwner);
 
   check("LPTimelock.getMinDelay", await timelock.getMinDelay(), timelockMinDelay);
   const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();

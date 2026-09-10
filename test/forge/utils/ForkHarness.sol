@@ -285,14 +285,20 @@ abstract contract ForkHarness is BaseForge {
         vault.setZapper(address(zapper));
         tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP);
 
-        // Ownership to the multisig, as the script does before the oracle warm-up.
+        // Ownership to the multisig, as the script does before the oracle warm-up. Since N-1
+        // all four contracts are Ownable2Step, so each transfer is only a NOMINATION and the
+        // multisig has to accept it; on the two plain contracts the deploy script leaves
+        // exactly this state behind for the operator Safe to complete.
         tokenX.transferOwnership(multisig);
         zapper.transferOwnership(multisig);
+        vm.startPrank(multisig);
+        tokenX.acceptOwnership();
+        zapper.acceptOwnership();
+        vm.stopPrank();
 
-        // Both proxies are Ownable2Step: the transfer only nominates, and the new owner has
-        // to accept. Production makes that acceptance the timelock's first scheduled
-        // operation; here the multisig accepts directly, which is the same two transactions
-        // with a shorter path. The multisig is also each proxy's guardian and operator, so
+        // The two proxies take the same two steps. Production makes their acceptance the
+        // timelock's first scheduled operation; here the multisig accepts directly, which is
+        // the same two transactions with a shorter path. The multisig is also each proxy's guardian and operator, so
         // the undelayed calls the fork tests make (`setDepositsPaused`, `rescuePosition`,
         // `setSigner`) reach the tier they are meant to.
         vault.transferOwnership(multisig);

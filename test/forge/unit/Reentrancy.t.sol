@@ -91,8 +91,8 @@ contract ReentrancyTest is LocalHarness {
      *      between that write and the `burn` it owns one whose record was just cleared.
      *      `rescuePosition` shares the guard precisely so it cannot run there. The router is
      *      made the OPERATOR — the tier `rescuePosition` now sits in — so that ONLY the guard
-     *      is left standing between it and the rescue. (It could not be made the owner: the
-     *      proxy's handover is two-step and the router never calls `acceptOwnership`.)
+     *      is left standing between it and the rescue. The owner tier would not do: on the
+     *      vault the owner is rejected by `onlyOperator` before the guard is ever reached.
      */
     function test_Reentrancy_RouterCannotReenterRescuePositionMidRebalance() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
@@ -122,10 +122,15 @@ contract ReentrancyTest is LocalHarness {
     }
 
     /// @dev Same argument as the vault's: from the `mint` until `vault.stakeFor`, the zapper
-    ///      legitimately owns an unrecorded NFT. `rescuePosition` shares the guard.
+    ///      legitimately owns an unrecorded NFT. `rescuePosition` shares the guard. The router
+    ///      is made the zapper's OWNER, which since N-1 is a two-step handover: the test
+    ///      nominates and the router accepts, so that only the guard — not the access check —
+    ///      is left standing between it and the rescue.
     function test_Reentrancy_RouterCannotReenterZapperRescuePositionMidZap() public {
         (, LPZapper z, ReentrantRouter r) = _reentrantStack();
         z.transferOwnership(address(r));
+        r.acceptOwnership(address(z));
+        assertEq(z.owner(), address(r), "precondition: the router really is the zapper's owner");
         r.configure(address(z), abi.encodeCall(LPZapper.rescuePosition, (1)));
 
         vm.startPrank(alice);
@@ -196,17 +201,22 @@ contract ReentrancyTest is LocalHarness {
     }
 
     /**
-     * @dev FINDING (behaviour, not a vulnerability): `LPZapper.sweep` is the one external
-     *      function in the stack with NO `nonReentrant`. A hostile owner sweeping a
-     *      hook-bearing token really can reenter it and sweep again in the same transaction.
-     *      It is `onlyOwner`, so this is the owner acting against itself with tokens it may
-     *      already move freely — recorded so the asymmetry with every other entry point is a
-     *      known decision rather than an oversight.
+     * @dev `LPZapper.sweep` carries `nonReentrant` since C-4, and this is what that claim is
+     *      worth: a hostile owner sweeping a hook-bearing token is called back mid-transfer,
+     *      tries to sweep the rest in the same transaction, and the guard rejects the second
+     *      call with its own error. The guard closes an asymmetry rather than a hole — it is
+     *      `onlyOwner`, and the same owner may take the whole balance in two transactions —
+     *      but the asymmetry is now measured instead of argued about.
+     *
+     *      The attacker has to complete the two-step handover (N-1) before it holds the
+     *      owner tier at all, which is itself part of what this test states.
      */
-    function test_Reentrancy_ZapperSweepIsUnguardedAndReallyDoesReenter() public {
+    function test_Reentrancy_ZapperSweepIsGuarded() public {
         HookToken stray = new HookToken("Stray", "STR", 18);
         HostileOwner hostile = new HostileOwner();
         zapper.transferOwnership(address(hostile));
+        hostile.execute(address(zapper), abi.encodeWithSignature("acceptOwnership()"));
+        assertEq(zapper.owner(), address(hostile), "precondition: the attacker really is the owner");
 
         stray.mint(address(zapper), 200e18);
         stray.setHooked(address(hostile), true);
@@ -214,13 +224,13 @@ contract ReentrancyTest is LocalHarness {
 
         hostile.execute(address(zapper), abi.encodeCall(LPZapper.sweep, (address(stray), 100e18, address(hostile))));
 
-        // Two nested attempts, not one: the reentrant sweep pushes again, which fires the
-        // hook again. The third attempt is what finally fails, and it fails on the BALANCE —
-        // never on a guard.
-        assertEq(hostile.attempts(), 2, "the sweep's push must have reached the hook, recursively");
-        assertTrue(hostile.lastReenterSucceeded(), "sweep really is reentrant: no guard stops it");
-        assertEq(stray.balanceOf(address(zapper)), 0, "both sweeps landed, draining the zapper in one transaction");
-        assertEq(stray.balanceOf(address(hostile)), 200e18, "and the owner took the whole balance");
+        // One attempt, not two: the first sweep's push fires the hook, the hook's reentrant
+        // sweep is rejected outright, and there is no second push to fire it again.
+        assertEq(hostile.attempts(), 1, "the sweep's push must have reached the hook");
+        assertFalse(hostile.lastReenterSucceeded(), "the reentrant sweep must be rejected");
+        assertEq(hostile.lastReturnData(), guardRejection, "and the rejection must be the guard's own");
+        assertEq(stray.balanceOf(address(zapper)), 100e18, "only the first sweep landed");
+        assertEq(stray.balanceOf(address(hostile)), 100e18, "so the owner took one sweep's worth, not the balance");
     }
 
     /**
@@ -232,8 +242,9 @@ contract ReentrancyTest is LocalHarness {
      *      funding party acting against a balance it funded — recorded so the asymmetry with
      *      every other entry point is a known decision rather than an oversight.
      *
-     *      (A hostile OWNER is no longer expressible on this contract: ownership is two-step,
-     *      so a contract that never calls `acceptOwnership` never becomes the owner.)
+     *      The OPERATOR is the tier that matters here, not the owner: `recoverExcessAsset` is
+     *      `onlyOperator`, and the operator seat is set outright by `initialize` with no
+     *      handshake, so the attacker holds it from the proxy's first block.
      */
     function test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
@@ -261,8 +272,9 @@ contract ReentrancyTest is LocalHarness {
     function test_Reentrancy_TheVaultsGuardIsSharedAcrossEveryEntryPoint() public {
         (LPStakingVault v, ReentrantRouter r, uint256 tokenId) = _reentrantVaultWithStake();
         // The router needs two tiers to reach every payload below: `setZapper` is owner tier,
-        // `rescuePosition` is OPERATOR tier. Ownership is two-step and the router never
-        // accepts, so the operator is the one that gets handed over.
+        // `rescuePosition` is OPERATOR tier. `setZapper` is called here by the standing owner
+        // on the router's behalf, and the operator seat is handed over outright — the only
+        // tier `rescuePosition` answers to.
         v.setZapper(address(r));
         v.setOperator(address(r));
 

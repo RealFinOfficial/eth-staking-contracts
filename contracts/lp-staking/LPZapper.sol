@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -34,6 +34,7 @@ struct PermitData {
 ///      never has to import the core contract.
 interface ILPStakingVault {
     function stakeFor(address user, uint256 tokenId) external;
+    function depositsPaused() external view returns (bool);
 }
 
 /**
@@ -49,14 +50,22 @@ interface ILPStakingVault {
  *
  *  The vault must whitelist this address via `setZapper` before zapping works.
  *
- *  There is no pause switch here, and that is deliberate: every zap ends in
- *  `vault.stakeFor`, so `LPStakingVault.setDepositsPaused(true)` already reverts the whole
- *  `zapIn` with `DepositsArePaused`, and `setZapper(address(0))` takes the path out
- *  altogether. A flag of its own would only be a second thing to get wrong.
+ *  Ownership is two-step (`Ownable2Step`): a mistyped `transferOwnership` is recoverable
+ *  until the new owner calls `acceptOwnership`, and it can never be renounced. An
+ *  ownerless zapper could neither be retuned nor swept, and `rescuePosition` would have
+ *  nowhere to send a stray NFT.
+ *
+ *  There is no pause flag of its own here, and that is deliberate: the zapper READS the
+ *  vault's switch up front. `_zapIn` calls `vault.depositsPaused()` before it pulls a
+ *  single wei and reverts with `DepositsArePaused` when it is on; the same error would come
+ *  back out of `vault.stakeFor` at the end of the flow anyway, so the pre-check only saves
+ *  the caller the work in between. `setZapper(address(0))` takes the path out altogether.
+ *  A flag of its own would only be a second thing to get wrong, and a second thing to
+ *  remember to throw.
  *
  *  Zap-out is out of scope for V1: `unstake` returns the position NFT itself.
  */
-contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
+contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
     using SafeERC20 for IERC20;
 
     // ──────────────────────── Constants ────────────────────────
@@ -125,6 +134,16 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     error SwapAmountExceedsInput(uint256 amountIn, uint256 usdcAmount);
     error UnexpectedNftSender(address sender);
     error UnsolicitedPosition(address operator, address from, uint256 tokenId);
+
+    /// @dev The vault's deposit pause was on when the zap started. Declared with the same
+    ///      signature as {LPStakingVault-DepositsArePaused}, so the selector — and any
+    ///      frontend decoder keyed on it — is identical whichever contract raised it.
+    error DepositsArePaused();
+
+    /// @dev `renounceOwnership` is disabled: the zapper is replaceable but not upgradeable,
+    ///      and `owner()` is where {rescuePosition} sends a stray NFT. An ownerless zapper
+    ///      could be neither retuned nor swept, and its rescue path would aim at address(0).
+    error RenounceDisabled();
 
     // ──────────────────────── Constructor ──────────────────────
 
@@ -214,7 +233,7 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
 
     /**
      * @notice `zapIn` preceded by an EIP-2612 USDC permit — no prior approval transaction.
-     * @dev The permit is skipped when the caller's allowance already covers `permit.value`.
+     * @dev The permit is skipped when the caller's allowance already covers `usdcAmount`.
      *      Permit signatures are public in the mempool and anyone can submit them, so a
      *      griefer can consume the signature first and make a bare `permit` call revert on
      *      a stale nonce. Checking the allowance first makes the zap succeed anyway,
@@ -235,7 +254,11 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         uint256 deadline,
         PermitData calldata permit
     ) external nonReentrant returns (uint256 tokenId) {
-        if (IERC20(usdc).allowance(msg.sender, address(this)) < permit.value) {
+        // Skip the permit whenever the existing allowance already covers THIS zap. Comparing
+        // against `usdcAmount` (what the zap pulls) rather than `permit.value` (what the
+        // signature grants) means a permit that was front-run, consumed or expired can never
+        // fail a zap the caller's current allowance would have carried anyway.
+        if (IERC20(usdc).allowance(msg.sender, address(this)) < usdcAmount) {
             IERC20Permit(usdc).permit(
                 msg.sender,
                 address(this),
@@ -294,11 +317,14 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
      * @notice Recovers tokens stranded on this contract.
      * @dev The zapper holds no funds between transactions; any balance is dust left by a
      *      failed refund or a stray transfer.
+     *      `nonReentrant` for consistency with every other external function in the stack —
+     *      the owner could equally sweep twice in two transactions, so this closes an
+     *      asymmetry, not a vulnerability.
      * @param token Token to sweep.
      * @param amount Amount to sweep.
      * @param to Recipient.
      */
-    function sweep(address token, uint256 amount, address to) external onlyOwner {
+    function sweep(address token, uint256 amount, address to) external onlyOwner nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
         emit Swept(token, to, amount);
@@ -341,6 +367,13 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         emit PositionRescued(tokenId, to, block.timestamp);
     }
 
+    /// @notice Disabled. See {RenounceDisabled}.
+    /// @dev Kept `onlyOwner` and deliberately NOT `view` (solc suggests it): the ABI entry must
+    ///      keep looking like the transaction it overrides so a caller gets the revert on-chain.
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceDisabled();
+    }
+
     // ──────────────────────── Internal helpers ─────────────────
 
     /// @dev Deployment sanity: the configured triple must be the pool actually passed in.
@@ -359,6 +392,10 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
         SwapParams calldata swap,
         uint256 deadline
     ) internal returns (uint256 tokenId) {
+        // The vault would reject `stakeFor` at the very end of this flow; checking first
+        // costs one static call and saves the caller the USDC pull, the swap and the mint
+        // that a paused vault would revert anyway.
+        if (vault.depositsPaused()) revert DepositsArePaused();
         if (usdcAmount == 0) revert ZeroAmount();
         // The zapper can only spend what it just pulled; anything larger is a mistake in
         // the caller's split, caught before any external value moves.
@@ -388,7 +425,16 @@ contract LPZapper is Ownable, ReentrancyGuard, TwapGuard, IERC721Receiver {
     ///      zero afterwards; `forceApprove` handles USDC's zero-first allowance rule.
     ///      SwapRouter02's `ExactInputSingleParams` carries no deadline — the caller's
     ///      deadline is enforced by `mint` in the same transaction.
+    ///
+    ///      SwapRouter02 reads `amountIn == 0` as its `Constants.CONTRACT_BALANCE` sentinel —
+    ///      "swap the router's whole balance of `tokenIn`, paid by the router" — so a zero
+    ///      amount must never reach it. The guard below keeps that invariant next to the
+    ///      router call rather than one function away at the call site.
     function _executeSwap(SwapParams calldata swap) internal {
+        // SwapRouter02 reads `amountIn == 0` as its CONTRACT_BALANCE sentinel ("swap the whole
+        // router balance"). The only call site is behind `amountIn > 0`; this keeps the
+        // invariant where the router call is, so no refactor can drop it silently.
+        if (swap.amountIn == 0) revert ZeroAmount();
         // USDC -> ASSET is the only direction a zap-in can take; `zeroForOne` must agree
         // with the pool's token ordering.
         if (swap.zeroForOne != usdcIsToken0) revert InvalidSwapDirection(swap.zeroForOne, usdcIsToken0);

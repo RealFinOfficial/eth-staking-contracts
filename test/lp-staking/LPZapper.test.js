@@ -479,12 +479,34 @@ describe("LPZapper", function () {
         .withArgs(zapAddr, ZERO);
     });
 
-    it("bubbles DepositsArePaused from the vault", async function () {
+    it("rejects the zap up front when the vault's deposits are paused, before any USDC moves", async function () {
       await vault.setDepositsPaused(true);
 
+      const balanceBefore = await usdc.balanceOf(alice.address);
+      const callsBefore = await router.swapCalls();
+
+      // The zapper raises the error itself, from `vault.depositsPaused()` read at the top of
+      // `_zapIn`. It carries the same selector the vault would have raised at `stakeFor`, so
+      // a decoder cannot tell — and does not need to tell — which contract answered.
       await expect(
         zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
-      ).to.be.revertedWithCustomError(vault, "DepositsArePaused");
+      ).to.be.revertedWithCustomError(zap, "DepositsArePaused");
+
+      expect(await usdc.balanceOf(alice.address)).to.equal(balanceBefore);
+      expect(await router.swapCalls()).to.equal(callsBefore);
+      await expectZapperDrained();
+    });
+
+    it("takes the zap again the moment the vault is unpaused", async function () {
+      await vault.setDepositsPaused(true);
+      await vault.setDepositsPaused(false);
+
+      const tokenId = await zap
+        .connect(alice)
+        .zapIn.staticCall(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
+      await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
+
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
     });
 
     it("reverts without a USDC allowance", async function () {
@@ -626,6 +648,43 @@ describe("LPZapper", function () {
 
       expect(await usdc.nonces(alice.address)).to.equal(0n);
       await expectZapperDrained();
+    });
+
+    it("skips a signature that grants MORE than the allowance, when the allowance covers the zap", async function () {
+      // N-6 case (a): the comparison is against `usdcAmount` (what the zap pulls), not
+      // against `permit.value` (what the signature grants). Under the old rule this exact
+      // shape submitted a dead signature and reverted a zap the allowance could carry.
+      await usdc.connect(alice).approve(zapAddr, USDC_IN);
+      const garbage = { value: USDC_IN * 2n, deadline: FAR_DEADLINE, v: 27, r: ethers.ZeroHash, s: ethers.ZeroHash };
+
+      await expect(
+        zap
+          .connect(alice)
+          .zapInWithPermit(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE, garbage)
+      ).to.emit(zap, "ZappedIn");
+
+      expect(await usdc.nonces(alice.address)).to.equal(0n);
+      await expectZapperDrained();
+    });
+
+    it("submits a signature smaller than the zap and then fails loudly on the pull", async function () {
+      // N-6 case (c): the allowance is zero, so the permit MUST run — and it grants less than
+      // the zap needs, so the pull fails on the allowance the permit itself created. Loud,
+      // not a silently smaller zap.
+      await usdc.connect(alice).approve(zapAddr, 0);
+      const signature = await signPermit(alice, zapAddr, USDC_IN - 1n, FAR_DEADLINE);
+
+      await expect(
+        zap.connect(alice).zapInWithPermit(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE, {
+          value: USDC_IN - 1n,
+          deadline: FAR_DEADLINE,
+          v: signature.v,
+          r: signature.r,
+          s: signature.s,
+        })
+      )
+        .to.be.revertedWithCustomError(usdc, "ERC20InsufficientAllowance")
+        .withArgs(zapAddr, USDC_IN - 1n, USDC_IN);
     });
 
     it("submits the permit, and fails on it, when the allowance is short", async function () {
@@ -791,6 +850,118 @@ describe("LPZapper", function () {
         "ERC20InsufficientBalance"
       );
     });
+
+    it("cannot be re-entered by a token hook calling sweep again", async function () {
+      // C-4: `sweep` carries `nonReentrant`. The token hands control to a third party in the
+      // middle of its own transfer, so the sweep's push is a real re-entrancy window.
+      const Hook = await ethers.getContractFactory("MockHookERC20");
+      const hookToken = await Hook.deploy("Hook", "HOOK", ASSET(1000), 18);
+      const hookAddr = await hookToken.getAddress();
+      await hookToken.transfer(zapAddr, ASSET(200));
+
+      // The TOKEN is made the zapper's owner, so the re-entrant sweep clears `onlyOwner` —
+      // which runs before `nonReentrant` — and the guard is all that is left to stop it.
+      // Ownership is two-step (N-1), so the token has to call `acceptOwnership` itself, and
+      // firing a hook is how this mock makes a call of its own.
+      await zap.transferOwnership(hookAddr);
+      await hookToken.setRecipientHook(
+        stranger.address,
+        zapAddr,
+        zap.interface.encodeFunctionData("acceptOwnership")
+      );
+      await hookToken.fireRecipientHook(stranger.address);
+      expect(await zap.owner()).to.equal(hookAddr);
+
+      // Both hooks now sweep. The outer one comes from the owner; its push to bob fires the
+      // inner one, which is the call the guard has to reject.
+      const sweepPayload = zap.interface.encodeFunctionData("sweep", [hookAddr, ASSET(100), bob.address]);
+      await hookToken.setRecipientHook(bob.address, zapAddr, sweepPayload);
+      await hookToken.setRecipientHook(stranger.address, zapAddr, sweepPayload);
+
+      await expect(hookToken.fireRecipientHook(bob.address)).to.be.revertedWithCustomError(
+        zap,
+        "ReentrancyGuardReentrantCall"
+      );
+      expect(await hookToken.balanceOf(zapAddr)).to.equal(ASSET(200));
+
+      // Disarm the nested leg and the identical sweep goes through, so nothing but the guard
+      // rejected it above — the window the guard closes is real.
+      await hookToken.setRecipientHook(bob.address, ZERO, "0x");
+      await expect(hookToken.fireRecipientHook(stranger.address))
+        .to.emit(zap, "Swept")
+        .withArgs(hookAddr, bob.address, ASSET(100));
+      expect(await hookToken.balanceOf(bob.address)).to.equal(ASSET(100));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Ownership", function () {
+    it("only nominates on transferOwnership, and the nominee holds nothing yet", async function () {
+      await expect(zap.transferOwnership(bob.address))
+        .to.emit(zap, "OwnershipTransferStarted")
+        .withArgs(owner.address, bob.address);
+
+      expect(await zap.owner()).to.equal(owner.address);
+      expect(await zap.pendingOwner()).to.equal(bob.address);
+
+      await expect(zap.connect(bob).setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(bob.address);
+
+      // ...and the standing owner still holds the whole admin surface.
+      await expect(zap.setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet");
+    });
+
+    it("moves the owner only when the nominee accepts", async function () {
+      await zap.transferOwnership(bob.address);
+
+      await expect(zap.connect(bob).acceptOwnership())
+        .to.emit(zap, "OwnershipTransferred")
+        .withArgs(owner.address, bob.address);
+
+      expect(await zap.owner()).to.equal(bob.address);
+      expect(await zap.pendingOwner()).to.equal(ZERO);
+
+      await expect(zap.setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(owner.address);
+      await expect(zap.connect(bob).setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet");
+    });
+
+    it("lets nobody but the nominee accept, the standing owner included", async function () {
+      await zap.transferOwnership(bob.address);
+
+      await expect(zap.connect(stranger).acceptOwnership())
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(stranger.address);
+      await expect(zap.acceptOwnership())
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(owner.address);
+
+      expect(await zap.pendingOwner()).to.equal(bob.address);
+      expect(await zap.owner()).to.equal(owner.address);
+    });
+
+    it("withdraws a mistyped nomination with transferOwnership(0)", async function () {
+      await zap.transferOwnership(bob.address);
+      await zap.transferOwnership(ZERO);
+
+      expect(await zap.pendingOwner()).to.equal(ZERO);
+      expect(await zap.owner()).to.equal(owner.address);
+
+      await expect(zap.connect(bob).acceptOwnership())
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(bob.address);
+    });
+
+    it("refuses to be renounced, and refuses a stranger for a different reason", async function () {
+      await expect(zap.renounceOwnership()).to.be.revertedWithCustomError(zap, "RenounceDisabled");
+      expect(await zap.owner()).to.equal(owner.address);
+
+      await expect(zap.connect(alice).renounceOwnership())
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -817,7 +988,10 @@ describe("LPZapper", function () {
 
     it("goes to the owner and nowhere else, even after ownership moves", async function () {
       const tokenId = await pushStrayPosition(alice);
+      // Ownable2Step: the nomination alone changes nothing, so bob has to accept before the
+      // rescue can follow the owner.
       await zap.transferOwnership(bob.address);
+      await zap.connect(bob).acceptOwnership();
 
       await expect(zap.rescuePosition(tokenId)).to.be.revertedWithCustomError(
         zap,

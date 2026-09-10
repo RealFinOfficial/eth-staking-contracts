@@ -7,8 +7,10 @@ import {LPZapper, PermitData} from "../../../contracts/lp-staking/LPZapper.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
+import {LPZapperSwapHarness} from "../../../contracts/lp-staking/mocks/LPZapperSwapHarness.sol";
 import {MaliciousNPM} from "../utils/attackers/MaliciousNPM.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 /**
  * @notice Why this file exists: {LPZapper} is the only entry point that touches a user's
@@ -174,6 +176,73 @@ contract ZapperBranchesTest is LocalHarness {
         assertEq(routerMock.swapCalls(), 0, "a zero swap leg must not call the router");
     }
 
+    /**
+     * @dev N-4: the vault's deposit pause is read UP FRONT, before the USDC pull. The zap
+     *      would fail at `vault.stakeFor` at the end of the flow either way; what this states
+     *      is that nothing of the caller's moves in between — no pull, no swap, no mint — so
+     *      a paused vault costs a would-be staker one reverted call and nothing else.
+     */
+    function test_ZapIn_RevertsBeforeAnyValueMovesWhenTheVaultsDepositsArePaused() public {
+        vault.setDepositsPaused(true);
+
+        uint256 balanceBefore = usdcToken.balanceOf(alice);
+        uint256 callsBefore = routerMock.swapCalls();
+
+        vm.startPrank(alice);
+        usdcToken.approve(address(zapper), ZAP);
+        vm.expectRevert(LPZapper.DepositsArePaused.selector);
+        zapper.zapIn(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE);
+        vm.stopPrank();
+
+        assertEq(usdcToken.balanceOf(alice), balanceBefore, "not one wei of the caller's USDC may move");
+        assertEq(usdcToken.balanceOf(address(zapper)), 0, "and none may be sitting on the zapper");
+        assertEq(routerMock.swapCalls(), callsBefore, "the swap leg must never be reached");
+    }
+
+    /// @dev The pre-check is the ONLY thing the pause changes: unpause and the same call works.
+    function test_ZapIn_ResumesTheMomentTheVaultIsUnpaused() public {
+        vault.setDepositsPaused(true);
+        vault.setDepositsPaused(false);
+
+        vm.startPrank(alice);
+        usdcToken.approve(address(zapper), ZAP);
+        uint256 tokenId = zapper.zapIn(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE);
+        vm.stopPrank();
+
+        assertEq(vault.stakerOf(tokenId), alice, "an unpaused vault must take the zap normally");
+    }
+
+    /**
+     * @dev N-5: SwapRouter02 reads `amountIn == 0` as its `Constants.CONTRACT_BALANCE`
+     *      sentinel — "swap the router's whole balance of `tokenIn`" — so a zero amount must
+     *      never reach it. `_zapIn` gates the swap leg behind `amountIn > 0`, which makes the
+     *      reverting arm unreachable from the production surface; the harness calls
+     *      `_executeSwap` directly, which is the only way to measure the guard rather than
+     *      argue for it.
+     */
+    function test_ExecuteSwap_RejectsTheRoutersContractBalanceSentinel() public {
+        LPZapperSwapHarness harness = _deploySwapHarness();
+
+        vm.expectRevert(LPZapper.ZeroAmount.selector);
+        harness.exposedExecuteSwap(_zapSwap(0));
+
+        assertEq(routerMock.swapCalls(), 0, "the guard must fire before the router is called");
+    }
+
+    /// @dev The positive control for the arm above: one wei past the sentinel and the very
+    ///      same call reaches the router and settles.
+    function test_ExecuteSwap_SwapsNormallyOnAPositiveAmount() public {
+        LPZapperSwapHarness harness = _deploySwapHarness();
+        usdcToken.transfer(address(harness), ZAP);
+
+        harness.exposedExecuteSwap(_zapSwap(ZAP));
+
+        assertEq(routerMock.swapCalls(), 1, "a positive amount must reach the router");
+        assertEq(routerMock.lastAmountIn(), ZAP, "and carry the amount it was given");
+        assertEq(usdcToken.balanceOf(address(harness)), 0, "the whole input leaves the zapper");
+        assertGt(asset.balanceOf(address(harness)), 0, "and the ASSET leg comes back");
+    }
+
     function test_ZapIn_RevertsOnTheWrongSwapDirection() public {
         SwapParams memory swap = SwapParams({
             zeroForOne: !zapper.usdcIsToken0(), amountIn: ZAP / 2, amountOutMin: 0, amount0Min: 0, amount1Min: 0
@@ -225,7 +294,8 @@ contract ZapperBranchesTest is LocalHarness {
         assertEq(vault.stakerOf(tokenId), alice, "the permit alone must be enough to zap");
     }
 
-    /// @dev `allowance < permit.value` — one wei short is enough to make the permit run.
+    /// @dev `allowance < usdcAmount` — one wei short is enough to make the permit run. The
+    ///      comparison is against what the zap PULLS, not against what the signature grants.
     function test_ZapInWithPermit_AllowanceOneWeiShortStillCallsThePermit() public {
         (uint8 v, bytes32 r, bytes32 s) = _signErc2612(alicePk, usdcToken, alice, address(zapper), ZAP, FAR_DEADLINE);
         PermitData memory permit = PermitData({value: ZAP, deadline: FAR_DEADLINE, v: v, r: r, s: s});
@@ -238,8 +308,8 @@ contract ZapperBranchesTest is LocalHarness {
         assertEq(usdcToken.nonces(alice), 1, "the permit must have been consumed, so the nonce moved");
     }
 
-    /// @dev `allowance == permit.value` — the skip arm. The signature is garbage on purpose:
-    ///      if it were read at all, this would revert.
+    /// @dev `allowance == usdcAmount` — the skip arm at its exact boundary. The signature is
+    ///      garbage on purpose: if it were read at all, this would revert.
     function test_ZapInWithPermit_AllowanceExactlyEqualSkipsThePermit() public {
         PermitData memory permit = _dummyPermit(ZAP);
 
@@ -264,6 +334,49 @@ contract ZapperBranchesTest is LocalHarness {
         vm.prank(alice);
         uint256 tokenId = zapper.zapInWithPermit(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE, permit);
         assertEq(vault.stakerOf(tokenId), alice, "the zap must succeed anyway, on the allowance the griefer created");
+    }
+
+    /**
+     * @dev N-6, the case the OLD rule got wrong: the allowance covers the zap, but the
+     *      signature grants MORE than the allowance and is itself unusable. Comparing against
+     *      `permit.value` would have submitted the dead signature and reverted a zap the
+     *      caller's standing allowance could carry; comparing against `usdcAmount` skips the
+     *      permit and the zap goes through.
+     */
+    function test_ZapInWithPermit_ASignatureLargerThanTheAllowanceIsStillSkipped() public {
+        PermitData memory permit = _dummyPermit(ZAP * 2);
+
+        vm.startPrank(alice);
+        usdcToken.approve(address(zapper), ZAP);
+        uint256 tokenId = zapper.zapInWithPermit(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE, permit);
+        vm.stopPrank();
+
+        assertEq(vault.stakerOf(tokenId), alice, "the standing allowance alone must carry the zap");
+        assertEq(usdcToken.nonces(alice), 0, "and the permit must never have been submitted");
+    }
+
+    /**
+     * @dev N-6 case (c): a signature for LESS than the zap pulls, with no standing allowance.
+     *      The permit is submitted — it has to be, the allowance is short — and the pull then
+     *      fails loudly on the allowance the permit created, rather than silently zapping less.
+     */
+    function test_ZapInWithPermit_ASignatureSmallerThanTheZapFailsOnThePull() public {
+        (uint8 v, bytes32 r, bytes32 s) =
+            _signErc2612(alicePk, usdcToken, alice, address(zapper), ZAP - 1, FAR_DEADLINE);
+        PermitData memory permit = PermitData({value: ZAP - 1, deadline: FAR_DEADLINE, v: v, r: r, s: s});
+
+        assertEq(usdcToken.allowance(alice, address(zapper)), 0, "precondition: nothing is approved yet");
+
+        // The rejection names an allowance of exactly `ZAP - 1`, which nothing but the
+        // submitted permit could have created: the permit ran, and the PULL is what failed.
+        // (The revert unwinds it again, so the allowance is back to zero afterwards.)
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(zapper), ZAP - 1, ZAP)
+        );
+        zapper.zapInWithPermit(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE, permit);
+
+        assertEq(usdcToken.allowance(alice, address(zapper)), 0, "the reverted permit leaves no allowance behind");
     }
 
     /// @dev A permit that is neither covered by an allowance nor valid fails in the token.
@@ -453,21 +566,25 @@ contract ZapperBranchesTest is LocalHarness {
         assertTrue(vaultUnchanged, "the vault's own guard must be untouched");
     }
 
-    function test_RenounceOwnership_KillsTheZappersAdminSurfaceOnly() public {
+    /**
+     * @dev N-1: the zapper cannot be renounced at all. An ownerless zapper could never be
+     *      retuned or swept, and `rescuePosition` would aim a stray NFT at address(0), so the
+     *      call reverts for the owner instead of merely being discouraged in a runbook — and
+     *      it stays `onlyOwner`, so a stranger is turned away by the ownership check first.
+     */
+    function test_RenounceOwnership_IsDisabledOnTheZapper() public {
+        vm.expectRevert(LPZapper.RenounceDisabled.selector);
         zapper.renounceOwnership();
-        assertEq(zapper.owner(), address(0), "ownership really is gone");
+        assertEq(zapper.owner(), address(this), "the owner must be exactly where it was");
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        zapper.sweep(address(usdcToken), 0, carol);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        zapper.renounceOwnership();
 
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        // And the whole admin surface still answers to that owner.
         zapper.setTwapParams(600, 100);
-
-        vm.startPrank(alice);
-        usdcToken.approve(address(zapper), ZAP);
-        uint256 tokenId = zapper.zapIn(ZAP, TICK_LOWER, TICK_UPPER, _zapSwap(ZAP / 2), FAR_DEADLINE);
-        vm.stopPrank();
-        assertEq(vault.stakerOf(tokenId), alice, "zapping must survive the loss of the zapper's owner");
+        assertEq(zapper.twapWindow(), 600, "the owner keeps its tier");
+        zapper.sweep(address(usdcToken), 0, carol);
     }
 
     // ──────────────────────── Helpers ──────────────────────────
@@ -477,6 +594,26 @@ contract ZapperBranchesTest is LocalHarness {
             SwapParams({
                 zeroForOne: usdcIsToken0Cached, amountIn: amountIn, amountOutMin: 0, amount0Min: 0, amount1Min: 0
             });
+    }
+
+    /// @dev A `LPZapperSwapHarness` on the harness's own market, so `_executeSwap` can be
+    ///      called with no `_zapIn` around it. Bare, not proxied: the branch under test fires
+    ///      before any state is read.
+    function _deploySwapHarness() private returns (LPZapperSwapHarness) {
+        return new LPZapperSwapHarness(
+            address(vault),
+            address(npmMock),
+            address(poolMock),
+            token0,
+            token1,
+            FEE,
+            address(routerMock),
+            address(usdcToken),
+            address(asset),
+            address(this),
+            MIN_TWAP_WINDOW,
+            500
+        );
     }
 
     function _deployZapper(

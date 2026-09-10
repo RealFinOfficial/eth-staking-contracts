@@ -521,6 +521,20 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
     }
 
+    // The same handshake on the two PLAIN contracts, which since N-1 are `Ownable2Step` as
+    // well. The script only nominated the multisig on TokenX and the zapper; completing it
+    // takes two ordinary transactions with no timelock in the path, which is exactly what the
+    // script prints for the multisig to send.
+    for (const [label, contract] of [
+      ["TokenX", tokenX],
+      ["LPZapper", zapper],
+    ]) {
+      await chain.send(contract.connect(w.multisig).acceptOwnership());
+      if ((await contract.owner()) !== w.multisig.address) {
+        throw new Error(`${label} did not end up owned by the multisig`);
+      }
+    }
+
     deployToBlock = await head();
 
     voucherDomain = await signing.readEip712Domain(distributor);
@@ -994,9 +1008,12 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       const expectedPerContract = {
         [tokenXAddr.toLowerCase()]: [
           "OwnershipTransferred", // Ownable(deployer), in the constructor
-          "MinterChanged",
-          "EpochCapSet",
-          "OwnershipTransferred", // -> multisig
+          "MinterChanged", // constructor: (0, 0) — the initial "no minter" state, logged
+          "EpochCapSet", // constructor: (0, 0) — epoch 0 with a zero cap, logged
+          "MinterChanged", // the wiring: -> the distributor
+          "EpochCapSet", // the wiring: -> the armed epoch
+          "OwnershipTransferStarted", // -> multisig (nomination)
+          "OwnershipTransferred", // -> multisig (the multisig's own acceptOwnership)
         ],
         // The distributor is a UUPS proxy, so its deploy tx is the PROXY's: `Upgraded` names
         // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
@@ -1042,9 +1059,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
           "OwnershipTransferred",
         ],
         [zapperAddr.toLowerCase()]: [
-          "OwnershipTransferred",
+          "OwnershipTransferred", // Ownable(deployer), in the constructor
           "TwapParamsSet",
-          "OwnershipTransferred",
+          "OwnershipTransferStarted", // -> multisig (nomination)
+          "OwnershipTransferred", // -> multisig (the multisig's own acceptOwnership)
         ],
         // The timelock's constructor grants four roles — DEFAULT_ADMIN to itself, PROPOSER
         // and CANCELLER to the multisig (OZ grants both to every proposer), EXECUTOR to the
@@ -1091,10 +1109,20 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       );
       expect(tokenXLogs[0].args.previousOwner).to.equal(C.ZERO_ADDRESS);
       expect(tokenXLogs[0].args.newOwner).to.equal(w.deployer.address);
-      expect(tokenXLogs[1].args.newMinter).to.equal(distributorAddr);
-      expect(tokenXLogs[2].args.epochId).to.equal(C.EPOCH_ONE);
-      expect(tokenXLogs[2].args.cap).to.equal(C.EPOCH_ONE_CAP);
-      expect(tokenXLogs[3].args.newOwner).to.equal(w.multisig.address);
+      // The two constructor emissions (C-7): the initial state is "no minter, epoch 0, zero
+      // cap", and it is now logged rather than left for an indexer to assume.
+      expect(tokenXLogs[1].args.previousMinter).to.equal(C.ZERO_ADDRESS);
+      expect(tokenXLogs[1].args.newMinter).to.equal(C.ZERO_ADDRESS);
+      expect(tokenXLogs[2].args.epochId).to.equal(0n);
+      expect(tokenXLogs[2].args.cap).to.equal(0n);
+      // Then the wiring the script does.
+      expect(tokenXLogs[3].args.newMinter).to.equal(distributorAddr);
+      expect(tokenXLogs[4].args.epochId).to.equal(C.EPOCH_ONE);
+      expect(tokenXLogs[4].args.cap).to.equal(C.EPOCH_ONE_CAP);
+      // And the two-step handover: the nomination, then the multisig's own acceptance.
+      expect(tokenXLogs[5].args.newOwner).to.equal(w.multisig.address);
+      expect(tokenXLogs[6].args.previousOwner).to.equal(w.deployer.address);
+      expect(tokenXLogs[6].args.newOwner).to.equal(w.multisig.address);
     });
 
     it("reports the EIP-712 domain and type hashes the back office must sign against", async function () {

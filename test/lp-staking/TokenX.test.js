@@ -81,6 +81,34 @@ describe("TokenX", function () {
       expect(await token.mintedInEpoch(0)).to.equal(0n);
     });
 
+    it("logs its whole initial state in the deployment transaction", async function () {
+      // C-7: the token starts with no minter, epoch 0 and a zero cap — all three the type's
+      // default, none of them written by the constructor — so without these two emissions an
+      // indexer would have to hardcode them. Order matters: `Ownable` logs the owner first.
+      const TokenX = await ethers.getContractFactory("TokenX");
+      const fresh = await TokenX.deploy(NAME, SYMBOL, owner.address);
+      await fresh.waitForDeployment();
+      const freshAddr = await fresh.getAddress();
+      const receipt = await fresh.deploymentTransaction().wait();
+
+      const events = receipt.logs
+        .filter((log) => log.address === freshAddr)
+        .map((log) => fresh.interface.parseLog(log))
+        .filter((parsed) => parsed !== null);
+
+      expect(events.map((e) => e.name)).to.deep.equal([
+        "OwnershipTransferred",
+        "MinterChanged",
+        "EpochCapSet",
+      ]);
+      expect(events[0].args[0]).to.equal(ethers.ZeroAddress);
+      expect(events[0].args[1]).to.equal(owner.address);
+      expect(events[1].args[0]).to.equal(ethers.ZeroAddress);
+      expect(events[1].args[1]).to.equal(ethers.ZeroAddress);
+      expect(events[2].args[0]).to.equal(0n);
+      expect(events[2].args[1]).to.equal(0n);
+    });
+
     it("fails closed: with the cap unarmed even 1 wei cannot be minted", async function () {
       await token.setMinter(minter.address);
 
@@ -89,6 +117,82 @@ describe("TokenX", function () {
         .withArgs(0n, 0n, 0n, 1n);
 
       expect(await token.totalSupply()).to.equal(0n);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Ownership", function () {
+    it("only nominates on transferOwnership, and the nominee holds nothing yet", async function () {
+      await expect(token.transferOwnership(bob.address))
+        .to.emit(token, "OwnershipTransferStarted")
+        .withArgs(owner.address, bob.address);
+
+      expect(await token.owner()).to.equal(owner.address);
+      expect(await token.pendingOwner()).to.equal(bob.address);
+
+      await expect(token.connect(bob).setEpochCap(EPOCH, TOKENS(100)))
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(bob.address);
+
+      // ...and the standing owner still holds the whole admin surface.
+      await expect(token.setEpochCap(EPOCH, TOKENS(100))).to.emit(token, "EpochCapSet");
+    });
+
+    it("moves the owner only when the nominee accepts", async function () {
+      await token.transferOwnership(bob.address);
+
+      await expect(token.connect(bob).acceptOwnership())
+        .to.emit(token, "OwnershipTransferred")
+        .withArgs(owner.address, bob.address);
+
+      expect(await token.owner()).to.equal(bob.address);
+      expect(await token.pendingOwner()).to.equal(ethers.ZeroAddress);
+
+      await expect(token.setMinter(minter.address))
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(owner.address);
+      await expect(token.connect(bob).setMinter(minter.address)).to.emit(token, "MinterChanged");
+    });
+
+    it("lets nobody but the nominee accept, the standing owner included", async function () {
+      await token.transferOwnership(bob.address);
+
+      await expect(token.connect(alice).acceptOwnership())
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+      await expect(token.acceptOwnership())
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(owner.address);
+
+      expect(await token.pendingOwner()).to.equal(bob.address);
+      expect(await token.owner()).to.equal(owner.address);
+    });
+
+    it("withdraws a mistyped nomination with transferOwnership(0)", async function () {
+      await token.transferOwnership(bob.address);
+      await token.transferOwnership(ethers.ZeroAddress);
+
+      expect(await token.pendingOwner()).to.equal(ethers.ZeroAddress);
+      expect(await token.owner()).to.equal(owner.address);
+
+      await expect(token.connect(bob).acceptOwnership())
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(bob.address);
+    });
+
+    it("refuses to be renounced, and refuses a stranger for a different reason", async function () {
+      // An ownerless TokenX could never arm another epoch, so minting would die with the
+      // running cap. The call reverts rather than being discouraged in a runbook.
+      await expect(token.renounceOwnership()).to.be.revertedWithCustomError(token, "RenounceDisabled");
+      expect(await token.owner()).to.equal(owner.address);
+
+      await expect(token.connect(alice).renounceOwnership())
+        .to.be.revertedWithCustomError(token, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+
+      // And the schedule is still administrable afterwards.
+      await token.setEpochCap(EPOCH, TOKENS(100));
+      expect(await token.epochCap(EPOCH)).to.equal(TOKENS(100));
     });
   });
 

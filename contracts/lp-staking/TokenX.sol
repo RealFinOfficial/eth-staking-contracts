@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
@@ -16,7 +16,9 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
  *      the timelock proposer. That is the escape hatch: if the rewards
  *      distributor is found to be buggy, the owner deploys a fixed distributor
  *      and re-points `minter` at it. Setting `minter` to address(0) disables
- *      minting entirely.
+ *      minting entirely. Ownership is two-step: a mistyped `transferOwnership`
+ *      is recoverable until the new owner calls `acceptOwnership`, and it can
+ *      never be renounced.
  *    - The token enforces its own per-epoch mint cap, independent of whatever
  *      the distributor believes. `setEpochCap(epochId, cap)` selects the current
  *      epoch and its cap in one call; `mint` accumulates into
@@ -55,7 +57,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
  *  Name and symbol are constructor parameters — the final branding is decided
  *  by the team at deployment time.
  */
-contract TokenX is ERC20, ERC20Burnable, ERC20Permit, Ownable {
+contract TokenX is ERC20, ERC20Burnable, ERC20Permit, Ownable2Step {
     // ──────────────────────── Errors ───────────────────────────
 
     /// @dev `mint` was called by an address that is not the current `minter`.
@@ -72,6 +74,11 @@ contract TokenX is ERC20, ERC20Burnable, ERC20Permit, Ownable {
 
     /// @dev `cancelNextEpoch` was called with no epoch armed.
     error NoPendingEpoch();
+
+    /// @dev `renounceOwnership` is disabled: the token is permanent and not upgradeable, and
+    ///      `setMinter` / the epoch caps are its only controls. An ownerless token could never
+    ///      arm another epoch, so minting would die with the running cap.
+    error RenounceDisabled();
 
     // ──────────────────────── Types ────────────────────────────
 
@@ -125,11 +132,18 @@ contract TokenX is ERC20, ERC20Burnable, ERC20Permit, Ownable {
     /// @param _symbol       ERC-20 symbol.
     /// @param _initialOwner Owner (multisig). Controls the minter, the epoch caps and
     ///                      the scheduled rollover.
+    /// @dev `Ownable2Step` has no constructor of its own, so the owner is still installed by
+    ///      `Ownable(_initialOwner)`; the two-step handshake only governs later transfers.
     constructor(string memory _name, string memory _symbol, address _initialOwner)
         ERC20(_name, _symbol)
         ERC20Permit(_name)
         Ownable(_initialOwner)
-    {}
+    {
+        // Initial state, logged so an indexer never has to assume it: no minter, epoch 0
+        // selected with a zero cap (so no mint can succeed until the owner arms an epoch).
+        emit MinterChanged(address(0), address(0));
+        emit EpochCapSet(0, 0);
+    }
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -275,5 +289,12 @@ contract TokenX is ERC20, ERC20Burnable, ERC20Permit, Ownable {
 
         delete pendingEpoch;
         emit NextEpochCancelled(p.epochId, p.cap, p.activatesAt);
+    }
+
+    /// @notice Disabled. See {RenounceDisabled}.
+    /// @dev Kept `onlyOwner` and deliberately NOT `view` (solc suggests it): the ABI entry must
+    ///      keep looking like the transaction it overrides so a caller gets the revert on-chain.
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceDisabled();
     }
 }

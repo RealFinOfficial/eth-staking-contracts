@@ -430,13 +430,29 @@ contract TokenXEpochsTest is LocalHarness {
         tokenX.mint(alice, 1);
     }
 
-    /**
-     * @dev Renouncing freezes the epoch schedule but NOT the mint: whoever is the minter at
-     *      that moment keeps minting up to the current epoch's cap, forever, and no one can
-     *      ever arm another epoch, change the cap, or replace them.
-     */
-    function test_RenounceOwnership_FreezesTheScheduleButNotTheStandingMinter() public {
+    /// @dev N-1: the renounce is gone. It would have frozen the epoch schedule with the
+    ///      running cap in force and no one able to arm another epoch — permanently — so the
+    ///      call reverts and the schedule stays administrable.
+    function test_RenounceOwnership_IsDisabled() public {
+        vm.expectRevert(TokenX.RenounceDisabled.selector);
         tokenX.renounceOwnership();
+
+        assertEq(tokenX.owner(), address(this), "the owner must be exactly where it was");
+        tokenX.armNextEpoch(2, 1e18, uint64(block.timestamp + 1));
+        (uint256 pendingId,,) = tokenX.pendingEpoch();
+        assertEq(pendingId, 2, "and the schedule is still administrable");
+    }
+
+    /**
+     * @dev What a HANDOVER costs the old owner, which is the closest reachable equivalent of
+     *      the renounce this test used to make: the epoch schedule moves to the new owner and
+     *      NOT the mint — whoever is the minter at that moment keeps minting up to the current
+     *      epoch's cap regardless of who owns the token.
+     */
+    function test_Ownership_AHandoverMovesTheScheduleButNotTheStandingMinter() public {
+        tokenX.transferOwnership(carol);
+        vm.prank(carol);
+        tokenX.acceptOwnership();
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
         tokenX.setEpochCap(2, 1e18);
@@ -446,7 +462,7 @@ contract TokenXEpochsTest is LocalHarness {
         tokenX.armNextEpoch(2, 1e18, uint64(block.timestamp + 1));
 
         tokenX.mint(alice, 1e18);
-        assertEq(tokenX.balanceOf(alice), 1e18, "the standing minter keeps its right after a renounce");
+        assertEq(tokenX.balanceOf(alice), 1e18, "the standing minter keeps its right across a handover");
     }
 
     // ──────────────────────── Helpers ──────────────────────────

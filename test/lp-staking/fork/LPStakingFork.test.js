@@ -758,9 +758,12 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       await (await tokenX.setMinter(distributorAddr)).wait();
       await (await tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP)).wait();
+      // Ownable2Step on all four contracts since N-1: the transfer only nominates, and the
+      // multisig has to accept. On TokenX and the zapper the deploy script leaves exactly the
+      // nomination behind for the operator Safe; here the multisig completes it at once.
       await (await tokenX.transferOwnership(multisig.address)).wait();
+      await (await tokenX.connect(multisig).acceptOwnership()).wait();
 
-      // Ownable2Step: the transfer nominates, and the multisig has to accept.
       await (await distributor.transferOwnership(multisig.address)).wait();
       await (await distributor.connect(multisig).acceptOwnership()).wait();
 
