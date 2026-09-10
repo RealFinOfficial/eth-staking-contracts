@@ -31,15 +31,17 @@
  * Without them, a run with nothing deployed fails and says which flag to add. A run with
  * everything already deployed reuses it and touches neither.
  *
- * ── The deploy waits out a real timelock delay ────────────────────────────────────────
+ * ── The deploy waits for nothing ──────────────────────────────────────────────────────
  *
- * On Sepolia the deploying wallet IS `LP_MULTISIG`, so it holds the timelock's proposer and
- * executor roles and the deploy script finishes the Ownable2Step handover itself: it
- * schedules both `acceptOwnership` operations, sleeps `LP_TIMELOCK_MIN_DELAY + 1` seconds of
- * WALL time, and executes them. Set `LP_TIMELOCK_MIN_DELAY=300` for staging — the run then
- * takes roughly ten minutes, which is why the script timeout below is what it is. Mainnet is
- * the other branch: the Safe schedules, waits 48 h and executes, and the script only prints
- * the payloads.
+ * Since the born-owned bootstrap (N-7) the deploy script schedules no timelock operation and
+ * sleeps out no delay: `initialize` names the LPTimelock as the owner of both proxies inside
+ * each proxy's own deployment transaction, and the vault is born pointing at a zapper whose
+ * address the script predicted from the deployer's nonce. The run is a straight line of about
+ * a dozen transactions at Sepolia block times. `LP_TIMELOCK_MIN_DELAY` is still forwarded —
+ * it is the delay the timelock will enforce on every LATER owner-tier call — but no part of
+ * this run waits for it. TokenX and the zapper are the only handover left: the script
+ * NOMINATES `LP_OPERATOR` on each and prints the two `acceptOwnership()` payloads. On staging
+ * the operator is the deploying wallet, so even that is skipped and both are already owned.
  *
  * ── Idempotence ───────────────────────────────────────────────────────────────────────
  *
@@ -83,10 +85,9 @@ const FAR_DEADLINE = 10n ** 12n;
 /**
  * A real deploy on a real network is nothing like a fork's; give the scripts room.
  *
- * The deploy run does not only send transactions at Sepolia block times — it also SLEEPS out
- * the timelock's own delay between scheduling the two `acceptOwnership` operations and
- * executing them (see the header). At the staging figure of `LP_TIMELOCK_MIN_DELAY=300` that
- * is five minutes of the budget before a single confirmation is counted.
+ * The run itself waits for no timelock delay any more (see the header), but it still sends a
+ * dozen transactions one at a time at Sepolia block times, with a UUPS validation pass and a
+ * manifest write between the pairs. Thirty minutes is slack, not a budget.
  */
 const LIVE_SCRIPT_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -308,8 +309,9 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
         );
       }
       // `LP_TIMELOCK_MIN_DELAY` is forwarded by liveScriptEnv along with every other LP_*
-      // key: it is the operator's decision, and on staging it is the difference between a
-      // five-minute run and a two-day one.
+      // key, `LP_GUARDIAN` and `LP_OPERATOR` included: both are required now, and the script
+      // refuses to run when they are the same address. The delay it sets binds every later
+      // owner-tier call, not this run.
       const run = await runner.runHardhatScript(
         "scripts/deploy-lp-staking.js",
         liveScriptEnv({
@@ -350,6 +352,15 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     }
 
     expect(await vault.pool()).to.equal(poolAddr);
+    // Born owned by the timelock, with nothing pending: the one legal end state since N-7.
+    for (const [label, contract] of [
+      ["LPStakingVault", vault],
+      ["RewardsDistributor", distributor],
+    ]) {
+      expect(await contract.owner(), `${label}.owner`).to.equal(timelockAddr);
+      expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(ethers.ZeroAddress);
+    }
+    expect(await vault.zapper()).to.equal(zapperAddr);
     expect(await zapper.vault()).to.equal(vaultAddr);
     expect(await zapper.usdcIsToken0()).to.equal(zeroForOne);
     expect(await distributor.tokenX()).to.equal(tokenXAddr);

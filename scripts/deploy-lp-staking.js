@@ -1,44 +1,62 @@
 const hre = require("hardhat");
 const pools = require("./lib/pools");
-const timelockOps = require("./lp-timelock");
+const uniswapByChain = require("./lib/uniswap");
+// Only the registry kind of the timelock is needed here. Since the bootstrap stopped
+// routing anything through the timelock (N-7), this script builds no timelock operation.
+const { TIMELOCK_KIND } = require("./lp-timelock");
 
 // Deploy the full LP staking stack and record every address in deployments.json.
 //
-// Deploy order is fixed by the wiring: TokenX first (nothing depends on it),
-// then RewardsDistributor (needs TokenX), then LPStakingVault, then LPZapper
-// (needs the vault), then the LPTimelock that ends up owning the two proxies.
-//
 // ──────────────────────── the bootstrap, and why it looks like this ────────────────────────
 //
-// Both UUPS proxies (implementation + LPProxy) take the SAME route, and `setZapper` is the
-// reason there is a route at all: it is owner-only and has to run before the handover, so
-// neither proxy can be born owned by its final owner.
+// Both UUPS proxies are born owned by the LPTimelock: `initialize` names the timelock as the
+// owner inside the proxy's own deployment transaction, and no key ever holds the owner tier
+// on them, not even for one block. That is possible because the one owner-only call the
+// bootstrap used to need — `setZapper` on the vault — is gone from the bootstrap: the
+// zapper's address is an `initialize` argument, and it is known before the zapper exists.
 //
-//   1. `initialize(owner_ = DEPLOYER, guardian_ = LP_GUARDIAN, …)` — the deployer owns both
-//      proxies for exactly as long as the wiring takes.
-//   2. wire: `tokenX.setMinter`, `vault.setZapper`, the optional `tokenX.setEpochCap`.
-//   3. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))`.
-//   4. `transferOwnership(timelock)` on both proxies. `Ownable2Step` only NOMINATES.
-//   5. `acceptOwnership()` on both, and that call is itself a timelock operation — the
-//      timelock is the only address that can send it, and only through schedule → delay →
-//      execute. Which is where the two networks part:
+// A CREATE address is a pure function of (deployer, nonce), and every transaction in this
+// script carries an explicit nonce (see `deployContract`), so the next three addresses are
+// computable at any point in the run. The vault implementation takes nonce N, the vault
+// proxy N + 1 and the zapper N + 2; the script computes N + 2 with `getCreateAddress`,
+// passes it to the vault's `initialize`, deploys the zapper, and asserts it landed there.
+// If it did not, the run throws and names the one repair: `setZapper` through the timelock.
 //
-//        * **staging** (`LP_MULTISIG == deployer`, e.g. the Sepolia rehearsal): this script
-//          holds the proposer and executor key, so it schedules both operations, waits out
-//          `minDelay` in wall time, executes them, and the post-deploy checks assert
-//          `owner == timelock` and `pendingOwner == 0`.
-//        * **mainnet** (a real Safe): the script cannot schedule anything. It prints the two
-//          `schedule(...)` payloads and the two later `execute(...)` payloads with their
-//          operation ids, and the post-deploy checks assert the documented INTERIM state —
-//          `owner == deployer`, `pendingOwner == timelock` — until the Safe finishes the
-//          handover. Until then the deployer key is still the owner of both proxies; that is
-//          the one window in the whole runbook where it matters that it stays safe.
+// The order, in full:
 //
-// LP_GUARDIAN holds the undelayed fast path on both proxies throughout. TokenX and LPZapper
-// are `Ownable2Step` too (N-1), so step 4 only NOMINATES the multisig on them as well: the
-// deployer stays their owner until the multisig sends `acceptOwnership()` — two plain
-// transactions, no timelock. When the multisig IS the deployer the nomination is skipped
-// outright, because the contract is already owned by the address it would be handed to.
+//   1. config, local validation and the on-chain checks (pool triple, decimals, factory)
+//   2. `LPTimelock(minDelay, [multisig], [multisig], address(0))` — depends on nothing,
+//      and everything below names it, so it goes first
+//   3. `TokenX(name, symbol, owner = DEPLOYER)` — the deployer must call `setMinter`
+//   4. RewardsDistributor implementation + LPProxy,
+//      `initialize(owner = timelock, guardian, operator, signer)`
+//   5. predict the zapper's address from the deployer's next-but-two nonce
+//   6. LPStakingVault implementation + LPProxy,
+//      `initialize(owner = timelock, guardian, operator, zapper = predicted, window, ticks)`
+//   7. `LPZapper(vault, …, owner = DEPLOYER, window, ticks)`; record it, then assert the
+//      address matches the prediction
+//   8. `tokenX.setMinter(distributor)`, and the optional `tokenX.setEpochCap(id, cap)`
+//   9. `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
+//      `Ownable2Step`, so both only NOMINATE; skipped when the operator IS the deployer
+//  10. `increaseObservationCardinalityNext` on the pool (permissionless)
+//  11. post-deploy verification, the address summary, the verify commands
+//
+// The one remaining bootstrap window: NONE on the proxies. TokenX and LPZapper stay owned by
+// the DEPLOYER until the operator multisig sends `acceptOwnership()` on each — two plain
+// transactions, no timelock, printed by this run. Neither contract can move a staker's
+// position or a user's funds; what the deployer still holds until then is TokenX's minter
+// wiring and the zapper's sweep.
+//
+// ──────────────────────── the three admin tiers ────────────────────────
+//
+// owner    = the LPTimelock. Upgrades, `setZapper`, `setGuardian`, `setOperator`, the ASSET
+//            leg switch — every one of them scheduled, public for `minDelay`, then executed.
+// guardian = LP_GUARDIAN, a hot key. The three pause switches, with no delay and nothing
+//            else. Required, and it must NOT be the operator.
+// operator = LP_OPERATOR, a multisig. The vault's `setTwapParams` and `rescuePosition`, the
+//            distributor's `setSigner` and `recoverExcessAsset`, and those same three pause
+//            switches as the cold fallback for a lost guardian key. Also the owner of TokenX
+//            and LPZapper. Required.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -47,27 +65,28 @@ const timelockOps = require("./lp-timelock");
 //   LP_SIGNER      — backend voucher signer for RewardsDistributor; MUST NOT be
 //                    the deployer or the multisig — it signs EIP-712 payloads on
 //                    every claim, which a Ledger cannot serve
-//   LP_MULTISIG    — owner of TokenX and LPZapper, guardian of the two proxies by default,
-//                    and the timelock's sole proposer, executor and canceller
+//   LP_MULTISIG    — the timelock's sole proposer, executor and canceller
+//   LP_GUARDIAN    — pause tier on BOTH proxies: the vault's two pause switches and the
+//                    distributor's, with no delay and nothing else. A hot key, and the run
+//                    throws if it equals LP_OPERATOR
+//   LP_OPERATOR    — routine-operations tier on BOTH proxies (setTwapParams,
+//                    rescuePosition, setSigner, recoverExcessAsset, plus the three pause
+//                    switches as the cold fallback), and the owner TokenX and LPZapper are
+//                    handed to
 //   LP_TOKENX_NAME / LP_TOKENX_SYMBOL — TokenX branding, decided at deploy time
 //
 // Optional env (defaults in parentheses)
-//   LP_NPM                    — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
-//   LP_ROUTER                 — SwapRouter02 (per-chain default, see UNISWAP_BY_CHAIN)
+//   LP_NPM                    — NonfungiblePositionManager (per-chain default, see
+//                               scripts/lib/uniswap.js)
+//   LP_ROUTER                 — SwapRouter02 (per-chain default, same file)
+//   LP_FACTORY                — UniswapV3Factory (per-chain default, same file). Only read
+//                               to prove LP_POOL is the factory's canonical pool
 //   LP_FEE                    — pool fee tier in hundredths of a bip (3000)
 //   LP_TWAP_WINDOW            — TWAP lookback in seconds, 300..3600 (300)
 //   LP_TWAP_MAX_DEVIATION_BPS — spot-vs-TWAP ceiling in BPS, <= 2000 (1000). The contract
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
-//   LP_GUARDIAN               — pause tier on BOTH proxies: the vault's two pause switches and
-//                               the distributor's, with no delay and nothing else
-//                               (LP_MULTISIG)
-//   LP_OPERATOR               — routine-operations tier on BOTH proxies: the vault's
-//                               setTwapParams and rescuePosition, the distributor's setSigner
-//                               and recoverExcessAsset, plus all three pause switches as the
-//                               cold fallback for a lost guardian key — all with no delay
-//                               (LP_MULTISIG)
 //   LP_TIMELOCK_MIN_DELAY     — seconds between a scheduled operation and its earliest
 //                               execution (172800 = 48 h, the mainnet figure). Sepolia
 //                               staging runs 300 so the flow can be rehearsed end to end;
@@ -81,24 +100,6 @@ const timelockOps = require("./lp-timelock");
 //                               needs >= 600
 //
 // Mainnet needs CONFIRM=yes, like every other state-changing script here.
-
-// Uniswap V3 is NOT at one address across chains. Sepolia got its own deployment,
-// and the mainnet addresses have zero code there. Keyed by chain id; a chain that
-// is not listed has no default, so LP_NPM / LP_ROUTER become required for it —
-// including a local fork, which reports 31337 rather than the forked chain id.
-// The getCode() check below is the backstop: a wrong address here fails there.
-const UNISWAP_BY_CHAIN = {
-  // mainnet
-  1: {
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-    swapRouter02: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
-  },
-  // sepolia
-  11155111: {
-    positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
-    swapRouter02: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
-  },
-};
 
 // ERC-1967 implementation slot: keccak256("eip1967.proxy.implementation") - 1.
 const ERC1967_IMPLEMENTATION_SLOT =
@@ -239,31 +240,6 @@ async function deployProxyPair(name, constructorArgs, initArgs, deployer) {
   };
 }
 
-/**
- * Waits out the timelock's own delay in WALL time.
- *
- * Only the staging path reaches this: the script holds the proposer and executor key there,
- * so the whole schedule → delay → execute cycle happens inside one run and the operator sees
- * the real flow rather than a shortcut. There is deliberately no `evm_increaseTime` here — a
- * deploy script must not depend on a test-only RPC method, and on a real network the clock is
- * the clock. With `minDelay = 0` there is nothing to wait for.
- */
-async function waitOutMinDelay(seconds) {
-  if (seconds <= 0) {
-    console.log("  minDelay is 0 — both operations are ready in the block they were scheduled in.");
-    return;
-  }
-  const total = seconds + 1; // `readyAt` is exclusive: OZ needs timestamp >= scheduled + delay
-  const readyAt = new Date(Date.now() + total * 1000);
-  console.log(`\nWaiting out the ${seconds}s timelock delay (ready at ${readyAt.toISOString()})...`);
-  const step = Math.min(30, total);
-  for (let left = total; left > 0; left -= step) {
-    const chunk = Math.min(step, left);
-    await new Promise((resolve) => setTimeout(resolve, chunk * 1000));
-    console.log(`  ${Math.max(left - chunk, 0)}s left`);
-  }
-}
-
 async function main() {
   const chainId = await pools.chainId();
   const mainnet = pools.isMainnet(chainId);
@@ -271,25 +247,28 @@ async function main() {
 
   // ──────────────────────── config ────────────────────────
 
-  const uniswap = UNISWAP_BY_CHAIN[chainId] || {};
+  const uniswap = uniswapByChain.forChain(chainId);
 
   const asset = readAddress("LP_ASSET");
   const usdc = readAddress("LP_USDC");
   const poolAddress = readAddress("LP_POOL");
   const positionManager = readAddress("LP_NPM", uniswap.positionManager);
   const swapRouter = readAddress("LP_ROUTER", uniswap.swapRouter02);
+  // Read only for the canonical-pool check below (C-2). Nothing on chain is bound to it.
+  const factoryAddress = readAddress("LP_FACTORY", uniswap.factory);
   const signer = readAddress("LP_SIGNER");
   const multisig = readAddress("LP_MULTISIG");
-  // Fast-path incident responder on the distributor proxy: pauses, signer rotation and
-  // `recoverExcessAsset`, with no timelock in front of it. Defaults to the multisig, which
-  // is what it is unless a dedicated ops key is provisioned.
-  const guardian = readAddress("LP_GUARDIAN", multisig);
+  // Pause tier on BOTH proxies: the vault's two pause switches and the distributor's, with
+  // no delay and nothing else. A HOT key — it is meant to be reachable at three in the
+  // morning — which is why it is required and must be a different address from the operator:
+  // a key held for speed and a key held for value must not be the same key.
+  const guardian = readAddress("LP_GUARDIAN");
   // Routine-operations tier on BOTH proxies (2026-09-09 role split): the vault's TWAP
   // calibration and NFT rescue, the distributor's signer rotation and ASSET recovery, plus
-  // all three pause switches as the cold fallback for a lost guardian key. Optional here and
-  // defaulted to the multisig; making it required, and rejecting `operator == guardian`, is
-  // part of the N-7 bootstrap rewrite.
-  const operator = readAddress("LP_OPERATOR", multisig);
+  // all three pause switches as the cold fallback for a lost guardian key. It is also the
+  // address TokenX and LPZapper are handed to, and the address rescued NFTs and recovered
+  // ASSET are sent to. Required.
+  const operator = readAddress("LP_OPERATOR");
 
   // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so
   // the schedule -> execute flow is rehearsable rather than theoretical.
@@ -321,6 +300,15 @@ async function main() {
   // ──────────────────────── local validation ────────────────────────
 
   if (asset === usdc) throw new Error("LP_ASSET and LP_USDC must be different tokens");
+  // The guardian is a hot key and the operator is a multisig; one address holding both tiers
+  // is a hot key holding the operator tier, which is the arrangement the role split exists to
+  // prevent. This is the one role rule that is fatal.
+  if (guardian === operator) {
+    throw new Error(
+      `LP_GUARDIAN and LP_OPERATOR must be different addresses — both are ${guardian}. ` +
+        `The guardian is a hot pause key; the operator is a multisig that can move value.`
+    );
+  }
   if (!VALID_FEE_TIERS.includes(fee)) {
     throw new Error(`LP_FEE must be one of ${VALID_FEE_TIERS.join(", ")} — got ${fee}`);
   }
@@ -366,6 +354,14 @@ async function main() {
   const [token0, token1] =
     asset.toLowerCase() < usdc.toLowerCase() ? [asset, usdc] : [usdc, asset];
 
+  // Names a collapsed role in the printout instead of leaving the reader to compare hex.
+  const roleNote = (address) => {
+    const parts = [];
+    if (address === multisig) parts.push("= the multisig");
+    if (address === deployer.address) parts.push("= the deployer");
+    return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+  };
+
   console.log("Deploying the LP staking stack...");
   console.log(`Network:            chain ${chainId}`);
   console.log(`Deployer:           ${deployer.address}`);
@@ -377,10 +373,11 @@ async function main() {
   console.log(`  fee:              ${fee}`);
   console.log(`PositionManager:    ${positionManager}`);
   console.log(`SwapRouter02:       ${swapRouter}`);
+  console.log(`Factory:            ${factoryAddress}`);
   console.log(`Voucher signer:     ${signer}`);
   console.log(`Multisig:           ${multisig}`);
-  console.log(`Guardian:           ${guardian}${guardian === multisig ? " (= the multisig)" : ""}`);
-  console.log(`Operator:           ${operator}${operator === multisig ? " (= the multisig)" : ""}`);
+  console.log(`Guardian:           ${guardian}${roleNote(guardian)}`);
+  console.log(`Operator:           ${operator}${roleNote(operator)}`);
   console.log(
     `Timelock minDelay:  ${timelockMinDelay}s` +
       (timelockMinDelay === DEFAULT_TIMELOCK_MIN_DELAY ? " (48 h, the mainnet default)" : "")
@@ -405,6 +402,7 @@ async function main() {
     ["LP_POOL", poolAddress],
     ["LP_NPM", positionManager],
     ["LP_ROUTER", swapRouter],
+    ["LP_FACTORY", factoryAddress],
     ["LP_ASSET", asset],
     ["LP_USDC", usdc],
   ]) {
@@ -427,6 +425,22 @@ async function main() {
     );
   }
   console.log(`  pool triple matches (token0/token1/fee)`);
+
+  // The triple check proves the contract at LP_POOL CLAIMS these tokens and this fee. Only the
+  // factory proves it IS the canonical pool for them — the pool the router will swap against
+  // and the position manager will mint into. The TWAP guard is the one consumer of LP_POOL,
+  // so a wrong address here would silently read an unrelated market for the life of the
+  // deployment (immutable) while every swap executes against the real one.
+  const FACTORY_ABI = ["function getPool(address,address,uint24) view returns (address)"];
+  const factory = new hre.ethers.Contract(factoryAddress, FACTORY_ABI, hre.ethers.provider);
+  const canonicalPool = hre.ethers.getAddress(await factory.getPool(token0, token1, fee));
+  if (canonicalPool !== poolAddress) {
+    throw new Error(
+      `LP_POOL ${poolAddress} is not the factory's pool for (${token0}, ${token1}, ${fee}) — ` +
+        `factory ${factoryAddress} reports ${canonicalPool}`
+    );
+  }
+  console.log(`  pool is the canonical factory pool`);
 
   // The zapper cannot tell ASSET from USDC on-chain: both are just "one side of
   // the pair", and swapping the two roles produces a stack that mints positions
@@ -464,32 +478,29 @@ async function main() {
         "         backend key, and a Ledger cannot serve that role."
     );
   }
-  // This is the fork in the road for the whole ownership bootstrap below, so it is stated
-  // before anything is deployed rather than discovered halfway through.
-  const stagingBootstrap = multisig.toLowerCase() === deployer.address.toLowerCase();
-  if (stagingBootstrap) {
+  // The role rules that are NOT fatal. Every one of them is a collapse a staging run is
+  // expected to make and a production run is not, so each is stated once, in full, and the
+  // run continues: the fatal case (guardian == operator) already threw above.
+  const collapses = [];
+  if (guardian === multisig) collapses.push("LP_GUARDIAN is the multisig");
+  if (operator === multisig) collapses.push("LP_OPERATOR is the multisig");
+  if (guardian === deployer.address) collapses.push("LP_GUARDIAN is the deploying key");
+  if (operator === deployer.address) collapses.push("LP_OPERATOR is the deploying key");
+  if (collapses.length > 0) {
     console.log(
-      "\nSTAGING BOOTSTRAP: LP_MULTISIG is the deployer, so this run holds the timelock's\n" +
-        "         proposer and executor roles itself. It will schedule both acceptOwnership\n" +
-        `         operations, wait out the ${timelockMinDelay}s delay and execute them, ending with\n` +
-        "         the timelock as the owner of both proxies. TokenX and the zapper still end\n" +
-        "         up owned by the deploying key, which is only right on staging — set\n" +
-        "         LP_MULTISIG to the real multisig before a production run."
-    );
-  } else {
-    console.log(
-      "\nMULTISIG BOOTSTRAP: the timelock's roles belong to LP_MULTISIG, which this run cannot\n" +
-        "         sign for. It will nominate the timelock on both proxies and print the two\n" +
-        "         schedule payloads; until the multisig schedules and executes them, the\n" +
-        "         DEPLOYER is still the owner of both proxies (pendingOwner = the timelock)."
+      "\nWARNING: the admin tiers are collapsed onto fewer addresses than the model assumes:\n" +
+        collapses.map((line) => `         - ${line}`).join("\n") +
+        "\n         That is the staging arrangement. On mainnet the guardian is a hot key, the\n" +
+        "         operator is a multisig, and neither is the key that signs this deployment."
     );
   }
+
   if (!epochId) {
     console.log(
       "\nWARNING: LP_EPOCH_ID / LP_EPOCH_CAP are unset, so TokenX starts on epoch 0 with a\n" +
         "         zero cap. Every claimTokenX will revert with EpochMintCapExceeded until\n" +
-        "         the owner arms an epoch with setEpochCap(epochId, cap). Arm it from the\n" +
-        "         multisig before announcing claims."
+        "         TokenX's owner arms an epoch with setEpochCap(epochId, cap). Arm it from\n" +
+        "         the operator before announcing claims."
     );
   }
 
@@ -498,6 +509,32 @@ async function main() {
 
   // ──────────────────────── deploy ────────────────────────
 
+  // The timelock first. It depends on nothing, and both proxies name it as their owner in
+  // their own deployment transaction, so it has to exist before either of them.
+  //
+  // Stock OZ v5, through the repo's own `LPTimelock` wrapper. Roles, per spec §2.5: the
+  // multisig is the only proposer, the only executor (execution is deliberately NOT open) and
+  // — because the OZ constructor grants it alongside PROPOSER_ROLE — the only canceller.
+  // `admin = address(0)` leaves the timelock its own DEFAULT_ADMIN_ROLE holder, so even a
+  // role change is a scheduled, publicly visible operation.
+  const timelockDeploy = await deployContract(
+    "LPTimelock",
+    [timelockMinDelay, [multisig], [multisig], hre.ethers.ZeroAddress],
+    deployer
+  );
+  const timelock = await hre.ethers.getContractAt("LPTimelock", timelockDeploy.address, deployer);
+  pools.recordDeployment(chainId, TIMELOCK_KIND, timelockDeploy.address, {
+    deployTx: timelockDeploy.tx.hash,
+    block: timelockDeploy.receipt.blockNumber,
+    minDelay: timelockMinDelay,
+    proposers: [multisig],
+    executors: [multisig],
+    cancellers: [multisig],
+    admin: hre.ethers.ZeroAddress,
+  });
+
+  // TokenX is the one contract the deployer must own for a moment: `setMinter` below is
+  // owner-only and the distributor does not exist yet at construction time.
   const tokenXDeploy = await deployContract(
     "TokenX",
     [tokenXName, tokenXSymbol, deployer.address],
@@ -508,24 +545,23 @@ async function main() {
     block: tokenXDeploy.receipt.blockNumber,
     name: tokenXName,
     symbol: tokenXSymbol,
+    owner: operator,
   });
 
   // The distributor is a UUPS proxy (spec 01 revision 2026-08-26): an implementation that
   // carries the two immutables and burns its own initializers, then an LPProxy whose
-  // constructor delegatecalls `initialize` in the SAME transaction. The owner named here is
-  // the DEPLOYER; the timelock takes over at the end of the run.
+  // constructor delegatecalls `initialize` in the SAME transaction. The owner named there is
+  // the TIMELOCK — the proxy is born owned by it, and no key ever holds the owner tier.
   const distributorDeploy = await deployProxyPair(
     "RewardsDistributor",
     [tokenXDeploy.address, asset],
-    [deployer.address, guardian, operator, signer],
+    [timelockDeploy.address, guardian, operator, signer],
     deployer
   );
   const distributorImplDeploy = distributorDeploy.impl;
   const distributorProxyDeploy = distributorDeploy.proxy;
   const distributorInitData = distributorDeploy.initData;
-  // The `owner` field is filled in after the timelock exists; recording the rest now means a
-  // run that dies in the next transaction still leaves the address written down.
-  const distributorRecord = {
+  pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, {
     deployTx: distributorDeploy.tx.hash,
     block: distributorDeploy.receipt.blockNumber,
     implementation: distributorImplDeploy.address,
@@ -533,25 +569,34 @@ async function main() {
     tokenX: tokenXDeploy.address,
     asset,
     signer,
+    owner: timelockDeploy.address,
     guardian,
     operator,
-  };
-  pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, distributorRecord);
+  });
+
+  // The vault is born owned by the timelock, so nobody can call `setZapper` at bootstrap
+  // without a 48 h schedule. Instead the zapper's address is passed to `initialize` ahead of
+  // its deployment: CREATE addresses are a pure function of (deployer, nonce), and every
+  // transaction in this script carries an explicit nonce, so the next three are known now —
+  // vault implementation, vault proxy, zapper.
+  const vaultImplNonce = await pools.resolveNonce(deployer.address);
+  const predictedZapper = hre.ethers.getCreateAddress({ from: deployer.address, nonce: vaultImplNonce + 2 });
+  console.log(`\nPredicted LPZapper address: ${predictedZapper} (deployer nonce ${vaultImplNonce + 2})`);
 
   // The vault is a UUPS proxy for the same reason and in the same shape: implementation (the
   // six immutables, the live pool triple check on them, and `_disableInitializers()`), then an
-  // LPProxy. Owner = the deployer, because `setZapper` below is owner-only and the handover
-  // follows the wiring.
+  // LPProxy. Owner = the timelock, zapper = the address the next transaction but one will
+  // deploy to.
   const vaultDeploy = await deployProxyPair(
     "LPStakingVault",
     [positionManager, poolAddress, token0, token1, fee, swapRouter],
-    [deployer.address, guardian, operator, hre.ethers.ZeroAddress, twapWindow, twapMaxDeviationTicks],
+    [timelockDeploy.address, guardian, operator, predictedZapper, twapWindow, twapMaxDeviationTicks],
     deployer
   );
   const vaultImplDeploy = vaultDeploy.impl;
   const vaultProxyDeploy = vaultDeploy.proxy;
   const vaultInitData = vaultDeploy.initData;
-  const vaultRecord = {
+  pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, {
     deployTx: vaultDeploy.tx.hash,
     block: vaultDeploy.receipt.blockNumber,
     implementation: vaultImplDeploy.address,
@@ -562,10 +607,11 @@ async function main() {
     fee,
     twapWindow,
     maxTwapDeviationTicks: twapMaxDeviationTicks,
+    owner: timelockDeploy.address,
     guardian,
     operator,
-  };
-  pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, vaultRecord);
+    zapper: predictedZapper,
+  });
 
   const zapperDeploy = await deployContract(
     "LPZapper",
@@ -585,6 +631,8 @@ async function main() {
     ],
     deployer
   );
+  // Recorded BEFORE the prediction is checked: if the address is wrong the run throws, and
+  // the address of a contract that is already on chain must not be lost with it.
   pools.recordDeployment(chainId, "LPZapper", zapperDeploy.address, {
     deployTx: zapperDeploy.tx.hash,
     block: zapperDeploy.receipt.blockNumber,
@@ -593,7 +641,18 @@ async function main() {
     asset,
     twapWindow,
     maxTwapDeviationTicks: twapMaxDeviationTicks,
+    owner: operator,
   });
+
+  if (zapperDeploy.address.toLowerCase() !== predictedZapper.toLowerCase()) {
+    throw new Error(
+      `LPZapper landed at ${zapperDeploy.address}, but the vault was initialized with ` +
+        `${predictedZapper}. The stack is deployed and recorded; the zap path is OFF until the ` +
+        `timelock executes LPStakingVault.setZapper(${zapperDeploy.address}) ` +
+        `(TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setZapper). Staking works meanwhile.`
+    );
+  }
+  console.log(`  LPZapper landed on the predicted address; the vault was born pointing at it`);
 
   const tokenX = tokenXDeploy.contract;
   const distributor = distributorDeploy.contract;
@@ -601,15 +660,12 @@ async function main() {
   const zapper = zapperDeploy.contract;
 
   // ──────────────────────── wiring ────────────────────────
-  // All of this is onlyOwner, so it must happen while the deployer still owns
-  // the contracts — hence before the ownership transfers below.
+  // What is left of it. The vault needs nothing — it was born pointing at the zapper — so
+  // this is TokenX only, and TokenX is still owned by the deployer at this point.
 
   console.log("\nWiring the stack...");
   await pools.send("Setting TokenX minter to the distributor", deployer, (o) =>
     tokenX.setMinter(distributorDeploy.address, o)
-  );
-  await pools.send("Whitelisting the zapper on the vault", deployer, (o) =>
-    vault.setZapper(zapperDeploy.address, o)
   );
 
   if (epochId) {
@@ -620,121 +676,30 @@ async function main() {
     console.log("Skipping setEpochCap — no epoch armed, claims will revert (see the warning above).");
   }
 
-  // ──────────────────────── the timelock ────────────────────────
-
-  // Stock OZ v5, through the repo's own `LPTimelock` wrapper. Roles, per spec §2.5: the
-  // multisig is the only proposer, the only executor (execution is deliberately NOT open) and
-  // — because the OZ constructor grants it alongside PROPOSER_ROLE — the only canceller.
-  // `admin = address(0)` leaves the timelock its own DEFAULT_ADMIN_ROLE holder, so even a
-  // role change is a scheduled, publicly visible operation.
-  const timelockDeploy = await deployContract(
-    "LPTimelock",
-    [timelockMinDelay, [multisig], [multisig], hre.ethers.ZeroAddress],
-    deployer
-  );
-  const timelock = await hre.ethers.getContractAt("LPTimelock", timelockDeploy.address, deployer);
-  pools.recordDeployment(chainId, timelockOps.TIMELOCK_KIND, timelockDeploy.address, {
-    deployTx: timelockDeploy.tx.hash,
-    block: timelockDeploy.receipt.blockNumber,
-    minDelay: timelockMinDelay,
-    proposers: [multisig],
-    executors: [multisig],
-    cancellers: [multisig],
-    admin: hre.ethers.ZeroAddress,
-  });
-
   // ──────────────────────── ownership ────────────────────────
 
+  // Only TokenX and LPZapper are handed over here: both proxies were born owned by the
+  // timelock and there is nothing to transfer on them. Both of these are `Ownable2Step`, so
+  // each call only NOMINATES — the operator finishes it with one plain transaction per
+  // contract, no timelock in the path.
   console.log("\nTransferring ownership...");
-  // All four contracts are Ownable2Step, so every one of these transactions only NOMINATES.
-  // The proxies' acceptance is the timelock's own first operation (see the bootstrap below);
-  // TokenX's and the zapper's is two plain transactions from the multisig.
-  const handsOverPlainContracts = multisig.toLowerCase() !== deployer.address.toLowerCase();
+  const handsOverPlainContracts = operator.toLowerCase() !== deployer.address.toLowerCase();
   if (handsOverPlainContracts) {
-    await pools.send("TokenX -> multisig (nomination)", deployer, (o) =>
-      tokenX.transferOwnership(multisig, o)
+    await pools.send("TokenX -> operator (nomination)", deployer, (o) =>
+      tokenX.transferOwnership(operator, o)
     );
-  } else {
-    console.log("TokenX -> multisig: skipped, the multisig IS the deployer and already owns it");
-  }
-  await pools.send("RewardsDistributor -> timelock (nomination)", deployer, (o) =>
-    distributor.transferOwnership(timelockDeploy.address, o)
-  );
-  await pools.send("LPStakingVault -> timelock (nomination)", deployer, (o) =>
-    vault.transferOwnership(timelockDeploy.address, o)
-  );
-  if (handsOverPlainContracts) {
-    await pools.send("LPZapper -> multisig (nomination)", deployer, (o) =>
-      zapper.transferOwnership(multisig, o)
+    await pools.send("LPZapper -> operator (nomination)", deployer, (o) =>
+      zapper.transferOwnership(operator, o)
     );
     console.log(
-      `\nTwo plain transactions for the multisig (${multisig}), no timelock involved:\n` +
+      `\nTwo plain transactions for the operator (${operator}), no timelock involved:\n` +
         `  TokenX.acceptOwnership()    -> ${tokenXDeploy.address}  payload 0x79ba5097\n` +
         `  LPZapper.acceptOwnership()  -> ${zapperDeploy.address}  payload 0x79ba5097\n` +
-        "Until they land, the DEPLOYER still owns both (pendingOwner = the multisig)."
+        "Until they land, the DEPLOYER still owns both (pendingOwner = the operator)."
     );
   } else {
-    console.log("LPZapper -> multisig: skipped, the multisig IS the deployer and already owns it");
-  }
-
-  // Now that the owner is known, the registry records it beside the address it belongs to.
-  pools.recordDeployment(chainId, "RewardsDistributor", distributorDeploy.address, {
-    ...distributorRecord,
-    owner: timelockDeploy.address,
-  });
-  pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, {
-    ...vaultRecord,
-    owner: timelockDeploy.address,
-  });
-
-  // ──────────────────────── the acceptance, through the timelock ────────────────────────
-
-  const acceptOperations = [
-    timelockOps.buildOperation({ target: distributorDeploy.address, fn: "acceptOwnership" }),
-    timelockOps.buildOperation({ target: vaultDeploy.address, fn: "acceptOwnership" }),
-  ];
-  const acceptLabels = ["RewardsDistributor", "LPStakingVault"];
-
-  if (stagingBootstrap) {
-    console.log("\nHanding both proxies to the timelock (schedule -> delay -> execute)...");
-    for (const [index, op] of acceptOperations.entries()) {
-      await pools.send(`Scheduling ${acceptLabels[index]}.acceptOwnership`, deployer, (o) =>
-        timelock.schedule(op.target, op.value, op.data, op.predecessor, op.salt, timelockMinDelay, o)
-      );
-      console.log(`  operation id: ${op.id}`);
-    }
-
-    await waitOutMinDelay(timelockMinDelay);
-
-    for (const [index, op] of acceptOperations.entries()) {
-      await pools.send(`Executing ${acceptLabels[index]}.acceptOwnership`, deployer, (o) =>
-        timelock.execute(op.target, op.value, op.data, op.predecessor, op.salt, o)
-      );
-    }
-  } else {
-    console.log("\n──────── the multisig's four timelock transactions ────────");
     console.log(
-      "Both proxies are nominated but NOT yet owned by the timelock. Send these from the\n" +
-        `multisig (${multisig}), which is the timelock's only proposer and executor.\n` +
-        `Every payload goes to the timelock at ${timelockDeploy.address}, value 0.\n` +
-        "The salt is derived from the call itself (scripts/lp-timelock.js documents how), so\n" +
-        "the id below can be recomputed by anyone from the public calldata."
-    );
-    for (const [index, op] of acceptOperations.entries()) {
-      console.log(`\n${acceptLabels[index]}.acceptOwnership()  —  operation ${op.id}`);
-      console.log(`  target:      ${op.target}`);
-      console.log(`  payload:     ${op.data}`);
-      console.log(`  predecessor: ${op.predecessor}`);
-      console.log(`  salt:        ${op.salt}`);
-      console.log(`  1. schedule: ${timelockOps.encodeSchedule(op, timelockMinDelay)}`);
-      console.log(`  2. execute (after ${timelockMinDelay}s): ${timelockOps.encodeExecute(op)}`);
-    }
-    console.log(
-      `\nOr, with the key that holds the roles:\n` +
-        `  TIMELOCK_ACTION=schedule TIMELOCK_TARGET=RewardsDistributor TIMELOCK_FN=acceptOwnership \\\n` +
-        `    npx hardhat run scripts/lp-timelock.js --network ${hre.network.name}\n` +
-        `  (then TIMELOCK_TARGET=LPStakingVault, and the same two with TIMELOCK_ACTION=execute\n` +
-        `  once ${timelockMinDelay}s have passed)`
+      "TokenX and LPZapper -> operator: skipped, the operator IS the deployer and already owns both."
     );
   }
 
@@ -791,11 +756,11 @@ async function main() {
   check("TokenX.symbol", await tokenX.symbol(), tokenXSymbol);
   check("TokenX.decimals", await tokenX.decimals(), TOKENX_DECIMALS);
   check("TokenX.minter", await tokenX.minter(), distributorDeploy.address);
-  // Ownable2Step (N-1): a nomination the multisig has not accepted yet leaves the DEPLOYER
-  // the owner. When the multisig is the deployer nothing was nominated at all.
+  // Ownable2Step (N-1): a nomination the operator has not accepted yet leaves the DEPLOYER
+  // the owner. When the operator is the deployer nothing was nominated at all.
   const [expectedPlainOwner, expectedPlainPendingOwner] = handsOverPlainContracts
-    ? [deployer.address, multisig]
-    : [multisig, hre.ethers.ZeroAddress];
+    ? [deployer.address, operator]
+    : [operator, hre.ethers.ZeroAddress];
   check("TokenX.owner", await tokenX.owner(), expectedPlainOwner);
   check("TokenX.pendingOwner", await tokenX.pendingOwner(), expectedPlainPendingOwner);
   check("TokenX.totalSupply", await tokenX.totalSupply(), 0);
@@ -806,11 +771,10 @@ async function main() {
     console.log(`WARN  TokenX.currentEpochId: ${await tokenX.currentEpochId()} with cap ${await tokenX.epochCap(0)} — claims revert until an epoch is armed`);
   }
 
-  // Ownable2Step through a timelock has exactly two legal end states, and which one this run
-  // reached is decided by whether it could sign for the timelock's proposer role.
-  const [expectedProxyOwner, expectedPendingOwner] = stagingBootstrap
-    ? [timelockDeploy.address, hre.ethers.ZeroAddress]
-    : [deployer.address, timelockDeploy.address];
+  // The proxies have exactly ONE legal end state since N-7: born owned by the timelock, with
+  // nothing pending. There is no interim, no branch and no window in which a key owns them.
+  const expectedProxyOwner = timelockDeploy.address;
+  const expectedPendingOwner = hre.ethers.ZeroAddress;
 
   check("RewardsDistributor.tokenX", await distributor.tokenX(), tokenXDeploy.address);
   check("RewardsDistributor.asset", await distributor.asset(), asset);
@@ -900,13 +864,6 @@ async function main() {
     await timelock.hasRole(DEFAULT_ADMIN_ROLE, deployer.address),
     false
   );
-  if (!stagingBootstrap) {
-    check(
-      "LPTimelock.PROPOSER_ROLE[deployer]",
-      await timelock.hasRole(PROPOSER_ROLE, deployer.address),
-      false
-    );
-  }
 
   // UUPS keeps the upgrade authority in the implementation, so the ERC-1967 ADMIN slot must be
   // empty on both proxies. A non-zero value there would mean a transparent proxy's ProxyAdmin
@@ -966,16 +923,20 @@ async function main() {
       `${timelockMinDelay} '["${multisig}"]' '["${multisig}"]' ${hre.ethers.ZeroAddress}`
   );
   console.log(
-    "\nThe constructor argument is the DEPLOYER, not the multisig — ownership moved " +
-      "afterwards,\nso verification must replay the value the constructor actually saw.\n" +
+    "\nTokenX and LPZapper name the DEPLOYER in their constructor argument, not the " +
+      "operator —\nthe nomination happens afterwards, and verification must replay the value " +
+      "the\nconstructor actually saw.\n" +
       "Each proxy needs two commands: one for the implementation, one for the proxy itself\n" +
-      "(implementation address + the `initialize` calldata)."
+      "(implementation address + the `initialize` calldata). The vault's calldata now carries\n" +
+      "SIX arguments — owner, guardian, operator, zapper, window, ticks — and the " +
+      "distributor's\nfour: owner, guardian, operator, signer."
   );
 
   if (failures.length > 0) {
     throw new Error(
       `Post-deploy verification failed for: ${failures.join(", ")}. ` +
-        `The contracts are deployed and recorded in deployments.json — fix the state from the multisig.`
+        `The contracts are deployed and recorded in deployments.json — fix the state from the ` +
+        `operator, or through the timelock for an owner-tier field.`
     );
   }
   console.log("\nAll post-deploy checks passed.");

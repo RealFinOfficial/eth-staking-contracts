@@ -1,5 +1,6 @@
 const hre = require("hardhat");
 const pools = require("./lib/pools");
+const uniswapByChain = require("./lib/uniswap");
 
 // Create the ASSET-USDC Uniswap V3 pool for the integration environment.
 //
@@ -15,8 +16,8 @@ const pools = require("./lib/pools");
 //
 // Optional env (defaults in parentheses)
 //   LP_FEE     — fee tier in hundredths of a bip (3000)
-//   LP_NPM     — NonfungiblePositionManager (per-chain default, see UNISWAP_BY_CHAIN)
-//   LP_FACTORY — UniswapV3Factory (per-chain default, see UNISWAP_BY_CHAIN)
+//   LP_NPM     — NonfungiblePositionManager (per-chain default, see scripts/lib/uniswap.js)
+//   LP_FACTORY — UniswapV3Factory (per-chain default, see scripts/lib/uniswap.js)
 //
 // ──────────────────────── computing LP_INITIAL_SQRT_PRICE_X96 ────────────────────────
 //
@@ -62,23 +63,6 @@ const pools = require("./lib/pools");
 // The script prints the human price this value decodes back to before sending
 // anything, so a wrong sort order or a missing 1e12 is visible before the tx.
 
-// Uniswap V3 is NOT at one address across chains. Sepolia got its own deployment,
-// and the mainnet addresses have zero code there — using them makes getPool()
-// return garbage instead of reverting. Keyed by chain id; a chain that is not
-// listed has no default, so LP_FACTORY / LP_NPM become required for it.
-const UNISWAP_BY_CHAIN = {
-  // mainnet
-  1: {
-    factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    positionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-  },
-  // sepolia
-  11155111: {
-    factory: "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
-    positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
-  },
-};
-
 const VALID_FEE_TIERS = [100, 500, 3000, 10000];
 
 // Neither call lives in our vendored interfaces — the vault and the zapper never
@@ -121,7 +105,7 @@ async function main() {
 
   // A local fork reports its own chain id (31337), not the forked one, so it
   // lands here with no default and must pass LP_FACTORY / LP_NPM explicitly.
-  const uniswap = UNISWAP_BY_CHAIN[chainId] || {};
+  const uniswap = uniswapByChain.forChain(chainId);
 
   const asset = readAddress("LP_ASSET");
   const usdc = readAddress("LP_USDC");

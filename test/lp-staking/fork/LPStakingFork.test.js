@@ -675,14 +675,24 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       const vaultImpl = await Vault.deploy(NPM_ADDR, POOL_ADDR, ASSET_ADDR, USDC_ADDR, FEE, ROUTER_ADDR);
       await vaultImpl.waitForDeployment();
 
+      // The zapper is deployed by the SAME key, in the very next transaction, so its CREATE
+      // address is known before it exists: address = f(deployer, nonce). That is what lets
+      // the proxy be born fully wired — owner and zapper both final in the proxy's own
+      // deployment transaction — which is exactly what scripts/deploy-lp-staking.js does
+      // (N-7). No `setZapper` follows, and no ownership handover either.
       const VaultProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
+      const vaultProxyNonce = await ethers.provider.getTransactionCount(deployer.address);
+      const predictedZapper = ethers.getCreateAddress({
+        from: deployer.address,
+        nonce: vaultProxyNonce + 1,
+      });
       const vaultProxy = await VaultProxyFactory.deploy(
         await vaultImpl.getAddress(),
         Vault.interface.encodeFunctionData("initialize", [
-          deployer.address, // owner, handed to the multisig below — `setZapper` runs first
+          multisig.address, // owner — the proxy is born owned by it, no handover to run
           multisig.address, // guardian — the hot pause key, never behind a timelock
           multisig.address, // operator — collapsed onto the multisig in this tier, see below
-          ethers.ZeroAddress, // zapper — wired by `setZapper` below, while the deployer owns it
+          predictedZapper, // zapper — the address the next transaction deploys to
           TWAP_WINDOW,
           MAX_DEVIATION_TICKS,
         ])
@@ -708,13 +718,13 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       );
       await zapper.waitForDeployment();
       zapperAddr = await zapper.getAddress();
-      await (await vault.setZapper(zapperAddr)).wait();
+      expect(zapperAddr, "the zapper must land on the pre-computed address").to.equal(
+        predictedZapper
+      );
+      expect(await vault.zapper()).to.equal(zapperAddr);
 
-      // Ownable2Step: the transfer nominates, and the multisig has to accept. `setZapper`
-      // above is owner-only, so the handover can only happen after the wiring.
-      //
-      // The guardian and the operator are the same multisig here for the same reason: this
-      // tier is about the contracts against the real pool, not about the role split, which
+      // The guardian and the operator are the same multisig here: this tier is about the
+      // contracts against the real pool, not about the role split, which
       // {LPStakingVault.test.js} and test/forge/unit/AccessControl.t.sol measure with three
       // distinct addresses.
       //
@@ -723,8 +733,6 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       // admin call would add nothing but blocks. The timelock path — schedule, delay, execute,
       // and a premature execute that reverts — is proven in the unit suites' "under a
       // TimelockController" blocks and end to end in both integration suites.
-      await (await vault.transferOwnership(multisig.address)).wait();
-      await (await vault.connect(multisig).acceptOwnership()).wait();
 
       // 8. Deploy the reward leg in the order scripts/deploy-lp-staking.js fixes: TokenX
       //    first, then the distributor that becomes its minter, then the epoch armed by
@@ -746,7 +754,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       const distributorProxy = await ProxyFactory.deploy(
         await distributorImpl.getAddress(),
         DistributorFactory.interface.encodeFunctionData("initialize", [
-          deployer.address, // owner, handed to the multisig below
+          multisig.address, // owner — born owned by it, like the vault above
           multisig.address, // guardian — the hot pause key, never behind a timelock
           multisig.address, // operator — collapsed onto the multisig in this tier, see below
           backOffice.address, // LP_SIGNER — the back office key, never the deployer
@@ -758,14 +766,14 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       await (await tokenX.setMinter(distributorAddr)).wait();
       await (await tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP)).wait();
-      // Ownable2Step on all four contracts since N-1: the transfer only nominates, and the
-      // multisig has to accept. On TokenX and the zapper the deploy script leaves exactly the
-      // nomination behind for the operator Safe; here the multisig completes it at once.
+      // TokenX is the one contract still handed over: the deployer had to own it to call
+      // `setMinter` and `setEpochCap` above, exactly as the deploy script does. Ownable2Step
+      // since N-1, so the transfer only NOMINATES and the multisig has to accept — on TokenX
+      // and the zapper the deploy script leaves that nomination behind for the operator Safe;
+      // here the multisig completes it at once. The distributor needs none of this: it was
+      // born owned by the multisig.
       await (await tokenX.transferOwnership(multisig.address)).wait();
       await (await tokenX.connect(multisig).acceptOwnership()).wait();
-
-      await (await distributor.transferOwnership(multisig.address)).wait();
-      await (await distributor.connect(multisig).acceptOwnership()).wait();
 
       // The voucher domain is a runtime fact of the deployed contract — its chain id is
       // the fork's, and its verifying contract only exists as of a minute ago.

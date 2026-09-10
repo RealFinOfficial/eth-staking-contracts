@@ -53,8 +53,13 @@ const ROLES = {
   carol: 3,
   dave: 4,
   backOffice: 5, // LP_SIGNER — the voucher signer, a hot backend key
-  multisig: 6, // LP_MULTISIG — final owner of all four contracts
+  multisig: 6, // LP_MULTISIG — the timelock's only proposer, executor and canceller
   signer2: 7, // rotation target for setSigner / setMinter
+  // The 2026-09-09 role split, kept on three DIFFERENT keys here: the deploy script refuses
+  // to run with `guardian == operator`, and collapsing either onto the multisig is the
+  // staging shortcut the script warns about. The fork suites deploy the production shape.
+  guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
+  operator: 9, // LP_OPERATOR — calibration, rescue, key rotation; owner of TokenX and LPZapper
 };
 
 // ─────────────────────────── Pool and stack parameters ───────────────────────────
