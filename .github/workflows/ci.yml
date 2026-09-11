@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same ref makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ── The one rule every fork-dependent suite in this repo follows ──────────────────────────
+#
+# Each resolves its archive endpoint as <NETWORK>_RPC_URL -> INFURA_API_KEY -> the first
+# public archive endpoint that actually serves the pinned block, and then applies a
+# ONE-SIDED rule:
+#
+#   * nothing resolved AND nothing configured -> skip. That is an environment fact, not a
+#     defect, so this workflow is green on a repository with no secrets at all.
+#   * nothing resolved BUT a variable was set -> fail. Asking for the tier and not getting
+#     it is a defect.
+#   * the fork is up and anything after that breaks -> fail. Never converted into a skip.
+#
+# Setting a secret therefore makes the matching suites MANDATORY: MAINNET_RPC_URL for the
+# two mainnet-pinned Hardhat suites, SEPOLIA_RPC_URL for everything on the sepolia profile
+# (the Hardhat Sepolia-fork integration suite and the whole Foundry fork tier). Both are
+# wired as `env` below; an unset secret arrives as an empty string, which reads as unset.
+#
+# `test-live/` appears in no job on purpose: it sends REAL Sepolia transactions with real
+# gas and is run by hand only. See README.md for its runbook.
+
+jobs:
+  build:
+    name: hardhat (unit + fork suites)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Compile
+        run: npx hardhat compile
+
+      # Upgrade safety for the two UUPS proxies, from the build info alone: no RPC, no
+      # secrets, no deployed contract. It rejects proxy-hostile code (selfdestruct,
+      # delegatecall, a constructor that writes state, a missing `_authorizeUpgrade`) before
+      # the suites get a chance to pass anyway. The storage-layout half runs only against a
+      # committed `.openzeppelin/<network>.json`, so it stays out of this network-free step.
+      - name: Validate upgrade safety
+        run: npx hardhat run scripts/validate-upgrade-safety.js
+
+      # `npx hardhat test` runs four tiers, three of which need a fork:
+      #   * the mock-only unit suites                        (no network)
+      #   * test/lp-staking/fork/            — in-process mainnet fork, block 25,750,000
+      #   * .../integration/LPStakingLocalFork.test.js — mainnet-pinned; spawns its own
+      #     `hardhat node --fork` and runs the deployment scripts against it
+      #   * .../integration/LPStakingSepoliaFork.test.js — the profile-driven suite, which
+      #     runs under LP_TEST_PROFILE's default value `sepolia` (block 11,562,000)
+      - name: Test
+        run: npx hardhat test
+        env:
+          MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+
+  forge:
+    name: forge (fork, unit, fuzz, invariant, coverage gate)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # lib/forge-std is a submodule; without it nothing compiles
+
+      # Pinned to the coverage gate's basis (LP_COVERAGE_BASIS=forge-1.7-ir-minimum) — bump both
+      # together, never one alone: a newer forge attributes `--ir-minimum` coverage differently.
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # scripts/run-forge.mjs (endpoint resolution) and scripts/check-coverage.mjs are Node.
+      - name: Install
+        run: npm ci
+
+      - name: Format check
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build --sizes
+
+      # ci profile: fuzz 1024 runs, invariants 512 sequences. The fork tier forks Sepolia at
+      # the pinned block and follows the rule at the top of this file.
+      - name: Test (ci profile)
+        run: npm run test:forge:ci
+        env:
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+
+      # Blocking gate: per-file line and branch floors for the six LP-staking contracts and
+      # the guard they share. `--ir-minimum` is not a tuning knob — coverage disables the
+      # optimizer and the un-optimized build hits "Stack too deep" in WeightedStakingPool.sol
+      # without it — so the npm script pins it and passes the basis in through
+      # LP_COVERAGE_BASIS, which the checker refuses to grade a run without.
+      - name: Coverage gate
+        run: npm run coverage:forge:check
+        env:
+          SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}

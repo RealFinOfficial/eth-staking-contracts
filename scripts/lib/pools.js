@@ -7,7 +7,13 @@ const hre = require("hardhat");
 // network- or pool-specific, so the same script runs on sepolia and mainnet
 // against either StakingPool or WeightedStakingPool.
 
-const REGISTRY_PATH = path.join(__dirname, "..", "..", "deployments.json");
+// The tracked registry, unless DEPLOYMENTS_FILE points somewhere else. The override
+// exists for the local-fork integration suite: those runs deploy throwaway contracts on
+// chain 31337 and must not rewrite the file that records the real mainnet deployment.
+// Every other run leaves it unset and writes deployments.json as before.
+const REGISTRY_PATH = process.env.DEPLOYMENTS_FILE
+  ? path.resolve(process.env.DEPLOYMENTS_FILE)
+  : path.join(__dirname, "..", "..", "deployments.json");
 
 const KINDS = ["StakingPool", "WeightedStakingPool"];
 
@@ -58,7 +64,7 @@ function recordDeployment(id, kind, address, extra = {}) {
   registry[key] = registry[key] || {};
   registry[key][kind] = { address, ...extra };
   fs.writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2) + "\n");
-  console.log(`Recorded in deployments.json under chain ${key}.`);
+  console.log(`Recorded in ${path.basename(REGISTRY_PATH)} under chain ${key}.`);
 }
 
 function registryAddress(id, kind) {
