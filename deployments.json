@@ -18,53 +18,58 @@
       "observationCardinality": 150
     },
     "TokenX": {
-      "address": "0x35db2155BB90CA63b6F376D9EC7b4E2F9f3F1ce3",
-      "deployTx": "0x57d847c862a56a1b495905b695426b72912f1f418ec462271403478f1995195d",
-      "block": 11576999,
+      "address": "0x0e5f4f9Ea700bCb65E4BeeaFaA8a67d0905Da03A",
+      "deployTx": "0x463cf4eabec810de33b5fac425c864b38a8cddf572374a746d08cf1dc529ab3a",
+      "block": 11680392,
       "name": "Test Token X",
-      "symbol": "tTOKENX"
+      "symbol": "tTOKENX",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "RewardsDistributor": {
-      "address": "0xE5a1dE5A42fb4058b14e54c544CEC4B5Cc675e80",
-      "deployTx": "0x82a7fa8711a8c14d106d8ee365260eed36608985207e73e8926788ad4362dd87",
-      "block": 11577001,
-      "implementation": "0x80d6171feb0a5e859021c06c8C155f2580525A29",
-      "implementationTx": "0x779c74c9e2fc7d9f1c0e2f00e6008eaa3e9f7ede762fda9c91e36a547ccc1862",
-      "tokenX": "0x35db2155BB90CA63b6F376D9EC7b4E2F9f3F1ce3",
+      "address": "0x1D6aB18aFeF3196B4E3F883C7aD36F49b003C8DA",
+      "deployTx": "0xfec8acda268b0bc5f446140844c1a5f42a5447f0c9d236bd5be4c20006443b34",
+      "block": 11680394,
+      "implementation": "0x54875Ff9D42bDdAf6865aDe7633b2E9606eF9FC0",
+      "implementationTx": "0xfb752aa6f30dfdeccf812d009a8bdf4e8b5a8b21efa39b862c04ccf0dfc7074f",
+      "tokenX": "0x0e5f4f9Ea700bCb65E4BeeaFaA8a67d0905Da03A",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "owner": "0x85b82deFCcf55A326ce77E558149C7BA5aB29226"
+      "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "LPStakingVault": {
-      "address": "0xf525B6Cdda0e44e782F4b9C36655A9f3DF2671a8",
-      "deployTx": "0x4027333f4456788d034106a00c8a2d6b4768a35775cc916f84d4fea9c17299be",
-      "block": 11577003,
-      "implementation": "0x8a7f6AFbb0D25e5774a8A880480F02be832d97BA",
-      "implementationTx": "0x817f0734dacf3936f33b8aa2b4a4c4b4db5005de259acb7e842a1331c31f5fcb",
+      "address": "0x6Ed8b565A61807591616e42263D91eBfA67Ddd56",
+      "deployTx": "0x04c37e8dd0581542ef5e7b29b37cb710a58f0b2ccc723feb77d04209cb5d6d01",
+      "block": 11680396,
+      "implementation": "0xdA1FF637E277087404f08b26cc376Daf9C551aD8",
+      "implementationTx": "0x9810417e81aef4bca372d5f0a86718171fcb930aa5d819c1dc014090604c5aec",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "fee": 3000,
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
-      "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "owner": "0x85b82deFCcf55A326ce77E558149C7BA5aB29226"
+      "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "zapper": "0xD0e45b7319Ff8cdB9Ec78055C6948e0B25Bb9eA1"
     },
     "LPZapper": {
-      "address": "0xfC67BBd5eCE82D4bd4156875d91f5C513Ad95a73",
-      "deployTx": "0xc18edb820a1bc5978a90f4b27aa9d7ba271b0387ffe4f514ed07c6ab21de9a65",
-      "block": 11577004,
-      "vault": "0xf525B6Cdda0e44e782F4b9C36655A9f3DF2671a8",
+      "address": "0xD0e45b7319Ff8cdB9Ec78055C6948e0B25Bb9eA1",
+      "deployTx": "0x89b2d23d7ac82840d23fbdbba877b39d398e6e9b844853dcf96ca24f4ad8a1ef",
+      "block": 11680397,
+      "vault": "0x6Ed8b565A61807591616e42263D91eBfA67Ddd56",
       "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "twapWindow": 300,
-      "maxTwapDeviationTicks": 953
+      "maxTwapDeviationTicks": 953,
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "TimelockController": {
-      "address": "0x85b82deFCcf55A326ce77E558149C7BA5aB29226",
-      "deployTx": "0x3cebf45ff3dd6874add4882b6ab3fc3c7e23e67fe571defd4d89dd377e918e36",
-      "block": 11577008,
+      "address": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
+      "deployTx": "0x5dce5abc2e86d71d82dd7bf4cc35902dfa7b729c41aa848539749df567e634d3",
+      "block": 11680391,
       "minDelay": 300,
       "proposers": [
         "0x5576bD37419dadAab305cca998E16BcD73318A35"
