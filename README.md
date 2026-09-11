@@ -305,15 +305,230 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 ## Tech Stack
 
 - **Solidity** — pragma `^0.8.20`, compiled with 0.8.28 (optimizer on, 200 runs, cancun)
-- **Hardhat** 2.x
-- **OpenZeppelin Contracts** v5 — Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA
+- **Hardhat** 2.x — unit suites, the fork suites, the 48-step scenario, the deploy scripts
+- **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
+- **OpenZeppelin Contracts** v5.6 — `Ownable2Step`, IERC20, SafeERC20, ReentrancyGuard, EIP712,
+  ECDSA. All four LP contracts are `Ownable2Step` and every one of them overrides
+  `renounceOwnership()` to revert `RenounceDisabled()`: an ownership move needs the new owner to
+  call `acceptOwnership`, and no contract in the stack can be left ownerless
+- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — `RewardsDistributor` and
+  `LPStakingVault` are UUPS (ERC-1967) proxies. The distributor's `claimed[user]` ledger is
+  cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
+  payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
+  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Both proxies
+  are **born owned** by a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet):
+  `initialize` names it inside the proxy's own deployment transaction, so no key ever holds the
+  owner tier, and an upgrade is public for the whole delay before it can run while `unstake` —
+  never pausable — is the exit window. Two further tiers sit outside the timelock: a
+  `guardian`, a hot key holding the three pause switches and nothing else, and an `operator`
+  multisig holding `setTwapParams`, `rescuePosition`, `setSigner` and `recoverExcessAsset` —
+  plus those same pause switches as the cold fallback for a lost guardian key. `TokenX` and
+  `LPZapper` stay non-upgradeable and are owned by the operator. Operating the timelock is
+  `scripts/lp-timelock.js`; the runbook and the reasoning are in
+  `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
 
 ## Development
 
 ```bash
-npm install               # Install dependencies
-npx hardhat compile       # Compile contracts
-npx hardhat test          # Run tests (128: 88 StakingPool + 40 WeightedStakingPool)
-npx hardhat coverage      # Coverage report
+npm install                      # Install dependencies
+npx hardhat compile              # Compile contracts
+
+npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
+npx hardhat test                 # 599 tests: unit suites + three fork suites
+npm run test:integration         # Just the mainnet-pinned local-fork integration suite
+npm run test:integration:sepolia # Just the profile-driven fork integration suite
+npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
+
+npm run test:forge               # 403 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
+npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
+
+npx hardhat coverage             # solidity-coverage over everything under test/
+npm run test:coverage:unit       # solidity-coverage over the four LP unit suites only
 ```
+
+### Test tiers
+
+Nine tiers across two toolchains. Hardhat owns the 48-step scenario and the deployment
+scripts; Foundry adds the adversarial and branch-coverage work, because `forge coverage`
+reports real per-branch numbers and `vm.createSelectFork` reaches live Uniswap without
+spawning a node.
+
+| tier | where | run by | needs |
+|---|---|---|---|
+| Hardhat unit (mocks) | `test/lp-staking/*.test.js` | `npx hardhat test` | nothing |
+| Hardhat in-process mainnet fork | `test/lp-staking/fork/` | `npx hardhat test` | mainnet archive RPC |
+| Hardhat local-fork integration, mainnet-pinned | `test/lp-staking/integration/LPStakingLocalFork.test.js` | `npm run test:integration` | mainnet archive RPC |
+| Hardhat fork integration, profile-driven | `test/lp-staking/integration/LPStakingSepoliaFork.test.js` | `npm run test:integration:sepolia` | archive RPC for the profile's chain |
+| Live Sepolia smoke — gated, **never CI** | `test-live/sepolia/SepoliaLive.test.js` | `npm run test:sepolia:live` | `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + endpoint |
+| Foundry fork (real state) | `test/forge/fork/` | `npm run test:forge` | archive RPC for the profile's chain |
+| Foundry unit (deterministic) | `test/forge/unit/` | `npm run test:forge` | nothing |
+| Foundry fuzz (properties) | `test/forge/fuzz/` | `npm run test:forge` | nothing |
+| Foundry invariant (campaigns) | `test/forge/invariant/` | `npm run test:forge` | nothing |
+
+`npx hardhat test` runs the first four (`paths.tests` is `./test`). It never runs
+`test-live/`, and neither does CI.
+
+The three mainnet-pinned suites fork block 25,750,000; everything on the default profile
+forks Sepolia at block 11,562,000.
+
+- `test/lp-staking/fork/LPStakingFork.test.js` forks in-process with `hardhat_reset` and runs
+  the contracts against the real Uniswap V3 pool.
+- `test/lp-staking/integration/LPStakingLocalFork.test.js` starts its own `hardhat node --fork`
+  on a free port, creates a fresh pool from mock tokens, deploys the stack with the repo's own
+  scripts (`hardhat run --network localhost`), drives a forty-eight step scenario one
+  transaction per block, and asserts the resulting logs are retrievable from the chain. It
+  writes to a scratch registry, never to `deployments.json`. The last three steps rehearse an
+  upgrade end to end: schedule it on the timelock, watch a premature `execute` revert, then
+  execute it after the delay and prove every staked position survived.
+- `test/lp-staking/integration/LPStakingSepoliaFork.test.js` is the same scenario driven
+  through the network profile — the same 48 steps against the team's real tREAL/tUSDC and the
+  Uniswap Sepolia deployment.
+
+### Test maps
+
+- Contracts test map (every tier, new tests and audit-finding tests marked): https://claude.ai/code/artifact/d04fc2cb-8da8-42c8-b91b-86ffcec1576b
+- Indexer test map (companion, evm-indexer): https://claude.ai/code/artifact/319b99b2-ccd0-48d9-93bc-fbef9c263c92
+- Expansion report (what landed, verification, audit findings SEC-01..05, open decisions): https://claude.ai/code/artifact/0ac9c23a-25bd-4fb3-8152-5673f6cac322
+
+The pages are generated from the test files at the branch head on 2026-08-25 and are private
+artifacts shared by the repository owner on request.
+
+### The network profile
+
+One object per world the fork suites can run in: `test/lp-staking/helpers/profiles.js` for
+Hardhat, `test/forge/utils/Profiles.sol` for Foundry. `LP_TEST_PROFILE` selects it, the default
+is `sepolia`, and an unknown value **throws** rather than falling back. Phase 2 is
+`LP_TEST_PROFILE=mainnet`, which re-runs the same test bodies against real ASSET/USDC; the
+profile is wired for it, not yet proven on it.
+
+Sepolia facts the default profile pins, verified live on 2026-08-25 and re-asserted on every
+run:
+
+| what | value |
+|---|---|
+| pinned block | 11562000 |
+| tREAL | `0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f` — 18 dec, "Test REAL", **token0** |
+| tUSDC | `0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215` — 6 dec, "TestUSDC", token1 |
+| funder | `0xBb7403aAF82342A0d987A8603aAf881136B5D125` — ~95% of both supplies |
+| factory | `0x0227628f3F023bb0B980b67D528571c95c6DaC1c` |
+| position manager | `0x1238536071E1c677A632429e3655c799b22cDA52` |
+| SwapRouter02 | `0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E` |
+
+**No tREAL/tUSDC pool exists on live Sepolia** at any fee tier, so the fork creates one with
+`scripts/create-sepolia-pool.js`. **Neither token has `DOMAIN_SEPARATOR()`**, so neither can
+sign an EIP-2612 permit: under this profile the permit steps prove the zapper's
+`allowance >= permit.value -> skip permit` branch instead, and the true EIP-2612 branch stays
+covered by the unit suites.
+
+### Skip vs fail
+
+Every fork-dependent suite resolves its endpoint the same way — `<NETWORK>_RPC_URL`, then
+`INFURA_API_KEY`, then the first public candidate that proves it serves ARCHIVE STATE at the
+pinned block (a header read is not enough; see below) — and follows the same
+one-sided rule: **failing to establish the fork is the only thing any of them may skip on, and
+with the profile's RPC variable or `INFURA_API_KEY` set even that fails instead.** Nothing after
+the fork is up is ever a skip. Setting a CI secret therefore makes the matching suites
+mandatory.
+
+Public fallbacks are probed for STATE, not for a header, and probed three times.
+`scripts/run-forge.mjs` reads an account balance, a contract's code and an `eth_call` of
+`totalSupply()` AT the pinned block, as three separate requests, and requires all three.
+A header read proves only that the node kept the header, and a single state read proves only
+that ONE request reached a backend that has the state: `ethereum-sepolia-rpc.publicnode.com`
+is a load-balanced pool whose backends disagree about Sepolia archive availability. Both
+outcomes were seen the same day — run 32845136586 found it pruned, fell through to
+`sepolia.gateway.tenderly.co` and went green, while run 32845141961 saw a single balance read
+PASS and the fork tier then fail on its first read of a different account with
+`-32000: historical state ... is not available`. So tenderly is tried FIRST and publicnode
+sits behind it as a fallback, in both `scripts/run-forge.mjs` and
+`test/lp-staking/helpers/profiles.js`. Each rejected candidate is logged as `host: reason` —
+host only, never a key.
+
+Spot checks, worth running whenever the rule is touched — each must FAIL, not skip:
+
+```bash
+SEPOLIA_RPC_URL=http://127.0.0.1:9 npm run test:integration:sepolia
+MAINNET_RPC_URL=http://127.0.0.1:9 npm run test:integration
+SEPOLIA_RPC_URL=http://127.0.0.1:9 npm run test:forge
+```
+
+### Live Sepolia smoke
+
+The spec's Sepolia staging rehearsal. It sends REAL transactions with real SepoliaETH and, on
+a first run, records the deployment in the **tracked** `deployments.json` under chain
+`11155111`.
+
+| gate | effect |
+|---|---|
+| `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + `SEPOLIA_RPC_URL` \| `INFURA_API_KEY` | all three required; without them the suite skips and names what is missing |
+| `SEPOLIA_LIVE_CREATE_POOL=1` | one-time: creates the tREAL/tUSDC pool. **Permanent** — the address is fixed forever afterwards |
+| `SEPOLIA_LIVE_DEPLOY=1` | one-time: deploys the four contracts and writes them into the tracked registry. That commit is the staging record |
+| `LP_SIGNER_KEY` | optional: redeems a real 1-wei TokenX voucher. Without it the suite proves a foreign voucher is refused, by static call, costing no gas |
+
+**Known precondition, not a bug:** a freshly created Uniswap V3 pool stores one observation, so
+`pool.observe([twapWindow, 0])` reverts `OLD` and every TWAP-guarded path reverts with it. The
+suite detects this and asserts that `zapIn` reverts rather than pretending the zap succeeded.
+Seed liquidity and trade the pool for at least `LP_TWAP_WINDOW` seconds before expecting the
+zap leg to pass. This is item 7 (SEC-01) in `docs/lp-staking-audit-notes.md`.
+
+Growing the array is a separate step from filling it, and the deploy script sizes it rather
+than guessing: `LP_OBSERVATION_CARDINALITY` defaults to 150 and the run fails before spending
+gas if it is below `2 × ceil(LP_TWAP_WINDOW / 12)` — one observation per 12-second block in
+the worst case, doubled for margin. The guard defaults are deliberately wide: 300 s of
+lookback and 1000 bps (= 953 ticks) of tolerance, so a fast move never locks a staker out of
+re-ranging.
+
+### Coverage
+
+```bash
+npm run coverage:forge:check   # the blocking gate: lcov + per-file line and branch floors
+npm run test:coverage:unit     # the Hardhat unit-only signal
+```
+
+`scripts/check-coverage.mjs` recomputes totals from the raw `DA:` / `BRDA:` records rather than
+trusting the optional `LF` / `BRF` summary lines, scopes to the four LP contracts plus
+`libraries/TwapGuard.sol`, and pins both the floors and their denominators — a moved
+measurement basis fails loudly instead of being graded against a bar that no longer describes
+it. `--ir-minimum` is not optional: coverage disables the optimizer and the un-optimized build
+hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script passes
+`LP_COVERAGE_BASIS=forge-1.7-ir-minimum` and the checker refuses to grade a run without it. The
+`forge-1.7` half names the toolchain, which is why CI pins `foundry-rs/foundry-toolchain` to
+`v1.7.1` rather than `stable` — bump the pin and the basis together, never one alone.
+`node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
+network.
+
+Re-measured 2026-09-10, after the three-role split and the `Ownable2Step` round moved four of
+the five denominators. Branch coverage is 100% on all five files, so every branch floor is also
+the ceiling:
+
+| file | lines | branches |
+|---|---|---|
+| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
+| `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
+| `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
+| `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
+
+The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:841`,
+`LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the three ERC-7201 assembly
+bodies (`LPStakingVault.sol:155`, `RewardsDistributor.sol:168`,
+`libraries/TwapGuard.sol:127`), and each proxy's `_disableInitializers();` /
+`__Ownable2Step_init();` (`LPStakingVault.sol:304`, `:335`; `RewardsDistributor.sol:228`,
+`:245`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
+— `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
+in the checker and in the audit notes rather than chased with contrived tests.
+
+### Foundry beside Hardhat
+
+Foundry runs **beside** Hardhat, not instead of it. Two settings keep them apart: forge writes
+to `out/` and `cache_forge/` (both gitignored) so it never touches Hardhat's `cache/`, and
+`forge fmt` is scoped to `test/forge/` only — `contracts/` stays formatted the way the Hardhat
+side formats it. Mocha loads only `.js`, so the `.t.sol` files are invisible to
+`npx hardhat test`.
+
+`lib/forge-std` is a git submodule: clone with `--recurse-submodules`, or run
+`git submodule update --init --recursive`. `scripts/run-forge.mjs` wraps `forge` because forge
+does not read `.env` — it resolves the fork endpoint, exports it, and runs forge. Bare
+`forge test` works too; the fork tier then skips with a reason.

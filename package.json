@@ -6,7 +6,16 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "test:coverage": "hardhat coverage"
+    "test:integration": "hardhat test test/lp-staking/integration/LPStakingLocalFork.test.js",
+    "test:integration:sepolia": "hardhat test test/lp-staking/integration/LPStakingSepoliaFork.test.js",
+    "test:sepolia:live": "hardhat test test-live/sepolia/SepoliaLive.test.js --network sepolia",
+    "validate:upgrades": "hardhat run scripts/validate-upgrade-safety.js",
+    "test:coverage": "hardhat coverage",
+    "test:coverage:unit": "hardhat coverage --testfiles \"test/lp-staking/{LPStakingVault,LPZapper,RewardsDistributor,TokenX}.test.js\"",
+    "test:forge": "node scripts/run-forge.mjs test",
+    "test:forge:ci": "FOUNDRY_PROFILE=ci node scripts/run-forge.mjs test",
+    "coverage:forge": "node scripts/run-forge.mjs coverage --ir-minimum --report lcov --report summary",
+    "coverage:forge:check": "LP_COVERAGE_BASIS=forge-1.7-ir-minimum node scripts/run-forge.mjs coverage --ir-minimum --report lcov && LP_COVERAGE_BASIS=forge-1.7-ir-minimum node scripts/check-coverage.mjs"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +25,8 @@
     "@nomicfoundation/hardhat-ledger": "^1.2.2",
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.6.1",
+    "@openzeppelin/contracts-upgradeable": "^5.6.1",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
     "hardhat": "^2.28.6"
   },
   "dependencies": {
