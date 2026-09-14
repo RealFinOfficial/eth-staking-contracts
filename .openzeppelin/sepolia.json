@@ -1380,7 +1380,6 @@
     },
     "21088b827c79388db92037fd43b0edf18d2a3c83dd061ce71a5f4766ae5fffd4": {
       "address": "0xEac50B6BA0b1b05FcE01D49636d58C5D813EF7d5",
-      "txHash": "0x297dfa5267ee9d1dfbe9ee827ab5d273501c9b2d7d0978b80c1cc65486948d20",
       "layout": {
         "solcVersion": "0.8.28",
         "storage": [],
@@ -1642,7 +1641,6 @@
     },
     "83e3431e1fc403a4282ba8ffe4b862f07bd6d9032fdcc54931e454ec544a2cd5": {
       "address": "0x4C0B8633a1E6C5dd6888c91E9254d2c13fa21eB8",
-      "txHash": "0x9087af13e6d630389e3fc0de4d58e0e9f53726301a7920761b7a87d49b33d776",
       "layout": {
         "solcVersion": "0.8.28",
         "storage": [],

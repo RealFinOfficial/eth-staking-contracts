@@ -1,6 +1,7 @@
 const { expect } = require("chai");
-const { ethers, upgrades } = require("hardhat");
+const { ethers, network, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { Manifest } = require("@openzeppelin/upgrades-core");
 
 const lpTimelock = require("../../scripts/lp-timelock");
 const {
@@ -333,6 +334,39 @@ describe("deploy-implementation.js", function () {
       expect(fromCommand.data).to.equal(
         vault.interface.encodeFunctionData("upgradeToAndCall", [result.implementation, "0x"])
       );
+    });
+
+    it("records the implementation in the manifest with no transaction hash", async function () {
+      const result = await deployImplementation({
+        kind: "LPStakingVault",
+        proxyAddress: vaultAddr,
+        contractName: "LPStakingVaultV2Mock",
+        unsafeAllowExtra: V2_UNSAFE_ALLOW_EXTRA,
+        deployer,
+        quiet: true,
+      });
+
+      // The committed `.openzeppelin/sepolia.json` is opened as the PARENT manifest by every
+      // suite that forks Sepolia, and there an `impls` entry carrying a `txHash` is validated
+      // with `eth_getTransactionByHash` against a chain pinned at an older block, which fails
+      // the whole run. An entry without one is checked with `getCode` and, on a development
+      // network, quietly redeployed. So the script strips the hash the plugin writes.
+      const manifest = await Manifest.forNetwork(network.provider);
+      const data = await manifest.read();
+      const entries = Object.values(data.impls).filter(
+        (impl) => impl && impl.address.toLowerCase() === result.implementation.toLowerCase()
+      );
+
+      expect(entries).to.have.lengthOf(1);
+      expect(entries[0]).to.not.have.property("txHash");
+      // Only the hash goes: the layout this file exists to archive is still there.
+      expect(entries[0].layout.storage).to.be.an("array");
+
+      // And the hash itself is not lost — the script still hands it back, which is what the
+      // runbook records in deployments.json as `implementationTx`.
+      expect(result.deployTxHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(result.deployTxHash).to.have.lengthOf(66);
+      expect(await ethers.provider.getTransaction(result.deployTxHash)).to.not.equal(null);
     });
 
     it("reuses an identical implementation instead of deploying a second copy", async function () {

@@ -1,4 +1,5 @@
 const hre = require("hardhat");
+const { Manifest } = require("@openzeppelin/upgrades-core");
 const pools = require("./lib/pools");
 
 // Deploy ONE new UUPS implementation for a proxy that is already live, and print the two
@@ -29,7 +30,9 @@ const pools = require("./lib/pools");
 //   3. derives the implementation's constructor arguments — see the next section
 //   4. `upgrades.prepareUpgrade(proxy, Factory, { kind: "uups", constructorArgs, unsafeAllow })`,
 //      which validates the new implementation against the DEPLOYED proxy's storage layout,
-//      deploys it, and records it in `.openzeppelin/<network>.json`
+//      deploys it, and records it in `.openzeppelin/<network>.json`. The deploy transaction
+//      hash is then removed from that manifest entry — see `stripImplTxHash` for why the
+//      committed manifest must carry none
 //   5. prints the addresses, the deploy transaction, the runtime code size, and the exact
 //      schedule / execute command lines for step 2
 //   6. with `RECORD=1`, writes `pendingImplementation` into the proxy's registry entry
@@ -235,6 +238,58 @@ function pendingImplementationRecord(entry, { implementation, block }) {
 }
 
 /**
+ * Removes the deploy transaction hash from an implementation's entry in THIS network's
+ * `hardhat-upgrades` manifest, immediately after `prepareUpgrade` wrote the entry. Returns
+ * whether an entry was actually changed. No-op when the entry carries no hash, so a re-run
+ * writes nothing.
+ *
+ * Why the committed manifest must carry no hashes under `impls`:
+ *
+ * `.openzeppelin/sepolia.json` is not read only by Sepolia runs. A Hardhat node forked from
+ * Sepolia reports the forked chain id, and `@openzeppelin/upgrades-core` then opens the
+ * committed Sepolia manifest as the PARENT of the fork's own throwaway one (`dist/manifest.js`:
+ * `this.parent = new Manifest(forkedChainId)`). Every entry in this file is therefore validated
+ * against a chain pinned at an OLD block by the fork suites — and the two kinds of entry are
+ * not validated the same way (`dist/deployment.js`, `validateStoredDeployment`):
+ *
+ *   - an entry WITH `txHash` is validated by `eth_getTransactionByHash`. The Sepolia fork suite
+ *     (`test/lp-staking/integration/LPStakingSepoliaFork.test.js`) pins block 11562000, the two
+ *     implementations this script deployed on 2026-09-14 were mined at 11703208, and a fork at
+ *     the older block has never seen those transactions. The plugin raises `InvalidDeployment`
+ *     ("No contract at address 0xEac5…"), `scripts/deploy-lp-staking.js` fails inside
+ *     `hre.upgrades.forceImport`, and the suite — and CI with it — exits non-zero.
+ *   - an entry WITHOUT one is only checked with `getCode`, and on a development network an
+ *     entry that fails that check is discarded silently (`validateCached` ->
+ *     `isDevelopmentNetwork`) and the implementation is simply redeployed on the fork. That is
+ *     the behaviour the fork suites have always relied on.
+ *
+ * Every other entry in the committed manifest was written by `forceImport`, which records no
+ * hash — this keeps the whole file to that one convention. Nothing is lost by dropping it: the
+ * hash is printed by this script, returned to the caller as `deployTxHash`, and is the value
+ * `deployments.json` carries as the proxy's `implementationTx`. The manifest is an archive of
+ * storage LAYOUTS, and the layout is untouched here.
+ */
+async function stripImplTxHash(implementation) {
+  const manifest = await Manifest.forNetwork(hre.network.provider);
+  let removed = false;
+
+  await manifest.lockedRun(async () => {
+    const data = await manifest.read();
+    for (const entry of Object.values(data.impls)) {
+      // The manifest keys entries by a bytecode hash, so the entry is found by its address —
+      // case-insensitively, because the manifest checksums it and a caller may not.
+      if (entry && entry.txHash && sameValue(entry.address, implementation)) {
+        delete entry.txHash;
+        removed = true;
+      }
+    }
+    if (removed) await manifest.write(data);
+  });
+
+  return removed;
+}
+
+/**
  * Deploys one implementation for one live proxy. The whole script, minus the environment
  * parsing and the printing; the suites call this directly.
  *
@@ -377,6 +432,13 @@ async function deployImplementation(options) {
   }
   const codeSize = (code.length - 2) / 2;
 
+  // The manifest entry `prepareUpgrade` has just written records the deploy transaction. The
+  // committed manifest must not carry it — the fork suites read this file as their parent
+  // manifest and a hash they cannot resolve is a hard failure. The hash itself is kept: it is
+  // printed below, returned as `deployTxHash`, and kept in deployments.json as
+  // `implementationTx`.
+  const manifestTxHashRemoved = await stripImplTxHash(implementation);
+
   log("");
   if (reused) {
     log(
@@ -406,6 +468,9 @@ async function deployImplementation(options) {
       (deployTxHash && reused ? "  (its ORIGINAL deploy; this run sent nothing)" : "")
   );
   if (deployTxHash) log(`  ${pools.explorerTx(chainId, deployTxHash)}`);
+  if (manifestTxHashRemoved) {
+    log(`  (dropped from the ${network} manifest entry; see stripImplTxHash)`);
+  }
   log(`block:          ${blockNumber === null ? "unknown" : blockNumber}`);
   log(
     `runtime code:   ${codeSize} bytes ` +

@@ -221,6 +221,17 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
    already runs, that contract did not change in this build: it has nothing to activate, and
    steps 3 to 8 do not apply to it.
 
+   Each run also strips the deploy transaction hash out of the entry the plugin writes into
+   `.openzeppelin/sepolia.json`, so the committed manifest carries NO `txHash` under `impls`.
+   That file is not read only by Sepolia runs: a Hardhat node forked from Sepolia opens it as
+   the parent manifest for its own throwaway one, and there an entry that has a hash is
+   validated with `eth_getTransactionByHash` against a chain pinned at block 11,562,000 — which
+   has never seen a transaction mined at 11,703,208, so the plugin throws `InvalidDeployment`
+   and the fork suite fails. An entry with no hash is only checked for code, and on a
+   development network an entry that fails that check is discarded and the implementation is
+   redeployed on the fork. Nothing is lost by dropping it: step 1 prints the hash, and it is
+   the value `deployments.json` carries as the proxy's `implementationTx`.
+
 2. **Run the upgrade-safety gate against the network.** Named with `--network sepolia` it adds
    the storage-layout half, which grades the new layout against the committed
    `.openzeppelin/sepolia.json`. It must pass BEFORE anything is scheduled — an incompatible
