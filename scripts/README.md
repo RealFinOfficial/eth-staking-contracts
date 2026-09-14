@@ -134,6 +134,7 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
 | `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending` |
+| `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
@@ -192,6 +193,99 @@ The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", 
 keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.
 The full runbook is in `docs/lp-staking-audit-notes.md` item 14.
+
+### Activating a new implementation (Sepolia test stack #5)
+
+A contract change is not live until a NEW implementation of each changed proxy is on chain and
+the timelock has pointed the proxy at it. Nothing about this is automatic: the implementation
+deploy and the upgrade are separate transactions, sent by different scripts, with the
+timelock's `getMinDelay()` between them. On Sepolia test stack #5 that delay is **300 seconds**
+(mainnet is 172,800 — 48 hours).
+
+The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor proxy
+`0x1D6aB18aFeF3196B4E3F883C7aD36F49b003C8DA`, both owned by `LPTimelock`
+`0x591c51A6EE2ef571C44dF2339A7c92b57850C082`. All three addresses are read out of
+`deployments.json`, so no command below carries one.
+
+1. **Deploy the new implementations, one kind per run.** Each run deploys one contract and
+   prints the two timelock commands for it. Do both, and keep both addresses.
+
+   ```bash
+   IMPL_TARGET=LPStakingVault \
+     npx hardhat run scripts/deploy-implementation.js --network sepolia
+   IMPL_TARGET=RewardsDistributor \
+     npx hardhat run scripts/deploy-implementation.js --network sepolia
+   ```
+
+   If a run reports that the implementation was already deployed and is the one the proxy
+   already runs, that contract did not change in this build: it has nothing to activate, and
+   steps 3 to 8 do not apply to it.
+
+2. **Run the upgrade-safety gate against the network.** Named with `--network sepolia` it adds
+   the storage-layout half, which grades the new layout against the committed
+   `.openzeppelin/sepolia.json`. It must pass BEFORE anything is scheduled — an incompatible
+   layout that reaches `execute` has already destroyed the ledger it moved.
+
+   ```bash
+   npx hardhat run scripts/validate-upgrade-safety.js --network sepolia
+   ```
+
+3. **Schedule both upgrades.** Paste the command each run of step 1 printed, or write it out:
+
+   ```bash
+   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=upgradeToAndCall \
+     TIMELOCK_ARGS=<newVaultImplementation>,0x \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+
+   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=RewardsDistributor TIMELOCK_FN=upgradeToAndCall \
+     TIMELOCK_ARGS=<newDistributorImplementation>,0x \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+   ```
+
+   `0x` is the `data` argument and means "no reinitializer call". Each command prints its
+   operation id; keep them, `TIMELOCK_ACTION=status TIMELOCK_ID=<id>` reads one back.
+
+4. **Wait out `getMinDelay()`** — 300 s on this stack. `TIMELOCK_ACTION=pending` lists every
+   scheduled operation with its state and its ready-at timestamp, measured against the chain's
+   own latest block, not the local clock.
+
+5. **Execute both.** Same operands as the schedule, `TIMELOCK_ACTION=execute`. The operation id
+   is a hash of the whole call, so an execute that names a different implementation address is
+   not a typo that goes through — it is a different operation that was never scheduled and the
+   timelock rejects it.
+
+6. **Post checks.** All three must hold, on each proxy:
+
+   - the ERC-1967 implementation slot equals the new implementation. Re-running step 1 for
+     that kind reads it out and labels it `Current impl`, and then reports that the
+     implementation it would deploy is the one the proxy already runs — that pair of lines IS
+     the check, and the re-run sends nothing, because an unchanged contract with unchanged
+     constructor arguments resolves to the implementation already on chain;
+   - `owner()` is still the timelock, and `guardian()` and `operator()` are unchanged — an
+     upgrade replaces code, never the admin tiers, and a change in any of them means the wrong
+     implementation landed;
+   - `npx hardhat run scripts/validate-upgrade-safety.js --network sepolia` still passes.
+
+7. **Record the new implementations in `deployments.json` and commit.** `RECORD=1` on step 1
+   writes the address under the proxy's entry as `pendingImplementation` (plus
+   `pendingImplementationBlock`) and touches nothing else in the file. Moving it into
+   `implementation` after the execute is a manual edit: the only writer of that field is
+   `deploy-lp-staking.js`, which writes it as one part of a full stack bootstrap and would
+   create six new entries if it were run for this.
+
+8. **Hand both addresses to the backend owner (krumbgf).** The backend pins the implementation
+   it expects to see behind each proxy, in two environment keys:
+
+   | Key | Value |
+   |---|---|
+   | `LP_EXPECTED_IMPLEMENTATION_VAULT` | the new `LPStakingVault` implementation |
+   | `LP_EXPECTED_IMPLEMENTATION_DISTRIBUTOR` | the new `RewardsDistributor` implementation |
+
+   Both must be updated and the api and worker containers RECREATED (a restart does not reread
+   the environment). Until that happens the backend raises
+   `lp.upgrade.unexpected_implementation`, because what it reads from the ERC-1967 slot no
+   longer matches what it was told to expect. The indexer needs nothing: it already handles the
+   `Upgraded` event, and the proxy addresses it indexes do not change.
 
 ## Test tooling (plain Node, not `hardhat run`)
 
