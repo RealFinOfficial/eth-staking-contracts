@@ -178,9 +178,16 @@ are deliberately NOT here, because routing them through a delay would defeat the
 exist: the guardian tier is the three pause switches (`setDepositsPaused`, `setRebalancePaused`,
 `setPaused`), sent directly by the hot key; the operator tier is `setTwapParams`,
 `rescuePosition`, `setSigner`, `recoverExcessAsset` — plus those same three pauses as the cold
-fallback — sent directly by the operator multisig. `setTwapParams` used to be owner-tier and
-left this list on 2026-09-09; scheduling it now would revert `OwnableUnauthorizedAccount` after
-the full delay.
+fallback, and `setGuardian` — sent directly by the operator multisig. `setTwapParams` used to be
+owner-tier and left this list on 2026-09-09; scheduling it now would revert
+`OwnableUnauthorizedAccount` after the full delay.
+
+`setGuardian` is the one call that is on BOTH sides. It stayed routable here because the owner
+can still send it, but since 2026-09-14 it is owner OR operator, so a revocation that cannot
+wait is sent DIRECTLY by the operator multisig: `setGuardian(address(0))` removes a compromised
+hot key in one transaction and leaves the guardian tier vacant, in which state only the operator
+can pause. A live address in the same call appoints a replacement. `setOperator` did not move
+and is still owner-only, so the operator cannot rotate itself.
 The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", target,
 keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.

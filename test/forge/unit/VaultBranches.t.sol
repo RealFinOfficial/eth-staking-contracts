@@ -838,11 +838,14 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, address(this), operatorSafe));
         twin.rescuePosition(1);
 
-        // The GUARDIAN is rejected on every owner function AND on every operator function.
+        // The GUARDIAN is rejected on every owner function AND on every operator function —
+        // `setGuardian` included, so a leaked hot key cannot keep itself installed.
         vm.startPrank(multisig);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setZapper(address(1));
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
+        vm.expectRevert(
+            abi.encodeWithSelector(LPStakingVault.NotOwnerOrOperator.selector, multisig, address(this), operatorSafe)
+        );
         twin.setGuardian(multisig);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, multisig));
         twin.setOperator(multisig);
@@ -852,13 +855,18 @@ contract VaultBranchesTest is LocalHarness {
         twin.rescuePosition(1);
         vm.stopPrank();
 
-        // The OPERATOR is rejected on every owner function.
+        // The OPERATOR is rejected on every owner function. `setGuardian` is NOT one of them
+        // any more — it is owner OR operator since 2026-09-14 — but `setOperator` still is,
+        // so the operator cannot rotate itself.
         vm.startPrank(operatorSafe);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
         twin.setZapper(address(1));
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
-        twin.setGuardian(operatorSafe);
+        twin.setOperator(operatorSafe);
+        twin.setGuardian(carol);
         vm.stopPrank();
+        assertEq(twin.guardian(), carol, "the operator must be able to appoint a new guardian");
+        twin.setGuardian(multisig); // put the guardian back for the assertions below
 
         // Each tier does work from its own address, and each pause takes either of two.
         vm.prank(multisig);
@@ -874,10 +882,7 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(twin.zapper(), address(1), "the owner must be able to point the zapper");
     }
 
-    function test_SetGuardian_RejectsZeroAndAnnouncesBothSides() public {
-        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
-        vault.setGuardian(address(0));
-
+    function test_SetGuardian_AnnouncesBothSidesAndMovesTheTier() public {
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.GuardianSet(address(this), carol);
         vault.setGuardian(carol);
@@ -890,6 +895,63 @@ contract VaultBranchesTest is LocalHarness {
             abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, carol, address(this))
         );
         vault.setDepositsPaused(true);
+    }
+
+    /**
+     * @dev `address(0)` is NOT rejected by `setGuardian` — it is the explicit "no guardian"
+     *      state, and writing it is how a compromised hot key is revoked without waiting out
+     *      the owner's 48 hour timelock. `GuardianSet` announces the revocation like any other
+     *      rotation, carrying `(previous, address(0))`.
+     *
+     *      Once the slot holds zero, every guardian path is closed: `onlyGuardianOrOperator`
+     *      compares `msg.sender` against it, and `msg.sender` can never be the zero address —
+     *      not even a call from `address(0)` itself, which the EVM does not permit. So the
+     *      modifier admits the operator alone, and this contract, which is still the operator
+     *      in this harness, is the only address left that can pause.
+     */
+    function test_SetGuardian_AcceptsZeroAsTheExplicitNoGuardianState() public {
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.GuardianSet(address(this), address(0));
+        vault.setGuardian(address(0));
+        assertEq(vault.guardian(), address(0), "the guardian seat must be vacant");
+
+        vm.startPrank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, address(0), address(this))
+        );
+        vault.setDepositsPaused(true);
+        vm.expectRevert(
+            abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, address(0), address(this))
+        );
+        vault.setRebalancePaused(true);
+        vm.stopPrank();
+
+        // The operator half of the pause tier is untouched by the revocation.
+        vault.setDepositsPaused(true);
+        assertTrue(vault.depositsPaused(), "the operator must still be able to pause deposits");
+
+        // And the seat can be filled again from the vacant state.
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.GuardianSet(address(0), carol);
+        vault.setGuardian(carol);
+        vm.prank(carol);
+        vault.setDepositsPaused(false);
+        assertFalse(vault.depositsPaused(), "the re-appointed guardian must hold the tier");
+    }
+
+    /// @dev `setOperator` did NOT move with `setGuardian`: it is still owner-only and still
+    ///      rejects zero, so the operator cannot rotate itself and the timelock stays the only
+    ///      tier that can change the operator. Measured from the operator's own address on a
+    ///      twin whose three roles are three addresses.
+    function test_SetOperator_StaysOwnerOnlyAndStillRejectsZero() public {
+        LPStakingVault twin = _guardedTwin();
+
+        vm.prank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        twin.setOperator(carol);
+
+        vm.expectRevert(LPStakingVault.ZeroAddress.selector);
+        twin.setOperator(address(0));
     }
 
     /// @dev The operator rotates the same way the guardian does: owner tier, zero rejected,

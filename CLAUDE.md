@@ -51,8 +51,9 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   `TimelockController`, `deploy/LPTimelock.sol`, and the owner from the proxy's own
   deployment transaction onwards): upgrades, `setZapper`, `setGuardian`, `setOperator`;
   **guardian** (a hot key, no delay): the two pauses and nothing else; **operator** (a
-  multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to the operator), and
-  those two pauses as well, as the cold fallback for a lost guardian key. Ownership is
+  multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to the operator),
+  `setGuardian`, and those two pauses as well, as the cold fallback for a lost guardian key.
+  Ownership is
   two-step and `renounceOwnership` reverts
 - **`LPZapper.sol`** — replaceable periphery. Sequences USDC → swap → mint →
   `vault.stakeFor` in one transaction and refunds every leftover in the same call. Holds
@@ -79,7 +80,11 @@ liquidity and are rewarded in TokenX. It shares no contract, no owner and no tok
   `deploy/LPTimelock.sol`, from the proxy's own deployment transaction onwards): upgrades,
   `setAssetClaimsEnabled`, `setGuardian`, `setOperator`; **guardian** (a hot key, no delay):
   `setPaused` and nothing else; **operator** (a multisig, no delay): `setSigner`,
-  `recoverExcessAsset` (funds go to the operator), and `setPaused` as well. Ownership is
+  `recoverExcessAsset` (funds go to the operator), `setGuardian`, and `setPaused` as well.
+  `setGuardian` is owner OR operator on BOTH proxies since 2026-09-14: the guardian is a hot
+  key holding an undelayed switch, the owner is 48 h away, and an undelayed key has to be
+  revocable without a delay — `address(0)` is the explicit "no guardian" state and is accepted
+  there (only there; `initialize` and `setOperator` still reject zero). Ownership is
   two-step and `renounceOwnership` reverts — a renounce would freeze the upgrade path
 
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
@@ -223,12 +228,12 @@ contracts/           — Solidity source files
                                 LPStakingVaultSwapHarness.sol / LPZapperSwapHarness.sol, which
                                 expose their parent's internal `_executeSwap` so the ZeroAmount
                                 arm can be reached (no production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 599 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 605 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
-    LPStakingVault.test.js      — 97 tests, incl. the upgrade and timelock paths
-    RewardsDistributor.test.js  — 65 tests, incl. the upgrade and timelock paths
+    LPStakingVault.test.js      — 100 tests, incl. the upgrade and timelock paths
+    RewardsDistributor.test.js  — 68 tests, incl. the upgrade and timelock paths
     TokenX.test.js              — 53 tests
     LPZapper.test.js            — 54 tests
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
@@ -242,7 +247,7 @@ test/                — Hardhat test files (Mocha + Chai). 599 tests, 0 pending
                                 — 93 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 403 tests in 24 suites: 101 fork, 263 unit, 21 fuzz,
+test/forge/          — Foundry tier. 408 tests in 24 suites: 101 fork, 268 unit, 21 fuzz,
                        18 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
@@ -418,14 +423,14 @@ without it. The `forge-1.7` half names the toolchain, which is why CI pins
 `foundry-rs/foundry-toolchain` to `v1.7.1` instead of `stable` — a newer forge attributes
 `--ir-minimum` coverage differently. Bump the pin and the basis together, never one alone.
 
-Re-measured 2026-09-10 — branch coverage is 100% on all five files, so every branch floor is
+Re-measured 2026-09-14 — branch coverage is 100% on all five files, so every branch floor is
 also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `LPStakingVault.sol` | 97.66% (167/171) | 100.00% (28/28) |
 | `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
-| `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
+| `RewardsDistributor.sol` | 97.09% (100/103) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 

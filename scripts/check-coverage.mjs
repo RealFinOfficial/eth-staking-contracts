@@ -46,13 +46,13 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-09-10 (two-step ownership on TokenX and the zapper) ────
+// ── Pinned floors, re-measured 2026-09-14 (the operator can revoke the guardian) ───────────
 //
 // | file                    | lines            | branches        |
 // |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  97.60% (163/167)| 100.00% (28/28) |
+// | LPStakingVault.sol      |  97.66% (167/171)| 100.00% (28/28) |
 // | LPZapper.sol            |  98.73% (78/79)  | 100.00% (17/17) |
-// | RewardsDistributor.sol  |  96.97% (96/99)  | 100.00% (15/15) |
+// | RewardsDistributor.sol  |  97.09% (100/103)| 100.00% (15/15) |
 // | TokenX.sol              |  97.87% (46/47)  | 100.00% (7/7)   |
 // | libraries/TwapGuard.sol |  97.67% (42/43)  | 100.00% (7/7)   |
 //
@@ -88,6 +88,21 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //     Its branch count is unchanged at 7 — neither the constructor emissions nor an
 //     unconditional `revert` adds an arm.
 //
+// The 2026-09-14 guardian-revocation round moved the two proxies' LINE denominators and left
+// every branch denominator alone:
+//
+//   * The vault's lines moved 167 -> 171 and the distributor's 99 -> 103. Each file gained the
+//     same four measurable lines: the `onlyOwnerOrOperator` modifier's three body lines (the
+//     `owner()` read, the operator read and the `revert`) and its `_;` placeholder, minus the
+//     `if (newGuardian == address(0)) revert ZeroAddress();` line that left `setGuardian`.
+//     All four are covered, so the number of uncovered lines is unchanged on both files — four
+//     on the vault, three on the distributor.
+//   * Neither branch denominator moved, and that is arithmetic rather than luck: `setGuardian`
+//     gave up one `if` (two arms, the zero-address rejection) and `onlyOwnerOrOperator` brought
+//     one `if` back (two arms, the rejection of a caller who is neither tier). 28 and 15 stand,
+//     and both are still fully covered — a stranger, the standing guardian and the two allowed
+//     tiers are each measured in `AccessControl.t.sol` and in the two branch suites.
+//
 // Earlier history: the vault's line denominator moved 109 -> 146 when the proxy split its state
 // into an ERC-7201 struct behind five getters and added `initialize`, `setGuardian`,
 // `_authorizeUpgrade` and the renounce override; TwapGuard moved 37 -> 43 for the same reason
@@ -98,28 +113,28 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
 // run, so all ten are demonstrably executed; the inlined site simply loses its own mapping:
 //
-//   * `contracts/lp-staking/LPStakingVault.sol:155`     `$.slot := LP_STAKING_VAULT_STORAGE`
+//   * `contracts/lp-staking/LPStakingVault.sol:157`     `$.slot := LP_STAKING_VAULT_STORAGE`
 //     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
 //     reads the resulting slot directly.
-//   * `contracts/lp-staking/LPStakingVault.sol:304`     `_disableInitializers();` — asserted by
+//   * `contracts/lp-staking/LPStakingVault.sol:334`     `_disableInitializers();` — asserted by
 //     `test_Constructor_DisablesTheImplementationsInitializers`, which proves it ran.
-//   * `contracts/lp-staking/LPStakingVault.sol:335`     `__Ownable2Step_init();` — an empty OZ
+//   * `contracts/lp-staking/LPStakingVault.sol:365`     `__Ownable2Step_init();` — an empty OZ
 //     initializer, kept because the upgrades plugin validates the parent-initializer chain.
-//   * `contracts/lp-staking/LPStakingVault.sol:841`     `_checkTwapDeviation();`
+//   * `contracts/lp-staking/LPStakingVault.sol:895`     `_checkTwapDeviation();`
 //   * `contracts/lp-staking/LPZapper.sol:442`           `_checkTwapDeviation();`
 //   * `contracts/lp-staking/libraries/TwapGuard.sol:127` `$.slot := TWAP_GUARD_STORAGE`
 //     — read by `twapWindow()` on both inheritors;
 //     `test_Storage_TheTwapGuardHasItsOwnPinnedNamespace` reads the slot directly.
 //   * `contracts/lp-staking/TokenX.sol:170`             `_rollPendingEpoch();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:168` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
-//   * `contracts/lp-staking/RewardsDistributor.sol:228` `_disableInitializers();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:245` `__Ownable2Step_init();`
+//   * `contracts/lp-staking/RewardsDistributor.sol:174` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
+//   * `contracts/lp-staking/RewardsDistributor.sol:259` `_disableInitializers();`
+//   * `contracts/lp-staking/RewardsDistributor.sol:276` `__Ownable2Step_init();`
 //
 // They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 167, minHit: 163},
+    lines: {found: 171, minHit: 167},
     branches: {found: 28, minHit: 28},
   },
   "contracts/lp-staking/LPZapper.sol": {
@@ -127,7 +142,7 @@ export const PER_FILE_FLOORS = {
     branches: {found: 17, minHit: 17},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 99, minHit: 96},
+    lines: {found: 103, minHit: 100},
     branches: {found: 15, minHit: 15},
   },
   "contracts/lp-staking/TokenX.sol": {

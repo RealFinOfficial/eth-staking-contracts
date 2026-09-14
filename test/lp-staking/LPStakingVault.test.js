@@ -1755,17 +1755,72 @@ describe("LPStakingVault", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("setGuardian", function () {
-    it("is owner only, rejects address(0) and emits GuardianSet", async function () {
+    it("takes the owner or the operator, and names all three in the rejection", async function () {
+      // The guardian cannot rotate itself, so a leaked hot key cannot keep itself installed.
       await expect(asGuardian().setGuardian(alice.address))
-        .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
-        .withArgs(guardian.address);
+        .to.be.revertedWithCustomError(vault, "NotOwnerOrOperator")
+        .withArgs(guardian.address, owner.address, operatorSafe.address);
 
-      await expect(vault.setGuardian(ZERO)).to.be.revertedWithCustomError(vault, "ZeroAddress");
+      await expect(vault.connect(stranger).setGuardian(alice.address))
+        .to.be.revertedWithCustomError(vault, "NotOwnerOrOperator")
+        .withArgs(stranger.address, owner.address, operatorSafe.address);
 
       await expect(vault.setGuardian(stranger.address))
         .to.emit(vault, "GuardianSet")
         .withArgs(guardian.address, stranger.address);
       expect(await vault.guardian()).to.equal(stranger.address);
+    });
+
+    it("lets the OPERATOR revoke the guardian in one transaction with address(0)", async function () {
+      await expect(asOperator().setGuardian(ZERO))
+        .to.emit(vault, "GuardianSet")
+        .withArgs(guardian.address, ZERO);
+      expect(await vault.guardian()).to.equal(ZERO);
+
+      // address(0) is the explicit "no guardian" state: the former guardian loses both
+      // switches at once, and the rejection names the zero address as the party that would
+      // have been allowed — which nobody can be, because msg.sender is never address(0).
+      await expect(asGuardian().setDepositsPaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
+        .withArgs(guardian.address, ZERO, operatorSafe.address);
+      await expect(asGuardian().setRebalancePaused(true))
+        .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
+        .withArgs(guardian.address, ZERO, operatorSafe.address);
+
+      // The operator still holds both switches itself, which is why the revocation costs the
+      // protocol nothing: no incident response is lost by removing the hot key.
+      await asOperator().setDepositsPaused(true);
+      expect(await vault.depositsPaused()).to.equal(true);
+      await asOperator().setRebalancePaused(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
+
+      // And the owner can re-appoint afterwards, from the vacant state.
+      await expect(vault.setGuardian(alice.address))
+        .to.emit(vault, "GuardianSet")
+        .withArgs(ZERO, alice.address);
+      await vault.connect(alice).setDepositsPaused(false);
+      expect(await vault.depositsPaused()).to.equal(false);
+    });
+
+    it("lets the OPERATOR appoint a replacement guardian, not only revoke", async function () {
+      await expect(asOperator().setGuardian(alice.address))
+        .to.emit(vault, "GuardianSet")
+        .withArgs(guardian.address, alice.address);
+      expect(await vault.guardian()).to.equal(alice.address);
+
+      await vault.connect(alice).setRebalancePaused(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
+    });
+
+    it("lets the OWNER revoke too, and the operator re-appoint afterwards", async function () {
+      await expect(vault.setGuardian(ZERO)).to.emit(vault, "GuardianSet").withArgs(guardian.address, ZERO);
+      expect(await vault.guardian()).to.equal(ZERO);
+
+      await expect(asOperator().setGuardian(bob.address))
+        .to.emit(vault, "GuardianSet")
+        .withArgs(ZERO, bob.address);
+      await vault.connect(bob).setDepositsPaused(true);
+      expect(await vault.depositsPaused()).to.equal(true);
     });
 
     it("moves the whole pause tier in one call", async function () {

@@ -52,11 +52,20 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 // owner    = the LPTimelock. Upgrades, `setZapper`, `setGuardian`, `setOperator`, the ASSET
 //            leg switch — every one of them scheduled, public for `minDelay`, then executed.
 // guardian = LP_GUARDIAN, a hot key. The three pause switches, with no delay and nothing
-//            else. Required, and it must NOT be the operator.
+//            else. Required at deploy time (`initialize` rejects a zero guardian), and it
+//            must NOT be the operator.
 // operator = LP_OPERATOR, a multisig. The vault's `setTwapParams` and `rescuePosition`, the
-//            distributor's `setSigner` and `recoverExcessAsset`, and those same three pause
-//            switches as the cold fallback for a lost guardian key. Also the owner of TokenX
-//            and LPZapper. Required.
+//            distributor's `setSigner` and `recoverExcessAsset`, those same three pause
+//            switches as the cold fallback for a lost guardian key, and `setGuardian` on both
+//            proxies. Also the owner of TokenX and LPZapper. Required.
+//
+//            `setGuardian` is owner OR operator since 2026-09-14. The guardian is a hot key
+//            holding switches that act immediately, while the owner is a timelock 48 h away on
+//            mainnet, so an undelayed key needs an undelayed revocation: the operator can
+//            revoke it in one transaction by passing `address(0)` — the explicit "no guardian"
+//            state, in which only the operator can pause — or appoint a replacement by passing
+//            a live address. `setOperator` did NOT move: it is still owner-only and still
+//            rejects zero, so the operator cannot rotate itself.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool
@@ -265,9 +274,11 @@ async function main() {
   const guardian = readAddress("LP_GUARDIAN");
   // Routine-operations tier on BOTH proxies (2026-09-09 role split): the vault's TWAP
   // calibration and NFT rescue, the distributor's signer rotation and ASSET recovery, plus
-  // all three pause switches as the cold fallback for a lost guardian key. It is also the
-  // address TokenX and LPZapper are handed to, and the address rescued NFTs and recovered
-  // ASSET are sent to. Required.
+  // all three pause switches as the cold fallback for a lost guardian key. Since 2026-09-14 it
+  // also holds `setGuardian` on both proxies, so it can revoke a compromised hot key with
+  // `setGuardian(address(0))` without waiting out the timelock. It is also the address TokenX
+  // and LPZapper are handed to, and the address rescued NFTs and recovered ASSET are sent to.
+  // Required.
   const operator = readAddress("LP_OPERATOR");
 
   // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so

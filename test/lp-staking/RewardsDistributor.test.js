@@ -811,24 +811,69 @@ describe("RewardsDistributor", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("setGuardian", function () {
-    it("is owner only, rejects address(0) and emits GuardianSet", async function () {
+    it("takes the owner or the operator, and names all three in the rejection", async function () {
+      // The guardian cannot rotate itself, so a leaked hot key cannot keep itself installed.
       await expect(asGuardian().setGuardian(alice.address))
-        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
-        .withArgs(guardian.address);
+        .to.be.revertedWithCustomError(distributor, "NotOwnerOrOperator")
+        .withArgs(guardian.address, owner.address, operatorSafe.address);
 
-      await expect(asOperator().setGuardian(alice.address))
-        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
-        .withArgs(operatorSafe.address);
-
-      await expect(distributor.setGuardian(ethers.ZeroAddress)).to.be.revertedWithCustomError(
-        distributor,
-        "ZeroAddress"
-      );
+      await expect(distributor.connect(alice).setGuardian(alice.address))
+        .to.be.revertedWithCustomError(distributor, "NotOwnerOrOperator")
+        .withArgs(alice.address, owner.address, operatorSafe.address);
 
       await expect(distributor.setGuardian(treasury.address))
         .to.emit(distributor, "GuardianSet")
         .withArgs(guardian.address, treasury.address);
       expect(await distributor.guardian()).to.equal(treasury.address);
+    });
+
+    it("lets the OPERATOR revoke the guardian in one transaction with address(0)", async function () {
+      await expect(asOperator().setGuardian(ethers.ZeroAddress))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(guardian.address, ethers.ZeroAddress);
+      expect(await distributor.guardian()).to.equal(ethers.ZeroAddress);
+
+      // address(0) is the explicit "no guardian" state: the former guardian loses the pause
+      // switch at once, and the rejection names the zero address as the party that would have
+      // been allowed — which nobody can be, because msg.sender is never address(0).
+      await expect(asGuardian().setPaused(true))
+        .to.be.revertedWithCustomError(distributor, "NotGuardianOrOperator")
+        .withArgs(guardian.address, ethers.ZeroAddress, operatorSafe.address);
+
+      // The operator still holds the switch itself, which is why the revocation costs the
+      // protocol nothing: no incident response is lost by removing the hot key.
+      await asOperator().setPaused(true);
+      expect(await distributor.paused()).to.equal(true);
+
+      // And the owner can re-appoint afterwards, from the vacant state.
+      await expect(distributor.setGuardian(treasury.address))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(ethers.ZeroAddress, treasury.address);
+      await distributor.connect(treasury).setPaused(false);
+      expect(await distributor.paused()).to.equal(false);
+    });
+
+    it("lets the OPERATOR appoint a replacement guardian, not only revoke", async function () {
+      await expect(asOperator().setGuardian(treasury.address))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(guardian.address, treasury.address);
+      expect(await distributor.guardian()).to.equal(treasury.address);
+
+      await distributor.connect(treasury).setPaused(true);
+      expect(await distributor.paused()).to.equal(true);
+    });
+
+    it("lets the OWNER revoke too, and the operator re-appoint afterwards", async function () {
+      await expect(distributor.setGuardian(ethers.ZeroAddress))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(guardian.address, ethers.ZeroAddress);
+      expect(await distributor.guardian()).to.equal(ethers.ZeroAddress);
+
+      await expect(asOperator().setGuardian(bob.address))
+        .to.emit(distributor, "GuardianSet")
+        .withArgs(ethers.ZeroAddress, bob.address);
+      await distributor.connect(bob).setPaused(true);
+      expect(await distributor.paused()).to.equal(true);
     });
 
     it("moves the guardian half of the pause tier in one call", async function () {

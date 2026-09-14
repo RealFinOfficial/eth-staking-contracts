@@ -100,14 +100,16 @@ analysis, not a description of a live risk of renouncing.
 |---|---|---|
 | `TokenX` | `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` | transfers, `permit`, `burn`; `mint` keeps working until the running epoch's cap is reached, then reverts `EpochMintCapExceeded` forever — **minting dies when the cap runs out** |
 | `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit`; and the vault's owner can point the deposit path at a replacement zapper, which is what makes this the least severe of the four |
-| `LPStakingVault` | the upgrade path, `setZapper`, `setGuardian`, `setOperator` | everything else; the three tiers are independent slots, so an ownership handover leaves the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` untouched, and a guardian or operator rotation leaves the owner's tier untouched. `stake` and `unstake` were never the owner's to lose |
-| `RewardsDistributor` | the upgrade path, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` | everything else; the same tier independence — the guardian keeps `setPaused`, the operator keeps `setSigner` and `recoverExcessAsset` |
+| `LPStakingVault` | the upgrade path, `setZapper`, `setOperator` | everything else; the three tiers are independent slots, so an ownership handover leaves the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` untouched, and a guardian or operator rotation leaves the owner's tier untouched. `setGuardian` is NOT lost either, because the operator holds it too since 2026-09-14. `stake` and `unstake` were never the owner's to lose |
+| `RewardsDistributor` | the upgrade path, `setAssetClaimsEnabled`, `setOperator` | everything else; the same tier independence — the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcessAsset` and `setGuardian` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
 because `unstake` is permissionless and unpausable. A lost guardian with `rebalancePaused` left
 on freezes re-ranging, but since the 2026-09-09 role split the operator holds the same three
-pause switches as the cold fallback and can lift it in one transaction without waiting out a
-guardian rotation through the timelock; the exit works either way, so no position is trapped.
+pause switches as the cold fallback and can lift it in one transaction; the exit works either
+way, so no position is trapped. Since 2026-09-14 the operator can also remove the lost or
+compromised key itself, by calling `setGuardian(address(0))` — see the `setGuardian` rule in
+item 3 below.
 The program-facing consequence is severe: rewards stop when the armed cap is exhausted and no
 new one can be armed.
 
@@ -123,14 +125,15 @@ Tests: `test/forge/unit/AccessControl.t.sol` — the tier matrix per contract, p
 `test_Ownership_AnUnacceptedTransferIsRecoverableOnAllFour`,
 `test_Ownership_NoneOfTheFourCanBeRenounced`,
 `test_Ownership_AStrangerIsRejectedOnRenounceByTheOwnershipCheck`,
-`test_Renounce_VaultOwnerLosesThreeAdminCallsOnHandover`,
+`test_Renounce_VaultOwnerLosesTwoAdminCallsOnHandover`,
 `test_Renounce_VaultGuardianLosesBothPauseSwitchesOnRotation`,
 `test_Renounce_VaultOperatorLosesFourAdminCallsOnRotation`,
-`test_Renounce_DistributorOwnerLosesThreeAdminCallsOnHandover`,
+`test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover`,
 `test_Renounce_DistributorGuardianLosesThePauseSwitchOnRotation`,
 `test_Renounce_DistributorOperatorLosesThreeAdminCallsOnRotation`,
 `test_Renounce_TokenXLosesFourAdminCallsOnHandover`,
-`test_Renounce_ZapperLosesThreeAdminCallsOnHandover`. Hardhat: the two-step and
+`test_Renounce_ZapperLosesThreeAdminCallsOnHandover`,
+`test_Tiers_TheOperatorCanRevokeTheGuardianWithNoDelay`. Hardhat: the two-step and
 `RenounceDisabled` cases in `test/lp-staking/TokenX.test.js` and
 `test/lp-staking/LPZapper.test.js`.
 
@@ -536,7 +539,7 @@ now.
 |---|---|---|
 | owner | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` | a code change, switching a whole reward leg on, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
 | guardian | `setPaused` | a bug in the claim path has to be stoppable in minutes |
-| operator | `setSigner`, `recoverExcessAsset`, **plus `setPaused`** | a leaked signing key is rotated by the multisig, not by the hot key, and ASSET leaves the contract only towards the operator |
+| operator | `setSigner`, `recoverExcessAsset`, **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, ASSET leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
 
 `LPStakingVault`:
 
@@ -544,28 +547,48 @@ now.
 |---|---|---|
 | owner | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` | code, pointing the deposit path at a new periphery contract, and the tier assignments are program decisions |
 | guardian | `setDepositsPaused`, `setRebalancePaused` | the two incident switches (item 13) have to act in one transaction |
-| operator | `setTwapParams`, `rescuePosition`, **plus both pause switches** | calibrating the guard is an operations decision, not an emergency one, and a stranded NFT leaves the contract only towards the operator |
+| operator | `setTwapParams`, `rescuePosition`, **plus both pause switches and `setGuardian`** | calibrating the guard is an operations decision, not an emergency one, a stranded NFT leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
 
 `TokenX` and `LPZapper` have no tiers of their own: they are plain `Ownable2Step` and the
 **operator** is their owner — `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` on
 the token; `setTwapParams`, `sweep`, `rescuePosition` on the zapper.
 
-Two rules follow from the matrix, and both are asserted in both directions on both proxies:
+Three rules follow from the matrix, and each is asserted in both directions on both proxies:
 
 - **The three pause switches accept the guardian OR the operator** (`onlyGuardianOrOperator`).
-  The guardian is the fast path; the operator is the cold fallback. If the hot key is lost or
-  compromised, replacing it means `setGuardian`, which is owner-tier and therefore 48 h away on
-  mainnet — and nothing may be un-pausable for two days. The OWNER is rejected on all three: a
-  pause routed through a 48 h delay is not a pause, and the timelock is not a party that can
-  react to anything anyway.
+  The guardian is the fast path; the operator is the cold fallback, so a lost hot key never
+  leaves anything un-pausable while a replacement is arranged. The OWNER is rejected on all
+  three: a pause routed through a 48 h delay is not a pause, and the timelock is not a party
+  that can react to anything anyway.
 - **Everything else on the operator tier is `onlyOperator`**, and the guardian is rejected there
   with `NotOperator(caller, operator)`. Nothing the hot key can call moves value or sets a key.
   That is the entire point of the split.
+- **`setGuardian` accepts the owner OR the operator** (`onlyOwnerOrOperator`), decided
+  2026-09-14. The reason is the shape of the guardian itself: it is a HOT key — one externally
+  owned account, kept online — holding switches that take effect in the transaction that calls
+  them. The owner is a `TimelockController` whose every call has to be scheduled and then waited
+  out, 48 h on mainnet. If the owner were the only tier that could replace the guardian, a
+  guardian key known to be leaked would keep those undelayed switches for the whole of those
+  48 h and could re-pause in every block of them. A key that acts with no delay has to be
+  revocable with no delay, and the operator multisig is the tier that can act with no delay. So
+  the operator can revoke by passing `address(0)` and can appoint a replacement by passing a
+  live address; the owner keeps exactly the same right through the timelock. This grants the
+  operator no new power over the protocol, because the operator already holds every switch the
+  guardian holds — removing the guardian leaves it with precisely what it had.
+  **`setOperator` did NOT move**: it is still `onlyOwner` and still rejects `address(0)`, so the
+  operator cannot rotate itself and the timelock stays the only tier that can change it.
+
+**`address(0)` is a legal guardian, and only through `setGuardian`.** It is the explicit "no
+guardian" state. With it stored, every guardian path is closed, because `msg.sender` can never
+be the zero address, so `onlyGuardianOrOperator` admits the operator alone. `initialize` still
+rejects a zero guardian — a stack is born with one — and `setOperator` still rejects a zero
+operator. `GuardianSet(previous, new)` is emitted for a revocation exactly as for a rotation.
 
 A stranger is rejected everywhere: `NotGuardianOrOperator(caller, guardian, operator)` on the
-three pauses, `NotOperator(caller, operator)` on the operator-only functions, and
-`OwnableUnauthorizedAccount` on the owner functions. `NotGuardian` no longer exists on either
-contract.
+three pauses, `NotOperator(caller, operator)` on the operator-only functions,
+`NotOwnerOrOperator(caller, owner, operator)` on `setGuardian`, and
+`OwnableUnauthorizedAccount` on the remaining owner functions. `NotGuardian` no longer exists on
+either contract.
 
 `recoverExcessAsset` sends to `operator()`, and so does `rescuePosition`. The owner is a
 timelock contract with no way to forward an ERC-20 or an ERC-721; the guardian is a hot key that
@@ -664,7 +687,9 @@ TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… CONFIRM=yes npx hardhat run scripts/lp
 
 The owner tier is exactly: `acceptOwnership`, `setZapper`, `setGuardian`, `setOperator`,
 `setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. Nothing else is routable, and
-nothing else needs to be. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
+nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
+but since 2026-09-14 it is owner OR operator, so a guardian revocation or replacement that
+cannot wait is sent DIRECTLY by the operator multisig instead of being scheduled here. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
 now, sent directly by the multisig, and scheduling it here would revert
 `OwnableUnauthorizedAccount` after the full delay. `setOperator` joined it, because moving the
 tier that holds the recovery hatches is exactly the kind of decision that should be public
@@ -733,8 +758,11 @@ a stale record reads as an incident.
 are guardian-tier: one transaction from the hot key, no delay, no schedule — and the operator
 multisig can send those same three calls whenever the guardian key is unreachable. Rotating the
 voucher signer, rescuing a stranded NFT, `recoverExcessAsset` and retuning the TWAP guard are
-operator-tier: one transaction from the multisig, also undelayed. If an incident needs a code
-change, the pause is the immediate mitigation and the upgrade is the slow follow-up.
+operator-tier: one transaction from the multisig, also undelayed. Revoking a compromised
+guardian does not go through here either, since 2026-09-14: `setGuardian(address(0))` from the
+operator multisig removes the hot key in one transaction, and a live address in the same call
+appoints a replacement. If an incident needs a code change, the pause is the immediate
+mitigation and the upgrade is the slow follow-up.
 
 **`updateDelay` is self-only.** Shortening the delay is itself a scheduled operation on the
 timelock's own address (`TIMELOCK_TARGET=TimelockController TIMELOCK_FN=updateDelay`), so it

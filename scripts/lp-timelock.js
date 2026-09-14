@@ -90,7 +90,8 @@ const OWNER_TIER = {
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
     kinds: ["LPStakingVault", "RewardsDistributor"],
-    note: "moves the undelayed pause tier to another hot key",
+    note: "moves the undelayed pause tier to another hot key, or to address(0) to revoke it; "
+      + "owner OR operator since 2026-09-14, so the operator can also send it directly",
   },
   setOperator: {
     signature: "function setOperator(address newOperator)",

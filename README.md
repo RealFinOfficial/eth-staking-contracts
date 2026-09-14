@@ -321,8 +321,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   owner tier, and an upgrade is public for the whole delay before it can run while `unstake` —
   never pausable — is the exit window. Two further tiers sit outside the timelock: a
   `guardian`, a hot key holding the three pause switches and nothing else, and an `operator`
-  multisig holding `setTwapParams`, `rescuePosition`, `setSigner` and `recoverExcessAsset` —
-  plus those same pause switches as the cold fallback for a lost guardian key. `TokenX` and
+  multisig holding `setTwapParams`, `rescuePosition`, `setSigner`, `recoverExcessAsset` and
+  `setGuardian` — plus those same pause switches as the cold fallback for a lost guardian key.
+  Since 2026-09-14 `setGuardian` takes the owner OR the operator, so a compromised hot key can
+  be revoked — by passing `address(0)`, which is the explicit "no guardian" state — or replaced
+  in one transaction, instead of the revocation waiting out the 48 h delay; `setOperator` did
+  not move and is still owner-only, so the operator cannot rotate itself. `TokenX` and
   `LPZapper` stay non-upgradeable and are owned by the operator. Operating the timelock is
   `scripts/lp-timelock.js`; the runbook and the reasoning are in
   `docs/lp-staking-audit-notes.md` item 14
@@ -335,12 +339,12 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 599 tests: unit suites + three fork suites
+npx hardhat test                 # 605 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 403 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 408 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -499,24 +503,24 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Re-measured 2026-09-10, after the three-role split and the `Ownable2Step` round moved four of
-the five denominators. Branch coverage is 100% on all five files, so every branch floor is also
-the ceiling:
+Re-measured 2026-09-14, after the guardian-revocation round moved the two proxies' line
+denominators (the vault 167 -> 171, the distributor 99 -> 103; no branch denominator moved).
+Branch coverage is 100% on all five files, so every branch floor is also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.60% (163/167) | 100.00% (28/28) |
+| `LPStakingVault.sol` | 97.66% (167/171) | 100.00% (28/28) |
 | `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
-| `RewardsDistributor.sol` | 96.97% (96/99) | 100.00% (15/15) |
+| `RewardsDistributor.sol` | 97.09% (100/103) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:841`,
+The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:895`,
 `LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the three ERC-7201 assembly
-bodies (`LPStakingVault.sol:155`, `RewardsDistributor.sol:168`,
+bodies (`LPStakingVault.sol:157`, `RewardsDistributor.sol:174`,
 `libraries/TwapGuard.sol:127`), and each proxy's `_disableInitializers();` /
-`__Ownable2Step_init();` (`LPStakingVault.sol:304`, `:335`; `RewardsDistributor.sol:228`,
-`:245`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
+`__Ownable2Step_init();` (`LPStakingVault.sol:334`, `:365`; `RewardsDistributor.sol:259`,
+`:276`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
 — `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
 in the checker and in the audit notes rather than chased with contrived tests.
 

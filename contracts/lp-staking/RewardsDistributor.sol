@@ -64,12 +64,14 @@ import "./TokenX.sol";
  *    |--------------------|---------------------------------------------------------------|
  *    | owner (timelock)   | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` |
  *    | guardian (hot key) | `setPaused`                                                   |
- *    | operator (multisig)| `setSigner`, `recoverExcessAsset`, and `setPaused`            |
+ *    | operator (multisig)| `setSigner`, `recoverExcessAsset`, `setGuardian`, `setPaused` |
  *
  *  A leaked signing key is contained by the guardian's pause in one transaction; the
  *  operator then rotates the signer from the multisig within hours. Nothing the guardian
  *  can do moves value or installs a key, which is what makes a hot guardian acceptable.
- *  The operator can pause as well, as the cold fallback for a lost guardian key.
+ *  The operator can pause as well, as the cold fallback for a lost guardian key, and it can
+ *  revoke or replace the guardian with no delay, because a hot key that holds an undelayed
+ *  switch has to be removable without one — see {setGuardian}.
  *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled.
  */
 contract RewardsDistributor is
@@ -109,6 +111,10 @@ contract RewardsDistributor is
 
     /// @dev A pause switch was called by someone who is neither the guardian nor the operator.
     error NotGuardianOrOperator(address caller, address guardian, address operator);
+
+    /// @dev `setGuardian` was called by someone who is neither the owner nor the operator —
+    ///      the standing guardian included, since the guardian cannot rotate itself.
+    error NotOwnerOrOperator(address caller, address owner, address operator);
 
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
@@ -198,13 +204,38 @@ contract RewardsDistributor is
 
     /// @dev The pause tier: the guardian (hot key, fast path) or the operator (multisig, the
     ///      cold fallback for a lost guardian key). Deliberately NOT satisfied by `owner()`:
-    ///      the timelock has no business holding an undelayed switch.
+    ///      the timelock has no business holding an undelayed switch. The guardian slot may
+    ///      legitimately hold `address(0)` — the explicit "no guardian" state that
+    ///      {setGuardian} can write — and in that state the first comparison can never match,
+    ///      because `msg.sender` is never the zero address, so this modifier admits the
+    ///      operator and nobody else.
     modifier onlyGuardianOrOperator() {
         RewardsDistributorStorage storage $ = _distributorStorage();
         address guardian_ = $.guardian;
         address operator_ = $.operator;
         if (msg.sender != guardian_ && msg.sender != operator_) {
             revert NotGuardianOrOperator(msg.sender, guardian_, operator_);
+        }
+        _;
+    }
+
+    /// @dev The guardian-rotation tier: the owner (the timelock, delayed) or the operator (the
+    ///      multisig, undelayed). It exists for one reason. The guardian is a hot key, meaning
+    ///      a single externally owned account kept online, and it holds a pause switch that
+    ///      takes effect in the transaction that calls it. The owner is a `TimelockController`
+    ///      whose every call has to be scheduled and then waited out — 48 hours minimum on
+    ///      mainnet. If the owner were the only tier that could replace the guardian, a
+    ///      guardian key that had leaked would keep its undelayed switch for the whole of
+    ///      those 48 hours and could re-pause claims in every block of them. An undelayed key
+    ///      therefore needs an undelayed revocation, and the operator multisig is the only
+    ///      tier that can act without a delay. Granting it costs nothing, because the operator
+    ///      already holds every switch the guardian holds (see {onlyGuardianOrOperator}), so
+    ///      it gains no power over the protocol that it did not already have.
+    modifier onlyOwnerOrOperator() {
+        address owner_ = owner();
+        address operator_ = _distributorStorage().operator;
+        if (msg.sender != owner_ && msg.sender != operator_) {
+            revert NotOwnerOrOperator(msg.sender, owner_, operator_);
         }
         _;
     }
@@ -396,12 +427,37 @@ contract RewardsDistributor is
         emit AssetClaimsEnabled(_enabled);
     }
 
-    /// @notice Rotate the fast-path guardian.
-    /// @param _guardian The new guardian (the multisig).
-    /// @dev Owner tier: the guardian cannot rotate itself, so losing the multisig is
-    ///      recoverable through the timelock rather than terminal.
-    function setGuardian(address _guardian) external onlyOwner {
-        if (_guardian == address(0)) revert ZeroAddress();
+    /// @notice Appoint, replace or REVOKE the fast-path guardian.
+    /// @param _guardian The address that holds the guardian tier from this transaction
+    ///        onwards, or `address(0)` to revoke the guardian and leave the tier vacant.
+    /// @dev The guardian is a hot key: one externally owned account, kept online so that
+    ///      {setPaused} can be thrown within minutes of an incident. It holds nothing else —
+    ///      it cannot move value and cannot set a key — which is what makes it acceptable for
+    ///      that key to be hot.
+    ///
+    ///      This function is owner OR operator tier. The owner is a `TimelockController` with
+    ///      a 48 hour minimum delay on mainnet, so if the owner were the only tier that could
+    ///      change the guardian, a guardian key known to be compromised would keep its
+    ///      undelayed pause switch for those whole 48 hours, and could re-pause both claim
+    ///      legs in every block until the replacement transaction became executable. A key
+    ///      that acts with no delay has to be revocable with no delay, and the operator
+    ///      multisig is the tier that can act with no delay. So the operator can revoke the
+    ///      guardian immediately by passing `address(0)`, and it can appoint a replacement by
+    ///      passing a live address. The owner keeps exactly the same right, through the
+    ///      timelock.
+    ///
+    ///      This grants the operator no new power over the protocol. The operator already
+    ///      holds `setPaused` itself (see {onlyGuardianOrOperator}), so an operator that
+    ///      revokes the guardian ends the transaction with precisely the powers it began with.
+    ///
+    ///      `address(0)` is accepted on purpose and is the explicit "no guardian" state: once
+    ///      it is stored, every guardian path is closed, because `msg.sender` can never be the
+    ///      zero address, and {onlyGuardianOrOperator} then admits the operator alone.
+    ///      {initialize} still rejects a zero guardian, because a stack is born with one.
+    ///      {setOperator} is unchanged — owner tier, zero rejected — so the operator cannot
+    ///      rotate itself and the timelock remains the only tier that can change the operator.
+    ///      {GuardianSet} is emitted either way, a revocation included, carrying both sides.
+    function setGuardian(address _guardian) external onlyOwnerOrOperator {
         RewardsDistributorStorage storage $ = _distributorStorage();
         emit GuardianSet($.guardian, _guardian);
         $.guardian = _guardian;

@@ -70,13 +70,15 @@ import "./libraries/TwapGuard.sol";
  *    |--------------------|-----------------------------------------------------------|
  *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` |
  *    | guardian (hot key) | `setDepositsPaused`, `setRebalancePaused`                 |
- *    | operator (multisig)| `setTwapParams`, `rescuePosition`, and both pause switches |
+ *    | operator (multisig)| `setTwapParams`, `rescuePosition`, `setGuardian`, and both pause switches |
  *
  *  The split follows blast radius, then response time. The guardian can stop deposits and
  *  re-ranging in one transaction but can move nothing and set no key, so it is safe to hold
  *  on a hot key. The operator can move stray value (to itself) and recalibrate the guard, so
  *  it is a multisig; it can also throw both pause switches, as the cold fallback for a lost
- *  guardian key. Code changes and role changes go through the timelock's public delay.
+ *  guardian key, and it can revoke or replace the guardian with no delay, because a hot key
+ *  that holds an undelayed switch has to be removable without one — see {setGuardian}. Code
+ *  changes, and the operator tier itself, go through the timelock's public delay.
  *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled:
  *  renouncing would freeze `_authorizeUpgrade` forever, which is the opposite of why the
  *  proxy exists.
@@ -230,6 +232,9 @@ contract LPStakingVault is
     error NotOperator(address caller, address operator);
     /// @dev A pause switch was called by someone who is neither the guardian nor the operator.
     error NotGuardianOrOperator(address caller, address guardian, address operator);
+    /// @dev `setGuardian` was called by someone who is neither the owner nor the operator —
+    ///      the standing guardian included, since the guardian cannot rotate itself.
+    error NotOwnerOrOperator(address caller, address owner, address operator);
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
 
@@ -244,13 +249,38 @@ contract LPStakingVault is
 
     /// @dev The pause tier: the guardian (hot key, fast path) or the operator (multisig, the
     ///      cold fallback for a lost guardian key). Deliberately NOT satisfied by `owner()`:
-    ///      the timelock has no business holding an undelayed switch.
+    ///      the timelock has no business holding an undelayed switch. The guardian slot may
+    ///      legitimately hold `address(0)` — the explicit "no guardian" state that
+    ///      {setGuardian} can write — and in that state the first comparison can never match,
+    ///      because `msg.sender` is never the zero address, so this modifier admits the
+    ///      operator and nobody else.
     modifier onlyGuardianOrOperator() {
         LPStakingVaultStorage storage $ = _vaultStorage();
         address guardian_ = $.guardian;
         address operator_ = $.operator;
         if (msg.sender != guardian_ && msg.sender != operator_) {
             revert NotGuardianOrOperator(msg.sender, guardian_, operator_);
+        }
+        _;
+    }
+
+    /// @dev The guardian-rotation tier: the owner (the timelock, delayed) or the operator (the
+    ///      multisig, undelayed). It exists for one reason. The guardian is a hot key, meaning
+    ///      a single externally owned account kept online, and it holds a pause switch that
+    ///      takes effect in the transaction that calls it. The owner is a `TimelockController`
+    ///      whose every call has to be scheduled and then waited out — 48 hours minimum on
+    ///      mainnet. If the owner were the only tier that could replace the guardian, a
+    ///      guardian key that had leaked would keep its undelayed switches for the whole of
+    ///      those 48 hours and could re-pause in every block of them. An undelayed key
+    ///      therefore needs an undelayed revocation, and the operator multisig is the only
+    ///      tier that can act without a delay. Granting it costs nothing, because the operator
+    ///      already holds every switch the guardian holds (see {onlyGuardianOrOperator}), so
+    ///      it gains no power over the protocol that it did not already have.
+    modifier onlyOwnerOrOperator() {
+        address owner_ = owner();
+        address operator_ = _vaultStorage().operator;
+        if (msg.sender != owner_ && msg.sender != operator_) {
+            revert NotOwnerOrOperator(msg.sender, owner_, operator_);
         }
         _;
     }
@@ -567,13 +597,37 @@ contract LPStakingVault is
     }
 
     /**
-     * @notice Rotates the fast-path guardian.
-     * @param newGuardian The new guardian (the multisig).
-     * @dev Owner tier: the guardian cannot rotate itself, so losing the multisig is
-     *      recoverable through the timelock rather than terminal.
+     * @notice Appoints, replaces or REVOKES the fast-path guardian.
+     * @param newGuardian The address that holds the guardian tier from this transaction
+     *        onwards, or `address(0)` to revoke the guardian and leave the tier vacant.
+     * @dev The guardian is a hot key: one externally owned account, kept online so that
+     *      {setDepositsPaused} and {setRebalancePaused} can be thrown within minutes of an
+     *      incident. It holds nothing else — it cannot move value and cannot set a key — which
+     *      is what makes it acceptable for that key to be hot.
+     *
+     *      This function is owner OR operator tier. The owner is a `TimelockController` with a
+     *      48 hour minimum delay on mainnet, so if the owner were the only tier that could
+     *      change the guardian, a guardian key known to be compromised would keep both
+     *      undelayed pause switches for those whole 48 hours, and could re-pause deposits and
+     *      re-ranging in every block until the replacement transaction became executable. A key
+     *      that acts with no delay has to be revocable with no delay, and the operator multisig
+     *      is the tier that can act with no delay. So the operator can revoke the guardian
+     *      immediately by passing `address(0)`, and it can appoint a replacement by passing a
+     *      live address. The owner keeps exactly the same right, through the timelock.
+     *
+     *      This grants the operator no new power over the protocol. The operator already holds
+     *      both pause switches itself (see {onlyGuardianOrOperator}), so an operator that
+     *      revokes the guardian ends the transaction with precisely the powers it began with.
+     *
+     *      `address(0)` is accepted on purpose and is the explicit "no guardian" state: once it
+     *      is stored, every guardian path is closed, because `msg.sender` can never be the zero
+     *      address, and {onlyGuardianOrOperator} then admits the operator alone. {initialize}
+     *      still rejects a zero guardian, because a stack is born with one. {setOperator} is
+     *      unchanged — owner tier, zero rejected — so the operator cannot rotate itself and the
+     *      timelock remains the only tier that can change the operator. {GuardianSet} is
+     *      emitted either way, a revocation included, carrying both sides.
      */
-    function setGuardian(address newGuardian) external onlyOwner {
-        if (newGuardian == address(0)) revert ZeroAddress();
+    function setGuardian(address newGuardian) external onlyOwnerOrOperator {
         LPStakingVaultStorage storage $ = _vaultStorage();
         emit GuardianSet($.guardian, newGuardian);
         $.guardian = newGuardian;
