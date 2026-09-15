@@ -432,6 +432,10 @@ npm run test:integration            # Just the mainnet-pinned local-fork integra
 npm run test:integration:sepolia    # Just the profile-driven fork integration suite
 npm run test:sepolia:live           # Gated live-Sepolia smoke; REAL transactions, never CI
 
+# Opt-in ApeBond dry-run: the whole live-day sequence on a FORK of Sepolia test stack #5.
+# Not a CI gate — it forks the chain HEAD, so it is not deterministic. See below.
+LP_APEBOND_DRYRUN=1 npx hardhat test test/lp-staking/integration/ApeBondUpgradeInPlace.test.js
+
 npm run test:forge                  # Foundry: fork + unit + fuzz + invariant
 npm run test:forge:ci               # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge              # forge coverage: lcov + a summary table
@@ -455,14 +459,16 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 | Hardhat in-process mainnet fork | `test/lp-staking/fork/LPStakingFork.test.js` | `npx hardhat test` | mainnet archive RPC |
 | Hardhat local-fork integration, mainnet-pinned | `test/lp-staking/integration/LPStakingLocalFork.test.js` | `npm run test:integration` | mainnet archive RPC |
 | Hardhat fork integration, profile-driven | `test/lp-staking/integration/LPStakingSepoliaFork.test.js` | `npm run test:integration:sepolia` | archive RPC for the profile's chain |
+| ApeBond fork dry-run — opt-in, **never a CI gate** | `test/lp-staking/integration/ApeBondUpgradeInPlace.test.js` | `LP_APEBOND_DRYRUN=1 npx hardhat test <that file>` | `LP_APEBOND_DRYRUN=1` + a Sepolia endpoint |
 | Live Sepolia smoke — gated, **never CI** | `test-live/sepolia/SepoliaLive.test.js` | `npm run test:sepolia:live` | `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + endpoint |
 | Foundry fork (real state) | `test/forge/fork/` | `npm run test:forge` | archive RPC for the profile's chain |
 | Foundry unit (deterministic) | `test/forge/unit/` | `npm run test:forge` | nothing |
 | Foundry fuzz (properties) | `test/forge/fuzz/` | `npm run test:forge` | nothing |
 | Foundry invariant (campaigns) | `test/forge/invariant/` | `npm run test:forge` | nothing |
 
-`npx hardhat test` runs the first five (`paths.tests` is `./test`). It does **not** and must
-never run `test-live/`.
+`npx hardhat test` runs the first six (`paths.tests` is `./test`). The ApeBond dry-run is
+collected by that command too but reports as **pending** unless `LP_APEBOND_DRYRUN=1` is set,
+which CI never sets. `npx hardhat test` does **not** and must never run `test-live/`.
 
 The **ApeBond route has no tier of its own.** Its unit coverage sits in the Hardhat unit tier
 (`ApeBondPositionAdapter.test.js`, `BonusEscrow.test.js`) and the Foundry unit tier
@@ -473,7 +479,9 @@ stack is `DeployApeBond.test.js`, the three OPERATOR scripts that follow that ac
 section 7 of the mainnet-pinned **local-fork** suite — the only tier that runs the real deploy
 script as a child process, which is what a flag-gated deployment has to be proven through. It
 deploys a SECOND stack there with `LP_APEBOND_ENABLED=1` and asserts that the first, un-flagged
-one has no ApeBond route at all.
+one has no ApeBond route at all. What none of those tiers can say anything about is the LIVE
+stack, because every one of them builds its world out of mocks; that is what the opt-in fork
+dry-run below is for.
 
 **Test maps** — generated from the test files at the branch head on 2026-08-25; private
 artifacts, shared by the repository owner on request.
@@ -661,6 +669,70 @@ Env vars, all set by the harness for its children and all optional otherwise:
 There is deliberately no `networks.hardhat` entry in `hardhat.config.js`: the in-process
 fork suite resets with a bare `hardhat_reset`, and a config entry would change what that
 resets to.
+
+## ApeBond fork dry-run — opt-in, never a CI gate
+
+`test/lp-staking/integration/ApeBondUpgradeInPlace.test.js` rehearses the whole ApeBond
+live-day sequence — the runbook in `scripts/README.md` under "Activating ApeBond on an
+existing stack" and "After the activation: opening the route" — against a fork of **Sepolia
+test stack #5**, using the repo's own four scripts as child processes:
+
+```bash
+LP_APEBOND_DRYRUN=1 npx hardhat test test/lp-staking/integration/ApeBondUpgradeInPlace.test.js
+```
+
+`deploy-apebond.js` (the in-place UUPS upgrade + escrow + adapter + the timelock batch, waited
+out and executed), then `set-purchase-signer.js`, then `fund-escrow.js`, then both phases of
+`apebond-rehearsal.js`.
+
+**It forks the chain HEAD, not a pinned block.** Every other fork suite here pins, and that is
+what makes them deterministic. This one cannot: stack #5 was deployed long after every pinned
+block in this repo, so at block 11,562,000 the vault proxy has no code at all. `fork-node.js`
+therefore takes an optional `blockNumber`, defaulting to `profile.pinnedBlock`;
+`forkNode.LATEST_BLOCK` drops the `--fork-block-number` flag and `probeFork` asserts the head is
+AHEAD of the pinned block instead of equal to it.
+
+**That is exactly why it is not a gate.** At the head the pool price, the operator's balances
+and the staked position are whatever Sepolia holds at the minute the node starts, so a run could
+go red because somebody else moved the pool. `.github/workflows/ci.yml` never sets
+`LP_APEBOND_DRYRUN`, so the suite reports as pending there. The usual one-sided rule still
+applies on top: without the flag it skips and says so; with the flag AND an endpoint set, a fork
+that cannot be established FAILS rather than skips.
+
+**What it proves that no mock tier can.** That the `LPStakingVault` compiled from this branch
+passes the storage-layout check against the layout recorded for the implementation the live
+proxy runs (`0xEac50B6B…`); that the deployer key holds both timelock roles on the real
+`LPTimelock`; that the batch clears the real 300-second `minDelay` and executes; that NFT
+231913's staker and the vault's owner/guardian/operator/zapper/TWAP/pause fields all survive the
+upgrade; that the distributor's ERC-1967 slot does not move; and that a position minted on the
+REAL Uniswap Sepolia position manager, in the campaign range `[-297120, -283260]` of the real
+tASSET/tUSDC pool, lands in the vault, credits the buyer rather than the caller, and pays its
+bonus after the cliff — including to a buyer who unstakes the position first.
+
+**Two impersonation variables, chain 31337 only.** The sequence needs two live accounts: the
+operator `0x5576bD37…` (deployer, timelock proposer and executor, adapter guardian) and the
+SoulZap seat `0x2b9818c8…`. Their private keys are not in this repo and must not be, so
+`scripts/lib/pools.js` reads `LP_DEPLOYER_IMPERSONATE` in `getSigner()` and
+`scripts/apebond-rehearsal.js` reads `LP_REHEARSAL_CALLER_IMPERSONATE` for the caller wallet.
+Both go through `impersonatedSignerFromEnv`, which reads the chain id FIRST and throws on
+anything but 31337 — on a real chain the node would sign with whatever key the network config
+holds, so the run would act as a different account than the one named and report a success that
+proves nothing. `LP_REHEARSAL_CALLER_IMPERSONATE` and `LP_REHEARSAL_CALLER_KEY` are mutually
+exclusive, because they are two different statements about who the caller is.
+
+**Nothing in the repository is written.** The children record into a scratch `DEPLOYMENTS_FILE`
+— a copy of the tracked registry with the live stack's entry also recorded under chain 31337,
+which is what a fork is: Sepolia's state on a node that reports 31337. The tracked
+`deployments.json` and the committed `.openzeppelin/sepolia.json` are compared by sha256 before
+and after; `git status --porcelain -- deployments.json .openzeppelin` must be empty; and the
+whole-tree `git status --porcelain` must have GAINED no entry over the run. The
+`hardhat-upgrades` manifest never lands in the repo either: on a forked development node
+`Manifest.forNetwork` writes to `<os.tmpdir()>/openzeppelin-upgrades/hardhat-31337-<instance>.json`
+and keeps the committed `.openzeppelin/sepolia.json` as a **read-only parent** — which is also
+why the layout check grades against the real deployed layout rather than against nothing.
+
+The run ends by printing one block with every address and transaction hash it produced on the
+fork. That block is the rehearsal record for the round's notes.
 
 ## Tech Stack
 

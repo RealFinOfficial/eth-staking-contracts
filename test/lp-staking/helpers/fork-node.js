@@ -21,6 +21,22 @@
  * optional parameter defaulting to `profiles.mainnet`, so the shipped suite behaves exactly
  * as it did before profiles existed.
  *
+ * ── Pinned block vs the chain head ────────────────────────────────────────────────────
+ *
+ * Every shipped suite forks at the profile's PINNED block, and that is what makes them
+ * deterministic: the same block serves the same state today and in a year, so a failure is
+ * always a defect in the code and never a change on the chain. `spawnForkNode`,
+ * `probeFork` and `establishFork` therefore default `blockNumber` to `profile.pinnedBlock`
+ * and behave exactly as they always did.
+ *
+ * One suite needs the opposite. `integration/ApeBondUpgradeInPlace.test.js` rehearses the
+ * ApeBond activation against Sepolia test stack #5 AS IT IS RIGHT NOW — the stack was
+ * deployed long after every pinned block in this repo, so at the pin its contracts do not
+ * exist at all. That suite passes {@link LATEST_BLOCK}, which drops the
+ * `--fork-block-number` flag and lets the node fork the chain head. The consequence is
+ * stated where it matters: a run at the head is NOT deterministic, so that suite is opt-in
+ * and is not a CI gate.
+ *
  * ── No orphan nodes ───────────────────────────────────────────────────────────────────
  *
  * A `hardhat node` that outlives the test run holds its port and its fork cache lock.
@@ -47,6 +63,25 @@ const DEFAULT_PROFILE = profiles.mainnet;
 
 /** Tick spacing Uniswap V3 assigns to each fee tier. Both profiles use 3000 -> 60. */
 const TICK_SPACING_BY_FEE = { 100: 1, 500: 10, 3000: 60, 10000: 200 };
+
+/**
+ * The value that asks for a fork at the CHAIN HEAD instead of the profile's pinned block.
+ *
+ * Passed as `blockNumber` to `spawnForkNode` / `probeFork` / `establishFork`. `undefined`
+ * and `null` mean the same thing, so a caller that computes the block number and comes up
+ * empty gets the head rather than a crash.
+ */
+const LATEST_BLOCK = "latest";
+
+/** Whether `blockNumber` asks for the head rather than a specific block. */
+function isLatest(blockNumber) {
+  return blockNumber === LATEST_BLOCK || blockNumber === undefined || blockNumber === null;
+}
+
+/** How a block selection is named in a message: "block 11562000", or "the chain head". */
+function describeBlock(blockNumber) {
+  return isLatest(blockNumber) ? "the chain head (latest)" : `block ${blockNumber}`;
+}
 
 const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 const HARDHAT_CLI = require.resolve("hardhat/internal/cli/cli.js");
@@ -140,13 +175,21 @@ function resolveRpcCandidates(env = process.env, profile = DEFAULT_PROFILE) {
  * @param {object} env Environment to read the profile's RPC variable / INFURA_API_KEY from.
  * @param {object} profile Network profile; defaults to mainnet, for which the strings below
  *   render exactly as they did before profiles existed.
+ * @param {number|"latest"} [blockNumber] Which block the fork asked for; defaults to the
+ *   profile's pinned block, which is what every shipped suite asks for and what the
+ *   approved message text names.
  * @returns {{action: "throw"|"skip", message: string}}
  */
-function decideOnForkFailure(failures, env = process.env, profile = DEFAULT_PROFILE) {
+function decideOnForkFailure(
+  failures,
+  env = process.env,
+  profile = DEFAULT_PROFILE,
+  blockNumber = profile.pinnedBlock
+) {
   const configured = profiles.isConfigured(profile, env);
   const label = profile.logLabel;
   const envUrl = profile.rpc.envUrl;
-  const detail = `no usable RPC for block ${profile.pinnedBlock}:\n    ${failures.join("\n    ")}`;
+  const detail = `no usable RPC for ${describeBlock(blockNumber)}:\n    ${failures.join("\n    ")}`;
 
   if (configured) {
     return {
@@ -228,15 +271,28 @@ function stopChild(child) {
  * Spawns the node and resolves once it answers `eth_chainId`, or rejects with whatever
  * killed it. Never resolves a half-started node: a fork URL the endpoint refuses makes
  * `hardhat node` exit before it binds, and that exit is what is reported.
+ *
+ * `blockNumber` defaults to the profile's pinned block, which is what every shipped suite
+ * wants. {@link LATEST_BLOCK} drops `--fork-block-number` entirely, so the node forks
+ * whatever the endpoint reports as the head at the moment it starts — see the module
+ * header for when that is the right thing to ask for and what it costs.
  */
-async function spawnForkNode({ url, port, logFile, profile = DEFAULT_PROFILE }) {
+async function spawnForkNode({
+  url,
+  port,
+  logFile,
+  profile = DEFAULT_PROFILE,
+  blockNumber = profile.pinnedBlock,
+}) {
   installExitHandlers();
 
-  const pinnedBlock = profile.pinnedBlock;
+  const latest = isLatest(blockNumber);
+  const blockArgs = latest ? [] : ["--fork-block-number", String(blockNumber)];
   const out = fs.openSync(logFile, "a");
   fs.writeSync(
     out,
-    `\n===== hardhat node --fork ${url} --fork-block-number ${pinnedBlock} --port ${port} =====\n`
+    `\n===== hardhat node --fork ${url} ${blockArgs.join(" ")} --port ${port} ` +
+      `(${describeBlock(blockNumber)}) =====\n`
   );
 
   const child = spawn(
@@ -250,8 +306,7 @@ async function spawnForkNode({ url, port, logFile, profile = DEFAULT_PROFILE }) 
       String(port),
       "--fork",
       url,
-      "--fork-block-number",
-      String(pinnedBlock),
+      ...blockArgs,
     ],
     { cwd: REPO_ROOT, env: childEnv(), stdio: ["ignore", out, out] }
   );
@@ -421,13 +476,27 @@ function sleep(ms) {
  *   - the funders: at least one must hold a non-zero balance of one of the two tokens,
  *     which is what makes the impersonation funding path viable at all.
  *
+ * A fork at {@link LATEST_BLOCK} cannot assert its head against a pinned number — the head
+ * is whatever the chain had reached when the node started. It is asserted to be AHEAD of
+ * the profile's pinned block instead, which still catches the two failures that matter: an
+ * endpoint serving a different chain, and an endpoint serving stale state.
+ *
  * @param {object} provider
  * @param {object} [profile]
+ * @param {{blockNumber?: number|"latest"}} [options]
  */
-async function probeFork(provider, profile = DEFAULT_PROFILE) {
+async function probeFork(provider, profile = DEFAULT_PROFILE, options = {}) {
+  const { blockNumber = profile.pinnedBlock } = options;
   const head = await provider.getBlockNumber();
-  if (head !== profile.pinnedBlock) {
-    throw new Error(`node head is ${head}, expected the pinned block ${profile.pinnedBlock}`);
+  if (isLatest(blockNumber)) {
+    if (head <= profile.pinnedBlock) {
+      throw new Error(
+        `node head is ${head}, which is not ahead of ${profile.name}'s pinned block ` +
+          `${profile.pinnedBlock} — the endpoint is serving stale state or another chain`
+      );
+    }
+  } else if (head !== blockNumber) {
+    throw new Error(`node head is ${head}, expected the pinned block ${blockNumber}`);
   }
 
   for (const [label, address] of [
@@ -516,12 +585,18 @@ async function probeFork(provider, profile = DEFAULT_PROFILE) {
 /**
  * Tries every candidate endpoint in turn and returns the first working node.
  *
- * @param {{logDir: string, profile?: object}} options
+ * @param {{logDir: string, profile?: object, blockNumber?: number|"latest"}} options
+ *   `blockNumber` defaults to the profile's pinned block; {@link LATEST_BLOCK} forks the
+ *   chain head instead.
  * @returns {Promise<{node: object, provider: object, url: string, probe: object, profile: object}|null>}
  *   `null` only when no endpoint worked AND no endpoint was configured — the single legal
  *   skip. When one was configured this throws instead.
  */
-async function establishFork({ logDir, profile = DEFAULT_PROFILE }) {
+async function establishFork({
+  logDir,
+  profile = DEFAULT_PROFILE,
+  blockNumber = profile.pinnedBlock,
+}) {
   const candidates = resolveRpcCandidates(process.env, profile);
   const failures = [];
 
@@ -530,13 +605,13 @@ async function establishFork({ logDir, profile = DEFAULT_PROFILE }) {
     try {
       const port = await getFreePort();
       const logFile = path.join(logDir, `hardhat-node-${port}.log`);
-      node = await spawnForkNode({ url, port, logFile, profile });
+      node = await spawnForkNode({ url, port, logFile, profile, blockNumber });
 
       const provider = new ethers.JsonRpcProvider(node.rpcUrl, undefined, PROVIDER_OPTIONS);
       provider.pollingInterval = 100;
 
       try {
-        const probe = await probeFork(provider, profile);
+        const probe = await probeFork(provider, profile, { blockNumber });
         return { node, provider, url, probe, profile };
       } catch (error) {
         provider.destroy();
@@ -548,7 +623,7 @@ async function establishFork({ logDir, profile = DEFAULT_PROFILE }) {
     }
   }
 
-  const decision = decideOnForkFailure(failures, process.env, profile);
+  const decision = decideOnForkFailure(failures, process.env, profile, blockNumber);
   if (decision.action === "throw") throw new Error(decision.message);
   console.warn(`\n  ${decision.message}\n`);
   return null;
@@ -559,6 +634,9 @@ module.exports = {
   EXTRA_PUBLIC_ARCHIVE_RPCS,
   DEFAULT_PROFILE,
   TICK_SPACING_BY_FEE,
+  LATEST_BLOCK,
+  isLatest,
+  describeBlock,
   PROVIDER_OPTIONS,
   resolveRpcCandidates,
   decideOnForkFailure,

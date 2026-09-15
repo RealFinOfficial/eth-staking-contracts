@@ -263,11 +263,21 @@ function readApeBondFlag() {
   throw new Error(`LP_APEBOND_ENABLED must be 1, 0 or unset — got ${raw}`);
 }
 
-/** Deploys one contract with an explicit nonce and returns it with its receipt. */
+/**
+ * Deploys one contract with an explicit nonce and returns it with its receipt.
+ *
+ * The factory is bound to `deployer` rather than left to pick up the network's default
+ * signer. On every real network the two are the same account — `pools.getSigner()` returns
+ * `getSigners()[0]` — so nothing about a live run changes. They stop being the same the
+ * moment the sender is IMPERSONATED (`LP_DEPLOYER_IMPERSONATE`, chain 31337 only): there the
+ * default signer is the node's own account 0, while the nonce on the very next line comes
+ * from `deployer`, so an unbound factory would deploy from one account with the other's
+ * nonce and take the CREATE address prediction in `deploy-apebond.js` phase 3 with it.
+ */
 async function deployContract(name, args, deployer) {
   const nonce = await pools.resolveNonce(deployer.address);
   console.log(`\nDeploying ${name}... (nonce ${nonce})`);
-  const factory = await hre.ethers.getContractFactory(name);
+  const factory = await hre.ethers.getContractFactory(name, deployer);
   const contract = await factory.deploy(...args, { nonce });
   await contract.waitForDeployment();
 

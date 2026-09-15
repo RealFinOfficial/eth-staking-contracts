@@ -57,6 +57,14 @@ LP_NPM=0xC36442b4a4522E871399CD717aBDD847Ab11FE88 LP_INITIAL_SQRT_PRICE_X96=… 
 | `LOCALHOST_RPC_URL` | The node's URL. Unset means `http://127.0.0.1:8545` |
 | `LOCALHOST_GAS_PRICE` | Fixed gas price in wei. A forked node inherits mainnet's base fee at the pinned block, so leaving Hardhat to estimate can undershoot the next block and the transaction is rejected. These scripts do not pin fees themselves |
 | `DEPLOYMENTS_FILE` | Where `recordDeployment` writes. Point it at a scratch file so a throwaway chain-31337 deploy never rewrites the tracked `deployments.json` |
+| `LP_DEPLOYER_IMPERSONATE` | The ADDRESS every state-changing script should send from, played WITHOUT its private key by impersonating it on the node. **Chain 31337 only** — on any other chain id the run stops with an error instead of sending, because there the transaction would be signed by whatever key the network config holds and would therefore come from a different account than the one named |
+| `LP_REHEARSAL_CALLER_IMPERSONATE` | The same thing for the one wallet `apebond-rehearsal.js` does not take from `getSigner()`: the SoulZap seat. Same 31337-only rule, same refusal elsewhere, and mutually exclusive with `LP_REHEARSAL_CALLER_KEY` |
+
+The two impersonation variables exist for the ApeBond fork dry-run (below). They are read in
+`scripts/lib/pools.js:impersonatedSignerFromEnv`, which checks the chain id first, then calls
+`hardhat_impersonateAccount`, then tops the account up with `hardhat_setBalance` only when it
+holds less than 1 ETH — a forked account usually carries real ETH already, and overwriting a
+balance that is sufficient would erase a fact the run may be asserting.
 
 A fork reports chain id **31337**, which neither LP script has Uniswap defaults for, so
 `LP_FACTORY`, `LP_NPM` and `LP_ROUTER` all have to be passed explicitly — the mainnet
@@ -551,6 +559,63 @@ deployment is already in `deployments.json`.
 signs an authorization with a key read out of the environment and spends a purchase id; on
 mainnet the purchase comes from SoulZap and the signature from the backend, and neither is driven
 from a script in this repo.
+
+### Rehearsing the whole sequence on a fork first (the dry-run)
+
+The four commands above are the live day. Before running them against Sepolia test stack #5
+for real, the same four can be run against a **fork of that stack**, in the same order, with
+the same environment, by the same scripts — as one opt-in test:
+
+```bash
+LP_APEBOND_DRYRUN=1 \
+  npx hardhat test test/lp-staking/integration/ApeBondUpgradeInPlace.test.js
+```
+
+`test/lp-staking/integration/ApeBondUpgradeInPlace.test.js` starts a
+`hardhat node --fork <sepolia>` with **no `--fork-block-number`**, so the node forks the chain
+head and the world it serves is stack #5 exactly as it stands right now: the vault proxy on
+implementation `0xEac50B6B…`, the 300-second timelock, NFT 231913 staked by the operator, the
+real tASSET/tUSDC pool and the real Uniswap Sepolia position manager. It then runs
+`deploy-apebond.js`, `set-purchase-signer.js`, `fund-escrow.js` and both phases of
+`apebond-rehearsal.js` as child processes against that node.
+
+**What it proves, that no other tier can.** Every other ApeBond test builds its world out of
+mocks, so what it proves is that the scripts are correct. This one proves that the LIVE STACK
+can be activated by them: that the new `LPStakingVault` compiled from this branch passes the
+storage-layout check against the layout recorded for the implementation the live proxy
+actually runs, that the deployer key really holds both timelock roles, that the batch really
+clears a 300-second `minDelay` and executes, that NFT 231913's staker survives the upgrade,
+that the distributor's implementation slot does not move, and that a purchase minted on the
+REAL position manager in the real campaign range lands in the vault, credits the buyer and
+pays its bonus after the cliff.
+
+**No key is used and no transaction reaches Sepolia.** The two live seats — the operator
+`0x5576bD37…` and the SoulZap seat `0x2b9818c8…` — are impersonated through
+`LP_DEPLOYER_IMPERSONATE` and `LP_REHEARSAL_CALLER_IMPERSONATE`, which are honoured on chain
+31337 only. The only traffic the endpoint sees is the reads the fork needs to answer.
+
+**It is NOT a CI gate, and it cannot become one.** A fork at the chain head is not
+deterministic: the pool price, the operator's balances and the staked position are whatever
+Sepolia holds at the minute the node starts, so a run could go red because somebody else moved
+the pool. `.github/workflows/ci.yml` never sets `LP_APEBOND_DRYRUN`, so `npx hardhat test`
+reports the suite as pending. Both gates are one-sided in the usual way: without the flag it
+skips and says so, and with the flag AND an endpoint set it FAILS rather than skips when the
+fork cannot be established.
+
+**Nothing in the repository is written.** The children record into a scratch
+`DEPLOYMENTS_FILE` — a copy of the tracked registry with the live stack's entry ALSO recorded
+under chain 31337, which is what a fork is: Sepolia's state on a node that reports 31337. The
+tracked `deployments.json` and the committed `.openzeppelin/sepolia.json` are compared by
+sha256 before and after, `git status --porcelain -- deployments.json .openzeppelin` must be
+empty, and the whole-tree `git status --porcelain` must have gained no entry over the run (so
+run it on a tree nobody else is editing). The `hardhat-upgrades` manifest is safe by
+construction: on a forked development node
+the plugin writes to `<os.tmpdir()>/openzeppelin-upgrades/hardhat-31337-<instance>.json` and
+keeps the committed `.openzeppelin/sepolia.json` as a read-only PARENT, which is exactly why
+the layout check grades against the real deployed layout.
+
+At the end the run prints one block with every address and every transaction hash it produced
+on the fork. That block is the rehearsal record for the round's notes.
 
 ### Replacing the adapter, and upgrading the vault alone
 

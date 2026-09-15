@@ -17,6 +17,33 @@ const REGISTRY_PATH = process.env.DEPLOYMENTS_FILE
 
 const KINDS = ["StakingPool", "WeightedStakingPool"];
 
+// ──────────────────────── impersonation (chain 31337 only) ────────────────────────
+
+/**
+ * The ONE chain id on which these scripts may send a transaction AS an account whose
+ * private key nobody here holds: 31337, what a Hardhat development node reports for itself
+ * whether it forks a real chain or starts empty. Anvil reports it too.
+ *
+ * Nothing else may. On a real chain an "impersonated" transaction is a contradiction: the
+ * node would sign it with whatever key the network config holds, so the run would act as a
+ * DIFFERENT account than the one named and the operator would not find out until the
+ * transaction landed. {@link impersonatedSignerFromEnv} therefore throws on every other
+ * chain id rather than quietly falling back.
+ */
+const IMPERSONATION_CHAIN_ID = 31337;
+
+/** The deployer/operator seat, impersonated. Read by {@link getSigner}. */
+const DEPLOYER_IMPERSONATE_ENV = "LP_DEPLOYER_IMPERSONATE";
+
+/**
+ * Below this the impersonated account is topped up to {@link IMPERSONATION_TOPUP_WEI}; at or
+ * above it the balance is left exactly as the fork found it. A forked account usually has
+ * real ETH already (the Sepolia operator holds ~3.4), and rewriting a balance that is
+ * already sufficient would quietly erase a fact the rehearsal might be asserting.
+ */
+const IMPERSONATION_MIN_BALANCE_WEI = 10n ** 18n; // 1 ETH
+const IMPERSONATION_TOPUP_WEI = 10_000n * 10n ** 18n; // 10,000 ETH
+
 const EXPLORERS = {
   1: "https://etherscan.io",
   11155111: "https://sepolia.etherscan.io",
@@ -168,7 +195,95 @@ async function resolveNonce(address) {
   return latest;
 }
 
+/**
+ * The address one impersonation variable names, or `null` when it is unset or empty.
+ *
+ * Pure apart from the checksum, so a typo is one message ("not a valid address") rather
+ * than a failure three calls later.
+ */
+function readImpersonationTarget(envName) {
+  const raw = process.env[envName];
+  if (raw === undefined || raw.trim() === "") return null;
+  try {
+    return hre.ethers.getAddress(raw.trim());
+  } catch {
+    throw new Error(`${envName} is not a valid address: ${raw}`);
+  }
+}
+
+/**
+ * A signer for the account `envName` names, on a Hardhat development node and NOWHERE ELSE.
+ *
+ * What it is for: the opt-in ApeBond dry-run
+ * (test/lp-staking/integration/ApeBondUpgradeInPlace.test.js) replays the whole live
+ * activation sequence against a `hardhat node --fork` of Sepolia test stack #5, using these
+ * scripts unmodified as child processes. The seats that sequence needs — the operator
+ * `0x5576bD37…` and the SoulZap caller `0x2b9818c8…` — are real accounts on Sepolia whose
+ * private keys must never be near a test run. On a fork they do not have to be: the node
+ * accepts `eth_sendTransaction` from any account `hardhat_impersonateAccount` has unlocked.
+ *
+ * Three things happen here, in order:
+ *
+ *   1. The chain id is read and checked. Anything other than {@link IMPERSONATION_CHAIN_ID}
+ *      throws, and the message says why — on a real chain the transaction would be signed
+ *      by the network config's key, i.e. by a different account than the one named.
+ *   2. `hardhat_impersonateAccount` unlocks the account (this is what
+ *      `hre.ethers.getImpersonatedSigner` does before it hands back the signer).
+ *   3. The balance is topped up with `hardhat_setBalance`, but only when it is below
+ *      {@link IMPERSONATION_MIN_BALANCE_WEI} — a fork usually inherits enough real ETH, and
+ *      overwriting a sufficient balance would erase state the caller may be asserting.
+ *
+ * @param {string} envName e.g. `LP_DEPLOYER_IMPERSONATE`
+ * @returns {Promise<object|null>} the signer, or `null` when the variable is unset
+ */
+async function impersonatedSignerFromEnv(envName) {
+  const address = readImpersonationTarget(envName);
+  if (address === null) return null;
+
+  const id = await chainId();
+  if (id !== IMPERSONATION_CHAIN_ID) {
+    throw new Error(
+      `${envName}=${address} asks this run to send transactions AS that account without its ` +
+        `private key. Only a Hardhat development node can do that, and a Hardhat node reports ` +
+        `chain id ${IMPERSONATION_CHAIN_ID}; this run is on chain ${id}. Refusing: here the ` +
+        `transactions would be signed by the key this network is configured with, so they ` +
+        `would come from a DIFFERENT account than ${address} and the run would report a ` +
+        `success that proves nothing. Unset ${envName}.`
+    );
+  }
+
+  const signer = await hre.ethers.getImpersonatedSigner(address);
+  const balance = await hre.ethers.provider.getBalance(address);
+  if (balance < IMPERSONATION_MIN_BALANCE_WEI) {
+    await hre.ethers.provider.send("hardhat_setBalance", [
+      address,
+      hre.ethers.toBeHex(IMPERSONATION_TOPUP_WEI),
+    ]);
+    console.log(
+      `${envName}: impersonating ${address} on chain ${id}; balance was ` +
+        `${hre.ethers.formatEther(balance)} ETH, topped up to ` +
+        `${hre.ethers.formatEther(IMPERSONATION_TOPUP_WEI)} ETH.`
+    );
+  } else {
+    console.log(
+      `${envName}: impersonating ${address} on chain ${id}; it already holds ` +
+        `${hre.ethers.formatEther(balance)} ETH, so the balance was left alone.`
+    );
+  }
+  return signer;
+}
+
+/**
+ * The account every state-changing script sends from.
+ *
+ * `LP_DEPLOYER_IMPERSONATE` comes first and is honoured on chain 31337 only — see
+ * {@link impersonatedSignerFromEnv}. Unset, which is every real run, this is exactly what it
+ * has always been: the first signer the network config produces.
+ */
 async function getSigner() {
+  const impersonated = await impersonatedSignerFromEnv(DEPLOYER_IMPERSONATE_ENV);
+  if (impersonated !== null) return impersonated;
+
   const signers = await hre.ethers.getSigners();
   if (signers.length === 0) {
     throw new Error(
@@ -296,6 +411,10 @@ function epochToIso(seconds) {
 
 module.exports = {
   KINDS,
+  IMPERSONATION_CHAIN_ID,
+  DEPLOYER_IMPERSONATE_ENV,
+  readImpersonationTarget,
+  impersonatedSignerFromEnv,
   chainId,
   isMainnet,
   explorerAddress,

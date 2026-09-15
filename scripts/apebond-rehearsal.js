@@ -70,6 +70,13 @@ const signing = require("../test/lp-staking/helpers/signing");
 //                                  already be allowlisted on the adapter; the run checks
 //                                  `soulZapCallers(caller)` and stops before the mint if it is
 //                                  not. Deposit phase only. Never printed
+//   LP_REHEARSAL_CALLER_IMPERSONATE  the SoulZap seat's ADDRESS, played without its private key
+//                                  by impersonating it on a Hardhat node. Honoured on chain
+//                                  31337 ONLY and refused loudly anywhere else — see
+//                                  `scripts/lib/pools.js:impersonatedSignerFromEnv`. It exists
+//                                  for the opt-in fork dry-run, which rehearses this script
+//                                  against a fork of the live stack and must not hold the live
+//                                  wallet's key. Mutually exclusive with LP_REHEARSAL_CALLER_KEY
 //   LP_REHEARSAL_BENEFICIARY       the buyer: who the vault credits with the position and who the
 //                                  escrow pays. Deposit phase only
 //   LP_APEBOND_PURCHASE_SIGNER_KEY private key that signs the authorization. It must match
@@ -122,6 +129,9 @@ const DEFAULT_BUDGET_BPS = 5000n;
 
 /** The campaign every rehearsal purchase is tagged with, so the indexer can filter them out. */
 const REHEARSAL_CAMPAIGN = "REAL-APEBOND-REHEARSAL";
+
+/** The SoulZap seat's address, played by impersonation instead of by its key. 31337 only. */
+const CALLER_IMPERSONATE_ENV = "LP_REHEARSAL_CALLER_IMPERSONATE";
 
 /** Uniswap V3's fee -> tick spacing map, used only when the pool will not say. */
 const TICK_SPACING_BY_FEE = { 100: 1, 500: 10, 3000: 60, 10000: 200 };
@@ -208,6 +218,29 @@ function readAddressEnv(name, fallback) {
   } catch {
     throw new Error(`${name} is not a valid address: ${raw}`);
   }
+}
+
+/**
+ * The wallet that plays the SoulZap seat: either its private key, or — on a Hardhat node
+ * only — the account itself, impersonated.
+ *
+ * The two are mutually exclusive rather than ordered, because they are two different
+ * statements about who the caller is and a run handed both would have to guess which one the
+ * operator meant. Everything downstream uses `.address` and `connect()`, which both shapes
+ * answer identically.
+ */
+async function resolveCaller() {
+  const impersonated = await pools.impersonatedSignerFromEnv(CALLER_IMPERSONATE_ENV);
+  if (impersonated === null) return readKeyEnv("LP_REHEARSAL_CALLER_KEY");
+
+  if (process.env.LP_REHEARSAL_CALLER_KEY) {
+    throw new Error(
+      `${CALLER_IMPERSONATE_ENV} and LP_REHEARSAL_CALLER_KEY are both set. They name the ` +
+        `SoulZap seat two different ways — one by address and one by key — so this run cannot ` +
+        `tell which of them is meant. Set exactly one.`
+    );
+  }
+  return impersonated;
 }
 
 /** A required private key, turned into a wallet on this network. The key is never printed. */
@@ -415,7 +448,7 @@ async function runDeposit({ chainId, stack, recordFile }) {
   const { adapter, adapterAddress, escrow, escrowAddress, vault, vaultAddress, bonusToken, bonusTokenAddress } =
     stack;
 
-  const caller = readKeyEnv("LP_REHEARSAL_CALLER_KEY");
+  const caller = await resolveCaller();
   const beneficiary = readAddressEnv("LP_REHEARSAL_BENEFICIARY");
   const purchaseSignerWallet = readKeyEnv("LP_APEBOND_PURCHASE_SIGNER_KEY");
 
@@ -1034,7 +1067,9 @@ module.exports = {
   DEFAULT_PHASE,
   DEFAULT_CLIFF_SECONDS,
   REHEARSAL_CAMPAIGN,
+  CALLER_IMPERSONATE_ENV,
   readPhase,
+  resolveCaller,
   resolveRecordFile,
   defaultMintAmounts,
   sqrtRatioAtTick,
