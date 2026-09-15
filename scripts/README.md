@@ -135,6 +135,7 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper — plus, with `LP_APEBOND_ENABLED=1`, the `BonusEscrow` proxy (born owned by the timelock and born pointing at its adapter) and the `ApeBondPositionAdapter` in front of it. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending` |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
+| `deploy-apebond.js` | Activate the ApeBond route on a stack that is ALREADY deployed: a new vault implementation, the `BonusEscrow` proxy and the `ApeBondPositionAdapter`, then ONE timelock batch that upgrades the proxy and allowlists the adapter in that order. Every phase reads the chain first and skips what is already there, so an interrupted run is resumed by running the same command again. `LP_APEBOND_MODE` also offers `replace-adapter` (swap the adapter, keep the escrow) and `upgrade-vault` (the plain upgrade, nothing ApeBond-shaped touched) |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
@@ -180,13 +181,14 @@ the script; `.env.example` carries the same block commented out.
 On a stack that is ALREADY deployed the adapter is added to an EXISTING vault, and that call has
 a precondition: the live proxy has to be running an implementation that HAS `setStakeOperator`.
 A vault proxy deployed before this round does not, so `schedule` would be accepted by the
-timelock and `execute` would revert on the proxy. Deploying and activating that implementation
-is an ordinary UUPS upgrade with a runbook already written — **"Activating a new implementation
-(Sepolia test stack #5)"** below. Use it as written: `IMPL_TARGET=LPStakingVault npx hardhat run
-scripts/deploy-implementation.js --network <net>` for the implementation,
-`scripts/validate-upgrade-safety.js --network <net>` as the gate, then the timelock's
-`upgradeToAndCall`. Only once the proxy runs the new implementation does the
-`setStakeOperator(adapter, true)` operation above become executable.
+timelock and `execute` would revert on the proxy. The upgrade and the allowlist entry therefore
+have to be ONE timelock batch, in that order, and `scripts/deploy-apebond.js` is the script that
+builds it — see **"Activating ApeBond on an existing stack (Sepolia test stack #5)"** below. It
+does the whole thing in one command: the new implementation (through the very same
+`deploy-implementation.js` code), the escrow and the adapter, the wiring, the batch, the wait and
+the execute, then the post-checks and the registry. Nothing about it is a second copy of the
+fresh-stack script — it reuses that script's own `deployContract` and `deployProxyPair`, so both
+paths produce the same shapes.
 
 `hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
 operands from the environment. `schedule` and `execute` take the SAME operands — the operation
@@ -362,6 +364,118 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
    `lp.upgrade.unexpected_implementation`, because what it reads from the ERC-1967 slot no
    longer matches what it was told to expect. The indexer needs nothing: it already handles the
    `Upgraded` event, and the proxy addresses it indexes do not change.
+
+### Activating ApeBond on an existing stack (Sepolia test stack #5)
+
+`deploy-lp-staking.js` with `LP_APEBOND_ENABLED=1` deploys the route as part of a FRESH stack.
+On a stack that is already live and already holds staked positions none of that is available:
+the vault proxy exists, it runs an implementation that has no `setStakeOperator`, and the only
+way to give it one is an in-place UUPS upgrade through the timelock that owns it.
+`scripts/deploy-apebond.js` is that second path, and this is how it is run.
+
+The stack it is run against: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, timelock
+`0x591c51A6EE2ef571C44dF2339A7c92b57850C082` with a **300 second** `minDelay`, distributor proxy
+`0x1D6aB18aFeF3196B4E3F883C7aD36F49b003C8DA`. All three come out of `deployments.json`, so no
+command below carries an address.
+
+1. **Prove the endpoint before anything else.** Every phase reads the chain, and a run that
+   loses the endpoint halfway through leaves an implementation on chain that nothing points at.
+   One read is enough to know the Infura project id in `.env` is still serving Sepolia:
+
+   ```bash
+   TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
+   ```
+
+   It prints the timelock's address and its `minDelay` before it does anything else, and those
+   two lines are the probe. A `402` here is the company Infura key over quota — switch to the
+   configured fallback endpoint rather than starting the run.
+
+2. **Bring the indexer's stored vault ABI to 15 events FIRST — before `executeBatch`, not
+   after.** This is the one step whose order cannot be recovered from. The indexer decodes a log
+   by looking its `topic0` up in the ABI it has STORED for that address; a log whose `topic0` is
+   not in that ABI is dropped, and it is dropped for good, because the indexer never re-reads a
+   block it has already passed. The upgraded vault emits `StakeOperatorSet`, which is the
+   fifteenth event and the one the fourteen-event ABI deployed before this round does not
+   carry — and the very first transaction the new implementation is involved in, the
+   `executeBatch` itself, emits it. Register the 15-event ABI (`abi/LPStakingVault.json` in
+   this repo is that ABI), confirm the indexer reports 15, and only then run step 3.
+
+3. **Run the script.** One command. It deploys the implementation, the escrow and the adapter,
+   writes the adapter's SoulZap allowlist, hands the adapter to the timelock, schedules the
+   batch, waits out the 300 seconds and executes it.
+
+   ```bash
+   LP_APEBOND_GUARDIAN=<the multisig> \
+   LP_APEBOND_SOULZAP_CALLERS=<the SoulZap router> \
+     npx hardhat run scripts/deploy-apebond.js --network sepolia
+   ```
+
+   `LP_APEBOND_PURCHASE_SIGNER` is deliberately left unset: the route is activated CLOSED, and
+   the guardian opens it with one undelayed `setPurchaseSigner` when the campaign starts. The
+   run says so as a WARN rather than a failure. `LP_APEBOND_BONUS_TOKEN` defaults to the vault's
+   own `token0()`, read off the proxy.
+
+   The run also writes `apebond-activate-batch.json` beside `deployments.json`. That file is the
+   same batch in the shape `lp-timelock.js` reads, so the operation can be driven by hand if the
+   script is interrupted between the schedule and the execute:
+
+   ```bash
+   TIMELOCK_ACTION=execute-batch TIMELOCK_BATCH=./apebond-activate-batch.json \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+   ```
+
+   Re-running the script does the same thing and is the preferred repair: it recomputes the same
+   operation id, finds it pending, waits and executes.
+
+4. **Read the post-checks.** The run prints them and throws if any of them fails. The ones that
+   matter most are the state-preservation block — `owner`, `guardian`, `operator`, `zapper`, the
+   TWAP parameters, both pause flags and `stakerOf` for every id in
+   `LP_APEBOND_ASSERT_POSITIONS` (NFT 231913 on this stack, by default) — plus the distributor's
+   ERC-1967 implementation slot, which this run must not have moved.
+
+5. **Commit `deployments.json`.** The run has already written it: `LPStakingVault.implementation`
+   now names the new implementation, and the two new kinds `BonusEscrow` and
+   `ApeBondPositionAdapter` carry their addresses, their owner and their configuration. Record
+   the commit that was deployed from, so the implementation on chain can be traced back to a
+   build.
+
+6. **The backend needs nothing on a test stack.** `LP_EXPECTED_IMPLEMENTATION_VAULT` and
+   `LP_EXPECTED_IMPLEMENTATION_DISTRIBUTOR` are empty on the test stacks, so nothing there pins
+   an implementation and nothing raises `lp.upgrade.unexpected_implementation`. Whether mainnet
+   pins them at all is still open — see the env-keys note sent to krumbgf on 2026-09-14.
+
+### Replacing the adapter, and upgrading the vault alone
+
+The same script, with `LP_APEBOND_MODE`:
+
+```bash
+LP_APEBOND_MODE=replace-adapter LP_APEBOND_SOULZAP_CALLERS=<the SoulZap router> \
+  npx hardhat run scripts/deploy-apebond.js --network sepolia
+
+LP_APEBOND_MODE=upgrade-vault \
+  npx hardhat run scripts/deploy-apebond.js --network sepolia
+```
+
+`replace-adapter` is the runbook of `docs/lp-staking-audit-notes.md` item 15, automated: the
+adapter is REPLACEABLE, not upgradeable, because everything it stores is spent state and nothing
+is owed at its address. It deploys a new adapter against the EXISTING escrow, wires its
+allowlist, hands it to the timelock, and then runs ONE batch of three —
+`setStakeOperator(old, false)`, `setStakeOperator(new, true)`, `BonusEscrow.setAdapter(new)` — so
+the old adapter loses the reserve right in the same transaction the new one gains it. The new
+adapter is recorded as `pendingAdapter` on the registry entry BEFORE it is activated, which is
+what lets an interrupted replacement resume rather than deploy a third one; a run started after
+the previous one completed is a NEW replacement and deploys another adapter, which is the point
+of the command.
+
+`upgrade-vault` is the plain UUPS upgrade as a one-call batch, with no ApeBond contract deployed
+or touched. It is the same end state step 3 of "Activating a new implementation" reaches, done
+in one command instead of four.
+
+On mainnet — and on any chain where the deploying key is not the timelock's proposer AND
+executor — neither mode sends the timelock transactions. The run deploys and wires everything it
+can, prints the targets, the payloads, the predecessor, the salt, the operation id and the
+`scheduleBatch` / `executeBatch` calldata, asserts that the vault is still exactly as it found
+it, and stops. The Safe sends the two transactions.
 
 ## Test tooling (plain Node, not `hardhat run`)
 

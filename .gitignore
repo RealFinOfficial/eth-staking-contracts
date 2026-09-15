@@ -14,3 +14,8 @@ lcov.info
 # `validateUpgrade` grades a new implementation against. The `unknown-<chainId>.json`
 # files are throwaway: every in-process fork run and every ephemeral node writes one.
 .openzeppelin/unknown-*.json
+
+# `scripts/deploy-apebond.js` writes the timelock batch it built beside deployments.json,
+# so the operator can drive the same operation by hand with `lp-timelock.js`. It is a run
+# artifact, not a record: the addresses it names are already in deployments.json.
+apebond-*-batch.json

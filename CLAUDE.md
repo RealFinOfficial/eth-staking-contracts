@@ -282,13 +282,17 @@ contracts/           — Solidity source files
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
-    mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers,
+    mocks/                    — Test-only Uniswap doubles (pool, position manager, router, and
+                                MockUniswapV3Factory, which answers the deploy script's
+                                canonical-pool check), permit token, reentrancy attackers,
                                 the SoulZap caller double, the three V2 mocks (upgrade tests)
-                                and the two swap harnesses LPStakingVaultSwapHarness.sol /
-                                LPZapperSwapHarness.sol, which expose their parent's internal
+                                plus LPStakingVaultV3Mock — a forward-compatible upgrade OF the
+                                V2 mock, for a suite that has to upgrade one proxy twice in one
+                                process — and the two swap harnesses LPStakingVaultSwapHarness.sol
+                                / LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached (no
                                 production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 753 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 783 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
@@ -306,6 +310,16 @@ test/                — Hardhat test files (Mocha + Chai). 753 tests, 0 pending
                                   id against the deployed contract's own hashOperationBatch,
                                   the derived salt, the refusals, and the schedule/execute
                                   round trip on a real LPTimelock
+    DeployApeBond.test.js       — 30 tests over scripts/deploy-apebond.js, run as a CHILD
+                                  PROCESS against a stack this suite deploys with
+                                  deploy-lp-staking.js (also a child) on a plain `hardhat node`
+                                  it spawns itself — no fork, no RPC, so it never skips. Covers
+                                  all three LP_APEBOND_MODE values, the resume path (a second
+                                  run sends no transaction at all), and the mainnet shape, where
+                                  the deploying key holds neither timelock role and the run
+                                  prints the calldata and stops. The 60 s minDelay is waited out
+                                  in CHAIN time, which the suite drives with evm_increaseTime
+                                  while the child polls
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
@@ -347,7 +361,16 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               drift apart
   deploy-lp-staking.js      — Deploys and wires the whole LP stack. The timelock goes first and
                               both proxies are born owned by it; TokenX and the zapper are
-                              nominated to the operator multisig, which accepts them
+                              nominated to the operator multisig, which accepts them. Exports
+                              `deployContract` / `deployProxyPair` so deploy-apebond.js runs the
+                              same bootstrap primitives rather than a second copy of them
+  deploy-apebond.js         — Activates the ApeBond route on a stack that is ALREADY deployed:
+                              a new vault implementation (through deploy-implementation.js's own
+                              exported function), the BonusEscrow proxy and the
+                              ApeBondPositionAdapter, then ONE timelock batch that upgrades the
+                              proxy and allowlists the adapter in that order. Every phase is
+                              resume-safe. LP_APEBOND_MODE also offers `replace-adapter` and
+                              `upgrade-vault`
   lp-timelock.js            — Operator front end for the timelock: schedule / execute /
                               schedule-batch / execute-batch / cancel / status / pending, plus
                               the calldata builders the suites reuse. A batch is several
@@ -400,6 +423,7 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 | tier | where | run by | needs |
 |---|---|---|---|
 | Hardhat unit (mocks) | `test/lp-staking/*.test.js` | `npx hardhat test` | nothing |
+| Hardhat script suite on a spawned local node | `test/lp-staking/DeployApeBond.test.js` | `npx hardhat test` | nothing (a plain `hardhat node`, no fork) |
 | Hardhat in-process mainnet fork | `test/lp-staking/fork/LPStakingFork.test.js` | `npx hardhat test` | mainnet archive RPC |
 | Hardhat local-fork integration, mainnet-pinned | `test/lp-staking/integration/LPStakingLocalFork.test.js` | `npm run test:integration` | mainnet archive RPC |
 | Hardhat fork integration, profile-driven | `test/lp-staking/integration/LPStakingSepoliaFork.test.js` | `npm run test:integration:sepolia` | archive RPC for the profile's chain |
@@ -409,12 +433,13 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 | Foundry fuzz (properties) | `test/forge/fuzz/` | `npm run test:forge` | nothing |
 | Foundry invariant (campaigns) | `test/forge/invariant/` | `npm run test:forge` | nothing |
 
-`npx hardhat test` runs the first four (`paths.tests` is `./test`). It does **not** and must
+`npx hardhat test` runs the first five (`paths.tests` is `./test`). It does **not** and must
 never run `test-live/`.
 
 The **ApeBond route has no tier of its own.** Its unit coverage sits in the Hardhat unit tier
 (`ApeBondPositionAdapter.test.js`, `BonusEscrow.test.js`) and the Foundry unit tier
-(`ApeBondAdapterBranches.t.sol`, `BonusEscrowBranches.t.sol`), and its end-to-end scenario is
+(`ApeBondAdapterBranches.t.sol`, `BonusEscrowBranches.t.sol`), its ACTIVATION on an existing
+stack is `DeployApeBond.test.js`, and its end-to-end scenario is
 section 7 of the mainnet-pinned **local-fork** suite — the only tier that runs the real deploy
 script as a child process, which is what a flag-gated deployment has to be proven through. It
 deploys a SECOND stack there with `LP_APEBOND_ENABLED=1` and asserts that the first, un-flagged

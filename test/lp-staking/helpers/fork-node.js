@@ -316,6 +316,81 @@ async function spawnForkNode({ url, port, logFile, profile = DEFAULT_PROFILE }) 
   };
 }
 
+/**
+ * Spawns a plain `hardhat node` — no fork, no endpoint, no pinned block — and resolves once it
+ * answers `eth_chainId` with 31337.
+ *
+ * {@link spawnForkNode} exists for the suites that need REAL Uniswap state and therefore need an
+ * archive endpoint, which is why those suites may skip. A suite that drives the repo's own
+ * scripts against the repo's own MOCKS needs neither: it needs a JSON-RPC server the child
+ * processes can reach, and nothing else. `test/lp-staking/DeployApeBond.test.js` is that suite,
+ * and because this node depends on no endpoint it can never skip.
+ *
+ * The child bookkeeping is the same as the forked node's — registered here, killed from `stop()`,
+ * from `process.on("exit")` and from SIGINT/SIGTERM — so an interrupted run leaves no orphan
+ * holding the port.
+ */
+async function spawnLocalNode({ port, logFile }) {
+  installExitHandlers();
+
+  const out = fs.openSync(logFile, "a");
+  fs.writeSync(out, `\n===== hardhat node --port ${port} (no fork) =====\n`);
+
+  const child = spawn(
+    process.execPath,
+    [HARDHAT_CLI, "node", "--hostname", "127.0.0.1", "--port", String(port)],
+    { cwd: REPO_ROOT, env: childEnv(), stdio: ["ignore", out, out] }
+  );
+  liveChildren.add(child);
+
+  let exited = null;
+  child.once("exit", (code, signal) => {
+    exited = { code, signal };
+    liveChildren.delete(child);
+    try {
+      fs.closeSync(out);
+    } catch {
+      /* already closed */
+    }
+  });
+
+  const rpcUrl = `http://127.0.0.1:${port}`;
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+
+  for (;;) {
+    if (exited !== null) {
+      const tail = readTail(logFile, 12);
+      throw new Error(
+        `hardhat node exited before it was ready (code ${exited.code}, signal ${exited.signal})` +
+          (tail ? `\n      ${tail.split("\n").join("\n      ")}` : "")
+      );
+    }
+
+    const probe = new ethers.JsonRpcProvider(rpcUrl, undefined, PROVIDER_OPTIONS);
+    try {
+      const chainId = await probe.send("eth_chainId", []);
+      probe.destroy();
+      if (BigInt(chainId) !== 31337n) {
+        throw new Error(`node reports chain id ${BigInt(chainId)}, expected 31337`);
+      }
+      break;
+    } catch (error) {
+      probe.destroy();
+      if (Date.now() > deadline) {
+        await stopChild(child);
+        throw new Error(
+          `hardhat node did not become ready within ${READY_TIMEOUT_MS} ms: ${
+            error.shortMessage || error.message
+          }`
+        );
+      }
+      await sleep(READY_POLL_MS);
+    }
+  }
+
+  return { child, port, rpcUrl, logFile, stop: () => stopChild(child) };
+}
+
 function readTail(file, lines) {
   try {
     const text = fs.readFileSync(file, "utf8").trimEnd();
@@ -484,10 +559,13 @@ module.exports = {
   EXTRA_PUBLIC_ARCHIVE_RPCS,
   DEFAULT_PROFILE,
   TICK_SPACING_BY_FEE,
+  PROVIDER_OPTIONS,
   resolveRpcCandidates,
   decideOnForkFailure,
   probeFork,
   establishFork,
+  getFreePort,
+  spawnLocalNode,
   REPO_ROOT,
   HARDHAT_CLI,
 };

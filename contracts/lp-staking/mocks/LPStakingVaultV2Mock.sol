@@ -40,8 +40,11 @@ contract LPStakingVaultV2Mock is LPStakingVault {
         address _swapRouter
     ) LPStakingVault(_positionManager, _pool, _token0, _token1, _fee, _swapRouter) {}
 
-    /// @notice Tells the two implementations apart from the proxy's own address.
-    function version() external pure returns (uint256) {
+    /// @notice Tells the implementations apart from the proxy's own address.
+    /// @dev `virtual` so a THIRD revision can be a forward-compatible upgrade of this one —
+    ///      see {LPStakingVaultV3Mock}, which a suite needs when it has to upgrade the same
+    ///      proxy twice in one process.
+    function version() external pure virtual returns (uint256) {
         return 2;
     }
 

@@ -1316,7 +1316,25 @@ async function main() {
   console.log("\nAll post-deploy checks passed.");
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+// The bootstrap primitives, shared with `scripts/deploy-apebond.js`, which adds the same two
+// ApeBond contracts to a stack that is ALREADY live. Both deploys have to produce byte-identical
+// shapes — an explicit nonce on every transaction, `initialize` inside the proxy's own deployment
+// transaction, `forceImport` into the manifest — so the two scripts run the same code rather than
+// two copies of it that can drift.
+module.exports = {
+  ERC1967_IMPLEMENTATION_SLOT,
+  UUPS_UNSAFE_ALLOW,
+  readAddress,
+  readAddressList,
+  deployContract,
+  deployProxyPair,
+};
+
+// `hardhat run` executes this file as the entry point; a `require` from another script or from
+// the suites must only pick up the exports above, and must NOT deploy a stack.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
