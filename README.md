@@ -464,15 +464,15 @@ SEPOLIA_RPC_URL=http://127.0.0.1:9 npm run test:forge
 
 ### Live Sepolia smoke
 
-The spec's Sepolia staging rehearsal. It sends REAL transactions with real SepoliaETH and, on
-a first run, records the deployment in the **tracked** `deployments.json` under chain
+The spec's Sepolia test stack #5 rehearsal. It sends REAL transactions with real SepoliaETH
+and, on a first run, records the deployment in the **tracked** `deployments.json` under chain
 `11155111`.
 
 | gate | effect |
 |---|---|
 | `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + `SEPOLIA_RPC_URL` \| `INFURA_API_KEY` | all three required; without them the suite skips and names what is missing |
 | `SEPOLIA_LIVE_CREATE_POOL=1` | one-time: creates the tREAL/tUSDC pool. **Permanent** — the address is fixed forever afterwards |
-| `SEPOLIA_LIVE_DEPLOY=1` | one-time: deploys the four contracts and writes them into the tracked registry. That commit is the staging record |
+| `SEPOLIA_LIVE_DEPLOY=1` | one-time: deploys the four contracts and writes them into the tracked registry. That commit is the test stack's record |
 | `LP_SIGNER_KEY` | optional: redeems a real 1-wei TokenX voucher. Without it the suite proves a foreign voucher is refused, by static call, costing no gas |
 
 **Known precondition, not a bug:** a freshly created Uniswap V3 pool stores one observation, so

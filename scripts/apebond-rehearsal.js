@@ -51,8 +51,9 @@ const signing = require("../test/lp-staking/helpers/signing");
 //                               still goes to the beneficiary — then asserts the beneficiary's
 //                               balance grew by exactly the bonus and that a second claim reverts.
 //
-// Between the two the operator waits out `LP_REHEARSAL_CLIFF_SECONDS` (default 600). Run the claim
-// phase early and it prints the seconds remaining and exits non-zero.
+// Between the two the operator waits out `LP_REHEARSAL_CLIFF_SECONDS` (default 300, the Sepolia
+// test stack #5 cliff). Run the claim phase early and it prints the seconds remaining and exits
+// non-zero.
 //
 // ──────────────────────── the record file ────────────────────────
 //
@@ -82,7 +83,7 @@ const signing = require("../test/lp-staking/helpers/signing");
 //   LP_APEBOND_PURCHASE_SIGNER_KEY private key that signs the authorization. It must match
 //                                  `adapter.purchaseSigner()`, which the run checks against the
 //                                  chain. Deposit phase only. Never printed
-//   LP_REHEARSAL_CLIFF_SECONDS     how long the bonus is locked, from the deposit (600)
+//   LP_REHEARSAL_CLIFF_SECONDS     how long the bonus is locked, from the deposit (300)
 //   LP_REHEARSAL_PURCHASE_ID       claim phase: the purchase to claim. Defaults to the one in the
 //                                  record file
 //   LP_REHEARSAL_GROSS/_NET/_BONUS the sample figures, in whole tokens. Gross and net are parsed
@@ -120,8 +121,12 @@ const VAULT_KIND = "LPStakingVault";
 const PHASES = ["deposit", "claim"];
 const DEFAULT_PHASE = "deposit";
 
-/** The cliff a rehearsal uses: long enough to be a real wait, short enough to sit through. */
-const DEFAULT_CLIFF_SECONDS = 600;
+/**
+ * The cliff a rehearsal uses: 300 seconds, the Sepolia test stack #5 cliff. Production is TBD
+ * with ApeBond (expected 2–3 months). The unlock is a full cliff with no vesting, because the
+ * buyer's position is an NFT and cannot be split into time-released parts (decided 2026-09-15).
+ */
+const DEFAULT_CLIFF_SECONDS = 300;
 /** How long the signed authorization stays good for. One hour, as a quote would be. */
 const AUTHORIZATION_TTL_SECONDS = 3600;
 /** Share of each balance the computed mint amounts may spend, in basis points. */

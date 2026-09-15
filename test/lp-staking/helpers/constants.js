@@ -57,7 +57,7 @@ const ROLES = {
   signer2: 7, // rotation target for setSigner / setMinter
   // The 2026-09-09 role split, kept on three DIFFERENT keys here: the deploy script refuses
   // to run with `guardian == operator`, and collapsing either onto the multisig is the
-  // staging shortcut the script warns about. The fork suites deploy the production shape.
+  // test-stack shortcut the script warns about. The fork suites deploy the production shape.
   guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
   operator: 9, // LP_OPERATOR — calibration, rescue, key rotation; owner of TokenX and LPZapper
   // The ApeBond route's two keys, appended AFTER the role split's pair so neither moves. The
@@ -112,10 +112,11 @@ const OBSERVATION_CARDINALITY = 150;
 /**
  * The timelock's `minDelay` for the fork suites, in seconds.
  *
- * Mainnet runs 48 h and Sepolia staging 300 s; a fork run wants the flow, not the wait. 60 s
- * is short enough that `evm_increaseTime(61)` between schedule and execute costs nothing, and
- * long enough that the two are genuinely different blocks with a real ready-at between them.
- * It must stay well below the TWAP window's warm-up history, which the same clock consumes.
+ * Mainnet runs 48 h and Sepolia test stack #5 runs 300 s; a fork run wants the flow, not the
+ * wait. 60 s is short enough that `evm_increaseTime(61)` between schedule and execute costs
+ * nothing, and long enough that the two are genuinely different blocks with a real ready-at
+ * between them. It must stay well below the TWAP window's warm-up history, which the same
+ * clock consumes.
  */
 const TIMELOCK_MIN_DELAY = 60;
 
@@ -171,8 +172,12 @@ const APEBOND_BONUS_BPS = 500n;
 const APEBOND_BONUS = (APEBOND_NET_INPUT * APEBOND_BONUS_BPS) / 10_000n;
 /** The campaign's funding of the escrow. Deliberately more than one bonus, so a surplus exists. */
 const APEBOND_ESCROW_FUNDING = ASSET(1_000);
-/** The cliff every bonus is locked behind: 7 days from the purchase. */
-const APEBOND_CLIFF_SECONDS = 7 * 24 * 60 * 60;
+/**
+ * The cliff every bonus is locked behind on Sepolia test stack #5: 300 seconds from the
+ * purchase. Production is TBD with ApeBond (expected 2–3 months). Full cliff, no vesting —
+ * the position is an NFT and cannot be split into time-released parts (vikinatora, 2026-09-15).
+ */
+const APEBOND_CLIFF_SECONDS = 300;
 /** Half-width of the campaign's approved range, in ticks. The authorization matches it exactly. */
 const APEBOND_HALF_WIDTH_TICKS = 1200;
 /** The position the SoulZap caller mints for the buyer, in the same shape mintFor takes. */

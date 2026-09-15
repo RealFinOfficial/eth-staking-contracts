@@ -121,8 +121,8 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
 //   LP_TIMELOCK_MIN_DELAY     — seconds between a scheduled operation and its earliest
-//                               execution (172800 = 48 h, the mainnet figure). Sepolia
-//                               staging runs 300 so the flow can be rehearsed end to end;
+//                               execution (172800 = 48 h, the mainnet figure). Sepolia test
+//                               stack #5 runs 300 so the flow can be rehearsed end to end;
 //                               the fork suites run 60. 0 is legal and means no delay at all,
 //                               which is only ever right on a throwaway chain
 //   LP_EPOCH_ID               — first epoch id to arm on TokenX (none)
@@ -378,8 +378,8 @@ async function main() {
   // Required.
   const operator = readAddress("LP_OPERATOR");
 
-  // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so
-  // the schedule -> execute flow is rehearsable rather than theoretical.
+  // The timelock's own parameter. 48 h on mainnet; the test stacks and the fork suites shorten
+  // it so the schedule -> execute flow is rehearsable rather than theoretical.
   const timelockMinDelay = Number(process.env.LP_TIMELOCK_MIN_DELAY || DEFAULT_TIMELOCK_MIN_DELAY);
 
   // ──── the ApeBond route, off unless asked for ────
@@ -631,7 +631,7 @@ async function main() {
         "         backend key, and a Ledger cannot serve that role."
     );
   }
-  // The role rules that are NOT fatal. Every one of them is a collapse a staging run is
+  // The role rules that are NOT fatal. Every one of them is a collapse a test-stack run is
   // expected to make and a production run is not, so each is stated once, in full, and the
   // run continues: the fatal case (guardian == operator) already threw above.
   const collapses = [];
@@ -643,8 +643,8 @@ async function main() {
     console.log(
       "\nWARNING: the admin tiers are collapsed onto fewer addresses than the model assumes:\n" +
         collapses.map((line) => `         - ${line}`).join("\n") +
-        "\n         That is the staging arrangement. On mainnet the guardian is a hot key, the\n" +
-        "         operator is a multisig, and neither is the key that signs this deployment."
+        "\n         That is the test-stack arrangement. On mainnet the guardian is a hot key,\n" +
+        "         the operator is a multisig, and neither is the key that signs this deployment."
     );
   }
 

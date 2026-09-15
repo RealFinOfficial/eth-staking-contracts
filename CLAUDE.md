@@ -96,12 +96,18 @@ only when `LP_APEBOND_ENABLED=1`. An un-flagged run is byte-for-byte the stack i
   balance the escrow ALREADY holds: an underfunded reserve reverts and takes the whole SoulZap
   purchase with it, so a bonus can never be sold before the money to pay it exists. Anyone may
   trigger a `claim` after that reservation's own cliff, and only the beneficiary recorded at
-  reserve time is ever paid. `recoverSurplus` moves `balance - totalReserved` and not one wei
-  more. It is upgradeable because `reservations` is the only record of what is owed to whom and
-  campaigns outlive a fix. **No pause and no guardian, deliberately** — a reservation is already
-  funded and already owed, so there is nothing a pause could do but withhold it. **Owner** (the
-  same `TimelockController`): upgrades, `setAdapter`, `recoverSurplus`; `setAdapter(address(0))`
-  closes the reserve path and is the wind-down lever, leaving every reservation intact
+  reserve time is ever paid. The unlock is a FULL cliff with no vesting, by design: the buyer's
+  position is an NFT and cannot be split into time-released parts, so the whole bonus becomes
+  claimable at once (decided 2026-09-15). The cliff LENGTH is not a contract constant either —
+  each reservation carries its own absolute `bonusUnlockAt`, signed into the authorization and
+  passed straight to `reserve` — and the back office sets it 300 seconds after the purchase on
+  Sepolia test stack #5, production TBD with ApeBond (expected 2–3 months). `recoverSurplus` moves
+  `balance - totalReserved` and not one wei more. It is upgradeable because `reservations` is the
+  only record of what is owed to whom and campaigns outlive a fix. **No pause and no guardian,
+  deliberately** — a reservation is already funded and already owed, so there is nothing a pause
+  could do but withhold it. **Owner** (the same `TimelockController`): upgrades, `setAdapter`,
+  `recoverSurplus`; `setAdapter(address(0))` closes the reserve path and is the wind-down lever,
+  leaving every reservation intact
 - **`ApeBondPositionAdapter.sol`** — the narrow gate between SoulZap and the vault, and a plain
   contract on purpose: it holds nothing between transactions and its only state is spent
   purchase ids and nonces, so it is REPLACED rather than upgraded (deploy the new one, then
@@ -205,7 +211,7 @@ bootstrap (finding N-7) the run schedules nothing and waits out no delay:
     switch. Then `tokenX.transferOwnership(operator)` and `zapper.transferOwnership(operator)` —
     `Ownable2Step`, so those two only NOMINATE; the operator multisig finishes with one plain
     `acceptOwnership()` per contract, no timelock. Both are skipped entirely when the operator
-    IS the deploying key, which is the staging case
+    IS the deploying key, which is the test-stack case
 16. `pool.increaseObservationCardinalityNext(target)` — permissionless, so it runs last
 17. Post-deploy verification (owner == timelock and `pendingOwner == 0` on every proxy,
     guardian, operator, signer, zapper, both pause flags, the TWAP params, the ERC-1967
@@ -532,8 +538,8 @@ SEPOLIA_RPC_URL=http://127.0.0.1:9 npm run test:forge                 # must FAI
 
 ### Live Sepolia smoke — runbook
 
-This is the spec's Sepolia staging rehearsal. It sends REAL transactions and, on a first run,
-records the deployment in the **tracked** `deployments.json` under chain `11155111`.
+This is the spec's Sepolia test stack #5 rehearsal. It sends REAL transactions and, on a first
+run, records the deployment in the **tracked** `deployments.json` under chain `11155111`.
 
 Gates (all three, or the suite skips and names what is missing): `SEPOLIA_LIVE=1`,
 `PRIVATE_KEY`, and `SEPOLIA_RPC_URL` or `INFURA_API_KEY`. Two further one-time gates, off by
@@ -541,8 +547,8 @@ default: `SEPOLIA_LIVE_CREATE_POOL=1` creates the pool (**permanent** — the ad
 forever; needs an explicit go the first time), `SEPOLIA_LIVE_DEPLOY=1` deploys the five
 contracts — TokenX, the two proxies, the zapper and the `LPTimelock` — and writes them into the
 tracked registry. There is no handover to wait for: the proxies come out of that run already
-owned by the timelock, and on staging the operator is the deploying key, so TokenX and the
-zapper need no `acceptOwnership` either. Optional `LP_SIGNER_KEY` redeems a real
+owned by the timelock, and on the test stack the operator is the deploying key, so TokenX and
+the zapper need no `acceptOwnership` either. Optional `LP_SIGNER_KEY` redeems a real
 1-wei TokenX voucher; without it the suite proves a foreign voucher is refused by static call.
 Both arms are real assertions and the test title says which one ran.
 
@@ -782,7 +788,8 @@ fork. That block is the rehearsal record for the round's notes.
 - **The campaign numbers are SAMPLES until the team closes §14 of the integration spec.** The
   five in `test/lp-staking/helpers/constants.js` are the rehearsal's figures, not committed
   terms: a **10,000 tASSET gross input**, a **1% SoulZap fee** (9,900 net), a **500 bps
-  guaranteed bonus** (495), a **7-day cliff**, and a **±1200-tick approved range**. Nothing
-  on-chain hard-codes any of them — every one arrives inside the signed
-  `PurchaseAuthorization`, and the adapter only checks the position against what was signed —
-  so closing §14 changes the backend's numbers, not a contract
+  guaranteed bonus** (495), a **300-second cliff** (Sepolia test stack #5; production TBD with
+  ApeBond, expected 2–3 months), and a **±1200-tick approved range**. Nothing on-chain hard-codes
+  any of them — every one arrives inside the signed `PurchaseAuthorization`, and the adapter only
+  checks the position against what was signed — so closing §14 changes the backend's numbers, not
+  a contract

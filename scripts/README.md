@@ -162,7 +162,7 @@ only then asserts it landed there. If it did not, the run throws and names the r
 Three role variables are read and all three are printed before anything is deployed.
 `LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B) are both REQUIRED and have no
 defaults; the script THROWS when they are equal and WARNS when either collapses onto
-`LP_MULTISIG` or onto the deploying key, which is what staging deliberately does.
+`LP_MULTISIG` or onto the deploying key, which is what the test stack deliberately does.
 
 What the run does NOT finish: `TokenX` and `LPZapper` are deployed deployer-owned (the deployer
 has to call `setMinter` and the epoch cap) and are then NOMINATED to `LP_OPERATOR`. Being
@@ -510,7 +510,7 @@ it has not happened, so the order is enforced rather than remembered.
    LP_REHEARSAL_CALLER_KEY=<the SoulZap-seat wallet's private key> \
    LP_REHEARSAL_BENEFICIARY=<the buyer's address> \
    LP_APEBOND_PURCHASE_SIGNER_KEY=<the backend key from step 1> \
-   LP_REHEARSAL_CLIFF_SECONDS=600 \
+   LP_REHEARSAL_CLIFF_SECONDS=300 \
      npx hardhat run scripts/apebond-rehearsal.js --network sepolia
    ```
 
@@ -534,8 +534,12 @@ it has not happened, so the order is enforced rather than remembered.
    timestamp and `claimed = false`, `claimable` is still 0 because the cliff has not passed, and
    `ApeBondPositionDeposited` is in the receipt with the same purchase id.
 
-4. **Claim the bonus — after the cliff.** Run it early and it prints the seconds remaining and
-   exits non-zero without sending anything.
+4. **Claim the bonus — after the cliff.** The cliff is 300 seconds on Sepolia test stack #5
+   (`LP_REHEARSAL_CLIFF_SECONDS`, default 300); production is TBD with ApeBond, expected 2–3
+   months. It is a FULL cliff with no vesting: the buyer's position is an NFT and cannot be
+   split into time-released parts, so the whole bonus unlocks at once (decided 2026-09-15).
+   Run it early and it prints the seconds remaining and exits non-zero without sending
+   anything.
 
    ```bash
    LP_REHEARSAL_PHASE=claim npx hardhat run scripts/apebond-rehearsal.js --network sepolia

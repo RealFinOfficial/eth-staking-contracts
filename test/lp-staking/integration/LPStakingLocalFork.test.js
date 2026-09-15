@@ -2459,7 +2459,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           // that proves the list is parsed rather than read as one string.
           LP_APEBOND_SOULZAP_CALLERS: `${w.soulZapCaller.address},${w.signer2.address}`,
           // LP_APEBOND_BONUS_TOKEN is deliberately UNSET — the default is LP_ASSET, which is
-          // the staging campaign's bonus token (tASSET), and B1 asserts the escrow got it.
+          // the test stack's campaign bonus token (tASSET), and B1 asserts the escrow got it.
           // LP_APEBOND_PURCHASE_SIGNER is deliberately UNSET too: the adapter is born with the
           // deposit path closed, and B4/B5 are that default being exercised.
         }),

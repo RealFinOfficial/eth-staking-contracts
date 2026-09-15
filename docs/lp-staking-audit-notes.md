@@ -530,7 +530,7 @@ now.
 
 | tier | holder | delay | what it is for |
 |---|---|---|---|
-| **owner** | the `TimelockController` (`deploy/LPTimelock.sol`; 48 h on mainnet, 300 s on staging) | `minDelay`, and the call is public for the whole of it | changing code, and changing who holds the other two tiers |
+| **owner** | the `TimelockController` (`deploy/LPTimelock.sol`; 48 h on mainnet, 300 s on Sepolia test stack #5) | `minDelay`, and the call is public for the whole of it | changing code, and changing who holds the other two tiers |
 | **guardian** | a HOT key that holds nothing else | none | stopping an incident: the pause switches, and nothing that moves value or sets a key |
 | **operator** | a multisig ("multisig B"), distinct from the timelock's proposer | none | routine operations: calibration, key rotation, the recovery hatches — plus the pause switches again, as the cold fallback |
 
@@ -646,10 +646,10 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   `LP_GUARDIAN` used to fall back to `LP_MULTISIG`; it does not, because a default would
   silently collapse the hot key onto the multisig and undo the split. The deploy script THROWS
   when `LP_OPERATOR == LP_GUARDIAN`, and WARNS (without stopping) when either collapses onto
-  `LP_MULTISIG` or onto the deploying key — staging deliberately collapses them, mainnet must
-  not. All three addresses are printed in the config block before anything is deployed.
-  `LP_TIMELOCK_MIN_DELAY` (default 172800 = 48 h) is the timelock's own delay; Sepolia staging
-  runs 300 and the fork suites 60.
+  `LP_MULTISIG` or onto the deploying key — the test stacks deliberately collapse them, mainnet
+  must not. All three addresses are printed in the config block before anything is deployed.
+  `LP_TIMELOCK_MIN_DELAY` (default 172800 = 48 h) is the timelock's own delay; Sepolia test
+  stack #5 runs 300 and the fork suites 60.
 - The post-deploy checks read the ERC-1967 implementation slot off each proxy, so "the
   registry's proxy really delegates to the registry's implementation" is asserted rather than
   assumed, and the ERC-1967 ADMIN slot is asserted EMPTY — a value there would mean a second,
@@ -666,7 +666,7 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   `Ownable2Step` that only NOMINATES: the operator multisig finishes with two plain
   transactions, `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()` — no timelock, no
   delay. The script skips the two nominations when the operator IS the deploying key, which is
-  the staging case.
+  the test-stack case.
 
 ### Runbook — operating the timelock
 
@@ -739,7 +739,8 @@ and nominated to `LP_OPERATOR`. The operator multisig completes both with one pl
 each — `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()`, no timelock, no delay — and
 the script prints both target addresses. Until it does, the deploying key still holds TokenX's
 minter wiring and the zapper's `sweep`; neither can touch a staker's position or a user's funds.
-On staging the operator IS the deploying key, so the script skips the nominations entirely.
+On the test stack the operator IS the deploying key, so the script skips the nominations
+entirely.
 
 **And with `LP_APEBOND_ENABLED=1`, one scheduled operation.** `LPStakingVault.setStakeOperator`
 is owner-tier, and the vault is owned by the timelock from its own deployment transaction, so
@@ -1015,6 +1016,15 @@ could add one without an upgrade. What the owner does have is the reserve path: 
 one address, so `setAdapter(address(0))` closes new reservations outright — the wind-down lever
 and the closest thing to a pause here — while leaving every reservation already made exactly
 where it is. Re-pointing it at a replacement adapter is the same single call (item 15, step 3).
+
+**The unlock is a FULL cliff with no vesting, by design.** The bonus becomes claimable in one
+step at `unlockAt` and never in instalments, because the buyer's position is a single Uniswap V3
+NFT: it cannot be split into time-released parts, so there is nothing for a vesting schedule to
+release against (Vladimir with vikinatora, 2026-09-15). The cliff LENGTH is not a contract
+constant either: every reservation carries its own absolute `bonusUnlockAt` timestamp, signed into
+the `PurchaseAuthorization` and passed straight through to `reserve`. The back office sets it 300
+seconds after the purchase on Sepolia test stack #5; production is TBD with ApeBond (expected 2–3
+months). Changing it changes what the backend signs, not the escrow's code.
 
 **Anyone may trigger a claim; only the recorded beneficiary is ever paid.** The payout address
 comes from storage written at reserve time and is never taken as an argument, so an open

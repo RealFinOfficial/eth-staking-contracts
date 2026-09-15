@@ -52,7 +52,7 @@ function scriptEnv(extra) {
  *
  * `network` defaults to `localhost`, the spawned fork node. The live Sepolia smoke suite
  * passes `sepolia` so the very same script runs against the real network, which is the only
- * difference between a rehearsal and the staging deployment.
+ * difference between a rehearsal and the Sepolia test stack #5 deployment.
  *
  * @param {string} relativeScript
  * @param {object} env
