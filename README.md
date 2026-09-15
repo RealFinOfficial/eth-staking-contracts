@@ -343,7 +343,7 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 735 tests: unit suites + three fork suites
+npx hardhat test                 # 753 tests: unit suites + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI

@@ -133,7 +133,7 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
 | `deploy-lp-staking.js` | Deploy and wire the whole stack: the `LPTimelock` first, then TokenX, the two UUPS proxies (born owned by that timelock) and the zapper — plus, with `LP_APEBOND_ENABLED=1`, the `BonusEscrow` proxy (born owned by the timelock and born pointing at its adapter) and the `ApeBondPositionAdapter` in front of it. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
-| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending` |
+| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending` |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
@@ -228,6 +228,36 @@ The salt is derived from the call (`keccak256(abi.encode("real.lp.timelock.v1", 
 keccak256(calldata), tag))`), which is why the two commands above need no shared secret; an
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.
 The full runbook is in `docs/lp-staking-audit-notes.md` item 14.
+
+`schedule-batch` and `execute-batch` send SEVERAL owner-tier calls as ONE operation, which the
+timelock runs in order, all or nothing. The calls come from a JSON file named by
+`TIMELOCK_BATCH` — an array of `{target, fn, args}`, where `target` is a registry kind or a raw
+address and `args` is an array in the function's own order:
+
+```json
+[
+  { "target": "LPStakingVault", "fn": "upgradeToAndCall", "args": ["0xNewImpl", "0x"] },
+  { "target": "LPStakingVault", "fn": "setStakeOperator", "args": ["0xAdapter", "true"] }
+]
+```
+
+```bash
+TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=./activation.json \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+
+TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=./activation.json \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
+That pair is exactly the ApeBond activation on a live vault proxy, and it has to be one
+operation: `setStakeOperator` does not exist on the implementation the proxy runs before the
+upgrade, so as two separate operations the second would be scheduled against code without that
+function and would revert after the whole delay. The same `OWNER_TIER` table, kind check,
+argument parsing and `CONFIRM=yes` rule apply per call; every value is zero and the predecessor
+is zero, as for a single operation. The salt is derived the same way under its own namespace —
+`keccak256(abi.encode("real.lp.timelock.v1.batch", keccak256(abi.encode(targets, payloads)),
+tag))` — so a repeat again needs `TIMELOCK_SALT_TAG`. `status` and `cancel` need no batch
+variant, both taking an id; `pending` lists a batch as one row with every call under it.
 
 ### Activating a new implementation (Sepolia test stack #5)
 

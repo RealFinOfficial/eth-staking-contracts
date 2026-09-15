@@ -30,16 +30,47 @@
 // schedule cannot be a typo that goes through — it is a different operation that does not
 // exist.
 //
+// ──────────────────────── batches ────────────────────────
+//
+// Two more actions schedule and execute SEVERAL owner-tier calls as ONE timelock operation,
+// which the contract runs in order, all or nothing. The calls come from a JSON file — an
+// array of `{target, fn, args}` objects, where `target` is a registry kind or a raw address
+// and `args` is an array in the function's own order:
+//
+//     [
+//       { "target": "LPStakingVault", "fn": "upgradeToAndCall", "args": ["0xNewImpl", "0x"] },
+//       { "target": "LPStakingVault", "fn": "setStakeOperator", "args": ["0xAdapter", "true"] }
+//     ]
+//
+//   TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=./activation.json \
+//     npx hardhat run scripts/lp-timelock.js --network sepolia
+//
+//   TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=./activation.json \
+//     npx hardhat run scripts/lp-timelock.js --network sepolia
+//
+// Order and atomicity are the whole point. Activating the ApeBond route on a LIVE vault proxy
+// is `upgradeToAndCall(newImplementation, 0x)` followed by `setStakeOperator(adapter, true)`,
+// and the second call DOES NOT EXIST on the implementation the proxy runs before the first
+// one: as two separate operations the second would be scheduled against code that has no such
+// function and would revert after the delay. Inside one batch the upgrade lands first and the
+// allowlist entry is written against the new code, in the same transaction.
+//
+// `status` and `cancel` need no batch variant — both take an id, and a batch id is an id.
+// `pending` lists a batch as one row with every call under it.
+//
 // ──────────────────────── environment ────────────────────────
 //
-//   TIMELOCK_ACTION           schedule | execute | cancel | status | pending
+//   TIMELOCK_ACTION           schedule | execute | schedule-batch | execute-batch |
+//                             cancel | status | pending
 //   TIMELOCK_TARGET           registry kind (LPStakingVault, RewardsDistributor,
 //                             TimelockController) or a raw address
 //   TIMELOCK_TARGET_ADDRESS   overrides the registry lookup for the target
 //   TIMELOCK_FN               one of the owner-tier functions listed in OWNER_TIER below
 //   TIMELOCK_ARGS             comma-separated arguments, in the function's own order
-//   TIMELOCK_SALT_TAG         distinguishes two otherwise identical operations (see below)
-//   TIMELOCK_DELAY            schedule only; defaults to the timelock's `getMinDelay()`
+//   TIMELOCK_BATCH            schedule-batch / execute-batch; path to the JSON file above
+//   TIMELOCK_SALT_TAG         distinguishes two otherwise identical operations (see below);
+//                             applies to a batch too
+//   TIMELOCK_DELAY            schedule / schedule-batch; defaults to `getMinDelay()`
 //   TIMELOCK_ID               cancel / status
 //   TIMELOCK_ADDRESS          overrides the registry lookup for the timelock itself
 //   CONFIRM=yes               required on mainnet, like every other state-changing script
@@ -61,7 +92,16 @@
 // `TIMELOCK_SALT_TAG` is the escape hatch — any string that has not been used before for that
 // exact call produces a fresh id. Set it whenever an identical call has to run a second time
 // (rotating the guardian back, re-pausing a leg, re-applying a parameter).
+//
+// A batch derives its salt the same way, from the whole list rather than from one call:
+//
+//     salt = keccak256(abi.encode("real.lp.timelock.v1.batch",
+//                                 keccak256(abi.encode(targets, payloads)), tag))
+//
+// A different namespace string, so a one-call batch and the single operation that makes the
+// same call can never share a salt; every value is zero, so they are not folded in.
 
+const fs = require("fs");
 const ethers = require("ethers");
 
 // ──────────────────────── the operations this script can build ────────────────────────
@@ -77,6 +117,12 @@ const ethers = require("ethers");
  *
  * `kinds` is the set of registry entries the function is legal on, which is what turns a
  * mistyped target into an error rather than a transaction that reverts after the delay.
+ *
+ * The same table is the whole vocabulary of a BATCH: every call in a `TIMELOCK_BATCH` file is
+ * one entry from here, resolved and encoded exactly as a single operation would be, and a
+ * batch may mix targets freely — the ApeBond activation is two calls on the vault, a later
+ * adapter replacement is two on the vault and one on the escrow. Nothing in a batch may carry
+ * ether: every value is zero, like every single operation this script builds.
  */
 const OWNER_TIER = {
   acceptOwnership: {
@@ -153,6 +199,9 @@ const OWNER_TIER_INTERFACE = new ethers.Interface(
 const TIMELOCK_INTERFACE = new ethers.Interface([
   "function schedule(address target, uint256 value, bytes data, bytes32 predecessor, bytes32 salt, uint256 delay)",
   "function execute(address target, uint256 value, bytes payload, bytes32 predecessor, bytes32 salt) payable",
+  "function scheduleBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt, uint256 delay)",
+  "function executeBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt) payable",
+  "function hashOperationBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt) pure returns (bytes32)",
   "function cancel(bytes32 id)",
   "function getMinDelay() view returns (uint256)",
   "function getTimestamp(bytes32 id) view returns (uint256)",
@@ -177,10 +226,21 @@ const PREDECESSOR = ethers.ZeroHash;
 /** Namespaced so a salt from this repo can never collide with one from another tool. */
 const SALT_NAMESPACE = "real.lp.timelock.v1";
 
+/** Its own namespace, so a one-call batch and the same call alone are different operations. */
+const BATCH_SALT_NAMESPACE = "real.lp.timelock.v1.batch";
+
 /** The registry key the timelock records itself under. */
 const TIMELOCK_KIND = "TimelockController";
 
-const ACTIONS = ["schedule", "execute", "cancel", "status", "pending"];
+const ACTIONS = [
+  "schedule",
+  "execute",
+  "schedule-batch",
+  "execute-batch",
+  "cancel",
+  "status",
+  "pending",
+];
 
 // ──────────────────────── builders (pure; the suites import these) ────────────────────────
 
@@ -208,6 +268,12 @@ function coerceArgs(fn, args) {
     if (input.type.startsWith("uint") || input.type.startsWith("int")) return BigInt(raw);
     return raw;
   });
+}
+
+/** Empty string means no arguments, not one empty argument. */
+function splitArgs(raw) {
+  if (!raw) return [];
+  return raw.split(",").map((value) => value.trim());
 }
 
 /** ABI-encodes one owner-tier call. */
@@ -302,6 +368,138 @@ function describeOperation(op) {
   return `${op.fn}(${rendered.join(", ")}) on ${op.target}` + (op.tag ? ` [tag ${op.tag}]` : "");
 }
 
+// ──────────────────────── batch builders ────────────────────────
+
+/**
+ * The batch salt, documented at the top of the file: a hash of the whole call list plus an
+ * optional tag, under its own namespace string. The values are not folded in because every
+ * value this script builds is zero; the targets and the payloads are the operation.
+ */
+function deriveBatchSalt({ targets, payloads, tag = "" }) {
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const calls = coder.encode(
+    ["address[]", "bytes[]"],
+    [targets.map((target) => ethers.getAddress(target)), payloads]
+  );
+  return ethers.keccak256(
+    coder.encode(
+      ["string", "bytes32", "string"],
+      [BATCH_SALT_NAMESPACE, ethers.keccak256(calls), tag]
+    )
+  );
+}
+
+/**
+ * OZ's own `hashOperationBatch`, recomputed off-chain: `keccak256(abi.encode(targets, values,
+ * payloads, predecessor, salt))`. Same reason as {operationId}: an id has to be quotable
+ * before any transaction is sent, and by a third party who only has the public calldata.
+ */
+function batchOperationId({ targets, values, payloads, predecessor = PREDECESSOR, salt }) {
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32"],
+      [targets.map((target) => ethers.getAddress(target)), values, payloads, predecessor, salt]
+    )
+  );
+}
+
+/**
+ * Everything one BATCH operation is: the ordered calls, their salt, and the single id all of
+ * them share. The timelock runs the calls in this order inside one transaction and reverts
+ * the whole operation if any of them reverts, which is what makes an upgrade followed by a
+ * call that only exists AFTER that upgrade a legal thing to schedule.
+ *
+ * Each op is `{target, fn, args}` — the same three operands a single operation takes — plus an
+ * optional `kind`, the registry entry the target was resolved from. When a kind is given it is
+ * checked against the function's own `kinds` list, exactly as the single actions check
+ * `TIMELOCK_TARGET`, so a call aimed at the wrong contract is refused here rather than after
+ * the delay.
+ *
+ * @param {Array<{target: string, fn: string, args?: Array<unknown>|string, kind?: string}>} ops
+ * @param {string} tag
+ */
+function buildBatch(ops, tag = "") {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    throw new Error("A batch needs at least one call — got none");
+  }
+
+  const calls = ops.map((op, index) => {
+    if (!op || typeof op !== "object" || Array.isArray(op)) {
+      throw new Error(`Batch call ${index} must be an object {target, fn, args}`);
+    }
+    const { fn, kind } = op;
+    if (!fn || !OWNER_TIER[fn]) {
+      throw new Error(
+        `Batch call ${index}: ${fn || "(no fn)"} is not an owner-tier function — ` +
+          `one of ${Object.keys(OWNER_TIER).join(", ")}`
+      );
+    }
+    if (kind && !OWNER_TIER[fn].kinds.includes(kind)) {
+      throw new Error(
+        `Batch call ${index}: ${fn} is not a function of ${kind} — ` +
+          `it is legal on ${OWNER_TIER[fn].kinds.join(", ")}`
+      );
+    }
+    if (typeof op.target !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(op.target)) {
+      throw new Error(`Batch call ${index}: target must be an address — got ${op.target}`);
+    }
+    const args = typeof op.args === "string" ? splitArgs(op.args) : op.args || [];
+    return {
+      fn,
+      args,
+      kind,
+      target: ethers.getAddress(op.target),
+      value: 0n,
+      data: encodeOwnerCall(fn, args),
+    };
+  });
+
+  const targets = calls.map((call) => call.target);
+  const values = calls.map((call) => call.value);
+  const payloads = calls.map((call) => call.data);
+  const salt = deriveBatchSalt({ targets, payloads, tag });
+
+  return {
+    calls,
+    tag,
+    targets,
+    values,
+    payloads,
+    predecessor: PREDECESSOR,
+    salt,
+    id: batchOperationId({ targets, values, payloads, salt }),
+  };
+}
+
+/** The `scheduleBatch(...)` calldata a Safe signs. */
+function encodeScheduleBatch(batch, delay) {
+  return TIMELOCK_INTERFACE.encodeFunctionData("scheduleBatch", [
+    batch.targets,
+    batch.values,
+    batch.payloads,
+    batch.predecessor,
+    batch.salt,
+    delay,
+  ]);
+}
+
+/** The `executeBatch(...)` calldata a Safe signs once the delay has elapsed. */
+function encodeExecuteBatch(batch) {
+  return TIMELOCK_INTERFACE.encodeFunctionData("executeBatch", [
+    batch.targets,
+    batch.values,
+    batch.payloads,
+    batch.predecessor,
+    batch.salt,
+  ]);
+}
+
+/** Human-readable one-liner for one call inside a batch. */
+function describeCall(call) {
+  const rendered = coerceArgs(call.fn, call.args).map((value) => String(value));
+  return `${call.fn}(${rendered.join(", ")}) on ${call.target}`;
+}
+
 // ──────────────────────── the CLI ────────────────────────
 
 async function main() {
@@ -350,6 +548,62 @@ async function main() {
     return;
   }
 
+  if (action === "schedule-batch" || action === "execute-batch") {
+    // schedule-batch / execute-batch — same file, same operation, same rules as the single
+    // pair above: print the operands and the calldata a Safe would sign, then send.
+    const batch = buildBatch(
+      readBatchFile().map((entry, index) => resolveBatchEntry(pools, chainId, entry, index)),
+      process.env.TIMELOCK_SALT_TAG || ""
+    );
+
+    console.log(
+      `\nBatch of ${batch.calls.length} call(s)` + (batch.tag ? ` [tag ${batch.tag}]` : "")
+    );
+    batch.calls.forEach((call, index) => {
+      console.log(`  ${index}. ${describeCall(call)}`);
+      console.log(`     calldata: ${call.data}`);
+    });
+    console.log(`  predecessor: ${batch.predecessor}`);
+    console.log(`  salt:        ${batch.salt}`);
+    console.log(`  id:          ${batch.id}`);
+
+    const batchSigner = await pools.getSigner();
+
+    if (action === "schedule-batch") {
+      const delay = resolveDelay(minDelay);
+      console.log(`  scheduleBatch calldata: ${encodeScheduleBatch(batch, delay)}`);
+      pools.requireConfirmation(chainId, `schedule batch ${batch.id}`);
+      await pools.send(
+        `Scheduling a batch of ${batch.calls.length} (delay ${delay}s)`,
+        batchSigner,
+        (o) =>
+          timelock
+            .connect(batchSigner)
+            .scheduleBatch(
+              batch.targets,
+              batch.values,
+              batch.payloads,
+              batch.predecessor,
+              batch.salt,
+              delay,
+              o
+            )
+      );
+      await reportStatus(timelock, batch.id, minDelay);
+      return;
+    }
+
+    console.log(`  executeBatch calldata:  ${encodeExecuteBatch(batch)}`);
+    await reportStatus(timelock, batch.id, minDelay);
+    pools.requireConfirmation(chainId, `execute batch ${batch.id}`);
+    await pools.send(`Executing a batch of ${batch.calls.length}`, batchSigner, (o) =>
+      timelock
+        .connect(batchSigner)
+        .executeBatch(batch.targets, batch.values, batch.payloads, batch.predecessor, batch.salt, o)
+    );
+    return;
+  }
+
   // schedule / execute — same operands, same operation.
   const op = buildOperation({
     target: await resolveTarget(hre, pools, chainId),
@@ -367,10 +621,7 @@ async function main() {
   const signer = await pools.getSigner();
 
   if (action === "schedule") {
-    const delay = process.env.TIMELOCK_DELAY ? BigInt(process.env.TIMELOCK_DELAY) : minDelay;
-    if (delay < minDelay) {
-      throw new Error(`TIMELOCK_DELAY ${delay} is below the timelock's minDelay ${minDelay}`);
-    }
+    const delay = resolveDelay(minDelay);
     console.log(`  schedule calldata: ${encodeSchedule(op, delay)}`);
     pools.requireConfirmation(chainId, `schedule ${describeOperation(op)}`);
     await pools.send(`Scheduling ${op.fn} (delay ${delay}s)`, signer, (o) =>
@@ -405,10 +656,79 @@ function requireFunction() {
   return fn;
 }
 
-/** Empty string means no arguments, not one empty argument. */
-function splitArgs(raw) {
-  if (!raw) return [];
-  return raw.split(",").map((value) => value.trim());
+/** The delay a schedule asks for: the timelock's own minimum unless told otherwise, never less. */
+function resolveDelay(minDelay) {
+  const delay = process.env.TIMELOCK_DELAY ? BigInt(process.env.TIMELOCK_DELAY) : minDelay;
+  if (delay < minDelay) {
+    throw new Error(`TIMELOCK_DELAY ${delay} is below the timelock's minDelay ${minDelay}`);
+  }
+  return delay;
+}
+
+/** The `TIMELOCK_BATCH` file, parsed and checked to be the array of call objects it must be. */
+function readBatchFile() {
+  const filePath = process.env.TIMELOCK_BATCH;
+  if (!filePath) {
+    throw new Error(
+      'Set TIMELOCK_BATCH to a JSON file holding [{"target": …, "fn": …, "args": [ … ]}, …]'
+    );
+  }
+  if (!fs.existsSync(filePath)) throw new Error(`No batch file at ${filePath}`);
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(`${filePath} is not valid JSON — ${error.message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${filePath} must hold a JSON ARRAY of {target, fn, args} objects`);
+  }
+  if (parsed.length === 0) throw new Error(`${filePath} holds no calls — a batch needs at least one`);
+  return parsed;
+}
+
+/**
+ * One entry of the batch file, turned into the `{target, fn, args, kind}` shape {@link
+ * buildBatch} takes. `target` is a registry kind or a raw address, the same choice
+ * `TIMELOCK_TARGET` / `TIMELOCK_TARGET_ADDRESS` offer a single operation — a value that looks
+ * like a 20-byte address is used as one, anything else is looked up in the registry and is
+ * checked against the function's own `kinds` list first.
+ */
+function resolveBatchEntry(pools, chainId, entry, index) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new Error(`Batch call ${index} must be an object {target, fn, args}`);
+  }
+  const fn = entry.fn;
+  if (!fn || !OWNER_TIER[fn]) {
+    throw new Error(
+      `Batch call ${index}: ${fn || "(no fn)"} is not an owner-tier function — ` +
+        `one of ${Object.keys(OWNER_TIER).join(", ")}`
+    );
+  }
+  const target = entry.target;
+  if (typeof target !== "string" || target.length === 0) {
+    throw new Error(
+      `Batch call ${index}: set "target" to one of ${OWNER_TIER[fn].kinds.join(", ")} ` +
+        `or to a raw address`
+    );
+  }
+  if (/^0x[0-9a-fA-F]{40}$/.test(target)) {
+    return { target: ethers.getAddress(target), fn, args: entry.args };
+  }
+  if (!OWNER_TIER[fn].kinds.includes(target)) {
+    throw new Error(
+      `Batch call ${index}: ${fn} is not a function of ${target} — ` +
+        `it is legal on ${OWNER_TIER[fn].kinds.join(", ")}`
+    );
+  }
+  const address = pools.registryAddress(chainId, target);
+  if (!address) {
+    throw new Error(
+      `Batch call ${index}: no ${target} recorded for chain ${chainId} in deployments.json — ` +
+        `put a raw address in "target" instead`
+    );
+  }
+  return { target: ethers.getAddress(address), fn, args: entry.args, kind: target };
 }
 
 /**
@@ -491,29 +811,37 @@ async function listPending(hre, pools, timelock, chainId) {
     return;
   }
 
-  console.log(`\n${logs.length} scheduled operation(s) since block ${fromBlock}:`);
-  const seen = new Set();
+  // A batch emits one `CallScheduled` per call, all carrying the SAME id and an `index` that
+  // counts them, so the logs are grouped by id first: one row per operation, every call of it
+  // listed underneath in the order the timelock will run them.
+  const byId = new Map();
   for (const log of logs) {
-    const id = log.args.id;
-    if (seen.has(id)) continue; // a batch schedules one log per call, all under one id
-    seen.add(id);
+    if (!byId.has(log.args.id)) byId.set(log.args.id, []);
+    byId.get(log.args.id).push(log);
+  }
 
+  console.log(`\n${byId.size} scheduled operation(s) since block ${fromBlock}:`);
+  for (const [id, calls] of byId) {
     const timestamp = await timelock.getTimestamp(id);
     const state =
       timestamp === 0n ? "CANCELLED" : timestamp === 1n ? "DONE" : (await timelock.isOperationReady(id)) ? "READY" : "PENDING";
-    let label = "unknown call";
-    try {
-      const parsed = OWNER_TIER_INTERFACE.parseTransaction({ data: log.args.data });
-      if (parsed) label = `${parsed.name}(${parsed.args.map(String).join(", ")})`;
-    } catch {
-      label = `raw ${log.args.data.slice(0, 10)}`;
-    }
+    const first = calls[0];
     console.log(
-      `  ${state.padEnd(9)} ${id}\n` +
-        `    ${label}\n` +
-        `    target ${log.args.target}  scheduled in block ${log.blockNumber}` +
+      `  ${state.padEnd(9)} ${id}` +
+        (calls.length > 1 ? `  (batch of ${calls.length})` : "") +
+        `\n    scheduled in block ${first.blockNumber}` +
         (timestamp > 1n ? `  readyAt ${timestamp} (${new Date(Number(timestamp) * 1000).toISOString()})` : "")
     );
+    for (const log of calls) {
+      let label = "unknown call";
+      try {
+        const parsed = OWNER_TIER_INTERFACE.parseTransaction({ data: log.args.data });
+        if (parsed) label = `${parsed.name}(${parsed.args.map(String).join(", ")})`;
+      } catch {
+        label = `raw ${log.args.data.slice(0, 10)}`;
+      }
+      console.log(`    ${log.args.index}. ${label}\n       target ${log.args.target}`);
+    }
   }
 }
 
@@ -524,6 +852,7 @@ module.exports = {
   TIMELOCK_KIND,
   PREDECESSOR,
   SALT_NAMESPACE,
+  BATCH_SALT_NAMESPACE,
   encodeOwnerCall,
   deriveSalt,
   operationId,
@@ -532,6 +861,13 @@ module.exports = {
   encodeExecute,
   encodeCancel,
   describeOperation,
+  deriveBatchSalt,
+  batchOperationId,
+  buildBatch,
+  encodeScheduleBatch,
+  encodeExecuteBatch,
+  describeCall,
+  resolveBatchEntry,
 };
 
 // `hardhat run` executes this file as the entry point; a `require` from the fork suites must

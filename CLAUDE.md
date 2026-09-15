@@ -288,7 +288,7 @@ contracts/           — Solidity source files
                                 LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached (no
                                 production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 735 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 753 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
@@ -302,6 +302,10 @@ test/                — Hardhat test files (Mocha + Chai). 735 tests, 0 pending
                                   trigger, `recoverSurplus`, and the upgrade path
     DeployImplementation.test.js — 11 tests over scripts/deploy-implementation.js: the
                                   validate/deploy/record steps and the manifest rules
+    LPTimelockBatch.test.js     — 18 tests over the batch half of scripts/lp-timelock.js: the
+                                  id against the deployed contract's own hashOperationBatch,
+                                  the derived salt, the refusals, and the schedule/execute
+                                  round trip on a real LPTimelock
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
@@ -344,8 +348,12 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
   deploy-lp-staking.js      — Deploys and wires the whole LP stack. The timelock goes first and
                               both proxies are born owned by it; TokenX and the zapper are
                               nominated to the operator multisig, which accepts them
-  lp-timelock.js            — Operator front end for the timelock: schedule / execute / cancel /
-                              status / pending, plus the calldata builders the suites reuse
+  lp-timelock.js            — Operator front end for the timelock: schedule / execute /
+                              schedule-batch / execute-batch / cancel / status / pending, plus
+                              the calldata builders the suites reuse. A batch is several
+                              owner-tier calls as ONE operation, read from a TIMELOCK_BATCH
+                              JSON file — which is how the ApeBond activation runs
+                              `upgradeToAndCall` and `setStakeOperator` in that order
   validate-upgrade-safety.js — UUPS implementation safety (network-free) and, against a
                               committed manifest, the storage-layout check. CI runs it
   create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
