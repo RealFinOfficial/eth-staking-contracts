@@ -298,7 +298,7 @@ contracts/           — Solidity source files
                                 / LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached (no
                                 production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 818 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 818 passing, 31 pending (the opt-in fork dry-run)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/

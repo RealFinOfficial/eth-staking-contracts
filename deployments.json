@@ -42,8 +42,8 @@
       "address": "0x6Ed8b565A61807591616e42263D91eBfA67Ddd56",
       "deployTx": "0x04c37e8dd0581542ef5e7b29b37cb710a58f0b2ccc723feb77d04209cb5d6d01",
       "block": 11680396,
-      "implementation": "0xEac50B6BA0b1b05FcE01D49636d58C5D813EF7d5",
-      "implementationTx": "0x297dfa5267ee9d1dfbe9ee827ab5d273501c9b2d7d0978b80c1cc65486948d20",
+      "implementation": "0xA3A78dF09f324ddDCC33d90f3717D61493163643",
+      "implementationTx": "0x5d124be840ddefd0a17ca8b75b7be5192e8ff00f1e46cc6f6f6feaeedc90849a",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
@@ -81,6 +81,34 @@
         "0x5576bD37419dadAab305cca998E16BcD73318A35"
       ],
       "admin": "0x0000000000000000000000000000000000000000"
+    },
+    "BonusEscrow": {
+      "address": "0x8FF27C9549a5d0D51b9d2832b9E5b465a941BA90",
+      "deployTx": "0xb938f2c8f6b26e733a5581fbb4856c26a25a884ad768f8cb44d056e394289048",
+      "block": 11709575,
+      "implementation": "0x44670b5AD73459AbE71A754CD8329A0f4EC52318",
+      "implementationTx": "0xd3622d1cad005bf97ae450c08f82fb46e1f61c0c37fe943a3e26fe925f088046",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
+      "adapter": "0xc91e4037b056696577e6e78e1bAaFd51fC270307"
+    },
+    "ApeBondPositionAdapter": {
+      "address": "0xc91e4037b056696577e6e78e1bAaFd51fC270307",
+      "deployTx": "0x8749178e4f6d36c697c78bfc1b804abb5e980b57d1be47c4fc957ce43cafae35",
+      "block": 11709576,
+      "vault": "0x6Ed8b565A61807591616e42263D91eBfA67Ddd56",
+      "escrow": "0x8FF27C9549a5d0D51b9d2832b9E5b465a941BA90",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "fee": 3000,
+      "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "purchaseSigner": "0x9FDf824f8F90c74286fDB1D8865F0223d7797a09",
+      "soulZapCallers": [
+        "0x067480A36c6372f910cC94dF2691D9dA5754c2A0"
+      ],
+      "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
+      "purchaseSignerTx": "0x63e40d103c732ab11ccf3a03e2e6124b2ac7c616f41944e7938808f14fe7e83b"
     }
   }
 }
