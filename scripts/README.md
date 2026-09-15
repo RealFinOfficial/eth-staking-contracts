@@ -136,6 +136,9 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending` |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `deploy-apebond.js` | Activate the ApeBond route on a stack that is ALREADY deployed: a new vault implementation, the `BonusEscrow` proxy and the `ApeBondPositionAdapter`, then ONE timelock batch that upgrades the proxy and allowlists the adapter in that order. Every phase reads the chain first and skips what is already there, so an interrupted run is resumed by running the same command again. `LP_APEBOND_MODE` also offers `replace-adapter` (swap the adapter, keep the escrow) and `upgrade-vault` (the plain upgrade, nothing ApeBond-shaped touched) |
+| `set-purchase-signer.js` | GUARDIAN tier: point `ApeBondPositionAdapter.purchaseSigner` at the backend key that signs purchases, which is what OPENS the deposit path `deploy-apebond.js` deliberately leaves closed. Takes the address (`LP_APEBOND_PURCHASE_SIGNER`) or the private key it belongs to (`LP_APEBOND_PURCHASE_SIGNER_KEY`, never printed). Checks the tier on chain and names it rather than reverting, sends nothing when the signer is already that address, and refuses `address(0)` — which closes the route outright — unless `LP_APEBOND_ALLOW_CLOSE=1` |
+| `fund-escrow.js` | Transfer the escrow's own `bonusToken()` into the `BonusEscrow` proxy. A plain ERC-20 transfer, because the escrow has no funding function: what makes a reservation possible is the proxy's balance covering `totalReserved`. `LP_APEBOND_FUND_AMOUNT` sends exactly that much; `LP_APEBOND_FUND_TARGET` tops the FREE balance (`balance - totalReserved`) up to that much and sends nothing when it is already there, so the same command is safe to repeat. Prints both sides' balances before and after, and refuses an amount the sender cannot cover |
+| `apebond-rehearsal.js` | The live rehearsal, TEST STACKS ONLY (it refuses chain 1 with no `CONFIRM` escape). `LP_REHEARSAL_PHASE=deposit` mints the campaign's position from the wallet playing the SoulZap seat, builds and signs the 15-field `PurchaseAuthorization`, calls `depositFor`, and asserts the vault has custody, the BENEFICIARY is the credited staker, the escrow holds a matching unclaimed reservation and `ApeBondPositionDeposited` is in the receipt. `LP_REHEARSAL_PHASE=claim`, after the cliff, claims the bonus from a wallet that is NOT the beneficiary and asserts the beneficiary's balance grew by exactly the bonus. Writes `apebond-rehearsal-<chainId>.json` beside the registry, which is what lets the two phases run in different shells on different days |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
@@ -443,6 +446,111 @@ command below carries an address.
    `LP_EXPECTED_IMPLEMENTATION_DISTRIBUTOR` are empty on the test stacks, so nothing there pins
    an implementation and nothing raises `lp.upgrade.unexpected_implementation`. Whether mainnet
    pins them at all is still open — see the env-keys note sent to krumbgf on 2026-09-14.
+
+7. **The route is deployed, not open.** `purchaseSigner` is `address(0)` and the escrow holds no
+   bonus tokens, so nothing can be bought yet. The next section is how that is turned into a
+   working campaign and proved with one real purchase.
+
+### After the activation: opening the route (Sepolia test stack #5)
+
+The activation leaves the route DEPLOYED and CLOSED on purpose: `purchaseSigner` is
+`address(0)`, so every `depositFor` reverts, and the escrow holds no bonus tokens, so the first
+purchase that got past the signature would revert at the reserve step anyway. Four commands turn
+that into a proven, working campaign, in this order. Each one refuses to run when the one before
+it has not happened, so the order is enforced rather than remembered.
+
+1. **Open the deposit path.** Guardian tier — `setPurchaseSigner` carries `onlyGuardian`, not
+   `onlyOwner`, so the timelock that OWNS the adapter cannot make this call at all and there is
+   no scheduled route to it. Run it from the guardian key:
+
+   ```bash
+   LP_APEBOND_PURCHASE_SIGNER=<the backend key's address> \
+     npx hardhat run scripts/set-purchase-signer.js --network sepolia
+   ```
+
+   `LP_APEBOND_PURCHASE_SIGNER_KEY=<the private key>` is the alternative when the operator holds
+   the key itself: the address is derived from it and the key is never printed. The run reads
+   `purchaseSigner()` before and after, sends nothing when it is already that address, refuses a
+   contract (the adapter verifies with `ECDSA.recover`, which only ever returns an EOA), and
+   refuses `address(0)` unless `LP_APEBOND_ALLOW_CLOSE=1` — because zero CLOSES the route, which
+   repudiates every authorization the backend has issued and is a deliberate act.
+
+   Rotating the signer later is the same command. Every outstanding authorization stops working
+   the moment it lands, so switch the backend over in the same window.
+
+2. **Fund the escrow.** The escrow has no funding function: a bonus can be reserved only while
+   the proxy's own `bonusToken` balance covers `totalReserved` plus the new amount, so funding it
+   is an ordinary ERC-20 transfer to the proxy.
+
+   ```bash
+   LP_APEBOND_FUND_TARGET=10000 npx hardhat run scripts/fund-escrow.js --network sepolia
+   ```
+
+   `LP_APEBOND_FUND_TARGET` is the FREE balance to reach — `balance - totalReserved`, which is
+   what a new purchase can actually reserve against. The run sends the difference and sends
+   nothing when the free balance is already there, so the command is safe to repeat and safe to
+   run while purchases are landing. `LP_APEBOND_FUND_AMOUNT=10000` is the other form: send
+   exactly that much, once. Either way the run prints both sides' balances before and after,
+   `totalReserved` (which funding must not move, and the run fails if it did), and the free
+   balance the escrow ends up with.
+
+3. **Buy one position for real — the deposit phase.** SoulZap is not deployed on a test stack, so
+   its seat is played by a wallet the operator holds, allowlisted on the adapter at activation
+   through `LP_APEBOND_SOULZAP_CALLERS`. That wallet needs both pool tokens and some Sepolia ETH.
+
+   ```bash
+   LP_REHEARSAL_CALLER_KEY=<the SoulZap-seat wallet's private key> \
+   LP_REHEARSAL_BENEFICIARY=<the buyer's address> \
+   LP_APEBOND_PURCHASE_SIGNER_KEY=<the backend key from step 1> \
+   LP_REHEARSAL_CLIFF_SECONDS=600 \
+     npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+   ```
+
+   Before it spends a single unit of gas the run checks the six things that have to be true — the
+   caller is allowlisted, the key matches `adapter.purchaseSigner()`, neither pause flag is on,
+   the vault has the adapter as a stake operator, the escrow points back at the adapter, and the
+   escrow can back the bonus — and stops with all of them printed if any fails. Then it approves
+   the position manager, mints the campaign's range around the pool's current tick, reads the
+   minted liquidity back, signs the 15-field `PurchaseAuthorization` under the
+   `RealApeBondPurchase`/`1` domain, approves the adapter for the NFT and calls `depositFor`.
+
+   The figures are the SAMPLE campaign from `test/lp-staking/helpers/constants.js` — 10,000
+   gross, 9,900 net after a 1% SoulZap fee, a 495 guaranteed bonus — overridable with
+   `LP_REHEARSAL_GROSS` / `_NET` / `_BONUS` in whole tokens. The mint amounts are computed
+   value-balanced at the pool's own price for the chosen range and sized to fit the caller's
+   balances; `LP_REHEARSAL_AMOUNT0` / `_AMOUNT1` state them outright instead.
+
+   Afterwards the run asserts what the purchase was supposed to produce: the position manager
+   reports the VAULT as the NFT's owner, the vault credits the BENEFICIARY (not the caller) as
+   its staker, `escrow.reservationOf(purchaseId)` holds the beneficiary, the bonus, the unlock
+   timestamp and `claimed = false`, `claimable` is still 0 because the cliff has not passed, and
+   `ApeBondPositionDeposited` is in the receipt with the same purchase id.
+
+4. **Claim the bonus — after the cliff.** Run it early and it prints the seconds remaining and
+   exits non-zero without sending anything.
+
+   ```bash
+   LP_REHEARSAL_PHASE=claim npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+   ```
+
+   `claim` takes no role and no permission: it is triggered here by the DEPLOYER, deliberately
+   not the beneficiary, and the money still goes to the beneficiary recorded at purchase time.
+   The run asserts the beneficiary's bonus-token balance grew by exactly the bonus, that
+   `totalReserved` fell by exactly the same, that the reservation is marked claimed, and that a
+   second claim reverts.
+
+**The record file.** The deposit phase writes `apebond-rehearsal-<chainId>.json` beside
+`deployments.json` — token id, purchase id, campaign id, the figures, the unlock timestamp and
+every transaction hash — and the claim phase reads it and appends its own hash. That is what lets
+the two phases run in different shells on different days with no arguments carried between them;
+`LP_REHEARSAL_PURCHASE_ID` names a purchase directly when there is no record to read. Like
+`apebond-*-batch.json` it is a run artifact and is gitignored: everything durable about the
+deployment is already in `deployments.json`.
+
+`scripts/apebond-rehearsal.js` REFUSES chain 1, with no `CONFIRM=yes` escape. It mints liquidity,
+signs an authorization with a key read out of the environment and spends a purchase id; on
+mainnet the purchase comes from SoulZap and the signature from the backend, and neither is driven
+from a script in this repo.
 
 ### Replacing the adapter, and upgrading the vault alone
 

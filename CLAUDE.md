@@ -292,7 +292,7 @@ contracts/           — Solidity source files
                                 / LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached (no
                                 production path can reach it)
-test/                — Hardhat test files (Mocha + Chai). 783 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 818 tests, 0 pending
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
@@ -320,6 +320,17 @@ test/                — Hardhat test files (Mocha + Chai). 783 tests, 0 pending
                                   prints the calldata and stops. The 60 s minDelay is waited out
                                   in CHAIN time, which the suite drives with evm_increaseTime
                                   while the child polls
+    ApeBondOperatorScripts.test.js — 35 tests over the three scripts that follow the
+                                  activation — set-purchase-signer.js, fund-escrow.js and
+                                  apebond-rehearsal.js — run as CHILD PROCESSES against a stack
+                                  this suite deploys and activates with the repo's own scripts on
+                                  a plain `hardhat node` it spawns itself. The rehearsal is driven
+                                  end to end against the mocks: a caller EOA plays the SoulZap
+                                  seat, the deposit phase mints and calls depositFor, chain time
+                                  is pushed past the cliff with evm_increaseTime, and the claim
+                                  phase pays the beneficiary. Covers the guardian-tier refusal,
+                                  the LP_APEBOND_ALLOW_CLOSE guard, the FREE-balance accounting
+                                  (balance - totalReserved) and the non-zero exit before the cliff
     fork/LPStakingFork.test.js  — 19 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing,
                                   scripts, ledger, constants, profiles
@@ -371,6 +382,23 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               proxy and allowlists the adapter in that order. Every phase is
                               resume-safe. LP_APEBOND_MODE also offers `replace-adapter` and
                               `upgrade-vault`
+  set-purchase-signer.js    — GUARDIAN tier: points ApeBondPositionAdapter.purchaseSigner at the
+                              backend key, which is what OPENS the deposit path the activation
+                              leaves closed. Takes the address or the private key it belongs to
+                              (never printed), checks the tier on chain and names it, and refuses
+                              address(0) unless LP_APEBOND_ALLOW_CLOSE=1
+  fund-escrow.js            — Transfers the escrow's own bonusToken() into the BonusEscrow proxy.
+                              A plain ERC-20 transfer, because the escrow has no funding function:
+                              what makes a reservation possible is the balance covering
+                              totalReserved. LP_APEBOND_FUND_AMOUNT sends exactly that much,
+                              LP_APEBOND_FUND_TARGET tops the FREE balance up to it and sends
+                              nothing when it is already there
+  apebond-rehearsal.js      — The live rehearsal, TEST STACKS ONLY (refuses chain 1 with no
+                              CONFIRM escape). Phase `deposit` mints the campaign position from
+                              the SoulZap-seat wallet, signs the 15-field PurchaseAuthorization
+                              and calls depositFor; phase `claim`, after the cliff, claims the
+                              bonus from a wallet that is NOT the beneficiary. Writes
+                              apebond-rehearsal-<chainId>.json beside the registry (gitignored)
   lp-timelock.js            — Operator front end for the timelock: schedule / execute /
                               schedule-batch / execute-batch / cancel / status / pending, plus
                               the calldata builders the suites reuse. A batch is several
@@ -423,7 +451,7 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 | tier | where | run by | needs |
 |---|---|---|---|
 | Hardhat unit (mocks) | `test/lp-staking/*.test.js` | `npx hardhat test` | nothing |
-| Hardhat script suite on a spawned local node | `test/lp-staking/DeployApeBond.test.js` | `npx hardhat test` | nothing (a plain `hardhat node`, no fork) |
+| Hardhat script suite on a spawned local node | `test/lp-staking/DeployApeBond.test.js`, `test/lp-staking/ApeBondOperatorScripts.test.js` | `npx hardhat test` | nothing (a plain `hardhat node`, no fork) |
 | Hardhat in-process mainnet fork | `test/lp-staking/fork/LPStakingFork.test.js` | `npx hardhat test` | mainnet archive RPC |
 | Hardhat local-fork integration, mainnet-pinned | `test/lp-staking/integration/LPStakingLocalFork.test.js` | `npm run test:integration` | mainnet archive RPC |
 | Hardhat fork integration, profile-driven | `test/lp-staking/integration/LPStakingSepoliaFork.test.js` | `npm run test:integration:sepolia` | archive RPC for the profile's chain |
@@ -439,7 +467,9 @@ never run `test-live/`.
 The **ApeBond route has no tier of its own.** Its unit coverage sits in the Hardhat unit tier
 (`ApeBondPositionAdapter.test.js`, `BonusEscrow.test.js`) and the Foundry unit tier
 (`ApeBondAdapterBranches.t.sol`, `BonusEscrowBranches.t.sol`), its ACTIVATION on an existing
-stack is `DeployApeBond.test.js`, and its end-to-end scenario is
+stack is `DeployApeBond.test.js`, the three OPERATOR scripts that follow that activation —
+`set-purchase-signer.js`, `fund-escrow.js`, `apebond-rehearsal.js` — are
+`ApeBondOperatorScripts.test.js`, and its end-to-end scenario is
 section 7 of the mainnet-pinned **local-fork** suite — the only tier that runs the real deploy
 script as a child process, which is what a flag-gated deployment has to be proven through. It
 deploys a SECOND stack there with `LP_APEBOND_ENABLED=1` and asserts that the first, un-flagged

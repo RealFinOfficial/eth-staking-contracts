@@ -19,3 +19,8 @@ lcov.info
 # so the operator can drive the same operation by hand with `lp-timelock.js`. It is a run
 # artifact, not a record: the addresses it names are already in deployments.json.
 apebond-*-batch.json
+
+# `scripts/apebond-rehearsal.js` writes the purchase it made beside deployments.json, so the
+# claim phase can run in another shell on another day. Same reason as the batch file above:
+# it is a run artifact of a TEST-STACK rehearsal, not a record of the deployment.
+apebond-rehearsal-*.json
