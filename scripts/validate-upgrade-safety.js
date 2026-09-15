@@ -80,7 +80,7 @@ const CONTRACTS = [
     constructorArgs: [DUMMY.address],
     // The ApeBond escrow ships with the integration and has not been deployed to Sepolia or
     // mainnet yet, so `.openzeppelin/sepolia.json` records no proxy that implements it.
-    deployed: false,
+    deployed: true,
   },
 ];
 
