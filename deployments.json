@@ -90,12 +90,12 @@
       "implementationTx": "0xd3622d1cad005bf97ae450c08f82fb46e1f61c0c37fe943a3e26fe925f088046",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
-      "adapter": "0xc91e4037b056696577e6e78e1bAaFd51fC270307"
+      "adapter": "0xb7d645c7396d198553fF42C5fE6D8B0460B0C0E7"
     },
     "ApeBondPositionAdapter": {
-      "address": "0xc91e4037b056696577e6e78e1bAaFd51fC270307",
-      "deployTx": "0x8749178e4f6d36c697c78bfc1b804abb5e980b57d1be47c4fc957ce43cafae35",
-      "block": 11709576,
+      "address": "0xb7d645c7396d198553fF42C5fE6D8B0460B0C0E7",
+      "deployTx": "0x7177fdb1dc7150c238cf840cb1e13c342a121049cd7c89ad6a53d2ae5f1f4910",
+      "block": 11764560,
       "vault": "0x6Ed8b565A61807591616e42263D91eBfA67Ddd56",
       "escrow": "0x8FF27C9549a5d0D51b9d2832b9E5b465a941BA90",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
@@ -103,12 +103,12 @@
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "fee": 3000,
       "guardian": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "purchaseSigner": "0x9FDf824f8F90c74286fDB1D8865F0223d7797a09",
+      "purchaseSigner": "0x49fEC5A0CF272A8DFF662054b49a7716D9de2D96",
       "soulZapCallers": [
-        "0x067480A36c6372f910cC94dF2691D9dA5754c2A0"
+        "0xB3639a56f8e52536b82966a8E4D835418a644071"
       ],
       "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
-      "purchaseSignerTx": "0x63e40d103c732ab11ccf3a03e2e6124b2ac7c616f41944e7938808f14fe7e83b"
+      "previousAdapter": "0xc91e4037b056696577e6e78e1bAaFd51fC270307"
     }
   }
 }
