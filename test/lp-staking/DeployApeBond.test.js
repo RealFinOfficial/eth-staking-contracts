@@ -55,7 +55,13 @@ const lpTimelock = require("../../scripts/lp-timelock");
  *   run 2  the same command again: nothing is deployed, nothing is scheduled, not one
  *          transaction is sent, and every address is the same.
  *   run 3  LP_APEBOND_MODE=replace-adapter: a new adapter, and one batch of three that takes the
- *          old one off the vault's allowlist, puts the new one on, and re-points the escrow.
+ *          old one off the vault's allowlist, puts the new one on, and re-points the escrow. It
+ *          runs with a DIFFERENT guardian, signer and caller than run 1, against a registry that
+ *          carries a hand-recorded `purchaseSignerTx` the way the live one does, so the record it
+ *          writes can only pass by describing THIS run's adapter.
+ *   run 3b the same mode again, interrupted after it scheduled its batch; the batch is then
+ *          executed by hand (the Safe's path, and a crash after the execute), and the same
+ *          command re-run: it must find everything in place AND still record the replacement.
  *   run 4  LP_APEBOND_MODE=upgrade-vault: the plain upgrade, a ONE-call batch, with the ApeBond
  *          wiring and the staked position both untouched by it.
  *
@@ -531,25 +537,43 @@ describe("deploy-apebond.js — activating ApeBond on an already-deployed stack"
 
   // ─────────────────────────────────────────────────────────────
   describe("LP_APEBOND_MODE=replace-adapter", function () {
+    /** The live registry carries this key, recorded by hand after set-purchase-signer.js. */
+    const STALE_PURCHASE_SIGNER_TX = "0x" + "ab".repeat(32);
+
     before(async function () {
+      // The registry as the live one looks: the adapter being replaced has a hand-recorded
+      // `purchaseSignerTx`. A record that spread the old entry would carry it across.
+      const registry = JSON.parse(fs.readFileSync(registryFile, "utf8"));
+      registry[String(CHAIN_ID)].ApeBondPositionAdapter.purchaseSignerTx = STALE_PURCHASE_SIGNER_TX;
+      fs.writeFileSync(registryFile, JSON.stringify(registry, null, 2) + "\n");
+
+      runs.replacedEntry = entry("ApeBondPositionAdapter");
+      runs.escrowEntryBefore = entry("BonusEscrow");
+
+      // Every per-adapter input differs from run 1's, so a value copied from the old entry
+      // cannot pass for one this run configured.
       runs.replace = await runApeBond({
         LP_APEBOND_MODE: "replace-adapter",
-        LP_APEBOND_GUARDIAN: w.guardian.address,
-        LP_APEBOND_PURCHASE_SIGNER: w.apeBondSigner.address,
-        LP_APEBOND_SOULZAP_CALLERS: w.soulZapCaller.address,
+        LP_APEBOND_GUARDIAN: w.dave.address,
+        LP_APEBOND_PURCHASE_SIGNER: w.carol.address,
+        LP_APEBOND_SOULZAP_CALLERS: w.bob.address,
         LP_APEBOND_ASSERT_POSITIONS: String(stakedTokenId),
         LP_APEBOND_WAIT_POLL_MS: "200",
       });
       runs.replaceAdapter = entry("ApeBondPositionAdapter").address;
+      runs.currentAdapter = runs.replaceAdapter;
     });
 
-    it("deploys a new adapter against the SAME escrow", async function () {
+    it("deploys a new adapter against the SAME escrow, configured by THIS run", async function () {
       expect(runs.replaceAdapter).to.not.equal(runs.activateAddresses.adapter);
       const adapter = at(runs.replaceAdapter, adapterIface);
       expect(await adapter.escrow()).to.equal(runs.activateAddresses.escrow);
       expect(await adapter.vault()).to.equal(vaultAddr);
       expect(await adapter.owner()).to.equal(timelockAddr);
-      expect(await adapter.soulZapCallers(w.soulZapCaller.address)).to.equal(true);
+      expect(await adapter.guardian()).to.equal(w.dave.address);
+      expect(await adapter.purchaseSigner()).to.equal(w.carol.address);
+      expect(await adapter.soulZapCallers(w.bob.address)).to.equal(true);
+      expect(await adapter.soulZapCallers(w.soulZapCaller.address)).to.equal(false);
     });
 
     it("swaps the allowlist entry and re-points the escrow in ONE batch", async function () {
@@ -579,13 +603,135 @@ describe("deploy-apebond.js — activating ApeBond on an already-deployed stack"
       expect(adapter).to.not.have.property("pendingAdapterBlock");
       expect(adapter).to.not.have.property("pendingAdapterTx");
       expect(adapter.escrow).to.equal(runs.activateAddresses.escrow);
+      expect(adapter.vault).to.equal(vaultAddr);
       expect(adapter.owner).to.equal(timelockAddr);
+      expect(adapter.token0).to.equal(token0Addr);
+      expect(adapter.token1).to.equal(token1Addr);
+      expect(adapter.fee).to.equal(FEE);
+      expect(adapter.bonusToken).to.equal(token0Addr);
+    });
+
+    it("records the NEW adapter's deploy block and transaction, not the old one's", async function () {
+      const adapter = entry("ApeBondPositionAdapter");
+      expect(adapter.block).to.be.a("number");
+      expect(adapter.block).to.not.equal(runs.replacedEntry.block);
+      expect(adapter.deployTx).to.not.equal(runs.replacedEntry.deployTx);
+      // The receipt is the authority: the recorded transaction created THIS address, in THIS block.
+      const receipt = await provider.getTransactionReceipt(adapter.deployTx);
+      expect(receipt.contractAddress).to.equal(runs.replaceAdapter);
+      expect(receipt.blockNumber).to.equal(adapter.block);
+    });
+
+    it("drops the replaced adapter's purchaseSignerTx", function () {
+      expect(runs.replacedEntry.purchaseSignerTx).to.equal(STALE_PURCHASE_SIGNER_TX);
+      expect(entry("ApeBondPositionAdapter")).to.not.have.property("purchaseSignerTx");
+    });
+
+    it("records the guardian, signer and callers THIS run configured", function () {
+      const adapter = entry("ApeBondPositionAdapter");
+      expect(adapter.guardian).to.equal(w.dave.address);
+      expect(adapter.purchaseSigner).to.equal(w.carol.address);
+      expect(adapter.soulZapCallers).to.deep.equal([w.bob.address]);
+    });
+
+    it("re-points the BonusEscrow entry at the new adapter and keeps the rest of it", function () {
+      const escrow = entry("BonusEscrow");
+      expect(runs.escrowEntryBefore.adapter).to.equal(runs.activateAddresses.adapter);
+      expect(escrow.adapter).to.equal(runs.replaceAdapter);
+      expect(escrow).to.deep.equal({ ...runs.escrowEntryBefore, adapter: runs.replaceAdapter });
     });
 
     it("upgrades nothing: the vault implementation and the position are untouched", async function () {
       expect(await implementationOf(vaultAddr)).to.equal(runs.activateAddresses.implementation);
       expect(await vaultState()).to.deep.equal(baseline.state);
       expect(runs.replace.stdout).to.include("All post-activation checks passed.");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("replace-adapter interrupted after scheduling, batch executed by hand, then re-run", function () {
+    // The two ways a replacement's batch executes WITHOUT the run that recorded it pending
+    // being there to see it: the Safe executes it on mainnet, or the run dies after the
+    // execute lands (a dropped RPC while it waits for the receipt, a Ctrl-C during the
+    // post-checks). Either way the next run finds all three calls already in place, builds an
+    // empty batch, and must STILL promote the pending adapter in the registry.
+    /** The same command both times, as an operator would re-run it. */
+    const replaceEnv = (extra) => ({
+      LP_APEBOND_MODE: "replace-adapter",
+      LP_APEBOND_GUARDIAN: w.dave.address,
+      LP_APEBOND_PURCHASE_SIGNER: w.carol.address,
+      LP_APEBOND_SOULZAP_CALLERS: w.bob.address,
+      LP_APEBOND_ASSERT_POSITIONS: String(stakedTokenId),
+      LP_APEBOND_WAIT_POLL_MS: "200",
+      ...extra,
+    });
+
+    let interrupted, pendingEntry, resumed;
+
+    before(async function () {
+      // A one-millisecond wall-clock ceiling on the wait, and no time pump: the run deploys,
+      // wires, hands over and SCHEDULES, then gives up waiting with the operation pending.
+      interrupted = await runner.runHardhatScript(
+        "scripts/deploy-apebond.js",
+        baseEnv(replaceEnv({ LP_APEBOND_WAIT_TIMEOUT_MS: "1" })),
+        { logFile }
+      );
+      pendingEntry = entry("ApeBondPositionAdapter");
+
+      // The batch, executed by hand from the file the run wrote — the Safe's path.
+      const { batch } = batchFromFile("replace-adapter");
+      await provider.send("evm_increaseTime", [MIN_DELAY + 1]);
+      await provider.send("evm_mine", []);
+      await chain.send(
+        timelock
+          .connect(w.deployer)
+          .executeBatch(batch.targets, batch.values, batch.payloads, batch.predecessor, batch.salt)
+      );
+
+      resumed = await runApeBond(replaceEnv());
+      runs.resumedAdapter = pendingEntry.pendingAdapter;
+      runs.currentAdapter = runs.resumedAdapter;
+    });
+
+    it("stops with the operation scheduled and the new adapter recorded as PENDING", function () {
+      expect(interrupted.code).to.not.equal(0);
+      expect(interrupted.stderr + interrupted.stdout).to.include("It IS scheduled");
+      expect(pendingEntry.address).to.equal(runs.replaceAdapter);
+      expect(pendingEntry.pendingAdapter).to.match(/^0x[0-9a-fA-F]{40}$/);
+      expect(pendingEntry.pendingAdapter).to.not.equal(runs.replaceAdapter);
+      expect(pendingEntry.pendingAdapterBlock).to.be.a("number");
+      expect(pendingEntry.pendingAdapterTx).to.match(/^0x[0-9a-fA-F]{64}$/);
+    });
+
+    it("resumes the SAME replacement, finds every call in place and sends nothing new", function () {
+      expect(resumed.stdout).to.include("RESUMING a replacement");
+      expect(resumed.stdout).to.include("ALREADY in place on chain");
+      expect(resumed.stdout).to.include("All post-activation checks passed.");
+    });
+
+    it("promotes the pending adapter although this run executed nothing", async function () {
+      const adapter = entry("ApeBondPositionAdapter");
+      expect(adapter.address).to.equal(runs.resumedAdapter);
+      expect(adapter.previousAdapter).to.equal(runs.replaceAdapter);
+      expect(adapter.block).to.equal(pendingEntry.pendingAdapterBlock);
+      expect(adapter.deployTx).to.equal(pendingEntry.pendingAdapterTx);
+      expect(adapter).to.not.have.property("pendingAdapter");
+      expect(adapter).to.not.have.property("pendingAdapterBlock");
+      expect(adapter).to.not.have.property("pendingAdapterTx");
+      expect(adapter.guardian).to.equal(w.dave.address);
+      expect(adapter.purchaseSigner).to.equal(w.carol.address);
+      expect(adapter.soulZapCallers).to.deep.equal([w.bob.address]);
+      expect(entry("BonusEscrow").adapter).to.equal(runs.resumedAdapter);
+
+      expect(await vault.isStakeOperator(runs.resumedAdapter)).to.equal(true);
+      expect(await vault.isStakeOperator(runs.replaceAdapter)).to.equal(false);
+      expect(await at(runs.activateAddresses.escrow, escrowIface).adapter()).to.equal(
+        runs.resumedAdapter
+      );
+    });
+
+    it("leaves the staked position and the admin tiers where they were", async function () {
+      expect(await vaultState()).to.deep.equal(baseline.state);
     });
   });
 
@@ -621,11 +767,11 @@ describe("deploy-apebond.js — activating ApeBond on an already-deployed stack"
     });
 
     it("touches no ApeBond contract: the allowlist and the escrow survive the upgrade", async function () {
-      expect(await vault.isStakeOperator(runs.replaceAdapter)).to.equal(true);
+      expect(await vault.isStakeOperator(runs.currentAdapter)).to.equal(true);
       expect(await at(runs.activateAddresses.escrow, escrowIface).adapter()).to.equal(
-        runs.replaceAdapter
+        runs.currentAdapter
       );
-      expect(entry("ApeBondPositionAdapter").address).to.equal(runs.replaceAdapter);
+      expect(entry("ApeBondPositionAdapter").address).to.equal(runs.currentAdapter);
     });
 
     it("keeps the staked position and every admin tier", async function () {

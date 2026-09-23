@@ -87,7 +87,9 @@ const {
 //   7. RECORD. `LPStakingVault.implementation` moves to the new implementation (the entry is
 //      spread, so nothing else in it is lost, and the two `pendingImplementation` keys
 //      `deploy-implementation.js` may have written are dropped, because they are no longer
-//      pending). `BonusEscrow` and `ApeBondPositionAdapter` were recorded in phase 3.
+//      pending). `BonusEscrow` and `ApeBondPositionAdapter` were recorded in phase 3. In
+//      `replace-adapter` mode this phase also rebuilds the adapter entry for the new adapter
+//      and re-points `BonusEscrow.adapter` — see the note under the three modes.
 //
 // ──────────────────────── resume safety ────────────────────────
 //
@@ -123,6 +125,15 @@ const {
 // is activated, so an interrupted run resumes the SAME replacement, while a run started after
 // the previous one completed is a NEW replacement and deploys another adapter. Replacing is an
 // explicit act; the script does not second-guess an operator who asked for it twice.
+//
+// The replacement is RECORDED once its batch's effects are on chain — whether this run executed
+// the batch, or an earlier run or the Safe did and this run found all three calls already in
+// place. The `ApeBondPositionAdapter` entry is then rebuilt for the NEW adapter rather than
+// copied from the old one: `deployTx` and `block` are promoted from `pendingAdapterTx` and
+// `pendingAdapterBlock`, `guardian` / `purchaseSigner` / `owner` / `soulZapCallers` are read
+// back off the new adapter, `previousAdapter` names the one it replaced, and nothing that
+// belonged to the old adapter (its block, a hand-recorded `purchaseSignerTx`) survives. The
+// `BonusEscrow` entry's `adapter` is re-pointed at the new adapter in the same phase.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -1146,25 +1157,27 @@ async function main() {
       console.log(`${VAULT_KIND}.implementation is unchanged (${after}); nothing to rewrite.`);
     }
 
-    if (mode === "replace-adapter" && executed) {
-      const current = pools.readRegistry()[String(chainId)][ADAPTER_KIND];
-      const extra = stripAddress(current);
-      delete extra.pendingAdapter;
-      delete extra.pendingAdapterBlock;
-      const pendingTx = extra.pendingAdapterTx;
-      delete extra.pendingAdapterTx;
-      pools.recordDeployment(chainId, ADAPTER_KIND, adapterAddress, {
-        ...extra,
-        ...(pendingTx ? { deployTx: pendingTx } : {}),
-        vault: vaultAddress,
-        escrow: escrowAddress,
-        guardian: apeBondGuardian,
-        purchaseSigner,
-        soulZapCallers,
-        owner: timelockAddress,
+    // Gated on the batch's EFFECTS, not on `executed`. The outer condition already says they are
+    // on chain: either this run executed the batch, or `ops` came out empty because an earlier
+    // run — or, on mainnet, the Safe — executed it and this run is the one that finds it done.
+    // Gating on `executed` alone left that second case unrecorded for good: the entry kept the
+    // OLD address and the `pendingAdapter` key, and every later run resumed, found nothing to
+    // do, passed its checks and recorded nothing again.
+    if (mode === "replace-adapter") {
+      await recordReplacement({
+        chainId,
+        adapter,
+        adapterAddress,
         previousAdapter,
+        escrow,
+        escrowAddress,
+        vaultAddress,
+        bonusToken,
+        token0,
+        token1,
+        fee,
+        soulZapCallers,
       });
-      console.log(`${ADAPTER_KIND} -> ${adapterAddress} (replacing ${previousAdapter})`);
     }
   } else {
     console.log("The batch has not executed, so nothing is recorded as live.");
@@ -1207,6 +1220,97 @@ async function main() {
 async function vaultAllows(vault, adapterAddress, hasStakeOperator) {
   if (!hasStakeOperator) return false;
   return vault.isStakeOperator(adapterAddress);
+}
+
+/**
+ * Phase 7 of `replace-adapter`: the registry catches up with a replacement that is live on chain.
+ *
+ * The `ApeBondPositionAdapter` entry is REBUILT for the new adapter, in the same shape the
+ * default mode records, rather than spread from the entry it replaces. Spreading is what the
+ * vault's record does, and it is right there, because the vault proxy is the same contract
+ * before and after. Here it is not: the new adapter is a different contract, deployed in a
+ * different block, so every key the old entry carried either describes the OLD contract (its
+ * `block`, a hand-recorded `purchaseSignerTx`) or is restated below from this run. Concretely:
+ *
+ *   - `deployTx` / `block` are promoted from `pendingAdapterTx` / `pendingAdapterBlock`, which
+ *     phase 3 wrote from the new adapter's own deploy receipt. The indexer starts reading the
+ *     adapter's events at `block`, so the old adapter's block here would be wrong by days;
+ *   - `guardian`, `purchaseSigner` and `owner` are read back off the new adapter, and
+ *     `soulZapCallers` is the configured list, each entry confirmed allowlisted on chain. In a
+ *     healthy run those are exactly the values phase 6 just asserted, and in an unhealthy one
+ *     the registry still says what the chain says, while phase 6 fails the run;
+ *   - no `purchaseSignerTx`: the new adapter's signer came in through its constructor, so there
+ *     is no separate transaction to name. A later `set-purchase-signer.js` rotation is recorded
+ *     by hand, as it was for the adapter this one replaces.
+ *
+ * The `BonusEscrow` entry keeps everything it has — the escrow proxy did not change — and only
+ * its `adapter` moves, to what the escrow itself now reports.
+ *
+ * The escrow is written FIRST. The adapter write is the one that drops `pendingAdapter`, and a
+ * run stopped between the two writes must still find the key and resume, not start a new
+ * replacement with the escrow entry already re-pointed.
+ */
+async function recordReplacement(context) {
+  const {
+    chainId,
+    adapter,
+    adapterAddress,
+    previousAdapter,
+    escrow,
+    escrowAddress,
+    vaultAddress,
+    bonusToken,
+    token0,
+    token1,
+    fee,
+    soulZapCallers,
+  } = context;
+
+  const chainRegistry = pools.readRegistry()[String(chainId)];
+  const current = chainRegistry[ADAPTER_KIND];
+  const pending = sameValue(current.pendingAdapter, adapterAddress);
+  if (!pending) {
+    console.log(
+      `WARN  the ${ADAPTER_KIND} entry does not record ${adapterAddress} as pendingAdapter ` +
+        `(it records ${current.pendingAdapter || "none"}), so its deploy transaction and block ` +
+        `are not known to this run and are left out of the entry.`
+    );
+  }
+  const deployTx = pending ? current.pendingAdapterTx : undefined;
+  const block = pending ? current.pendingAdapterBlock : undefined;
+
+  const allowlisted = [];
+  for (const caller of soulZapCallers) {
+    if (await adapter.soulZapCallers(caller)) allowlisted.push(caller);
+  }
+
+  const escrowCurrent = chainRegistry[ESCROW_KIND];
+  const escrowAdapter = hre.ethers.getAddress(await escrow.adapter());
+  pools.recordDeployment(chainId, ESCROW_KIND, escrowCurrent.address, {
+    ...stripAddress(escrowCurrent),
+    adapter: escrowAdapter,
+  });
+  console.log(`${ESCROW_KIND}.adapter -> ${escrowAdapter}`);
+
+  pools.recordDeployment(chainId, ADAPTER_KIND, adapterAddress, {
+    ...(deployTx ? { deployTx } : {}),
+    ...(block !== undefined ? { block } : {}),
+    vault: vaultAddress,
+    escrow: escrowAddress,
+    bonusToken,
+    token0,
+    token1,
+    fee,
+    guardian: hre.ethers.getAddress(await adapter.guardian()),
+    purchaseSigner: hre.ethers.getAddress(await adapter.purchaseSigner()),
+    soulZapCallers: allowlisted,
+    owner: hre.ethers.getAddress(await adapter.owner()),
+    previousAdapter,
+  });
+  console.log(
+    `${ADAPTER_KIND} -> ${adapterAddress} (replacing ${previousAdapter}; deployed in block ` +
+      `${block === undefined ? "unknown" : block})`
+  );
 }
 
 /** A registry entry minus its `address`, ready to be spread back into `recordDeployment`. */

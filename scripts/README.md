@@ -653,6 +653,25 @@ what lets an interrupted replacement resume rather than deploy a third one; a ru
 the previous one completed is a NEW replacement and deploys another adapter, which is the point
 of the command.
 
+Once the batch's effects are on chain — executed by this run, or found already executed by a
+re-run after an interruption or after the Safe sent it — the run rebuilds the
+`ApeBondPositionAdapter` entry for the NEW adapter: its own `deployTx` and `block` (promoted from
+`pendingAdapterTx` / `pendingAdapterBlock`), the guardian, signer and callers read back off it,
+`previousAdapter`, and nothing carried over from the old entry (no old `block`, no old
+`purchaseSignerTx`). `BonusEscrow.adapter` is re-pointed in the same phase.
+
+The replacement on Sepolia test stack #5 can be rehearsed first on a fork of the chain head, with
+the live-day environment, followed by one 14-field purchase and its claim through the new adapter:
+
+```bash
+LP_APEBOND_DRYRUN=1 \
+  npx hardhat test test/lp-staking/integration/ApeBondReplaceAdapter.test.js
+```
+
+Like the activation dry-run it is opt-in and pending in CI; unlike it, it falls back to the
+public Sepolia endpoints when no `SEPOLIA_RPC_URL` / `INFURA_API_KEY` is set, and fails (rather
+than skips) when none of them can be forked.
+
 `upgrade-vault` is the plain UUPS upgrade as a one-call batch, with no ApeBond contract deployed
 or touched. It is the same end state step 3 of "Activating a new implementation" reaches, done
 in one command instead of four.
