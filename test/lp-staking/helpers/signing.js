@@ -179,12 +179,11 @@ function claimTypeHash(leg) {
  * Order and types must match the struct as the contract declares it: this array is both what
  * ethers signs and what `purchaseAuthorizationTypeHash()` below derives the type string from,
  * so the adapter's `PURCHASE_AUTHORIZATION_TYPEHASH` can be asserted against it rather than
- * against a second hand-written copy of the same 15 lines.
+ * against a second hand-written copy of the same 14 lines.
  */
 const PURCHASE_AUTHORIZATION_FIELDS = [
   { name: "purchaseId", type: "bytes32" },
   { name: "campaignId", type: "bytes32" },
-  { name: "soulZapRequestId", type: "bytes32" },
   { name: "beneficiary", type: "address" },
   { name: "soulZapCaller", type: "address" },
   { name: "inputToken", type: "address" },
@@ -210,7 +209,7 @@ const PURCHASE_AUTHORIZATION_FIELDS = [
  * @param {object} args
  * @param {object} args.signer Ethers signer holding the purchase key.
  * @param {object} args.domain EIP-712 domain of the adapter being signed for.
- * @param {object} args.authorization The 15 fields, by name.
+ * @param {object} args.authorization The 14 fields, by name.
  */
 async function signPurchaseAuthorization({ signer, domain, authorization }) {
   return signer.signTypedData(

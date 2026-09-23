@@ -343,7 +343,7 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 753 tests: unit suites + three fork suites
+npx hardhat test                 # 818 passing, 31 pending (opt-in dry-run): unit + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
@@ -523,6 +523,10 @@ file with nothing uncovered at all:
 | `RewardsDistributor.sol` | 97.09% (100/103) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
+
+Re-confirmed 2026-09-23 after `soulZapRequestId` left the adapter's purchase struct: every
+number above measured the same, because the removed field only sat on continuation lines of
+multi-line statements, so no line or branch was added or removed.
 
 The thirteen uncovered lines are the two `_checkTwapDeviation();` call sites
 (`LPStakingVault.sol:966`, `LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the

@@ -908,7 +908,7 @@ describe("ApeBond activation, rehearsed on a fork of live Sepolia (stack #5)", f
 
 /** Only the adapter's one event, so the receipt can be decoded without its whole ABI. */
 const DEPOSITED_IFACE = new ethers.Interface([
-  "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,bytes32 soulZapRequestId,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
+  "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
 ]);
 
 /**

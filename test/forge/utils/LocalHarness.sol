@@ -109,7 +109,7 @@ abstract contract LocalHarness is BaseForge {
     /// @dev {ApeBondPositionAdapter-PURCHASE_AUTHORIZATION_TYPEHASH}, re-declared here so a
     ///      change to the struct fails a test instead of quietly re-signing the new shape.
     bytes32 internal constant PURCHASE_AUTHORIZATION_TYPEHASH = keccak256(
-        "PurchaseAuthorization(bytes32 purchaseId,bytes32 campaignId,bytes32 soulZapRequestId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline)"
+        "PurchaseAuthorization(bytes32 purchaseId,bytes32 campaignId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline)"
     );
 
     // ──────────────────────── The rung ─────────────────────────

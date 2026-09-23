@@ -2421,7 +2421,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     // Opaque ids in the contracts; REAL's own identifiers in production.
     const purchaseId = ethers.id("real.apebond.purchase.1");
     const campaignId = ethers.id("real.apebond.campaign.rehearsal");
-    const soulZapRequestId = ethers.id("soulzap.quote.1");
     const PURCHASE_NONCE = 1n;
 
     before(async function () {
@@ -2689,7 +2688,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       authorization = {
         purchaseId,
         campaignId,
-        soulZapRequestId,
         beneficiary: w.alice.address,
         soulZapCaller: w.soulZapCaller.address,
         inputToken: assetAddr,
@@ -2809,7 +2807,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(deposited.purchaseId).to.equal(purchaseId);
       expect(deposited.campaignId).to.equal(campaignId);
       expect(deposited.beneficiary).to.equal(w.alice.address);
-      expect(deposited.soulZapRequestId).to.equal(soulZapRequestId);
       expect(deposited.tokenId).to.equal(apeTokenId);
       expect(deposited.liquidity).to.equal(apeLiquidity);
       expect(Number(deposited.tickLower)).to.equal(campaignRange.tickLower);

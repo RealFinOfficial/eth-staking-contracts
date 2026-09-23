@@ -38,7 +38,6 @@ describe("ApeBondPositionAdapter", function () {
 
   const PURCHASE = ID("apebond-purchase-1");
   const CAMPAIGN = ID("apebond-campaign-1");
-  const REQUEST = ID("soulzap-request-1");
   const BONUS = TOKENS(100);
   const ESCROW_FUNDING = TOKENS(1_000);
   const GROSS_INPUT = 1_000_000_000n; // 1,000 USDT, 6 decimals
@@ -130,7 +129,6 @@ describe("ApeBondPositionAdapter", function () {
     return {
       purchaseId: PURCHASE,
       campaignId: CAMPAIGN,
-      soulZapRequestId: REQUEST,
       beneficiary: alice.address,
       soulZapCaller: soulZapAddr,
       inputToken: usdtAddr,
@@ -319,7 +317,7 @@ describe("ApeBondPositionAdapter", function () {
   describe("The typed data", function () {
     it("uses the type hash the struct defines, field for field", async function () {
       expect(await adapter.PURCHASE_AUTHORIZATION_TYPEHASH()).to.equal(purchaseAuthorizationTypeHash());
-      expect(PURCHASE_AUTHORIZATION_FIELDS).to.have.lengthOf(15);
+      expect(PURCHASE_AUTHORIZATION_FIELDS).to.have.lengthOf(14);
     });
 
     it("reports the RealApeBondPurchase domain, distinct from the rewards voucher domain", async function () {
@@ -391,7 +389,7 @@ describe("ApeBondPositionAdapter", function () {
       expect(receipt.status).to.equal(1);
     });
 
-    it("emits ApeBondPositionDeposited with all thirteen fields of spec §9", async function () {
+    it("emits ApeBondPositionDeposited with all twelve fields of spec §9", async function () {
       const { tx, tokenId, authorization } = await deposit();
 
       await expect(tx)
@@ -400,7 +398,6 @@ describe("ApeBondPositionAdapter", function () {
           PURCHASE,
           CAMPAIGN,
           alice.address,
-          REQUEST,
           tokenId,
           LIQUIDITY,
           TICK_LOWER,

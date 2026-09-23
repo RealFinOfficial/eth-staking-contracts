@@ -50,7 +50,6 @@ contract ApeBondAdapterBranchesTest is LocalHarness {
 
     bytes32 internal constant PURCHASE = keccak256("apebond-purchase-1");
     bytes32 internal constant CAMPAIGN = keccak256("apebond-campaign-1");
-    bytes32 internal constant REQUEST = keccak256("soulzap-request-1");
 
     uint256 internal constant GROSS_INPUT = 1_000e6;
     uint256 internal constant NET_INPUT = 990e6;
@@ -89,7 +88,6 @@ contract ApeBondAdapterBranchesTest is LocalHarness {
         return ApeBondPositionAdapter.PurchaseAuthorization({
             purchaseId: PURCHASE,
             campaignId: CAMPAIGN,
-            soulZapRequestId: REQUEST,
             beneficiary: carol,
             soulZapCaller: address(soulZap),
             inputToken: address(usdcToken),

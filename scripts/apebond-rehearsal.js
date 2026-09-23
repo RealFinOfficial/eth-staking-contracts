@@ -23,7 +23,7 @@ const signing = require("../test/lp-staking/helpers/signing");
 // (`LP_REHEARSAL_CALLER_KEY`), allowlisted on the adapter at activation time through
 // `LP_APEBOND_SOULZAP_CALLERS`. That wallet does what SoulZap would do — it mints the position and
 // presents the authorization — and nothing else about the flow changes: the same `depositFor`, the
-// same 15-field EIP-712 authorization, the same custody assertions.
+// same 14-field EIP-712 authorization, the same custody assertions.
 //
 // ──────────────────────── test stacks only ────────────────────────
 //
@@ -157,9 +157,9 @@ const ADAPTER_ABI = [
   "function consumedPurchaseIds(bytes32 purchaseId) view returns (bool)",
   "function consumedNonces(uint256 nonce) view returns (bool)",
   "function eip712Domain() view returns (bytes1 fields, string name, string version, uint256 chainId, address verifyingContract, bytes32 salt, uint256[] extensions)",
-  "function hashPurchaseAuthorization((bytes32 purchaseId,bytes32 campaignId,bytes32 soulZapRequestId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline) authorization) view returns (bytes32)",
-  "function depositFor(uint256 tokenId,(bytes32 purchaseId,bytes32 campaignId,bytes32 soulZapRequestId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline) authorization,bytes realSignature)",
-  "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,bytes32 soulZapRequestId,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
+  "function hashPurchaseAuthorization((bytes32 purchaseId,bytes32 campaignId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline) authorization) view returns (bytes32)",
+  "function depositFor(uint256 tokenId,(bytes32 purchaseId,bytes32 campaignId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline) authorization,bytes realSignature)",
+  "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
 ];
 
 const ESCROW_ABI = [
@@ -718,13 +718,11 @@ async function runDeposit({ chainId, stack, recordFile }) {
     )
   );
   const campaignId = hre.ethers.id(REHEARSAL_CAMPAIGN);
-  const soulZapRequestId = hre.ethers.id(`${REHEARSAL_CAMPAIGN}:${nonce}`);
   const bonusUnlockAt = BigInt(nowSeconds + cliffSeconds);
 
   const authorization = {
     purchaseId,
     campaignId,
-    soulZapRequestId,
     beneficiary,
     soulZapCaller: caller.address,
     inputToken: inputTokenAddress,
@@ -848,7 +846,6 @@ async function runDeposit({ chainId, stack, recordFile }) {
     bonusSymbol,
     purchaseId,
     campaignId,
-    soulZapRequestId,
     tokenId: tokenId.toString(),
     liquidity: liquidity.toString(),
     beneficiary,

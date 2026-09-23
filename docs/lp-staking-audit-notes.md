@@ -802,7 +802,9 @@ cannot be used to escape the delay it is changing.
 ### Sizes
 
 `forge build --sizes`, re-measured 2026-09-15 after the ApeBond round was rebased onto the
-guardian-revocation base, optimizer as configured in `foundry.toml`:
+guardian-revocation base, optimizer as configured in `foundry.toml`. The adapter row was
+re-measured 2026-09-23, after `soulZapRequestId` left the purchase struct (8,785 -> 8,751 B);
+every other row measured the same that day:
 
 | contract | runtime (B) | EIP-170 margin (B) |
 |---|---|---|
@@ -810,7 +812,7 @@ guardian-revocation base, optimizer as configured in `foundry.toml`:
 | `LPStakingVaultV2Mock` | 16,139 | 8,437 |
 | `LPZapper` | 9,244 | 15,332 |
 | `RewardsDistributor` (implementation) | 9,009 | 15,567 |
-| `ApeBondPositionAdapter` | 8,785 | 15,791 |
+| `ApeBondPositionAdapter` | 8,751 | 15,825 |
 | `TokenX` | 6,193 | 18,383 |
 | `BonusEscrow` (implementation) | 5,658 | 18,918 |
 

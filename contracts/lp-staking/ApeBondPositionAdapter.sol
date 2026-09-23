@@ -108,9 +108,10 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
      *      breaking change for an integrator that cannot redeploy in step with us. It changes
      *      {PURCHASE_AUTHORIZATION_TYPEHASH} too, which invalidates every outstanding
      *      signature — deliberately loud, but only useful if it is never done by accident.
+     *      Reduced from 15 to 14 fields on 2026-09-23 (CTO decision: `soulZapRequestId` was a
+     *      leftover and nothing replaces it), before any external integrator signed against it.
      * @param purchaseId Stable REAL identifier for this entitlement. Spent exactly once.
      * @param campaignId The ApeBond campaign this purchase belongs to.
-     * @param soulZapRequestId The SoulZap quote this transaction executes. Correlation only.
      * @param beneficiary Buyer credited as the vault staker and as the bonus payee.
      * @param soulZapCaller The single address allowed to present this authorization.
      * @param inputToken What the buyer paid with. Audit trail; never touched on-chain here.
@@ -127,7 +128,6 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
     struct PurchaseAuthorization {
         bytes32 purchaseId;
         bytes32 campaignId;
-        bytes32 soulZapRequestId;
         address beneficiary;
         address soulZapCaller;
         address inputToken;
@@ -154,7 +154,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
     ///      different domains mean neither signer's signatures can ever be replayed as the
     ///      other's even if the same key were used by mistake.
     bytes32 public constant PURCHASE_AUTHORIZATION_TYPEHASH = keccak256(
-        "PurchaseAuthorization(bytes32 purchaseId,bytes32 campaignId,bytes32 soulZapRequestId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline)"
+        "PurchaseAuthorization(bytes32 purchaseId,bytes32 campaignId,address beneficiary,address soulZapCaller,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt,uint128 minLiquidity,int24 expectedTickLower,int24 expectedTickUpper,uint256 nonce,uint256 deadline)"
     );
 
     /// @dev NFT-receipt guard states, mirroring {LPZapper} and {LPStakingVault}. Non-zero
@@ -209,7 +209,6 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
         bytes32 indexed purchaseId,
         bytes32 indexed campaignId,
         address indexed beneficiary,
-        bytes32 soulZapRequestId,
         uint256 tokenId,
         uint128 liquidity,
         int24 tickLower,
@@ -671,11 +670,11 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
      * @dev The EIP-712 struct hash. Written out field by field, in the struct's declared order,
      *      so it reads against {PURCHASE_AUTHORIZATION_TYPEHASH} line for line.
      *
-     *      Split into two halves and concatenated because sixteen 32-byte words in one
+     *      Split into two halves and concatenated because fifteen 32-byte words in one
      *      `abi.encode` do not fit on the stack under this repo's build (0.8.28, optimizer 200,
      *      no via-IR). The result is byte-identical: every field of {PurchaseAuthorization} is a
      *      static type, so each `abi.encode` here is just its arguments padded to 32 bytes and
-     *      laid end to end, and concatenating the two is the same 512 bytes the one-call form
+     *      laid end to end, and concatenating the two is the same 480 bytes the one-call form
      *      would produce. `test_Digest_MatchesTheReferenceEncoding` recomputes it the long way
      *      and the Hardhat suite recomputes it a third time with `ethers.TypedDataEncoder`.
      */
@@ -686,7 +685,6 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
                     PURCHASE_AUTHORIZATION_TYPEHASH,
                     authorization.purchaseId,
                     authorization.campaignId,
-                    authorization.soulZapRequestId,
                     authorization.beneficiary,
                     authorization.soulZapCaller,
                     authorization.inputToken,
@@ -708,7 +706,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
 
     /**
      * @dev Step 15, in a function of its own and with as few parameters as the event allows:
-     *      thirteen fields plus the locals they come from do not fit on the stack together
+     *      twelve fields plus the locals they come from do not fit on the stack together
      *      under this repo's build (0.8.28, optimizer 200, no via-IR).
      *
      *      `tickLower` / `tickUpper` are therefore read off the authorization rather than
@@ -724,7 +722,6 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuard, EIP712, IERC721Rece
             authorization.purchaseId,
             authorization.campaignId,
             authorization.beneficiary,
-            authorization.soulZapRequestId,
             tokenId,
             liquidity,
             authorization.expectedTickLower,

@@ -446,12 +446,6 @@
       },
       {
         "indexed": false,
-        "internalType": "bytes32",
-        "name": "soulZapRequestId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
         "internalType": "uint256",
         "name": "tokenId",
         "type": "uint256"
@@ -674,11 +668,6 @@
             "type": "bytes32"
           },
           {
-            "internalType": "bytes32",
-            "name": "soulZapRequestId",
-            "type": "bytes32"
-          },
-          {
             "internalType": "address",
             "name": "beneficiary",
             "type": "address"
@@ -861,11 +850,6 @@
           {
             "internalType": "bytes32",
             "name": "campaignId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "soulZapRequestId",
             "type": "bytes32"
           },
           {

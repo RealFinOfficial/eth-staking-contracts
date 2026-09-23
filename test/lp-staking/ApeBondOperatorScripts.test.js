@@ -586,7 +586,7 @@ describe("the ApeBond operator scripts — signer, funding and the live rehearsa
       const record = readRecord();
       const receipt = await provider.getTransactionReceipt(record.deposit.depositTx);
       const iface = new ethers.Interface([
-        "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,bytes32 soulZapRequestId,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
+        "event ApeBondPositionDeposited(bytes32 indexed purchaseId,bytes32 indexed campaignId,address indexed beneficiary,uint256 tokenId,uint128 liquidity,int24 tickLower,int24 tickUpper,address inputToken,uint256 grossInputAmount,uint256 netInputAmount,uint256 guaranteedBonusAmount,uint64 bonusUnlockAt)",
       ]);
       const parsed = receipt.logs
         .filter((log) => log.address.toLowerCase() === adapterAddr.toLowerCase())

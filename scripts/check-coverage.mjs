@@ -62,6 +62,11 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // uncovered branch fails the gate. The adapter's LINE floor is its ceiling too — it is the one
 // file in scope with nothing uncovered at all, so any new line it grows must arrive covered.
 //
+// 2026-09-23, re-ratified unchanged. `soulZapRequestId` left `PurchaseAuthorization` (15 -> 14
+// fields) and the `ApeBondPositionDeposited` event. The adapter still measures 97/97 lines and
+// 25/25 branches: the field only sat on continuation lines of the multi-line `abi.encode` and
+// `emit` statements, which lcov does not count on their own, so no floor above moved.
+//
 // 2026-09-15, the ApeBond round, rebased onto the guardian-revocation base. The two new
 // contracts join the gate: `ApeBondPositionAdapter.sol` and `BonusEscrow.sol`, both at 100%
 // branches. Reaching full line coverage on the adapter took one test rather than one lowered

@@ -401,7 +401,7 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               nothing when it is already there
   apebond-rehearsal.js      — The live rehearsal, TEST STACKS ONLY (refuses chain 1 with no
                               CONFIRM escape). Phase `deposit` mints the campaign position from
-                              the SoulZap-seat wallet, signs the 15-field PurchaseAuthorization
+                              the SoulZap-seat wallet, signs the 14-field PurchaseAuthorization
                               and calls depositFor; phase `claim`, after the cliff, claims the
                               bonus from a wallet that is NOT the beneficiary. Writes
                               apebond-rehearsal-<chainId>.json beside the registry (gitignored)
@@ -591,6 +591,10 @@ uncovered at all:
 | `RewardsDistributor.sol` | 97.09% (100/103) | 100.00% (15/15) |
 | `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
+
+Re-confirmed 2026-09-23 after `soulZapRequestId` left the adapter's purchase struct: every
+number above measured the same, because the removed field only sat on continuation lines of
+multi-line statements, so no line or branch was added or removed.
 
 The thirteen uncovered lines are all `--ir-minimum` line attribution: the two
 `_checkTwapDeviation();` call sites, `_rollPendingEpoch();`, the four ERC-7201 assembly bodies,
