@@ -24,3 +24,7 @@ apebond-*-batch.json
 # claim phase can run in another shell on another day. Same reason as the batch file above:
 # it is a run artifact of a TEST-STACK rehearsal, not a record of the deployment.
 apebond-rehearsal-*.json
+
+# `scripts/apebond-sign-authorization.js` writes the pair it signed beside deployments.json. It is a
+# hand-over artifact for a third-party router on a TEST STACK, not a record of the deployment.
+apebond-authorization-*.json

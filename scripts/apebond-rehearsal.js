@@ -1073,6 +1073,7 @@ module.exports = {
   readPhase,
   resolveCaller,
   resolveRecordFile,
+  resolveStack,
   defaultMintAmounts,
   sqrtRatioAtTick,
   alignDown,

@@ -147,6 +147,7 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 | `set-purchase-signer.js` | GUARDIAN tier: point `ApeBondPositionAdapter.purchaseSigner` at the backend key that signs purchases, which is what OPENS the deposit path `deploy-apebond.js` deliberately leaves closed. Takes the address (`LP_APEBOND_PURCHASE_SIGNER`) or the private key it belongs to (`LP_APEBOND_PURCHASE_SIGNER_KEY`, never printed). Checks the tier on chain and names it rather than reverting, sends nothing when the signer is already that address, and refuses `address(0)` — which closes the route outright — unless `LP_APEBOND_ALLOW_CLOSE=1` |
 | `fund-escrow.js` | Transfer the escrow's own `bonusToken()` into the `BonusEscrow` proxy. A plain ERC-20 transfer, because the escrow has no funding function: what makes a reservation possible is the proxy's balance covering `totalReserved`. `LP_APEBOND_FUND_AMOUNT` sends exactly that much; `LP_APEBOND_FUND_TARGET` tops the FREE balance (`balance - totalReserved`) up to that much and sends nothing when it is already there, so the same command is safe to repeat. Prints both sides' balances before and after, and refuses an amount the sender cannot cover |
 | `apebond-rehearsal.js` | The live rehearsal, TEST STACKS ONLY (it refuses chain 1 with no `CONFIRM` escape). `LP_REHEARSAL_PHASE=deposit` mints the campaign's position from the wallet playing the SoulZap seat, builds and signs the 14-field `PurchaseAuthorization`, calls `depositFor`, and asserts the vault has custody, the BENEFICIARY is the credited staker, the escrow holds a matching unclaimed reservation and `ApeBondPositionDeposited` is in the receipt. `LP_REHEARSAL_PHASE=claim`, after the cliff, claims the bonus from a wallet that is NOT the beneficiary and asserts the beneficiary's balance grew by exactly the bonus. Writes `apebond-rehearsal-<chainId>.json` beside the registry, which is what lets the two phases run in different shells on different days |
+| `apebond-sign-authorization.js` | SIGN-ONLY, TEST STACKS ONLY (refuses chain 1 with no `CONFIRM` escape). Produces one `{ authorization, signature }` pair for a third-party router that mints the position itself and calls `depositFor` from its own contract. Signs off chain with `LP_APEBOND_PURCHASE_SIGNER_KEY`, sends no transaction, and stops before signing when the key is not `adapter.purchaseSigner()`, the caller is not allowlisted, the input token is not one of the pool's two, net exceeds gross, the bonus exceeds what the escrow can still reserve, or the range is off the tick grid. Asserts the adapter's own `hashPurchaseAuthorization` equals the signed digest. Writes `apebond-authorization-<chainId>-<id>.json` and prints a "FOR THE ROUTER SIDE" block |
 | `validate-upgrade-safety.js` | UUPS implementation safety (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
@@ -572,6 +573,56 @@ deployment is already in `deployments.json`.
 signs an authorization with a key read out of the environment and spends a purchase id; on
 mainnet the purchase comes from SoulZap and the signature from the backend, and neither is driven
 from a script in this repo.
+
+### Signing for a third-party router (test stacks only)
+
+`apebond-rehearsal.js` plays both sides of a purchase: it mints the position AND signs the
+authorization in the same run. When ApeBond's own SoulZap router is the caller, the router mints
+the position in its contract and needs only REAL's half: one signed `PurchaseAuthorization` and
+its signature. `scripts/apebond-sign-authorization.js` produces exactly that pair and nothing else.
+It signs off chain with the purchase-signer key, sends no transaction and changes nothing on chain.
+
+```bash
+LP_SIGN_BENEFICIARY=<the buyer> \
+LP_SIGN_SOULZAP_CALLER=<the router contract, allowlisted on the adapter> \
+LP_SIGN_INPUT_TOKEN=<one of the pool's two tokens> \
+LP_SIGN_GROSS=1000 LP_SIGN_NET=990 LP_SIGN_BONUS=100 \
+LP_SIGN_TICK_LOWER=-291360 LP_SIGN_TICK_UPPER=-288960 \
+  npx hardhat run scripts/apebond-sign-authorization.js --network sepolia
+```
+
+Gross and net are whole tokens of the input token, the bonus is whole tokens of
+`escrow.bonusToken()`. The optional inputs and their defaults are `LP_SIGN_CLIFF_SECONDS` (300),
+`LP_SIGN_MIN_LIQUIDITY` (1), `LP_SIGN_CAMPAIGN` (the rehearsal campaign id),
+`LP_SIGN_DEADLINE_SECONDS` (3600), `LP_SIGN_NONCE` (chain time, moved forward past consumed
+nonces), `LP_SIGN_PURCHASE_ID` (`keccak256(abi.encode(campaign, beneficiary, caller, nonce,
+chainId))`) and `LP_SIGN_OUT`. The adapter, escrow and vault come from the registry, with the same
+`LP_APEBOND_ADAPTER` / `_ESCROW` / `_VAULT` overrides as the rehearsal. The header of the script lists
+every variable.
+
+Before it signs, the run reads the chain and stops, having signed nothing, if any of these fails:
+the key's address is `adapter.purchaseSigner()`, the adapter's EIP-712 domain is
+`RealApeBondPurchase`/`1` on this chain and its type hash is the 14-field one,
+`soulZapCallers(caller)` is true, the beneficiary is not one of the four addresses the adapter
+rejects, the input token is one of the pool's two tokens, net is not above gross, the bonus is not
+above the escrow's free balance (balance minus `totalReserved`), the ticks are ordered and on the
+pool's `tickSpacing` grid, and neither the nonce nor the purchase id is spent. After signing it
+asserts that `adapter.hashPurchaseAuthorization(authorization)`, read from the chain, equals the
+local EIP-712 digest, and that ECDSA recovery of the signature over that digest gives
+`purchaseSigner`. It then writes `apebond-authorization-<chainId>-<first 8 hex of purchaseId>.json`
+beside the registry (gitignored) and prints a "FOR THE ROUTER SIDE" block that holds no secret and is
+pasted to the third party as it is: the 14 fields in struct order, the signature, the digest, the
+deadline in UTC and the reminder to mint exactly on the signed ticks, with at least `minLiquidity`,
+and to call `depositFor` from the named caller, once.
+
+Two facts the router side should know. `bonusUnlockAt` is fixed when the pair is SIGNED (chain time
+plus the cliff), not when it is deposited. And a signed pair consumes nothing on chain until it
+lands, so two runs in the same second for the same buyer and caller produce the same default nonce;
+set `LP_SIGN_NONCE` to issue several pairs at once.
+
+This script is for TEST STACKS ONLY and refuses chain 1 with no `CONFIRM=yes` escape. On mainnet a
+purchase authorization is issued by the backend's signing endpoint (roadmap step 5), never by hand
+from a key in an operator's `.env`.
 
 ### Rehearsing the whole sequence on a fork first (the dry-run)
 
