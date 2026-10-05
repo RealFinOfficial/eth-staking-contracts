@@ -44,9 +44,9 @@ const pools = require("./lib/pools");
 //
 // ──────────────────────── where the constructor arguments come from ────────────────────────
 //
-// Three of the five implementations carry `immutable` protocol references set in their
-// constructor — the vault (its market), the registry (its distributor) and the zapper (its
-// vault and market) — and the new implementation must carry EXACTLY the values the deployed one
+// Four of the six implementations carry `immutable` protocol references set in their
+// constructor — the vault (its market), the registry (its distributor), the zapper (its
+// vault and market) and the bonus escrow (its bonus token and vault) — and the new implementation must carry EXACTLY the values the deployed one
 // carries: they are bytecode, not proxy storage, so an upgrade replaces them wholesale. A vault
 // implementation built with the wrong `pool` would silently repoint the TWAP guard at another
 // market for every position already in custody. `RewardsDistributor` and `TokenOverture` have
@@ -73,7 +73,7 @@ const pools = require("./lib/pools");
 // ──────────────────────── environment ────────────────────────
 //
 //   IMPL_TARGET              LPStakingVault | RewardsDistributor | LPEpochRegistry |
-//                            TokenOverture | LPZapper. One kind per run, because each is a
+//                            TokenOverture | LPZapper | BonusEscrow. One kind per run, because each is a
 //                            separate implementation, a separate deploy and a separate
 //                            timelock operation
 //   IMPL_PROXY_ADDRESS       overrides the registry lookup of the proxy
@@ -96,8 +96,11 @@ const pools = require("./lib/pools");
 // The full runbook — validate, schedule, wait, execute, post-check, record, hand over — is in
 // scripts/README.md under "Activating a new implementation (Sepolia test stack #5)".
 
-/** The five UUPS proxies. Each name is both a registry kind and an artifact name. */
-const IMPL_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper"];
+/**
+ * The UUPS proxies: the five of the LP stack and, on a stack that carries the ApeBond route, the
+ * `BonusEscrow`. Each name is both a registry kind and an artifact name.
+ */
+const IMPL_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper", "BonusEscrow"];
 
 /**
  * The two exceptions the spec grants the proxies (`docs/specs/01-contracts.md` §1): the
@@ -145,6 +148,11 @@ const CONSTRUCTOR_SOURCES = {
     getters: ["vault", "positionManager", "pool", "token0", "token1", "fee", "swapRouter", "usdc", "asset"],
     registryKeys: ["vault", null, null, null, null, null, null, "usdc", "asset"],
   },
+  BonusEscrow: {
+    // constructor(bonusToken, vault)
+    getters: ["bonusToken", "vault"],
+    registryKeys: ["bonusToken", "vault"],
+  },
 };
 
 /** The view surface the constructor arguments are read through. Nothing else is called. */
@@ -171,6 +179,7 @@ const IMMUTABLE_ABI = {
     "function usdc() view returns (address)",
     "function asset() view returns (address)",
   ],
+  BonusEscrow: ["function bonusToken() view returns (address)", "function vault() view returns (address)"],
 };
 
 /** Compares two constructor values the way Solidity would: addresses case-insensitively. */

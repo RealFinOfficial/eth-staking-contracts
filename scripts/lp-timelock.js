@@ -214,6 +214,25 @@ const OWNER_TIER = {
     kinds: [ADAPTER_KIND],
     note: "adds or removes one SoulZap contract on the depositFor allowlist",
   },
+  setCampaign: {
+    signature:
+      "function setCampaign(bytes32 campaignId, (bool enabled, int24 tickLower, int24 tickUpper, " +
+      "uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount) config)",
+    kinds: [ADAPTER_KIND],
+    note:
+      "creates or reconfigures one campaign: exact range, cliff, rate (<= 10,000 bps), minimum " +
+      "bonus. Pass the config as an array or object in a TIMELOCK_BATCH file",
+  },
+  setCampaignEnabled: {
+    signature: "function setCampaignEnabled(bytes32 campaignId, bool enabled)",
+    kinds: [ADAPTER_KIND],
+    note: "switches one existing campaign on or off",
+  },
+  setCampaignCaller: {
+    signature: "function setCampaignCaller(bytes32 campaignId, address caller, bool allowed)",
+    kinds: [ADAPTER_KIND],
+    note: "permits or removes one caller for one campaign (the global allowlist is also needed)",
+  },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",
     kinds: [...PROXY_KINDS, ESCROW_KIND],
@@ -292,17 +311,49 @@ function coerceArgs(fn, args) {
         `(${fragment.inputs.map((i) => `${i.type} ${i.name}`).join(", ") || "none"}) — got ${args.length}`
     );
   }
-  return fragment.inputs.map((input, index) => {
-    const raw = args[index];
-    if (typeof raw !== "string") return raw;
-    if (input.type === "bool") {
-      if (raw === "true") return true;
-      if (raw === "false") return false;
-      throw new Error(`${fn} argument ${index} (${input.name}) must be true or false — got ${raw}`);
+  return fragment.inputs.map((input, index) => coerceValue(fn, `argument ${index} (${input.name})`, input, args[index]));
+}
+
+/**
+ * One value, by its ABI parameter. Strings become what the type needs (`true`/`false`, a BigInt);
+ * a tuple — `ApeBondPositionAdapter.setCampaign`'s `CampaignConfig` — is taken as an array in
+ * component order or as an object by component name (a batch file can hold either), or as the
+ * JSON text of one, and every component is coerced the same way. A bool is never left to
+ * ethers' truthiness: the string "false" would otherwise encode as true.
+ */
+function coerceValue(fn, label, input, raw) {
+  if (input.baseType === "tuple") {
+    let value = raw;
+    if (typeof value === "string") {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        throw new Error(`${fn} ${label} must be a JSON array or object for ${input.type} — got ${raw}`);
+      }
     }
-    if (input.type.startsWith("uint") || input.type.startsWith("int")) return BigInt(raw);
-    return raw;
-  });
+    const parts = Array.isArray(value)
+      ? value
+      : input.components.map((component) => {
+          if (!value || !(component.name in value)) {
+            throw new Error(`${fn} ${label} is missing ${component.name}`);
+          }
+          return value[component.name];
+        });
+    if (parts.length !== input.components.length) {
+      throw new Error(`${fn} ${label} needs ${input.components.length} components — got ${parts.length}`);
+    }
+    return input.components.map((component, i) =>
+      coerceValue(fn, `${label}.${component.name}`, component, parts[i])
+    );
+  }
+  if (input.type === "bool") {
+    if (raw === true || raw === "true") return true;
+    if (raw === false || raw === "false") return false;
+    throw new Error(`${fn} ${label} must be true or false — got ${raw}`);
+  }
+  if (typeof raw !== "string" && typeof raw !== "number") return raw;
+  if (input.type.startsWith("uint") || input.type.startsWith("int")) return BigInt(raw);
+  return raw;
 }
 
 /** Empty string means no arguments, not one empty argument. */
