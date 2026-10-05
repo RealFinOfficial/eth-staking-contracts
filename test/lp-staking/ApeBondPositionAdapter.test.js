@@ -3,158 +3,118 @@ const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 const {
-  signPurchaseAuthorization,
-  purchaseAuthorizationTypeHash,
-  PURCHASE_AUTHORIZATION_FIELDS,
-} = require("./helpers/signing");
+  APEBOND_CAMPAIGN_ID,
+  APEBOND_BONUS_BPS,
+  APEBOND_MIN_BONUS,
+  APEBOND_CLIFF_SECONDS,
+} = require("./helpers/constants");
+const { valueAt, bonusFor } = require("./helpers/positionValue");
 
+/**
+ * ApeBondPositionAdapter — the gate between SoulZap and the vault, after the B.3 refactor
+ * (decision document 2026-10-01, overrides 2026-10-05).
+ *
+ * What this suite proves:
+ *   - THE CONTRACT COMPUTES THE BONUS (P1). There is no signature, no purchase id and no bonus
+ *     number in the call: `depositFor(tokenId, campaignId, beneficiary)` values the position at
+ *     the vault's TWAP and takes the campaign's rate of it, zero below the campaign's minimum
+ *     (D6). The expected figure is computed here, independently, from `helpers/positionValue.js`
+ *     (a BigInt port of the Uniswap math), and cross-checked against `previewBonus`.
+ *   - A campaign carries exactly range, cliff, rate and minimum — no cap of any kind (O2) — and
+ *     the escrow records the bonus whatever its balance is.
+ *   - The order of the twelve steps: every rejection fires with the values its error names, and
+ *     a failed purchase leaves nothing behind.
+ *   - THE LOOP (P2): buy and unstake in one transaction forfeits the bonus.
+ *   - The two admin tiers (timelock owner: campaigns, callers, guardian; guardian: the pause) and
+ *     the NFT receipt window.
+ *   - `depositFor` writes nothing to the adapter's own storage.
+ *
+ * The local stack is the repo's mocks: the pool mock's spot and TWAP are both tick 0 unless a
+ * test moves them, and the position manager mock fabricates positions with `mintFake`.
+ */
 describe("ApeBondPositionAdapter", function () {
   let adapter, vault, escrow, soulZap, nfpm, pool, router;
-  let token0, token1, bonus, usdt;
-  let owner, guardian, purchaseSigner, alice, bob, stranger;
+  let asset, quote;
+  let owner, guardian, alice, bob, stranger, keeper;
 
   let adapterAddr, vaultAddr, escrowAddr, soulZapAddr, nfpmAddr, poolAddr, routerAddr;
-  let token0Addr, token1Addr, bonusAddr, usdtAddr;
+  let assetAddr, quoteAddr, token0Addr, token1Addr;
+  let bonusIsToken0;
 
-  // The two admin tiers are DIFFERENT accounts here, and so is the purchase signer, so "is
-  // this owner-only, guardian-only or signed" is never answered by two of them happening to
-  // be the same address. In production `owner` is the TimelockController, `guardian` is the
-  // multisig and `purchaseSigner` is a backend key that holds nothing.
   const asGuardian = () => adapter.connect(guardian);
 
   const FEE = 3000;
   const OTHER_FEE = 500;
+  const TICK_SPACING = 60;
   const TWAP_WINDOW = 600;
   const MAX_DEVIATION_TICKS = 500;
   const TICK_LOWER = -600;
   const TICK_UPPER = 600;
-  const LIQUIDITY = 1_000_000n;
-  const MIN_LIQUIDITY = 500_000n;
+  const LIQUIDITY = 10n ** 24n; // worth ~5.9e22 token units at tick 0: a bonus well above the minimum
+  const SMALL_LIQUIDITY = 10n ** 18n; // its bonus is far below the 1-token minimum
   const FAR_DEADLINE = 10n ** 12n;
   const ZERO = ethers.ZeroAddress;
-
+  const UNSAFE_ALLOW = ["constructor", "state-variable-immutable"];
+  const CAMPAIGN = APEBOND_CAMPAIGN_ID;
+  const OTHER_CAMPAIGN = ethers.id("apebond.campaign.other");
   const TOKENS = (n) => ethers.parseEther(String(n));
-  const ID = (label) => ethers.id(label);
-
-  const PURCHASE = ID("apebond-purchase-1");
-  const CAMPAIGN = ID("apebond-campaign-1");
-  const BONUS = TOKENS(100);
-  const ESCROW_FUNDING = TOKENS(1_000);
-  const GROSS_INPUT = 1_000_000_000n; // 1,000 USDT, 6 decimals
-  const NET_INPUT = 990_000_000n; //     after SoulZap's fee
 
   // MockSoulZapCaller.Approval
-  const APPROVE_PER_TOKEN = 0;
   const APPROVE_FOR_ALL = 1;
   const APPROVE_NONE = 2;
 
+  const NO_SWAP = { zeroForOne: true, amountIn: 0n, amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n };
+
+  function campaignConfig(overrides = {}) {
+    return {
+      enabled: true,
+      tickLower: TICK_LOWER,
+      tickUpper: TICK_UPPER,
+      bonusCliffSeconds: BigInt(APEBOND_CLIFF_SECONDS),
+      bonusBps: APEBOND_BONUS_BPS,
+      minBonusAmount: APEBOND_MIN_BONUS,
+      ...overrides,
+    };
+  }
+
   // ── deployment helpers ─────────────────────────────────────────
 
-  /// Deploys a vault UUPS proxy exactly as LPStakingVault.test.js does; `unsafeAllow` names
-  /// the two patterns the spec chose deliberately.
-  ///
-  /// The vault's three tiers are collapsed onto two keys here on purpose: `owner` holds the
-  /// owner AND operator tiers (nothing in this file calls the operator's functions) while
-  /// `guardian` holds the pause tier, which section "depositFor" uses. `zapper` starts at
-  /// address(0) — the ApeBond route is a stake OPERATOR, beside the zapper and never it.
-  async function deployVaultProxy() {
+  async function deployVaultProxy(poolAddress = poolAddr) {
     const Vault = await ethers.getContractFactory("LPStakingVault");
     return upgrades.deployProxy(
       Vault,
       [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS],
       {
         kind: "uups",
-        constructorArgs: [nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr],
-        unsafeAllow: ["constructor", "state-variable-immutable"],
+        constructorArgs: [nfpmAddr, poolAddress, token0Addr, token1Addr, FEE, routerAddr],
+        unsafeAllow: UNSAFE_ALLOW,
       }
     );
   }
 
-  /// Deploys a BonusEscrow UUPS proxy, as BonusEscrow.test.js does. The adapter is wired in
-  /// afterwards with `setAdapter` because this fixture owns the escrow; the deploy script,
-  /// which does not, passes a pre-computed adapter address to `initialize` instead.
-  async function deployEscrowProxy() {
+  async function deployEscrowProxy(bonusToken = assetAddr, forVault = vaultAddr) {
     const Escrow = await ethers.getContractFactory("BonusEscrow");
     return upgrades.deployProxy(Escrow, [owner.address, ZERO], {
       kind: "uups",
-      constructorArgs: [bonusAddr],
-      unsafeAllow: ["constructor", "state-variable-immutable"],
+      constructorArgs: [bonusToken, forVault],
+      unsafeAllow: UNSAFE_ALLOW,
     });
-  }
-
-  function adapterArgs(overrides = {}) {
-    return {
-      positionManager: nfpmAddr,
-      vault: vaultAddr,
-      escrow: escrowAddr,
-      token0: token0Addr,
-      token1: token1Addr,
-      fee: FEE,
-      initialOwner: owner.address,
-      guardian: guardian.address,
-      purchaseSigner: purchaseSigner.address,
-      ...overrides,
-    };
   }
 
   async function deployAdapter(overrides = {}) {
-    const args = adapterArgs(overrides);
-    const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
-    return Adapter.deploy(
-      args.positionManager,
-      args.vault,
-      args.escrow,
-      args.token0,
-      args.token1,
-      args.fee,
-      args.initialOwner,
-      args.guardian,
-      args.purchaseSigner
-    );
-  }
-
-  // ── authorization helpers ──────────────────────────────────────
-
-  async function authDomain(verifyingContract = adapterAddr) {
-    return {
-      name: "RealApeBondPurchase",
-      version: "1",
-      chainId: (await ethers.provider.getNetwork()).chainId,
-      verifyingContract,
-    };
-  }
-
-  /// One campaign purchase, with every field at its default unless a test moves it.
-  async function makeAuth(overrides = {}) {
-    return {
-      purchaseId: PURCHASE,
-      campaignId: CAMPAIGN,
-      beneficiary: alice.address,
-      soulZapCaller: soulZapAddr,
-      inputToken: usdtAddr,
-      grossInputAmount: GROSS_INPUT,
-      netInputAmount: NET_INPUT,
-      guaranteedBonusAmount: BONUS,
-      bonusUnlockAt: BigInt(await time.latest()) + 30n * 24n * 3600n,
-      minLiquidity: MIN_LIQUIDITY,
-      expectedTickLower: TICK_LOWER,
-      expectedTickUpper: TICK_UPPER,
-      nonce: 1n,
-      deadline: FAR_DEADLINE,
+    const args = {
+      positionManager: nfpmAddr,
+      vault: vaultAddr,
+      escrow: escrowAddr,
+      initialOwner: owner.address,
+      guardian: guardian.address,
       ...overrides,
     };
+    const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+    return Adapter.deploy(args.positionManager, args.vault, args.escrow, args.initialOwner, args.guardian);
   }
 
-  async function sign(authorization, opts = {}) {
-    return signPurchaseAuthorization({
-      signer: opts.signer ?? purchaseSigner,
-      domain: opts.domain ?? (await authDomain()),
-      authorization,
-    });
-  }
-
-  /// Fabricates a position NFT for `holder`. The adapter reads `positions()` and nothing
-  /// else, so the principal only has to be there for the vault's own later paths.
+  /// Fabricates a position NFT for `holder`; principal is funded so the vault's later paths work.
   async function createPosition(holder, opts = {}) {
     const {
       tickLower = TICK_LOWER,
@@ -164,54 +124,59 @@ describe("ApeBondPositionAdapter", function () {
       poolToken1 = token1Addr,
       poolFee = FEE,
     } = opts;
-
-    await nfpm.mintFake(holder, poolToken0, poolToken1, poolFee, tickLower, tickUpper, liquidity, 0, 0);
+    const principal = TOKENS(1_000);
+    await nfpm.mintFake(
+      holder,
+      poolToken0,
+      poolToken1,
+      poolFee,
+      tickLower,
+      tickUpper,
+      liquidity,
+      principal,
+      principal
+    );
+    await asset.transfer(nfpmAddr, principal);
+    await quote.transfer(nfpmAddr, principal);
     return nfpm.lastMintedId();
   }
 
-  /// The whole production shape in one call: SoulZap holds the NFT, approves the adapter and
-  /// calls `depositFor` in the same transaction.
+  /// The production shape in one call: SoulZap holds the NFT, approves the adapter and calls
+  /// `depositFor` in the same transaction.
   async function deposit(opts = {}) {
     const tokenId = opts.tokenId ?? (await createPosition(soulZapAddr, opts.position ?? {}));
-    const authorization = opts.authorization ?? (await makeAuth(opts.auth ?? {}));
-    const signature = opts.signature ?? (await sign(authorization, opts.signOpts ?? {}));
-    const tx = soulZap.deposit(adapterAddr, nfpmAddr, tokenId, authorization, signature);
-    return { tx, tokenId, authorization, signature };
+    const tx = soulZap.deposit(
+      adapterAddr,
+      nfpmAddr,
+      tokenId,
+      opts.campaignId ?? CAMPAIGN,
+      opts.beneficiary ?? alice.address
+    );
+    return { tx, tokenId };
+  }
+
+  /// The bonus the adapter must compute for `liquidity` on the campaign range at `tick`.
+  function expected(liquidity = LIQUIDITY, tick = 0, config = campaignConfig()) {
+    const value = valueAt(liquidity, config.tickLower, config.tickUpper, tick, bonusIsToken0);
+    return { value, bonus: bonusFor(value, config.bonusBps, config.minBonusAmount) };
   }
 
   async function txTimestamp(tx) {
-    const receipt = await tx.wait();
-    return (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
+    const receipt = await (await tx).wait();
+    return BigInt((await ethers.provider.getBlock(receipt.blockNumber)).timestamp);
   }
 
   beforeEach(async function () {
-    [owner, guardian, purchaseSigner, alice, bob, stranger] = await ethers.getSigners();
+    [owner, guardian, alice, bob, stranger, keeper] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    const usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
-    const asset = await Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18);
-
-    // Uniswap sorts the pair ascending by address, so which of the two ends up as token0 is
-    // an accident of deployment order. The adapter is token-agnostic and only ever compares
-    // what `positions()` reports against its own immutables.
-    const sorted =
-      (await usdc.getAddress()).toLowerCase() < (await asset.getAddress()).toLowerCase()
-        ? [usdc, asset]
-        : [asset, usdc];
-    token0 = sorted[0];
-    token1 = sorted[1];
-    token0Addr = await token0.getAddress();
-    token1Addr = await token1.getAddress();
-
-    // The bonus is a token of its own: §6.3 forbids the escrow from sharing balances with the
-    // vault or the distributor, and a separate token is how a test can tell them apart.
-    bonus = await Token.deploy("Bonus", "BONUS", TOKENS(10_000_000), 18);
-    bonusAddr = await bonus.getAddress();
-
-    // What the buyer paid with. Never moved on-chain by anything in this stack — the
-    // authorization carries it as an audit trail (§7).
-    usdt = await Token.deploy("Tether USD", "USDT", 1_000_000n * 10n ** 6n, 6);
-    usdtAddr = await usdt.getAddress();
+    asset = await Token.deploy("Asset", "ASSET", TOKENS(100_000_000), 18);
+    quote = await Token.deploy("Quote", "QUOTE", TOKENS(100_000_000), 18);
+    assetAddr = await asset.getAddress();
+    quoteAddr = await quote.getAddress();
+    [token0Addr, token1Addr] =
+      assetAddr.toLowerCase() < quoteAddr.toLowerCase() ? [assetAddr, quoteAddr] : [quoteAddr, assetAddr];
+    bonusIsToken0 = token0Addr === assetAddr;
 
     const Pool = await ethers.getContractFactory("MockUniswapV3Pool");
     pool = await Pool.deploy(token0Addr, token1Addr, FEE);
@@ -230,7 +195,6 @@ describe("ApeBondPositionAdapter", function () {
 
     escrow = await deployEscrowProxy();
     escrowAddr = await escrow.getAddress();
-    await bonus.transfer(escrowAddr, ESCROW_FUNDING);
 
     adapter = await deployAdapter();
     adapterAddr = await adapter.getAddress();
@@ -239,454 +203,441 @@ describe("ApeBondPositionAdapter", function () {
     soulZap = await SoulZap.deploy();
     soulZapAddr = await soulZap.getAddress();
 
-    // The three wiring transactions the deploy runbook performs, and nothing else: the
-    // adapter is a stake operator on the vault, the reserving adapter on the escrow, and the
-    // SoulZap contract is on its own allowlist.
+    // The deploy scripts' timelock link batch, then the campaign wiring.
+    await vault.setBonusEscrow(escrowAddr);
     await vault.setStakeOperator(adapterAddr, true);
     await escrow.setAdapter(adapterAddr);
     await adapter.setSoulZapCaller(soulZapAddr, true);
+    await adapter.setCampaign(CAMPAIGN, campaignConfig());
+    await adapter.setCampaignCaller(CAMPAIGN, soulZapAddr, true);
   });
 
   // ─────────────────────────────────────────────────────────────
   describe("Deployment", function () {
-    it("stores every immutable, the two roles and the signer, and starts with an empty book", async function () {
+    it("reads the pool from the vault and the bonus side from the escrow", async function () {
       expect(await adapter.positionManager()).to.equal(nfpmAddr);
       expect(await adapter.vault()).to.equal(vaultAddr);
       expect(await adapter.escrow()).to.equal(escrowAddr);
       expect(await adapter.token0()).to.equal(token0Addr);
       expect(await adapter.token1()).to.equal(token1Addr);
       expect(await adapter.fee()).to.equal(FEE);
+      expect(await adapter.tickSpacing()).to.equal(TICK_SPACING);
+      expect(await adapter.bonusIsToken0()).to.equal(bonusIsToken0);
+      expect(await adapter.BPS()).to.equal(10_000n);
       expect(await adapter.owner()).to.equal(owner.address);
       expect(await adapter.guardian()).to.equal(guardian.address);
-      expect(await adapter.purchaseSigner()).to.equal(purchaseSigner.address);
       expect(await adapter.depositsPaused()).to.equal(false);
-      expect(await adapter.consumedPurchaseIds(PURCHASE)).to.equal(false);
-      expect(await adapter.consumedNonces(1n)).to.equal(false);
     });
 
-    it("announces the guardian and the purchase signer from block one", async function () {
+    it("announces the guardian and the open deposit switch from block one", async function () {
       const fresh = await deployAdapter();
-
       await expect(fresh.deploymentTransaction())
         .to.emit(fresh, "GuardianSet")
         .withArgs(ZERO, guardian.address);
-      await expect(fresh.deploymentTransaction())
-        .to.emit(fresh, "PurchaseSignerSet")
-        .withArgs(ZERO, purchaseSigner.address);
+      await expect(fresh.deploymentTransaction()).to.emit(fresh, "DepositsPausedSet").withArgs(false);
     });
 
-    it("rejects a zero position manager, vault, escrow, pool token or guardian", async function () {
-      for (const overrides of [
-        { positionManager: ZERO },
-        { vault: ZERO },
-        { escrow: ZERO },
-        { token0: ZERO },
-        { token1: ZERO },
-        { guardian: ZERO },
-      ]) {
-        await expect(deployAdapter(overrides)).to.be.revertedWithCustomError(adapter, "ZeroAddress");
+    it("values in token1 when the escrow pays in token1", async function () {
+      const other = token0Addr === assetAddr ? token1Addr : token0Addr;
+      const otherEscrow = await deployEscrowProxy(other);
+      const otherAdapter = await deployAdapter({ escrow: await otherEscrow.getAddress() });
+      expect(await otherAdapter.bonusIsToken0()).to.equal(other === token0Addr);
+    });
+
+    it("rejects a zero position manager, vault, escrow or guardian, and a zero owner", async function () {
+      const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+      for (const key of ["positionManager", "vault", "escrow", "guardian"]) {
+        await expect(deployAdapter({ [key]: ZERO })).to.be.revertedWithCustomError(Adapter, "ZeroAddress");
       }
+      await expect(deployAdapter({ initialOwner: ZERO }))
+        .to.be.revertedWithCustomError(Adapter, "OwnableInvalidOwner")
+        .withArgs(ZERO);
     });
 
-    it("rejects an unsorted pool pair", async function () {
-      await expect(deployAdapter({ token0: token1Addr, token1: token0Addr }))
-        .to.be.revertedWithCustomError(adapter, "TokensNotSorted")
-        .withArgs(token1Addr, token0Addr);
+    it("rejects an escrow linked to a different vault", async function () {
+      const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+      const otherVault = await deployVaultProxy();
+      const otherVaultAddr = await otherVault.getAddress();
+      const foreignEscrow = await deployEscrowProxy(assetAddr, otherVaultAddr);
+
+      await expect(deployAdapter({ escrow: await foreignEscrow.getAddress() }))
+        .to.be.revertedWithCustomError(Adapter, "EscrowVaultMismatch")
+        .withArgs(otherVaultAddr, vaultAddr);
     });
 
-    it("deploys with the path CLOSED when no purchase signer is given", async function () {
-      // Zero is allowed here and nowhere else in the constructor: it is the wind-down state
-      // the guardian can also return to, not a misconfiguration.
-      const closed = await deployAdapter({ purchaseSigner: ZERO });
-      expect(await closed.purchaseSigner()).to.equal(ZERO);
-    });
-
-    it("has no rescue, sweep or arbitrary-call surface at all", async function () {
-      // The claim in the contract note, asserted rather than asserted-in-prose: nothing on
-      // this ABI moves a token, so there is no owner path to misuse and no stray to recover.
-      const names = adapter.interface.fragments
-        .filter((f) => f.type === "function")
-        .map((f) => f.name);
-      for (const forbidden of ["rescuePosition", "sweep", "recover", "execute", "call", "multicall"]) {
+    it("has no signature, purchase id, cap, rescue, sweep or arbitrary-call surface", async function () {
+      const names = adapter.interface.fragments.filter((f) => f.type === "function").map((f) => f.name);
+      for (const forbidden of [
+        "purchaseSigner",
+        "setPurchaseSigner",
+        "hashPurchaseAuthorization",
+        "PURCHASE_AUTHORIZATION_TYPEHASH",
+        "consumedNonces",
+        "consumedPurchaseIds",
+        "campaignAllocatedBonus",
+        "remainingCampaignBonus",
+        "maxTotalBonus",
+        "maxBonusPerPurchase",
+        "rescuePosition",
+        "sweep",
+        "execute",
+        "multicall",
+        "eip712Domain",
+      ]) {
         expect(names).to.not.include(forbidden);
       }
+      // depositFor is the three-argument form: no struct, no signature.
+      expect(adapter.interface.getFunction("depositFor").inputs.map((i) => i.type)).to.deep.equal([
+        "uint256",
+        "bytes32",
+        "address",
+      ]);
     });
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("The typed data", function () {
-    it("uses the type hash the struct defines, field for field", async function () {
-      expect(await adapter.PURCHASE_AUTHORIZATION_TYPEHASH()).to.equal(purchaseAuthorizationTypeHash());
-      expect(PURCHASE_AUTHORIZATION_FIELDS).to.have.lengthOf(14);
-    });
+  describe("depositFor — the contract computes the bonus", function () {
+    it("stakes for the beneficiary and reserves value x rate under the tokenId", async function () {
+      const { tx, tokenId } = await deposit();
+      const ts = await txTimestamp(tx);
+      const { bonus } = expected();
 
-    it("reports the RealApeBondPurchase domain, distinct from the rewards voucher domain", async function () {
-      const domain = await adapter.eip712Domain();
-      expect(domain.name).to.equal("RealApeBondPurchase");
-      expect(domain.version).to.equal("1");
-      expect(domain.verifyingContract).to.equal(adapterAddr);
-      expect(domain.chainId).to.equal((await ethers.provider.getNetwork()).chainId);
-      expect(domain.name).to.not.equal("RealLPRewards");
-    });
-
-    it("hashes an authorization exactly as ethers does", async function () {
-      // The split `abi.encode` inside `_structHash` is byte-identical to the one-call form —
-      // this is the assertion that says so, against an independent implementation.
-      const authorization = await makeAuth();
-      const expected = ethers.TypedDataEncoder.hash(
-        await authDomain(),
-        { PurchaseAuthorization: PURCHASE_AUTHORIZATION_FIELDS },
-        authorization
-      );
-      expect(await adapter.hashPurchaseAuthorization(authorization)).to.equal(expected);
-    });
-
-    it("binds the digest to this adapter, so a sibling deployment's signature is worthless", async function () {
-      const sibling = await deployAdapter();
-      const authorization = await makeAuth();
-
-      expect(await sibling.hashPurchaseAuthorization(authorization)).to.not.equal(
-        await adapter.hashPurchaseAuthorization(authorization)
-      );
-
-      const foreign = await sign(authorization, { domain: await authDomain(await sibling.getAddress()) });
-      await expect(deposit({ authorization, signature: foreign }).then((d) => d.tx)).to.be.revertedWithCustomError(
-        adapter,
-        "InvalidSignature"
-      );
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────
-  describe("depositFor — the happy path", function () {
-    it("stakes the position for the beneficiary, reserves the bonus and keeps nothing", async function () {
-      const { tx, tokenId, authorization } = await deposit();
-      const receipt = await (await tx).wait();
-
-      // Custody and attribution, the two facts the whole call exists to produce.
       expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
       expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
 
-      // The bonus is recorded against the purchase id, not against the tokenId — a rebalance
-      // replaces the NFT and must not touch the entitlement (§4.4).
-      const reservation = await escrow.reservationOf(PURCHASE);
-      expect(reservation.beneficiary).to.equal(alice.address);
-      expect(reservation.amount).to.equal(BONUS);
-      expect(reservation.unlockAt).to.equal(authorization.bonusUnlockAt);
-      expect(reservation.claimed).to.equal(false);
-      expect(await escrow.totalReserved()).to.equal(BONUS);
+      const r = await escrow.reservationOf(tokenId);
+      expect(r.beneficiary).to.equal(alice.address);
+      expect(r.amount).to.equal(bonus);
+      expect(r.unlockAt).to.equal(ts + BigInt(APEBOND_CLIFF_SECONDS));
+      expect(r.forfeited).to.equal(false);
+      expect(await escrow.totalReserved()).to.equal(bonus);
 
-      // The id and the nonce are spent.
-      expect(await adapter.consumedPurchaseIds(PURCHASE)).to.equal(true);
-      expect(await adapter.consumedNonces(1n)).to.equal(true);
-
-      // And the adapter itself ends the transaction holding nothing at all.
+      // Nothing stays with the adapter, and the escrow did not need a balance (O2).
       expect(await nfpm.balanceOf(adapterAddr)).to.equal(0n);
-      expect(await bonus.balanceOf(adapterAddr)).to.equal(0n);
-      expect(await token0.balanceOf(adapterAddr)).to.equal(0n);
-      expect(await token1.balanceOf(adapterAddr)).to.equal(0n);
-      expect(await ethers.provider.getBalance(adapterAddr)).to.equal(0n);
-      expect(receipt.status).to.equal(1);
+      expect(await asset.balanceOf(adapterAddr)).to.equal(0n);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
     });
 
-    it("emits ApeBondPositionDeposited with all twelve fields of spec §9", async function () {
-      const { tx, tokenId, authorization } = await deposit();
+    it("emits ApeBondPositionDeposited with the position, the price, the value and the bonus", async function () {
+      const { tx, tokenId } = await deposit();
+      const ts = await txTimestamp(tx);
+      const { value, bonus } = expected();
 
       await expect(tx)
         .to.emit(adapter, "ApeBondPositionDeposited")
         .withArgs(
-          PURCHASE,
+          tokenId,
           CAMPAIGN,
           alice.address,
-          tokenId,
           LIQUIDITY,
           TICK_LOWER,
           TICK_UPPER,
-          usdtAddr,
-          GROSS_INPUT,
-          NET_INPUT,
-          BONUS,
-          authorization.bonusUnlockAt
+          0,
+          value,
+          bonus,
+          ts + BigInt(APEBOND_CLIFF_SECONDS)
         );
     });
 
     it("makes the vault and the escrow speak in the same transaction", async function () {
       const { tx, tokenId } = await deposit();
-      const ts = await txTimestamp(await tx);
+      const ts = await txTimestamp(tx);
+      const { bonus } = expected();
 
       await expect(tx)
         .to.emit(vault, "Staked")
         .withArgs(alice.address, tokenId, TICK_LOWER, TICK_UPPER, LIQUIDITY, ts);
-      await expect(tx).to.emit(escrow, "BonusReserved").withArgs(PURCHASE, alice.address, BONUS, anyUint64());
+      await expect(tx)
+        .to.emit(escrow, "BonusReserved")
+        .withArgs(tokenId, alice.address, bonus, ts + BigInt(APEBOND_CLIFF_SECONDS));
+    });
+
+    it("agrees with previewBonus, which runs the same formula", async function () {
+      const [value, bonus, twapTick] = await adapter.previewBonus(CAMPAIGN, LIQUIDITY);
+      const ref = expected();
+      expect(value).to.equal(ref.value);
+      expect(bonus).to.equal(ref.bonus);
+      expect(twapTick).to.equal(0n);
+
+      await expect(adapter.previewBonus(OTHER_CAMPAIGN, LIQUIDITY))
+        .to.be.revertedWithCustomError(adapter, "UnknownCampaign")
+        .withArgs(OTHER_CAMPAIGN);
+    });
+
+    it("values the position at the vault's TWAP, not at spot", async function () {
+      await pool.setTicks(100, 50); // spot 100, TWAP 50: inside the 500-tick bound
+      const atTwap = expected(LIQUIDITY, 50);
+      const atSpot = expected(LIQUIDITY, 100);
+      expect(atTwap.bonus).to.not.equal(atSpot.bonus);
+
+      const { tx, tokenId } = await deposit();
+      await tx;
+      expect((await escrow.reservationOf(tokenId)).amount).to.equal(atTwap.bonus);
+      await expect(tx).to.emit(adapter, "ApeBondPositionDeposited");
+    });
+
+    it("stakes a purchase whose bonus is below the minimum, with no reservation (D6)", async function () {
+      const { bonus } = expected(SMALL_LIQUIDITY);
+      expect(bonus).to.equal(0n);
+
+      const { tx, tokenId } = await deposit({ position: { liquidity: SMALL_LIQUIDITY } });
+      await expect(tx).to.not.emit(escrow, "BonusReserved");
+      await expect(tx)
+        .to.emit(adapter, "ApeBondPositionDeposited")
+        .withArgs(
+          tokenId,
+          CAMPAIGN,
+          alice.address,
+          SMALL_LIQUIDITY,
+          TICK_LOWER,
+          TICK_UPPER,
+          0,
+          expected(SMALL_LIQUIDITY).value,
+          0n,
+          0n
+        );
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      expect((await escrow.reservationOf(tokenId)).beneficiary).to.equal(ZERO);
+    });
+
+    it("treats the minimum as inclusive: a bonus equal to it is reserved, one wei less is not", async function () {
+      const raw = (expected().value * APEBOND_BONUS_BPS) / 10_000n;
+
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ minBonusAmount: raw }));
+      const { tx: atMin, tokenId: first } = await deposit();
+      await atMin;
+      expect((await escrow.reservationOf(first)).amount).to.equal(raw);
+
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ minBonusAmount: raw + 1n }));
+      const { tx: below, tokenId: second } = await deposit();
+      await expect(below).to.not.emit(escrow, "BonusReserved");
+      expect((await escrow.reservationOf(second)).beneficiary).to.equal(ZERO);
+    });
+
+    it("reserves nothing for a zero rate and everything for a 10,000-bps rate", async function () {
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusBps: 0, minBonusAmount: 0n }));
+      const { tx, tokenId } = await deposit();
+      await expect(tx).to.not.emit(escrow, "BonusReserved");
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusBps: 10_000, minBonusAmount: 0n }));
+      const { tx: whole, tokenId: id2 } = await deposit();
+      await whole;
+      expect((await escrow.reservationOf(id2)).amount).to.equal(expected().value);
+    });
+
+    it("unlocks at the deposit time when the cliff is zero — a bonus that can no longer be forfeited", async function () {
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusCliffSeconds: 0n }));
+      const { tx, tokenId } = await deposit();
+      const ts = await txTimestamp(tx);
+      expect((await escrow.reservationOf(tokenId)).unlockAt).to.equal(ts);
+      expect(await escrow.isActive(tokenId)).to.equal(false);
     });
 
     it("accepts an operator-for-all approval as well as a per-token one", async function () {
       await soulZap.setApprovalMode(APPROVE_FOR_ALL);
       const { tx, tokenId } = await deposit();
       await tx;
-
       expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
-      expect(await nfpm.isApprovedForAll(soulZapAddr, adapterAddr)).to.equal(true);
     });
 
-    it("stakes a zero-bonus purchase without touching the escrow", async function () {
-      // A campaign that promises no extra payout still has to be routable: `reserve` rejects
-      // a zero amount, so the leg is skipped rather than made impossible.
-      const { tx, tokenId } = await deposit({ auth: { guaranteedBonusAmount: 0n } });
-
-      await expect(tx).to.not.emit(escrow, "BonusReserved");
-      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
-      expect(await escrow.totalReserved()).to.equal(0n);
-      expect((await escrow.reservationOf(PURCHASE)).beneficiary).to.equal(ZERO);
-
-      // ...and the id is spent all the same, so the purchase cannot be presented twice.
-      expect(await adapter.consumedPurchaseIds(PURCHASE)).to.equal(true);
+    it("gives every purchase its own reservation, keyed by its own NFT", async function () {
+      const a = await deposit();
+      await a.tx;
+      const b = await deposit({ beneficiary: bob.address });
+      await b.tx;
+      expect((await escrow.reservationOf(b.tokenId)).beneficiary).to.equal(bob.address);
+      expect(await escrow.totalReserved()).to.equal(expected().bonus * 2n);
     });
 
-    it("lets a second purchase through with its own id and nonce", async function () {
-      await (await deposit()).tx;
+    it("writes nothing to the adapter's own storage", async function () {
+      const slots = [];
+      for (let i = 0; i < 8; i++) slots.push(await ethers.provider.getStorage(adapterAddr, i));
+      const { tx } = await deposit();
+      await tx;
+      for (let i = 0; i < 8; i++) {
+        expect(await ethers.provider.getStorage(adapterAddr, i)).to.equal(slots[i]);
+      }
+    });
 
-      const second = await deposit({
-        auth: { purchaseId: ID("apebond-purchase-2"), beneficiary: bob.address, nonce: 2n },
-      });
+    it("affects only later purchases when a campaign is reconfigured", async function () {
+      const first = await deposit();
+      const ts = await txTimestamp(first.tx);
+      const before = await escrow.reservationOf(first.tokenId);
+
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusBps: 2_000, bonusCliffSeconds: 999n }));
+      const r = await escrow.reservationOf(first.tokenId);
+      expect(r.amount).to.equal(before.amount);
+      expect(r.unlockAt).to.equal(ts + BigInt(APEBOND_CLIFF_SECONDS));
+
+      const second = await deposit();
       await second.tx;
-
-      expect(await vault.stakerOf(second.tokenId)).to.equal(bob.address);
-      expect(await escrow.totalReserved()).to.equal(BONUS * 2n);
+      expect((await escrow.reservationOf(second.tokenId)).amount).to.equal(
+        expected(LIQUIDITY, 0, campaignConfig({ bonusBps: 2_000 })).bonus
+      );
     });
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("depositFor — the checklist rejections", function () {
+  describe("depositFor — the rejections, in order", function () {
     it("1. refuses while the adapter's own deposits are paused", async function () {
       await asGuardian().setDepositsPaused(true);
-
-      await expect((await deposit()).tx).to.be.revertedWithCustomError(adapter, "DepositsArePaused");
+      const { tx } = await deposit();
+      await expect(tx).to.be.revertedWithCustomError(adapter, "DepositsArePaused");
     });
 
-    it("2. refuses a caller that is not on the SoulZap allowlist", async function () {
-      await adapter.setSoulZapCaller(soulZapAddr, false);
+    it("2a. refuses a caller that is not on the global allowlist", async function () {
+      const tokenId = await createPosition(stranger.address);
+      await nfpm.connect(stranger).approve(adapterAddr, tokenId);
+      await expect(adapter.connect(stranger).depositFor(tokenId, CAMPAIGN, alice.address))
+        .to.be.revertedWithCustomError(adapter, "NotSoulZapCaller")
+        .withArgs(stranger.address);
+    });
 
+    it("2b. refuses a caller allowed globally but not for this campaign", async function () {
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig());
+      const { tx } = await deposit({ campaignId: OTHER_CAMPAIGN });
+      await expect(tx)
+        .to.be.revertedWithCustomError(adapter, "NotCampaignCaller")
+        .withArgs(OTHER_CAMPAIGN, soulZapAddr);
+    });
+
+    it("2c. refuses a caller removed from the campaign, and one removed from the allowlist", async function () {
+      await adapter.setCampaignCaller(CAMPAIGN, soulZapAddr, false);
+      await expect((await deposit()).tx)
+        .to.be.revertedWithCustomError(adapter, "NotCampaignCaller")
+        .withArgs(CAMPAIGN, soulZapAddr);
+
+      await adapter.setCampaignCaller(CAMPAIGN, soulZapAddr, true);
+      await adapter.setSoulZapCaller(soulZapAddr, false);
       await expect((await deposit()).tx)
         .to.be.revertedWithCustomError(adapter, "NotSoulZapCaller")
         .withArgs(soulZapAddr);
     });
 
-    it("3. refuses when the authorization names a different SoulZap caller", async function () {
-      await adapter.setSoulZapCaller(stranger.address, true);
-
-      await expect((await deposit({ auth: { soulZapCaller: stranger.address } })).tx)
-        .to.be.revertedWithCustomError(adapter, "CallerMismatch")
-        .withArgs(stranger.address, soulZapAddr);
+    it("3a. refuses a campaign that was never configured, even for a pre-authorized caller", async function () {
+      await adapter.setCampaignCaller(OTHER_CAMPAIGN, soulZapAddr, true);
+      const { tx } = await deposit({ campaignId: OTHER_CAMPAIGN });
+      await expect(tx).to.be.revertedWithCustomError(adapter, "UnknownCampaign").withArgs(OTHER_CAMPAIGN);
     });
 
-    it("4a. refuses a zero beneficiary", async function () {
-      await expect((await deposit({ auth: { beneficiary: ZERO } })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidBeneficiary")
-        .withArgs(ZERO);
-    });
-
-    it("4b. refuses the adapter itself as beneficiary (SEC-05)", async function () {
-      await expect((await deposit({ auth: { beneficiary: adapterAddr } })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidBeneficiary")
-        .withArgs(adapterAddr);
-    });
-
-    it("4c. refuses the vault as beneficiary (SEC-05)", async function () {
-      // The finding itself: `stakeFor(vault)` writes a staker record that `unstake` cannot
-      // reach and `rescuePosition` refuses to touch, stranding the NFT until an upgrade.
-      await expect((await deposit({ auth: { beneficiary: vaultAddr } })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidBeneficiary")
-        .withArgs(vaultAddr);
-    });
-
-    it("4d. refuses the position manager as beneficiary (SEC-05)", async function () {
-      await expect((await deposit({ auth: { beneficiary: nfpmAddr } })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidBeneficiary")
-        .withArgs(nfpmAddr);
-    });
-
-    it("5. refuses an expired authorization", async function () {
-      const deadline = BigInt(await time.latest()) + 60n;
-      await time.increaseTo(deadline + 1n);
-
-      await expect((await deposit({ auth: { deadline } })).tx)
-        .to.be.revertedWithCustomError(adapter, "AuthorizationExpired")
-        .withArgs(deadline, anyUint());
-    });
-
-    it("6a. refuses a signature from any other key", async function () {
-      await expect((await deposit({ signOpts: { signer: bob } })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidSignature")
-        .withArgs(bob.address, purchaseSigner.address);
-    });
-
-    it("6b. refuses everything once the signer is unset — the path is closed", async function () {
-      await asGuardian().setPurchaseSigner(ZERO);
-
+    it("3b. refuses a disabled campaign, and accepts it again once re-enabled", async function () {
+      await adapter.setCampaignEnabled(CAMPAIGN, false);
       await expect((await deposit()).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidSignature")
-        .withArgs(purchaseSigner.address, ZERO);
+        .to.be.revertedWithCustomError(adapter, "CampaignDisabled")
+        .withArgs(CAMPAIGN);
+
+      await adapter.setCampaignEnabled(CAMPAIGN, true);
+      const { tx, tokenId } = await deposit();
+      await tx;
+      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
     });
 
-    it("6c. refuses an authorization whose fields were edited after signing", async function () {
-      const authorization = await makeAuth();
-      const signature = await sign(authorization);
-      const tampered = { ...authorization, guaranteedBonusAmount: BONUS * 10n };
-
-      await expect(
-        (await deposit({ authorization: tampered, signature })).tx
-      ).to.be.revertedWithCustomError(adapter, "InvalidSignature");
+    it("4. refuses a zero, adapter, vault or position-manager beneficiary (SEC-05)", async function () {
+      for (const beneficiary of [ZERO, adapterAddr, vaultAddr, nfpmAddr]) {
+        await expect((await deposit({ beneficiary })).tx)
+          .to.be.revertedWithCustomError(adapter, "InvalidBeneficiary")
+          .withArgs(beneficiary);
+      }
     });
 
-    it("7a. refuses a replayed purchase id", async function () {
-      await (await deposit()).tx;
-
-      await expect((await deposit({ auth: { nonce: 2n } })).tx)
-        .to.be.revertedWithCustomError(adapter, "PurchaseAlreadyProcessed")
-        .withArgs(PURCHASE);
-    });
-
-    it("7b. refuses a replayed nonce under a fresh purchase id", async function () {
-      await (await deposit()).tx;
-
-      await expect((await deposit({ auth: { purchaseId: ID("apebond-purchase-2") } })).tx)
-        .to.be.revertedWithCustomError(adapter, "NonceAlreadyUsed")
-        .withArgs(1n);
-    });
-
-    it("7c. refuses the replay even inside ONE transaction", async function () {
-      // Two `depositFor` calls in the same outer call: no revert separates them, so only the
-      // spent-id book written before the transfers can stop the second one.
-      const tokenId = await createPosition(soulZapAddr);
-      const authorization = await makeAuth();
-      const signature = await sign(authorization);
-
-      await expect(
-        soulZap.depositTwice(adapterAddr, nfpmAddr, tokenId, authorization, signature)
-      ).to.be.revertedWithCustomError(adapter, "PurchaseAlreadyProcessed");
-    });
-
-    it("8a. refuses an NFT the caller does not own", async function () {
-      // No approval step, because a non-owner cannot make one: the position manager itself
-      // rejects it, and the check under test is the adapter's, one call later.
-      await soulZap.setApprovalMode(APPROVE_NONE);
+    it("5a. refuses an NFT the caller does not own", async function () {
       const tokenId = await createPosition(alice.address);
-
-      await expect((await deposit({ tokenId })).tx)
+      // The caller cannot approve an NFT it does not own, so it skips the approval step and
+      // the adapter's own ownership check is what refuses it.
+      await soulZap.setApprovalMode(APPROVE_NONE);
+      const { tx } = await deposit({ tokenId });
+      await expect(tx)
         .to.be.revertedWithCustomError(adapter, "NftNotHeldByCaller")
         .withArgs(tokenId, alice.address, soulZapAddr);
     });
 
-    it("8b. refuses an NFT the adapter was never approved for", async function () {
+    it("5b. refuses an NFT the adapter was never approved for", async function () {
       await soulZap.setApprovalMode(APPROVE_NONE);
       const { tx, tokenId } = await deposit();
-
       await expect(tx)
         .to.be.revertedWithCustomError(adapter, "NftNotApproved")
         .withArgs(tokenId, soulZapAddr);
     });
 
-    it("9a. refuses a position on another pair", async function () {
-      const foreign = await (await ethers.getContractFactory("MockERC20Decimals")).deploy(
-        "Foreign",
-        "FRGN",
-        TOKENS(1),
-        18
-      );
+    it("6a. refuses a position on another pair or another fee tier", async function () {
+      const Token = await ethers.getContractFactory("MockERC20Decimals");
+      const foreign = await Token.deploy("Foreign", "FRN", TOKENS(1), 18);
       const foreignAddr = await foreign.getAddress();
-      const [a, b] =
-        foreignAddr.toLowerCase() < token1Addr.toLowerCase()
-          ? [foreignAddr, token1Addr]
-          : [token1Addr, foreignAddr];
 
-      const { tx, tokenId } = await deposit({ position: { poolToken0: a, poolToken1: b } });
-
-      await expect(tx)
+      const wrongPair = await deposit({ position: { poolToken1: foreignAddr } });
+      await expect(wrongPair.tx)
         .to.be.revertedWithCustomError(adapter, "PositionPoolMismatch")
-        .withArgs(tokenId, a, b, FEE);
+        .withArgs(wrongPair.tokenId, token0Addr, foreignAddr, FEE);
+
+      const wrongFee = await deposit({ position: { poolFee: OTHER_FEE } });
+      await expect(wrongFee.tx)
+        .to.be.revertedWithCustomError(adapter, "PositionPoolMismatch")
+        .withArgs(wrongFee.tokenId, token0Addr, token1Addr, OTHER_FEE);
     });
 
-    it("9b. refuses a position on another fee tier of the same pair", async function () {
-      const { tx, tokenId } = await deposit({ position: { poolFee: OTHER_FEE } });
-
-      await expect(tx)
-        .to.be.revertedWithCustomError(adapter, "PositionPoolMismatch")
-        .withArgs(tokenId, token0Addr, token1Addr, OTHER_FEE);
-    });
-
-    it("9c. refuses a range that is not the exact signed one, even a wider one", async function () {
-      // Wider is not better: the campaign priced the bonus against one range, so anything
-      // else is a different product.
-      const { tx } = await deposit({ position: { tickLower: TICK_LOWER - 60, tickUpper: TICK_UPPER + 60 } });
-
+    it("6b. refuses a range that is not the campaign's exact one, even a wider one", async function () {
+      const { tx } = await deposit({ position: { tickLower: TICK_LOWER - TICK_SPACING } });
       await expect(tx)
         .to.be.revertedWithCustomError(adapter, "TickRangeMismatch")
-        .withArgs(TICK_LOWER - 60, TICK_UPPER + 60, TICK_LOWER, TICK_UPPER);
+        .withArgs(TICK_LOWER - TICK_SPACING, TICK_UPPER, TICK_LOWER, TICK_UPPER);
     });
 
-    it("9d. refuses an empty position", async function () {
-      const { tx, tokenId } = await deposit({ position: { liquidity: 0n }, auth: { minLiquidity: 0n } });
-
+    it("6c. refuses an empty position", async function () {
+      const { tx, tokenId } = await deposit({ position: { liquidity: 0n } });
       await expect(tx).to.be.revertedWithCustomError(adapter, "EmptyPosition").withArgs(tokenId);
     });
 
-    it("9e. refuses a position under the authorization's liquidity floor", async function () {
-      const thin = MIN_LIQUIDITY - 1n;
-      const { tx } = await deposit({ position: { liquidity: thin } });
-
+    it("7. refuses while spot is outside the vault's TWAP bounds", async function () {
+      await pool.setTicks(MAX_DEVIATION_TICKS + 1, 0);
+      const { tx } = await deposit();
       await expect(tx)
-        .to.be.revertedWithCustomError(adapter, "InsufficientLiquidity")
-        .withArgs(thin, MIN_LIQUIDITY);
-    });
+        .to.be.revertedWithCustomError(adapter, "PriceOutsideTwapBounds")
+        .withArgs(MAX_DEVIATION_TICKS + 1, 0, MAX_DEVIATION_TICKS);
 
-    it("9f. accepts a position exactly at the floor", async function () {
-      const { tx, tokenId } = await deposit({ position: { liquidity: MIN_LIQUIDITY } });
-      await tx;
-
-      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      await pool.setTicks(MAX_DEVIATION_TICKS, 0); // the bound itself is inside
+      await (
+        await deposit()
+      ).tx;
     });
 
     it("takes the vault's own deposit pause with it", async function () {
       await vault.connect(guardian).setDepositsPaused(true);
-
-      await expect((await deposit()).tx).to.be.revertedWithCustomError(vault, "DepositsArePaused");
+      const { tx } = await deposit();
+      await expect(tx).to.be.revertedWithCustomError(vault, "DepositsArePaused");
+      expect(await adapter.depositsPaused()).to.equal(false);
     });
 
     it("reverts the whole purchase when the adapter is not a stake operator", async function () {
       await vault.setStakeOperator(adapterAddr, false);
-
-      await expect((await deposit()).tx)
-        .to.be.revertedWithCustomError(vault, "NotZapper")
-        .withArgs(adapterAddr, ZERO);
-    });
-
-    it("reverts the whole purchase when the escrow cannot fund the bonus", async function () {
-      const { tx, tokenId } = await deposit({ auth: { guaranteedBonusAmount: ESCROW_FUNDING + 1n } });
-
-      await expect(tx)
-        .to.be.revertedWithCustomError(escrow, "Underfunded")
-        .withArgs(ESCROW_FUNDING, ESCROW_FUNDING + 1n);
-
-      // Atomicity, stated as the two facts a half-completed purchase would break. The id IS
-      // written before the transfers — and the revert rolls that write back with everything
-      // else, which is exactly why there is no recovery workflow to write (§10).
-      expect(await nfpm.ownerOf(tokenId)).to.equal(soulZapAddr);
-      expect(await adapter.consumedPurchaseIds(PURCHASE)).to.equal(false);
-      expect(await adapter.consumedNonces(1n)).to.equal(false);
-      expect(await escrow.totalReserved()).to.equal(0n);
+      const { tx } = await deposit();
+      await expect(tx).to.be.revertedWithCustomError(vault, "NotZapper").withArgs(adapterAddr, ZERO);
     });
 
     it("reverts the whole purchase when the escrow no longer accepts this adapter", async function () {
       await escrow.setAdapter(ZERO);
-
-      await expect((await deposit()).tx)
-        .to.be.revertedWithCustomError(escrow, "NotAdapter")
-        .withArgs(adapterAddr, ZERO);
+      const { tx } = await deposit();
+      await expect(tx).to.be.revertedWithCustomError(escrow, "NotAdapter").withArgs(adapterAddr, ZERO);
     });
 
-    it("leaves nothing behind after a failed deposit", async function () {
-      await asGuardian().setDepositsPaused(true);
+    it("refuses to carry a second bonus on the same NFT after an exit", async function () {
+      const { tx, tokenId } = await deposit({ beneficiary: soulZapAddr });
+      await tx;
+      await soulZap.execute(vaultAddr, vault.interface.encodeFunctionData("unstake", [tokenId]));
+
+      const again = await deposit({ tokenId, beneficiary: alice.address });
+      await expect(again.tx).to.be.revertedWithCustomError(escrow, "DuplicateReservation").withArgs(tokenId);
+    });
+
+    it("refuses the same NFT twice inside one transaction", async function () {
+      const tokenId = await createPosition(soulZapAddr);
+      await expect(soulZap.depositTwice(adapterAddr, nfpmAddr, tokenId, CAMPAIGN, alice.address))
+        .to.be.revertedWithCustomError(adapter, "NftNotHeldByCaller")
+        .withArgs(tokenId, vaultAddr, soulZapAddr);
+    });
+
+    it("leaves nothing behind after a failed purchase", async function () {
+      await escrow.setAdapter(ZERO);
       const { tx, tokenId } = await deposit();
       await expect(tx).to.be.reverted;
 
@@ -698,10 +649,68 @@ describe("ApeBondPositionAdapter", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
+  describe("The loop and the bonus after the purchase", function () {
+    it("forfeits the bonus when the buyer unstakes in the purchase transaction (P2)", async function () {
+      const tokenId = await createPosition(soulZapAddr);
+      const { bonus } = expected();
+      await asset.transfer(escrowAddr, bonus); // funded: only the forfeiture can stop the claim
+
+      const tx = soulZap.depositAndUnstake(adapterAddr, nfpmAddr, tokenId, CAMPAIGN, vaultAddr);
+      await expect(tx).to.emit(escrow, "BonusReserved");
+      await expect(tx).to.emit(escrow, "BonusForfeited").withArgs(tokenId, soulZapAddr, bonus);
+
+      expect(await escrow.totalReserved()).to.equal(0n);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(soulZapAddr);
+      await time.increase(APEBOND_CLIFF_SECONDS);
+      await expect(escrow.claim(tokenId))
+        .to.be.revertedWithCustomError(escrow, "Forfeited")
+        .withArgs(tokenId);
+    });
+
+    it("pays the bonus to a buyer who stays staked through the cliff, once the escrow is funded", async function () {
+      const { tx, tokenId } = await deposit();
+      await tx;
+      const { bonus } = expected();
+      await time.increase(APEBOND_CLIFF_SECONDS);
+
+      await expect(escrow.claim(tokenId))
+        .to.be.revertedWithCustomError(escrow, "InsufficientFunds")
+        .withArgs(bonus, 0n);
+
+      await asset.transfer(escrowAddr, bonus);
+      await vault.connect(alice).unstake(tokenId); // after the cliff: forfeits nothing
+      await expect(escrow.connect(keeper).claim(tokenId))
+        .to.emit(escrow, "BonusClaimed")
+        .withArgs(tokenId, alice.address, bonus);
+    });
+
+    it("moves the bonus to the new NFT when the buyer rebalances before the cliff", async function () {
+      const { tx, tokenId } = await deposit();
+      await tx;
+      const newId = await vault
+        .connect(alice)
+        .rebalance.staticCall(tokenId, TICK_LOWER, TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      await expect(
+        vault.connect(alice).rebalance(tokenId, TICK_LOWER, TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.emit(escrow, "BonusMoved");
+      expect((await escrow.reservationOf(newId)).beneficiary).to.equal(alice.address);
+      expect((await escrow.reservationOf(tokenId)).beneficiary).to.equal(ZERO);
+    });
+
+    it("keeps the bonus claimable while new deposits are paused", async function () {
+      const { tx, tokenId } = await deposit();
+      await tx;
+      await asset.transfer(escrowAddr, expected().bonus);
+      await asGuardian().setDepositsPaused(true);
+      await time.increase(APEBOND_CLIFF_SECONDS);
+      await expect(escrow.claim(tokenId)).to.emit(escrow, "BonusClaimed");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("The NFT receipt hook", function () {
     it("refuses a position pushed in outside a deposit", async function () {
       const tokenId = await createPosition(alice.address);
-
       await expect(
         nfpm.connect(alice)["safeTransferFrom(address,address,uint256)"](alice.address, adapterAddr, tokenId)
       )
@@ -712,9 +721,18 @@ describe("ApeBondPositionAdapter", function () {
     it("refuses a token from any collection but the configured position manager", async function () {
       const Other = await ethers.getContractFactory("MockPositionManager");
       const other = await Other.deploy();
-      await other.mintFake(alice.address, token0Addr, token1Addr, FEE, TICK_LOWER, TICK_UPPER, LIQUIDITY, 0, 0);
+      await other.mintFake(
+        alice.address,
+        token0Addr,
+        token1Addr,
+        FEE,
+        TICK_LOWER,
+        TICK_UPPER,
+        LIQUIDITY,
+        0,
+        0
+      );
       const tokenId = await other.lastMintedId();
-
       await expect(
         other.connect(alice)["safeTransferFrom(address,address,uint256)"](alice.address, adapterAddr, tokenId)
       )
@@ -723,9 +741,9 @@ describe("ApeBondPositionAdapter", function () {
     });
 
     it("closes the window again after a deposit", async function () {
-      const { tx } = await deposit();
-      await tx;
-
+      await (
+        await deposit()
+      ).tx;
       const stray = await createPosition(alice.address);
       await expect(
         nfpm.connect(alice)["safeTransferFrom(address,address,uint256)"](alice.address, adapterAddr, stray)
@@ -734,113 +752,138 @@ describe("ApeBondPositionAdapter", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("Administration", function () {
-    it("allowlists and removes a SoulZap caller, owner only, both sides logged", async function () {
-      await expect(adapter.connect(stranger).setSoulZapCaller(stranger.address, true))
-        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
-        .withArgs(stranger.address);
+  describe("Campaign administration (owner = timelock)", function () {
+    it("stores a campaign and announces its full state", async function () {
+      const config = campaignConfig({ bonusBps: 750, minBonusAmount: TOKENS(5), bonusCliffSeconds: 86_400n });
+      await expect(adapter.setCampaign(OTHER_CAMPAIGN, config))
+        .to.emit(adapter, "CampaignSet")
+        .withArgs(OTHER_CAMPAIGN, true, TICK_LOWER, TICK_UPPER, 86_400n, 750, TOKENS(5));
 
-      // Admitting a caller is a code change in all but name, so it waits out the timelock;
-      // stopping one that is already admitted is the guardian's pause.
-      await expect(asGuardian().setSoulZapCaller(stranger.address, true))
-        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
-        .withArgs(guardian.address);
+      const stored = await adapter.campaigns(OTHER_CAMPAIGN);
+      expect(stored.enabled).to.equal(true);
+      expect(stored.tickLower).to.equal(TICK_LOWER);
+      expect(stored.tickUpper).to.equal(TICK_UPPER);
+      expect(stored.bonusCliffSeconds).to.equal(86_400n);
+      expect(stored.bonusBps).to.equal(750n);
+      expect(stored.minBonusAmount).to.equal(TOKENS(5));
+    });
 
+    it("rejects a zero campaign id", async function () {
+      await expect(adapter.setCampaign(ethers.ZeroHash, campaignConfig())).to.be.revertedWithCustomError(
+        adapter,
+        "ZeroCampaignId"
+      );
+      await expect(
+        adapter.setCampaignCaller(ethers.ZeroHash, soulZapAddr, true)
+      ).to.be.revertedWithCustomError(adapter, "ZeroCampaignId");
+    });
+
+    it("rejects a range no position on the vault's pool could have", async function () {
+      const bad = [
+        [TICK_UPPER, TICK_LOWER], // lower above upper
+        [TICK_LOWER, TICK_LOWER], // empty
+        [TICK_LOWER + 1, TICK_UPPER], // off the 60-tick grid
+        [TICK_LOWER, TICK_UPPER - 1],
+        [-887280, TICK_UPPER], // below MIN_TICK, on the grid
+        [TICK_LOWER, 887280], // above MAX_TICK, on the grid
+      ];
+      for (const [lower, upper] of bad) {
+        await expect(
+          adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ tickLower: lower, tickUpper: upper }))
+        )
+          .to.be.revertedWithCustomError(adapter, "InvalidCampaignRange")
+          .withArgs(lower, upper, TICK_SPACING);
+      }
+      // The widest grid range inside the bounds is accepted.
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ tickLower: -887220, tickUpper: 887220 }));
+    });
+
+    it("rejects a rate above the whole value, and accepts exactly the whole value", async function () {
+      await expect(adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ bonusBps: 10_001 })))
+        .to.be.revertedWithCustomError(adapter, "BonusBpsTooHigh")
+        .withArgs(10_001);
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ bonusBps: 10_000 }));
+    });
+
+    it("switches an existing campaign on and off, and refuses an unknown one", async function () {
+      await expect(adapter.setCampaignEnabled(CAMPAIGN, false))
+        .to.emit(adapter, "CampaignEnabledSet")
+        .withArgs(CAMPAIGN, false);
+      expect((await adapter.campaigns(CAMPAIGN)).enabled).to.equal(false);
+
+      await expect(adapter.setCampaignEnabled(OTHER_CAMPAIGN, true))
+        .to.be.revertedWithCustomError(adapter, "UnknownCampaign")
+        .withArgs(OTHER_CAMPAIGN);
+    });
+
+    it("permits and removes a campaign caller, both ways logged, zero refused", async function () {
+      await expect(adapter.setCampaignCaller(CAMPAIGN, bob.address, true))
+        .to.emit(adapter, "CampaignCallerSet")
+        .withArgs(CAMPAIGN, bob.address, true);
+      expect(await adapter.campaignCallers(CAMPAIGN, bob.address)).to.equal(true);
+      await expect(adapter.setCampaignCaller(CAMPAIGN, bob.address, false))
+        .to.emit(adapter, "CampaignCallerSet")
+        .withArgs(CAMPAIGN, bob.address, false);
+      await expect(adapter.setCampaignCaller(CAMPAIGN, ZERO, true)).to.be.revertedWithCustomError(
+        adapter,
+        "ZeroAddress"
+      );
+    });
+
+    it("allowlists and removes a SoulZap caller, both ways logged, zero refused", async function () {
+      await expect(adapter.setSoulZapCaller(bob.address, true))
+        .to.emit(adapter, "SoulZapCallerSet")
+        .withArgs(bob.address, true);
+      await expect(adapter.setSoulZapCaller(bob.address, false))
+        .to.emit(adapter, "SoulZapCallerSet")
+        .withArgs(bob.address, false);
       await expect(adapter.setSoulZapCaller(ZERO, true)).to.be.revertedWithCustomError(
         adapter,
         "ZeroAddress"
       );
-
-      await expect(adapter.setSoulZapCaller(stranger.address, true))
-        .to.emit(adapter, "SoulZapCallerSet")
-        .withArgs(stranger.address, true);
-      expect(await adapter.soulZapCallers(stranger.address)).to.equal(true);
-
-      await expect(adapter.setSoulZapCaller(stranger.address, false))
-        .to.emit(adapter, "SoulZapCallerSet")
-        .withArgs(stranger.address, false);
-      expect(await adapter.soulZapCallers(stranger.address)).to.equal(false);
-
-      // One address's allowance says nothing about another's — this is a mapping, not a slot.
-      expect(await adapter.soulZapCallers(soulZapAddr)).to.equal(true);
     });
 
-    it("rotates the purchase signer, guardian only, and accepts zero to close the path", async function () {
-      await expect(adapter.setPurchaseSigner(bob.address))
-        .to.be.revertedWithCustomError(adapter, "NotGuardian")
-        .withArgs(owner.address, guardian.address);
-
-      await expect(asGuardian().setPurchaseSigner(bob.address))
-        .to.emit(adapter, "PurchaseSignerSet")
-        .withArgs(purchaseSigner.address, bob.address);
-      expect(await adapter.purchaseSigner()).to.equal(bob.address);
-
-      await expect(asGuardian().setPurchaseSigner(ZERO))
-        .to.emit(adapter, "PurchaseSignerSet")
-        .withArgs(bob.address, ZERO);
-      expect(await adapter.purchaseSigner()).to.equal(ZERO);
+    it("keeps every configuration function owner-only — the guardian and a caller included", async function () {
+      for (const caller of [guardian, stranger]) {
+        const as = adapter.connect(caller);
+        const calls = [
+          as.setCampaign(OTHER_CAMPAIGN, campaignConfig()),
+          as.setCampaignEnabled(CAMPAIGN, false),
+          as.setCampaignCaller(CAMPAIGN, caller.address, true),
+          as.setSoulZapCaller(caller.address, true),
+          as.setGuardian(caller.address),
+        ];
+        for (const call of calls) {
+          await expect(call)
+            .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
+            .withArgs(caller.address);
+        }
+      }
     });
+  });
 
-    it("makes a rotation invalidate every outstanding authorization at once", async function () {
-      const authorization = await makeAuth();
-      const stale = await sign(authorization);
-
-      await asGuardian().setPurchaseSigner(bob.address);
-      await expect((await deposit({ authorization, signature: stale })).tx)
-        .to.be.revertedWithCustomError(adapter, "InvalidSignature")
-        .withArgs(purchaseSigner.address, bob.address);
-
-      // ...and the new key's signatures work at once.
-      const fresh = await sign(authorization, { signer: bob });
-      const { tx, tokenId } = await deposit({ authorization, signature: fresh });
-      await tx;
-      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
-    });
-
-    it("pauses and resumes deposits, guardian only, full state logged", async function () {
-      await expect(adapter.setDepositsPaused(true))
-        .to.be.revertedWithCustomError(adapter, "NotGuardian")
-        .withArgs(owner.address, guardian.address);
-
-      await expect(asGuardian().setDepositsPaused(true))
-        .to.emit(adapter, "DepositsPausedSet")
-        .withArgs(true);
+  // ─────────────────────────────────────────────────────────────
+  describe("The guardian", function () {
+    it("pauses and resumes deposits, full state logged, and nobody else can", async function () {
+      await expect(asGuardian().setDepositsPaused(true)).to.emit(adapter, "DepositsPausedSet").withArgs(true);
       expect(await adapter.depositsPaused()).to.equal(true);
-
       await expect(asGuardian().setDepositsPaused(false))
         .to.emit(adapter, "DepositsPausedSet")
         .withArgs(false);
 
-      const { tx, tokenId } = await deposit();
-      await tx;
-      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      for (const caller of [owner, stranger]) {
+        await expect(adapter.connect(caller).setDepositsPaused(true))
+          .to.be.revertedWithCustomError(adapter, "NotGuardian")
+          .withArgs(caller.address, guardian.address);
+      }
     });
 
-    it("leaves ordinary REAL stakers alone while the ApeBond route is paused", async function () {
-      // The whole reason this switch exists beside the vault's: one route stops, the other
-      // does not.
-      await asGuardian().setDepositsPaused(true);
-
-      const own = await createPosition(bob.address);
-      await nfpm.connect(bob).approve(vaultAddr, own);
-      await vault.connect(bob).stake(own);
-
-      expect(await vault.stakerOf(own)).to.equal(bob.address);
-      expect(await adapter.depositsPaused()).to.equal(true);
-    });
-
-    it("rotates the guardian, owner only, non-zero, both sides logged", async function () {
-      await expect(asGuardian().setGuardian(bob.address))
-        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
-        .withArgs(guardian.address);
-
+    it("is rotated by the owner, non-zero, both sides logged, and the switch moves with it", async function () {
       await expect(adapter.setGuardian(ZERO)).to.be.revertedWithCustomError(adapter, "ZeroAddress");
-
       await expect(adapter.setGuardian(bob.address))
         .to.emit(adapter, "GuardianSet")
         .withArgs(guardian.address, bob.address);
 
-      // The old guardian is out in the same transaction, and the new one is in.
       await expect(asGuardian().setDepositsPaused(true))
         .to.be.revertedWithCustomError(adapter, "NotGuardian")
         .withArgs(guardian.address, bob.address);
@@ -848,109 +891,12 @@ describe("ApeBondPositionAdapter", function () {
       expect(await adapter.depositsPaused()).to.equal(true);
     });
 
-    it("keeps the guardian out of the owner's tier and the owner out of the guardian's", async function () {
-      // Two tiers, stated as the matrix in the contract note and asserted as one.
-      await expect(adapter.setDepositsPaused(true)).to.be.revertedWithCustomError(adapter, "NotGuardian");
-      await expect(adapter.setPurchaseSigner(bob.address)).to.be.revertedWithCustomError(
-        adapter,
-        "NotGuardian"
-      );
-      await expect(asGuardian().setSoulZapCaller(bob.address, true)).to.be.revertedWithCustomError(
-        adapter,
-        "OwnableUnauthorizedAccount"
-      );
-      await expect(asGuardian().setGuardian(bob.address)).to.be.revertedWithCustomError(
-        adapter,
-        "OwnableUnauthorizedAccount"
-      );
-    });
-
-    it("gives a SoulZap caller no admin power of any kind", async function () {
-      await expect(
-        soulZap.execute(
-          adapterAddr,
-          adapter.interface.encodeFunctionData("setDepositsPaused", [true])
-        )
-      ).to.be.revertedWithCustomError(adapter, "NotGuardian");
-
-      await expect(
-        soulZap.execute(
-          adapterAddr,
-          adapter.interface.encodeFunctionData("setSoulZapCaller", [soulZapAddr, true])
-        )
-      ).to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount");
-
-      expect(await adapter.soulZapCallers(soulZapAddr)).to.equal(true);
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────
-  describe("Lifecycle after the purchase", function () {
-    it("lets the buyer unstake straight from the vault, with nobody's permission", async function () {
-      // §4.5: no hard lock. The adapter is not in this path at all.
-      const { tx, tokenId } = await deposit();
-      await tx;
-
-      await vault.connect(alice).unstake(tokenId);
-
-      expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
-      expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
-    });
-
-    it("keeps the bonus reserved after the buyer unstakes, and pays it at the cliff", async function () {
-      const { tx, tokenId, authorization } = await deposit();
-      await tx;
-      await vault.connect(alice).unstake(tokenId);
-
-      expect(await escrow.claimable(PURCHASE)).to.equal(0n); // still locked
-      await time.increaseTo(authorization.bonusUnlockAt);
-      expect(await escrow.claimable(PURCHASE)).to.equal(BONUS);
-
-      const before = await bonus.balanceOf(alice.address);
-      await expect(escrow.connect(alice).claim(PURCHASE))
-        .to.emit(escrow, "BonusClaimed")
-        .withArgs(PURCHASE, alice.address, BONUS);
-
-      expect(await bonus.balanceOf(alice.address)).to.equal(before + BONUS);
-      expect(await escrow.totalReserved()).to.equal(0n);
-    });
-
-    it("keeps the bonus claimable while new deposits are paused", async function () {
-      // §6.3: a pause may never withhold money the escrow has already been paid to hold.
-      const { tx, authorization } = await deposit();
-      await tx;
-
+    it("leaves ordinary stakers alone while the ApeBond route is paused", async function () {
       await asGuardian().setDepositsPaused(true);
-      await vault.connect(guardian).setDepositsPaused(true);
-      await time.increaseTo(authorization.bonusUnlockAt);
-
-      await escrow.connect(stranger).claim(PURCHASE);
-      expect(await bonus.balanceOf(alice.address)).to.equal(BONUS);
-    });
-
-    it("does not treat the adapter as authoritative for the tokenId afterwards", async function () {
-      // §8: the adapter stores no position state. `purchaseId` is what stays stable; the
-      // tokenId lives in the vault and the indexer follows it from there.
-      const { tx, tokenId } = await deposit();
-      await tx;
-
-      const names = adapter.interface.fragments
-        .filter((f) => f.type === "function")
-        .map((f) => f.name);
-      expect(names).to.not.include("positionOf");
-      expect(names).to.not.include("tokenIdOf");
-      expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
-      expect(await adapter.consumedPurchaseIds(PURCHASE)).to.equal(true);
+      const tokenId = await createPosition(bob.address);
+      await nfpm.connect(bob).approve(vaultAddr, tokenId);
+      await vault.connect(bob).stake(tokenId);
+      expect(await vault.stakerOf(tokenId)).to.equal(bob.address);
     });
   });
 });
-
-/// `withArgs` matcher for a value the test does not pin — the block timestamp, and the cliff
-/// derived from it.
-function anyUint() {
-  return (value) => typeof value === "bigint" && value > 0n;
-}
-
-function anyUint64() {
-  return anyUint();
-}
