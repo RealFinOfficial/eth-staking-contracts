@@ -482,4 +482,229 @@ describe("lp-timelock.js — batches", function () {
       expect(await vault.isStakeOperator(adapter.address)).to.equal(true);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────
+  /**
+   * The ApeBond calls (B.3 decision document, 2026-10-05): the link batch the deploy scripts
+   * build — `setBonusEscrow`, `setStakeOperator`, `setAdapter` — and the adapter's campaign
+   * setters, whose `setCampaign` takes a STRUCT. A batch file carries that struct as an array
+   * or an object, and a CLI string carries it as JSON; every one of those must encode to the
+   * same calldata, and a bool must never be left to ethers' truthiness ("false" is truthy).
+   */
+  describe("the ApeBond calls", function () {
+    const CAMPAIGN = ethers.id("apebond.campaign.batch-test");
+    const CONFIG = {
+      enabled: false,
+      tickLower: -1200,
+      tickUpper: 1200,
+      bonusCliffSeconds: 300,
+      bonusBps: 1000,
+      minBonusAmount: 10n ** 18n,
+    };
+    const asArray = (c) => [
+      c.enabled,
+      c.tickLower,
+      c.tickUpper,
+      c.bonusCliffSeconds,
+      c.bonusBps,
+      c.minBonusAmount,
+    ];
+
+    function decodeCampaign(data) {
+      const decoded = lpTimelock.OWNER_TIER_INTERFACE.decodeFunctionData("setCampaign", data);
+      const config = decoded[1];
+      return {
+        id: decoded[0],
+        enabled: config[0],
+        tickLower: Number(config[1]),
+        tickUpper: Number(config[2]),
+        bonusCliffSeconds: Number(config[3]),
+        bonusBps: Number(config[4]),
+        minBonusAmount: config[5],
+      };
+    }
+
+    it("encodes setCampaign identically from an array, an object and a JSON string", function () {
+      const fromArray = lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, asArray(CONFIG)]);
+      const fromObject = lpTimelock.encodeOwnerCall("setCampaign", [
+        CAMPAIGN,
+        { ...CONFIG, minBonusAmount: CONFIG.minBonusAmount.toString() },
+      ]);
+      const fromJson = lpTimelock.encodeOwnerCall("setCampaign", [
+        CAMPAIGN,
+        JSON.stringify(asArray({ ...CONFIG, minBonusAmount: CONFIG.minBonusAmount.toString() })),
+      ]);
+      // Every scalar as a string, the way a TIMELOCK_BATCH file carries it.
+      const fromStrings = lpTimelock.encodeOwnerCall("setCampaign", [
+        CAMPAIGN,
+        asArray(CONFIG).map((value) => String(value)),
+      ]);
+
+      expect(fromObject).to.equal(fromArray);
+      expect(fromJson).to.equal(fromArray);
+      expect(fromStrings).to.equal(fromArray);
+      expect(decodeCampaign(fromArray)).to.deep.equal({ id: CAMPAIGN, ...CONFIG });
+    });
+
+    it("keeps the string \"false\" false, and refuses a bool that is neither", function () {
+      const data = lpTimelock.encodeOwnerCall("setCampaign", [
+        CAMPAIGN,
+        ["false", "-1200", "1200", "300", "1000", "1"],
+      ]);
+      expect(decodeCampaign(data).enabled).to.equal(false);
+
+      expect(() =>
+        lpTimelock.encodeOwnerCall("setCampaign", [
+          CAMPAIGN,
+          ["no", "-1200", "1200", "300", "1000", "1"],
+        ])
+      ).to.throw(/setCampaign argument 1 \(config\)\.enabled must be true or false — got no/);
+      expect(() => lpTimelock.encodeOwnerCall("setCampaignEnabled", [CAMPAIGN, "yes"])).to.throw(
+        /setCampaignEnabled argument 1 \(enabled\) must be true or false — got yes/
+      );
+      const fromStringTrue = lpTimelock.encodeOwnerCall("setCampaign", [
+        CAMPAIGN,
+        { ...CONFIG, enabled: "true" },
+      ]);
+      expect(decodeCampaign(fromStringTrue).enabled).to.equal(true);
+    });
+
+    it("refuses a struct with the wrong shape", function () {
+      expect(() =>
+        lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, asArray(CONFIG).slice(0, 5)])
+      ).to.throw(/setCampaign argument 1 \(config\) needs 6 components — got 5/);
+      const { minBonusAmount, ...missing } = CONFIG;
+      expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, missing])).to.throw(
+        /setCampaign argument 1 \(config\) is missing minBonusAmount/
+      );
+      expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, "[true, -1200"])).to.throw(
+        /setCampaign argument 1 \(config\) must be a JSON array or object/
+      );
+      expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN])).to.throw(
+        /setCampaign takes 2 argument\(s\)/
+      );
+    });
+
+    it("knows on which contract each ApeBond call is legal", function () {
+      const legal = {
+        setBonusEscrow: ["LPStakingVault"],
+        setStakeOperator: ["LPStakingVault"],
+        setAdapter: ["BonusEscrow"],
+        recoverSurplus: ["BonusEscrow"],
+        setCampaign: ["ApeBondPositionAdapter"],
+        setCampaignEnabled: ["ApeBondPositionAdapter"],
+        setCampaignCaller: ["ApeBondPositionAdapter"],
+        setSoulZapCaller: ["ApeBondPositionAdapter"],
+      };
+      for (const [fn, kinds] of Object.entries(legal)) {
+        expect(lpTimelock.OWNER_TIER[fn].kinds, fn).to.deep.equal(kinds);
+      }
+      // The escrow is an Ownable2Step UUPS proxy like the five; the adapter is plain Ownable.
+      for (const fn of ["upgradeToAndCall", "acceptOwnership", "transferOwnership"]) {
+        expect(lpTimelock.OWNER_TIER[fn].kinds, fn).to.include("BonusEscrow");
+      }
+      expect(lpTimelock.OWNER_TIER.transferOwnership.kinds).to.include("ApeBondPositionAdapter");
+      expect(lpTimelock.OWNER_TIER.upgradeToAndCall.kinds).to.not.include("ApeBondPositionAdapter");
+      expect(lpTimelock.OWNER_TIER.setGuardian.kinds).to.include("ApeBondPositionAdapter");
+      // The signature era is gone: no owner-tier entry may name it.
+      expect(lpTimelock.OWNER_TIER).to.not.have.property("setPurchaseSigner");
+
+      expect(() =>
+        lpTimelock.buildBatch([
+          {
+            target: vaultAddr,
+            kind: "BonusEscrow",
+            fn: "setCampaign",
+            args: [CAMPAIGN, asArray(CONFIG)],
+          },
+        ])
+      ).to.throw(
+        /setCampaign is not a function of BonusEscrow — it is legal on ApeBondPositionAdapter/
+      );
+    });
+
+    it("round-trips a batch through the file shape the deploy scripts write", function () {
+      const apebond = require("../../scripts/lib/apebond");
+      const batch = lpTimelock.buildBatch([
+        { target: vaultAddr, fn: "setBonusEscrow", args: [other.address] },
+        { target: vaultAddr, fn: "setStakeOperator", args: [adapter.address, "true"] },
+        { target: other.address, fn: "setCampaign", args: [CAMPAIGN, asArray(CONFIG)] },
+      ]);
+      const file = JSON.parse(JSON.stringify(apebond.batchFileContents(batch.calls)));
+      expect(file[2].args[1]).to.deep.equal(asArray(CONFIG).map((value) => String(value)));
+
+      const registry = { registryAddress: () => undefined };
+      const rebuilt = lpTimelock.buildBatch(
+        file.map((entry, index) => lpTimelock.resolveBatchEntry(registry, 31337, entry, index))
+      );
+      expect(rebuilt.id).to.equal(batch.id);
+      expect(rebuilt.payloads).to.deep.equal(batch.payloads);
+    });
+
+    it("runs the ApeBond link and a campaign as ONE operation on a real timelock", async function () {
+      // The pair the deploy scripts put beside the vault: the escrow born owned by the
+      // timelock with its reserve path closed, the adapter already handed to the timelock.
+      const Escrow = await ethers.getContractFactory("BonusEscrow");
+      const escrow = await upgrades.deployProxy(Escrow, [timelockAddr, ethers.ZeroAddress], {
+        kind: "uups",
+        constructorArgs: [token0Addr, vaultAddr],
+        unsafeAllow: UUPS_UNSAFE_ALLOW,
+      });
+      const escrowAddr = await escrow.getAddress();
+      const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+      const apeAdapter = await Adapter.deploy(
+        nfpmAddr,
+        vaultAddr,
+        escrowAddr,
+        timelockAddr,
+        guardian.address
+      );
+      const apeAdapterAddr = await apeAdapter.getAddress();
+
+      const batch = lpTimelock.buildBatch([
+        { target: vaultAddr, kind: "LPStakingVault", fn: "setBonusEscrow", args: [escrowAddr] },
+        {
+          target: vaultAddr,
+          kind: "LPStakingVault",
+          fn: "setStakeOperator",
+          args: [apeAdapterAddr, "true"],
+        },
+        { target: escrowAddr, kind: "BonusEscrow", fn: "setAdapter", args: [apeAdapterAddr] },
+        {
+          target: apeAdapterAddr,
+          kind: "ApeBondPositionAdapter",
+          fn: "setCampaign",
+          args: [CAMPAIGN, asArray({ ...CONFIG, enabled: true })],
+        },
+      ]);
+
+      await send("scheduleBatch", batch, MIN_DELAY);
+      await expect(send("executeBatch", batch)).to.be.revertedWithCustomError(
+        timelock,
+        "TimelockUnexpectedOperationState"
+      );
+      await time.increase(Number(MIN_DELAY) + 1);
+      await expect(send("executeBatch", batch))
+        .to.emit(vault, "BonusEscrowSet")
+        .withArgs(ethers.ZeroAddress, escrowAddr)
+        .and.to.emit(vault, "StakeOperatorSet")
+        .withArgs(apeAdapterAddr, true)
+        .and.to.emit(escrow, "AdapterSet")
+        .withArgs(ethers.ZeroAddress, apeAdapterAddr)
+        .and.to.emit(apeAdapter, "CampaignSet");
+
+      // The two link facts a wrong configuration would get wrong silently.
+      expect(await vault.bonusEscrow()).to.equal(escrowAddr);
+      expect(await escrow.vault()).to.equal(vaultAddr);
+      expect(await vault.isStakeOperator(apeAdapterAddr)).to.equal(true);
+      expect(await escrow.adapter()).to.equal(apeAdapterAddr);
+      const stored = await apeAdapter.campaigns(CAMPAIGN);
+      expect(stored.enabled).to.equal(true);
+      expect(stored.tickLower).to.equal(BigInt(CONFIG.tickLower));
+      expect(stored.tickUpper).to.equal(BigInt(CONFIG.tickUpper));
+      expect(stored.bonusCliffSeconds).to.equal(BigInt(CONFIG.bonusCliffSeconds));
+      expect(stored.bonusBps).to.equal(BigInt(CONFIG.bonusBps));
+      expect(stored.minBonusAmount).to.equal(CONFIG.minBonusAmount);
+    });
+  });
 });
