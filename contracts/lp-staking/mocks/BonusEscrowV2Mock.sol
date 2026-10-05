@@ -12,9 +12,7 @@ import "../BonusEscrow.sol";
  *
  *  It changes nothing about the custody math. The only additions are a `version()` marker and
  *  one new variable, which lives in its OWN ERC-7201 namespace
- *  (`real.lp.storage.BonusEscrowV2`) rather than inside V1's struct. That is the pattern a real
- *  upgrade would follow when it needs state the first version never had: appending to V1's
- *  struct is also legal, but a separate namespace cannot get the offset wrong.
+ *  (`real.lp.storage.BonusEscrowV2`) rather than inside V1's struct.
  */
 contract BonusEscrowV2Mock is BonusEscrow {
     /// @custom:storage-location erc7201:real.lp.storage.BonusEscrowV2
@@ -31,16 +29,14 @@ contract BonusEscrowV2Mock is BonusEscrow {
         }
     }
 
-    constructor(IERC20 bonusToken_) BonusEscrow(bonusToken_) {}
+    constructor(IERC20 bonusToken_, address vault_) BonusEscrow(bonusToken_, vault_) {}
 
     /// @notice Tells the two implementations apart from the proxy's own address.
     function version() external pure returns (uint256) {
         return 2;
     }
 
-    /// @notice The V2 half of the setup, run once via `upgradeToAndCall`. `reinitializer(2)` is
-    ///         what lets a second version seed state the first version never had, without
-    ///         re-running V1's `initialize`.
+    /// @notice The V2 half of the setup, run once via `upgradeToAndCall`.
     function initializeV2(uint256 marker) external reinitializer(2) {
         _v2Storage().upgradeMarker = marker;
     }
