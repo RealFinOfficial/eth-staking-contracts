@@ -5,29 +5,34 @@ pragma solidity 0.8.28;
  * @notice A vault that accepts a `stakeFor` and then reports the wrong thing about it.
  *
  * @dev Why it gets this authority: `vault` is an immutable constructor argument on
- *      {ApeBondPositionAdapter}, so the adapter has no way to verify at run time that the
- *      address it was pointed at is the vault anybody meant. The final custody assertion is
- *      the adapter's only defence against a wrong one, and an assertion nothing can trip is an
- *      assertion nobody has tested.
+ *      {ApeBondPositionAdapter}, so the adapter cannot verify at run time that the address it
+ *      was pointed at is the vault anybody meant. The final custody assertion is the adapter's
+ *      only defence against a wrong one, and an assertion nothing can trip is untested.
  *
- *      Two levers, both producing the same rejection from a different direction:
- *        * `takeCustody` false — `stakeFor` returns without pulling the NFT, so the adapter
- *          still owns it when it checks.
- *        * `reportedStaker` — custody moves, but `stakerOf` names somebody other than the
- *          beneficiary the purchase was signed for.
+ *      It answers the pool reads the adapter's constructor and `depositFor` make (`token0`,
+ *      `token1`, `fee`, `pool`, `previewTwap`) from values a test sets, and has two levers that
+ *      produce the same rejection from different directions:
+ *        * `takeCustody` false — `stakeFor` returns without pulling the NFT;
+ *        * `reportedStaker` — custody moves, but `stakerOf` names somebody else.
  */
 contract MisreportingVault {
-    /// @notice Set false to leave the NFT with the adapter.
     bool public takeCustody = true;
-    /// @notice Overrides what {stakerOf} reports. Zero means "report what was recorded".
     address public reportedStaker;
 
     address public immutable positionManager;
+    address public immutable token0;
+    address public immutable token1;
+    uint24 public immutable fee;
+    address public immutable pool;
 
     mapping(uint256 => address) private _stakers;
 
-    constructor(address positionManager_) {
+    constructor(address positionManager_, address token0_, address token1_, uint24 fee_, address pool_) {
         positionManager = positionManager_;
+        token0 = token0_;
+        token1 = token1_;
+        fee = fee_;
+        pool = pool_;
     }
 
     function setTakeCustody(bool v) external {
@@ -36,6 +41,15 @@ contract MisreportingVault {
 
     function setReportedStaker(address v) external {
         reportedStaker = v;
+    }
+
+    /// @dev Spot == TWAP == tick 0, inside any bound.
+    function previewTwap()
+        external
+        pure
+        returns (int24 currentTick, int24 twapTick, int24 maxDeviationTicks, bool withinBounds)
+    {
+        return (0, 0, 500, true);
     }
 
     function stakeFor(address user, uint256 tokenId) external {
