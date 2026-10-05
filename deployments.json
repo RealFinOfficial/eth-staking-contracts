@@ -17,7 +17,7 @@
       "fee": 3000,
       "observationCardinality": 150
     },
-    "TokenX": {
+    "TokenOverture": {
       "address": "0x0e5f4f9Ea700bCb65E4BeeaFaA8a67d0905Da03A",
       "deployTx": "0x463cf4eabec810de33b5fac425c864b38a8cddf572374a746d08cf1dc529ab3a",
       "block": 11680392,
@@ -31,7 +31,7 @@
       "block": 11680394,
       "implementation": "0x4C0B8633a1E6C5dd6888c91E9254d2c13fa21eB8",
       "implementationTx": "0x9087af13e6d630389e3fc0de4d58e0e9f53726301a7920761b7a87d49b33d776",
-      "tokenX": "0x0e5f4f9Ea700bCb65E4BeeaFaA8a67d0905Da03A",
+      "overture": "0x0e5f4f9Ea700bCb65E4BeeaFaA8a67d0905Da03A",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "owner": "0x591c51A6EE2ef571C44dF2339A7c92b57850C082",
