@@ -625,14 +625,22 @@ describe("deploy-implementation.js", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("inputs", function () {
-    it("knows exactly the five proxies", function () {
+    it("knows exactly the five LP proxies and the ApeBond escrow", function () {
       expect(IMPL_KINDS).to.deep.equal([
         "LPStakingVault",
         "RewardsDistributor",
         "LPEpochRegistry",
         "TokenOverture",
         "LPZapper",
+        "BonusEscrow",
       ]);
+      // The escrow's two immutables are read back off the live proxy, in constructor order,
+      // and both are cross-checked against its registry entry.
+      const { CONSTRUCTOR_SOURCES } = require("../../scripts/deploy-implementation");
+      expect(CONSTRUCTOR_SOURCES.BonusEscrow).to.deep.equal({
+        getters: ["bonusToken", "vault"],
+        registryKeys: ["bonusToken", "vault"],
+      });
     });
 
     it("rejects a target that is not one of the five proxies", async function () {
