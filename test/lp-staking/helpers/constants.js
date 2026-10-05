@@ -60,13 +60,9 @@ const ROLES = {
   // test-stack shortcut the script warns about. The fork suites deploy the production shape.
   guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
   operator: 9, // LP_OPERATOR — operator of all five proxies, Overture minter, funds the distributor
-  // The ApeBond route's two keys, appended AFTER the role split's pair so neither moves. The
-  // purchase signer is deliberately NOT `backOffice`: integration spec §6.4 keeps the
-  // purchase-authorization signer and its configuration separate from the rewards voucher
-  // signer, and the suite must not be able to pass by accidentally signing one with the
-  // other's key.
-  apeBondSigner: 10, // LP_APEBOND_PURCHASE_SIGNER — signs PurchaseAuthorizations
-  soulZapCaller: 11, // stands in for the SoulZap router that presents them
+  // Index 10 is unused on purpose: it was the ApeBond purchase signer, which the 2026-10-05
+  // refactor removed with the signature (B.3 decision document). The SoulZap seat keeps 11.
+  soulZapCaller: 11, // stands in for the SoulZap router that calls depositFor
 };
 
 // ─────────────────────────── Pool and stack parameters ───────────────────────────
@@ -176,31 +172,26 @@ const ERC1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 const ERC1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
 
-// ─────────────────────────── The ApeBond sample campaign ───────────────────────────
-//
-// SAMPLE figures, not committed campaign terms: what the rehearsal buys, what SoulZap's fee
-// takes off it, and the 5% guaranteed bonus REAL owes on the remainder. The input is stated
-// in tASSET so the bonus arithmetic stays visible — 9,900 * 500 / 10,000 = 495 — rather than
-// crossing an 18/6 decimal gap and a price on the way. `inputToken` is audit trail on the
-// authorization and is never moved by the adapter, so which token it names costs nothing.
+// SAMPLE campaign terms, not committed ones (B.3 decision document, open item O5). Since the
+// 2026-10-05 refactor the CONTRACT computes the bonus: the value of the position at the vault's
+// TWAP, times the campaign's rate, zero below the campaign's minimum. Nothing here is a bonus
+// amount; the suites compute the expected one from the position they mint.
 
-/** What the buyer paid, before SoulZap's fee. */
-const APEBOND_GROSS_INPUT = ASSET(10_000);
-/** What reached the liquidity, after a 1% fee. */
-const APEBOND_NET_INPUT = ASSET(9_900);
-/** The campaign's guaranteed bonus, in basis points of the net input. */
-const APEBOND_BONUS_BPS = 500n;
-/** 5% of the net input, in the bonus token's own units. */
-const APEBOND_BONUS = (APEBOND_NET_INPUT * APEBOND_BONUS_BPS) / 10_000n;
+/** The campaign id the suites configure: keccak256("apebond.campaign.sample"). */
+const APEBOND_CAMPAIGN_ID = "0x68cdced4b49b09e6fb2059b60ff9780812ba8894ce84abff81fe6cd57d00262d";
+/** The campaign's rate, in basis points of the position's value: 10 %. */
+const APEBOND_BONUS_BPS = 1_000n;
+/** Below this computed bonus a purchase is staked without one (D6): 1 ASSET. */
+const APEBOND_MIN_BONUS = ASSET(1);
 /** The campaign's funding of the escrow. Deliberately more than one bonus, so a surplus exists. */
 const APEBOND_ESCROW_FUNDING = ASSET(1_000);
 /**
- * The cliff every bonus is locked behind on Sepolia test stack #5: 300 seconds from the
- * purchase. Production is TBD with ApeBond (expected 2–3 months). Full cliff, no vesting —
- * the position is an NFT and cannot be split into time-released parts (vikinatora, 2026-09-15).
+ * The cliff every bonus is locked behind on the test stacks: 300 seconds from the purchase.
+ * Production is TBD with ApeBond (open item O5). Full cliff, no vesting — the position is an
+ * NFT and cannot be split into time-released parts (vikinatora, 2026-09-15).
  */
 const APEBOND_CLIFF_SECONDS = 300;
-/** Half-width of the campaign's approved range, in ticks. The authorization matches it exactly. */
+/** Half-width of the campaign's range around the pool's tick, in ticks. Deposits match it exactly. */
 const APEBOND_HALF_WIDTH_TICKS = 1200;
 /** The position the SoulZap caller mints for the buyer, in the same shape mintFor takes. */
 const APEBOND_MINT_ASSET = ASSET(4_000);
@@ -336,10 +327,9 @@ module.exports = {
   REWARD_CLAIM_TYPEHASH,
   ERC1967_IMPLEMENTATION_SLOT,
   ERC1967_ADMIN_SLOT,
-  APEBOND_GROSS_INPUT,
-  APEBOND_NET_INPUT,
+  APEBOND_CAMPAIGN_ID,
   APEBOND_BONUS_BPS,
-  APEBOND_BONUS,
+  APEBOND_MIN_BONUS,
   APEBOND_ESCROW_FUNDING,
   APEBOND_CLIFF_SECONDS,
   APEBOND_HALF_WIDTH_TICKS,
