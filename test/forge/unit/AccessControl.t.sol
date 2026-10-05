@@ -10,6 +10,11 @@ import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
 import {ILPEpochRegistry} from "../../../contracts/lp-staking/interfaces/ILPEpochRegistry.sol";
 import {MockBonusEscrow} from "../../../contracts/lp-staking/mocks/MockBonusEscrow.sol";
+import {BonusEscrow} from "../../../contracts/lp-staking/BonusEscrow.sol";
+import {BonusEscrowV2Mock} from "../../../contracts/lp-staking/mocks/BonusEscrowV2Mock.sol";
+import {ApeBondPositionAdapter} from "../../../contracts/lp-staking/ApeBondPositionAdapter.sol";
+import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonusEscrowHooks.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {RejectingReceiver} from "../utils/attackers/Receivers.sol";
 
@@ -1180,7 +1185,125 @@ contract AccessControlTest is LocalHarness {
         vm.stopPrank();
     }
 
+    // ──────────────────────── The ApeBond route ────────────────
+    //
+    // Sepolia-only contracts, held to the same rule: every tier is a closed list. The escrow has
+    // an owner (the timelock) and two NON-admin writers — the vault, which reports exits and
+    // re-ranges, and the adapter, which reserves — and no pause and no guardian at all. The
+    // adapter has an owner (the timelock: campaigns, callers, the guardian) and a guardian that
+    // holds the deposit pause and nothing else. `multisig` stands in for the guardian and
+    // `operatorSafe` for the operator, so a refusal is never satisfied by a collapsed role.
+
+    /// @dev The two notifications are the vault's alone: the escrow's owner, its adapter, both
+    ///      undelayed tiers of the stack and a stranger are each refused by name.
+    function test_ApeBond_TheEscrowHooksAreVaultOnly() public {
+        (BonusEscrow escrow,) = _apeBondRoute();
+        IBonusEscrowHooks.Snapshot memory snap =
+            IBonusEscrowHooks.Snapshot({tickLower: TICK_LOWER, tickUpper: TICK_UPPER, liquidity: LIQUIDITY});
+        address[5] memory refused = [address(this), carol, multisig, operatorSafe, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            bytes memory notVault = abi.encodeWithSelector(BonusEscrow.NotVault.selector, refused[i], address(vault));
+            vm.startPrank(refused[i]);
+            vm.expectRevert(notVault);
+            escrow.onUnstake(1);
+            vm.expectRevert(notVault);
+            escrow.onRebalance(1, 2, snap, snap);
+            vm.stopPrank();
+        }
+    }
+
+    /// @dev Only the adapter reserves — not the owner, not the vault, not either undelayed tier.
+    function test_ApeBond_ReserveIsAdapterOnly() public {
+        (BonusEscrow escrow,) = _apeBondRoute();
+        address[5] memory refused = [address(this), address(vault), multisig, operatorSafe, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(BonusEscrow.NotAdapter.selector, refused[i], carol));
+            escrow.reserve(1, alice, AWARD, uint64(block.timestamp + 1 days));
+        }
+    }
+
+    /// @dev The escrow's owner tier — the reserve right, the surplus, the code — is the owner's
+    ///      alone. The guardian, the operator, the adapter and a stranger are each refused.
+    function test_ApeBond_TheEscrowOwnerTierRefusesEveryoneElse() public {
+        (BonusEscrow escrow,) = _apeBondRoute();
+        asset.transfer(address(escrow), AWARD);
+        address v2 = address(new BonusEscrowV2Mock(IERC20(address(asset)), address(vault)));
+
+        address[4] memory refused = [multisig, operatorSafe, carol, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            bytes memory notOwner = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]);
+            vm.startPrank(refused[i]);
+            vm.expectRevert(notOwner);
+            escrow.setAdapter(refused[i]);
+            vm.expectRevert(notOwner);
+            escrow.recoverSurplus(refused[i]);
+            vm.expectRevert(notOwner);
+            escrow.upgradeToAndCall(v2, "");
+            vm.stopPrank();
+        }
+        assertEq(escrow.adapter(), carol, "the reserve right did not move");
+        assertEq(asset.balanceOf(address(escrow)), AWARD, "nothing left the escrow");
+    }
+
+    /// @dev The adapter's owner tier — campaigns, callers, the guardian seat — is refused to the
+    ///      guardian (whose one right is the pause) and to a stranger.
+    function test_ApeBond_TheAdapterOwnerTierRefusesTheGuardianAndAStranger() public {
+        (, ApeBondPositionAdapter adapter) = _apeBondRoute();
+        ApeBondPositionAdapter.CampaignConfig memory config = ApeBondPositionAdapter.CampaignConfig({
+            enabled: true,
+            tickLower: TICK_LOWER,
+            tickUpper: TICK_UPPER,
+            bonusCliffSeconds: 1 days,
+            bonusBps: 100,
+            minBonusAmount: 0
+        });
+        adapter.setCampaign(keccak256("existing"), config);
+
+        address[2] memory refused = [multisig, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            bytes memory notOwner = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]);
+            vm.startPrank(refused[i]);
+            vm.expectRevert(notOwner);
+            adapter.setCampaign(keccak256("campaign"), config);
+            vm.expectRevert(notOwner);
+            adapter.setCampaignEnabled(keccak256("existing"), false);
+            vm.expectRevert(notOwner);
+            adapter.setCampaignCaller(keccak256("existing"), refused[i], true);
+            vm.expectRevert(notOwner);
+            adapter.setSoulZapCaller(refused[i], true);
+            vm.expectRevert(notOwner);
+            adapter.setGuardian(refused[i]);
+            vm.expectRevert(notOwner);
+            adapter.transferOwnership(refused[i]);
+            vm.stopPrank();
+        }
+        assertEq(adapter.owner(), address(this), "the owner is where it was");
+    }
+
+    /// @dev The adapter's pause is the guardian's: the owner (the timelock holds no undelayed
+    ///      switch) and a stranger are refused, the guardian answers in one transaction.
+    function test_ApeBond_TheAdapterPauseRefusesTheOwnerAndAStranger() public {
+        (, ApeBondPositionAdapter adapter) = _apeBondRoute();
+        address[2] memory refused = [address(this), stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotGuardian.selector, refused[i], multisig));
+            adapter.setDepositsPaused(true);
+        }
+        vm.prank(multisig);
+        adapter.setDepositsPaused(true);
+        assertTrue(adapter.depositsPaused(), "the guardian holds the switch");
+    }
+
     // ──────────────────────── Helpers ──────────────────────────
+
+    /// @dev An escrow on the local vault (owner: this contract, adapter: `carol`) and an adapter
+    ///      in front of it (owner: this contract, guardian: `multisig`).
+    function _apeBondRoute() internal returns (BonusEscrow escrow, ApeBondPositionAdapter adapter) {
+        escrow = _deployBonusEscrowProxy(address(asset), address(vault), address(this), carol);
+        adapter = new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), multisig);
+    }
 
     /// @dev The five contracts' proxy addresses, in deploy-script order.
     function _allFive() private view returns (address[5] memory) {

@@ -118,7 +118,9 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         v.id2 = mathVault.rebalance(v.id1, R2_LOWER, R2_UPPER, _noSwap(), FAR_DEADLINE);
         v.bonus2 = _assertMoved(v.id1, v.id2);
         // The document rounds its table (115 ASSET, 0.17 USDC left); the exact math leaves ~2.45 USDC.
-        assertApproxEqRel(usdcToken.balanceOf(alice) - v.usdcBefore, 4_999.83e6, 0.001e18, "about 4,999.83 USDC refunded");
+        assertApproxEqRel(
+            usdcToken.balanceOf(alice) - v.usdcBefore, 4_999.83e6, 0.001e18, "about 4,999.83 USDC refunded"
+        );
 
         _reportVector(v);
     }
