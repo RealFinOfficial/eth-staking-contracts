@@ -1,50 +1,38 @@
 const hre = require("hardhat");
-
 const pools = require("./lib/pools");
 
-// Campaign operator: put bonus tokens into the ApeBond {BonusEscrow} proxy.
+// Campaign operator: put bonus tokens ($ASSET) into the ApeBond {BonusEscrow} proxy.
 //
-// ──────────────────────── why this is a plain transfer ────────────────────────
+// ──────────────────────── reserve now, fund later ────────────────────────
 //
-// The escrow has no funding function, and that is by design. It holds obligations, not a
-// deposit book: `reserve` records what is owed and `claim` pays it, and the only thing that
-// makes a reservation possible is that the proxy's own ERC-20 balance covers `totalReserved`
-// plus the new amount. So funding it is an ordinary ERC-20 `transfer` to the proxy address —
-// there is nothing to call, nothing to approve and no counter to raise. `scripts/fund-rewards.js`
-// looks similar and is NOT the same shape: the staking pool's `addRewards` pulls with
-// `safeTransferFrom` and increments a counter, because there the balance and the counter are two
-// different facts.
+// Since 2026-10-05 the escrow records every bonus WHATEVER its balance is (override O2 of the B.3
+// decision document: no ceiling of any kind). The balance matters at exactly one moment: a claim
+// pays the whole amount out of it, or reverts with `InsufficientFunds(needed, balance)` and changes
+// nothing, until the company funds the escrow. So the escrow can be SHORT — more owed
+// (`totalReserved`) than held — and the backend alerts when it is. This script is how the company
+// closes that gap, and how it tops up ahead of the cliffs.
 //
-// What this script adds over sending the transfer by hand is the three numbers nobody should
-// have to compute in their head at the keyboard: `totalReserved` (the floor under the balance,
-// which this run must leave exactly where it found it), the FREE balance
-// (`balance - totalReserved`, which is what a new purchase can actually reserve against), and
-// what the deployer is left holding.
+// It is a plain ERC-20 `transfer` to the proxy: the escrow has no funding function, nothing to
+// approve and no counter to raise. What the script adds is the arithmetic nobody should do at the
+// keyboard: the balance, `totalReserved`, and their difference — the SURPLUS when positive (only
+// that much is reachable by `recoverSurplus`), the SHORTFALL when negative (that many claims would
+// revert today) — before and after.
 //
 // ──────────────────────── the two ways to say how much ────────────────────────
 //
-// A fixed amount is what a campaign top-up is: "send 10,000". A TARGET is what a re-run is:
-// "make sure the free balance is 10,000", which sends the difference and sends nothing at all
-// when the free balance is already there. Exactly one of the two is given, because they answer
-// different questions and a run that was handed both would have to guess which one the operator
-// meant.
-//
-// ──────────────────────── the environment ────────────────────────
-//
-//   LP_APEBOND_FUND_AMOUNT   how much to send, in WHOLE tokens, e.g. "10000". Decimals come
-//                            from the token itself, never from an assumption
-//   LP_APEBOND_FUND_TARGET   the FREE balance to reach, in whole tokens. The run sends
-//                            `target - free` and sends nothing when free >= target, so the same
-//                            command is safe to repeat. Mutually exclusive with the above
-//   LP_APEBOND_ESCROW        the escrow's address, when it is not the one recorded for this
-//                            chain in the registry
+//   LP_APEBOND_FUND_AMOUNT   send exactly this many WHOLE tokens, e.g. "10000". Decimals come
+//                            from the token itself
+//   LP_APEBOND_FUND_TARGET   make `balance - totalReserved` equal this many whole tokens: the run
+//                            sends `target - (balance - totalReserved)`, which COVERS a shortfall
+//                            first, and sends nothing when the escrow already holds that much.
+//                            TARGET=0 means "cover exactly what is owed". Safe to repeat.
+//   (exactly one of the two)
+//   LP_APEBOND_ESCROW        the escrow's address, when it is not the one recorded for this chain
 //   DEPLOYMENTS_FILE         redirects the registry, like every other script here
 //   CONFIRM=yes              required on mainnet
 //
+//     LP_APEBOND_FUND_TARGET=0     npx hardhat run scripts/fund-escrow.js --network sepolia
 //     LP_APEBOND_FUND_AMOUNT=10000 npx hardhat run scripts/fund-escrow.js --network sepolia
-//     LP_APEBOND_FUND_TARGET=10000 npx hardhat run scripts/fund-escrow.js --network sepolia
-//
-// The runbook is in scripts/README.md under "After the activation: opening the route".
 
 /** The registry kind this script resolves. */
 const ESCROW_KIND = "BonusEscrow";
@@ -54,6 +42,7 @@ const ESCROW_ABI = [
   "function bonusToken() view returns (address)",
   "function adapter() view returns (address)",
   "function owner() view returns (address)",
+  "function vault() view returns (address)",
   "function totalReserved() view returns (uint256)",
 ];
 
@@ -100,14 +89,15 @@ function resolveRequest(decimals) {
 
   if (amount && target) {
     throw new Error(
-      "Set LP_APEBOND_FUND_AMOUNT (send exactly this much) or LP_APEBOND_FUND_TARGET (top the " +
-        "FREE balance up to this much) — not both. They answer different questions."
+      "Set LP_APEBOND_FUND_AMOUNT (send exactly this much) or LP_APEBOND_FUND_TARGET (make " +
+        "balance - totalReserved equal this much) — not both. They answer different questions."
     );
   }
   if (!amount && !target) {
     throw new Error(
       "Set LP_APEBOND_FUND_AMOUNT in whole tokens, e.g. LP_APEBOND_FUND_AMOUNT=10000, or " +
-        "LP_APEBOND_FUND_TARGET to the free balance the escrow should end up with"
+        "LP_APEBOND_FUND_TARGET to the surplus over totalReserved the escrow should end up with " +
+        "(0 covers exactly what is owed)"
     );
   }
 
@@ -154,11 +144,15 @@ async function main() {
   const beforeEscrow = await token.balanceOf(escrowAddress);
   const beforeSender = await token.balanceOf(sender.address);
   const totalReserved = await escrow.totalReserved();
-  const beforeFree = beforeEscrow > totalReserved ? beforeEscrow - totalReserved : 0n;
+  // SIGNED: negative is a shortfall — claims worth that much would revert today.
+  const beforeFree = beforeEscrow - totalReserved;
+  const describeFree = (free) =>
+    free >= 0n ? `${units(free)} surplus` : `${units(-free)} SHORT — claims revert InsufficientFunds`;
 
   console.log(`${ESCROW_KIND}:      ${escrowAddress} (proxy)`);
   console.log(`  ${pools.explorerAddress(chainId, escrowAddress)}`);
   console.log(`  adapter:        ${await escrow.adapter()}`);
+  console.log(`  vault:          ${await escrow.vault()}`);
   console.log(`  owner:          ${await escrow.owner()}`);
   console.log(`Network:          chain ${chainId} (${hre.network.name})`);
   console.log(`Bonus token:      ${await token.name()} (${symbol}) @ ${tokenAddress}`);
@@ -166,8 +160,8 @@ async function main() {
   console.log(`From:             ${sender.address}`);
   console.log(`\n  — before —`);
   console.log(`  escrow balance: ${units(beforeEscrow)}`);
-  console.log(`  totalReserved:  ${units(totalReserved)}  (the floor; this run must not move it)`);
-  console.log(`  FREE balance:   ${units(beforeFree)}  (balance - totalReserved)`);
+  console.log(`  totalReserved:  ${units(totalReserved)}  (what is owed; this run must not move it)`);
+  console.log(`  balance - owed: ${describeFree(beforeFree)}`);
   console.log(`  sender balance: ${units(beforeSender)}`);
 
   // ──────── how much actually goes ────────
@@ -179,17 +173,17 @@ async function main() {
   } else {
     amount = value > beforeFree ? value - beforeFree : 0n;
     console.log(
-      `\nRequested:        bring the FREE balance to ${units(value)} ` +
+      `\nRequested:        bring balance - totalReserved to ${units(value)} ` +
         `(LP_APEBOND_FUND_TARGET=${raw})`
     );
-    console.log(`  free now:       ${units(beforeFree)}`);
+    console.log(`  now:            ${describeFree(beforeFree)}`);
     console.log(`  to send:        ${units(amount)}`);
   }
 
   if (amount === 0n) {
     console.log(
       mode === "target"
-        ? `\nThe free balance is already at or above the target — nothing to send, nothing sent.`
+        ? `\nThe escrow already holds the target over what it owes — nothing to send, nothing sent.`
         : `\nLP_APEBOND_FUND_AMOUNT is zero — nothing to send, nothing sent.`
     );
     return;
@@ -214,21 +208,21 @@ async function main() {
   const afterEscrow = await token.balanceOf(escrowAddress);
   const afterSender = await token.balanceOf(sender.address);
   const afterReserved = await escrow.totalReserved();
-  const afterFree = afterEscrow > afterReserved ? afterEscrow - afterReserved : 0n;
+  const afterFree = afterEscrow - afterReserved;
 
   console.log(`\n  — after —`);
   console.log(`  escrow balance: ${units(afterEscrow)}  (+${units(afterEscrow - beforeEscrow)})`);
   console.log(`  totalReserved:  ${units(afterReserved)}`);
-  console.log(`  FREE balance:   ${units(afterFree)}  (+${units(afterFree - beforeFree)})`);
+  console.log(`  balance - owed: ${describeFree(afterFree)}`);
   console.log(`  sender balance: ${units(afterSender)}  (-${units(beforeSender - afterSender)})`);
 
   // Funding reserves nothing, so `totalReserved` must read exactly what it read before. A change
-  // here means a purchase landed in the same window, not that this run did something.
+  // here means a purchase, a claim or a forfeiture landed in the same window.
   if (afterReserved !== totalReserved) {
     throw new Error(
       `totalReserved moved from ${units(totalReserved)} to ${units(afterReserved)} across this ` +
-        `run. Funding reserves nothing, so a purchase landed in the same window — re-read the ` +
-        `escrow before relying on the free balance printed above.`
+        `run. Funding reserves nothing, so a purchase, claim or forfeiture landed in the same ` +
+        `window — re-read the escrow before relying on the figures printed above.`
     );
   }
   // A fee-on-transfer token would deliver less than it took. The escrow's accounting assumes it
@@ -236,12 +230,13 @@ async function main() {
   if (afterEscrow - beforeEscrow !== amount) {
     throw new Error(
       `The escrow received ${units(afterEscrow - beforeEscrow)} but ${units(amount)} was sent. ` +
-        `${symbol} does not deliver what it takes; the escrow's funding invariant assumes it does.`
+        `${symbol} does not deliver what it takes; the escrow's claims assume it does.`
     );
   }
   console.log(
-    `\nDone. The escrow can back ${units(afterFree)} of new reservations; ${units(afterReserved)} ` +
-      `is already owed.`
+    afterFree >= 0n
+      ? `\nDone. Every reservation (${units(afterReserved)} owed) is covered; ${units(afterFree)} is surplus.`
+      : `\nDone, but the escrow is still SHORT by ${units(-afterFree)}: claims of that much revert until it is funded.`
   );
 }
 
