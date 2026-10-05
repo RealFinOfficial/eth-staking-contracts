@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Blocking coverage gate for the five LP-staking contracts plus the guard they share.
+ * Blocking coverage gate for the seven LP-staking contracts (the five LP proxies, the ApeBond
+ * escrow and adapter) plus the four libraries they share.
  *
  * Reads the lcov file `forge coverage --report lcov` writes and enforces three things:
  *
@@ -15,7 +16,8 @@
  *   (c) the per-file line and branch FLOORS are met, expressed as a minimum number of
  *       covered entities rather than a percentage so no rounding can creep in.
  *
- * Scope is `contracts/lp-staking/{the five contracts}` + `libraries/TwapGuard.sol`. The mocks,
+ * Scope is `contracts/lp-staking/{the seven contracts}` + `libraries/{TwapGuard, TickMath,
+ * LiquidityAmounts, PositionValue}.sol`. The mocks,
  * the interfaces and the two legacy staking pools are deliberately out of scope: they are
  * test scaffolding and frozen pre-LP code, and including them would dilute the number in both
  * directions.
@@ -46,19 +48,39 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-10-05 (Wednesday launch: tracks M / P / R / U) ──────────
+// ── Pinned floors, re-measured 2026-10-05 (lane 2: the B.3 ApeBond refactor on lane 1) ──────
 //
-// | file                     | lines             | branches        |
-// |--------------------------|-------------------|-----------------|
-// | LPStakingVault.sol       |  97.91% (187/191) | 100.00% (34/34) |
-// | LPZapper.sol             |  96.08% (98/102)  | 100.00% (20/20) |
-// | RewardsDistributor.sol   |  97.54% (119/122) | 100.00% (18/18) |
-// | LPEpochRegistry.sol      |  96.46% (109/113) | 100.00% (21/21) |
-// | TokenOverture.sol        |  84.62% (22/26)   | 100.00% (2/2)   |
-// | libraries/TwapGuard.sol  |  97.67% (42/43)   | 100.00% (7/7)   |
+// | file                        | lines             | branches        |
+// |-----------------------------|-------------------|-----------------|
+// | ApeBondPositionAdapter.sol  | 100.00% (126/126) | 100.00% (34/34) |
+// | BonusEscrow.sol             |  97.30% (108/111) | 100.00% (23/23) |
+// | LPStakingVault.sol          |  97.99% (195/199) | 100.00% (35/35) |
+// | LPZapper.sol                |  96.08% (98/102)  | 100.00% (20/20) |
+// | RewardsDistributor.sol      |  97.54% (119/122) | 100.00% (18/18) |
+// | LPEpochRegistry.sol         |  96.46% (109/113) | 100.00% (21/21) |
+// | TokenOverture.sol           |  84.62% (22/26)   | 100.00% (2/2)   |
+// | libraries/TwapGuard.sol     |  97.67% (42/43)   | 100.00% (7/7)   |
+// | libraries/TickMath.sol      | 100.00% (25/25)   | 100.00% (21/21) |
+// | libraries/LiquidityAmounts.sol | 100.00% (15/15) | 100.00% (7/7)  |
+// | libraries/PositionValue.sol | 100.00% (4/4)     | (0/0 — the ternary is not instrumented) |
 //
-// Branch coverage is 100% on all six, so every branch floor is the ceiling: one newly uncovered
-// branch fails the gate. Measured on 546 Foundry tests in 28 suites.
+// Branch coverage is 100% on every file, so every branch floor is the ceiling; the adapter's and
+// the three new libraries' LINE floors are their ceilings too. Measured on 720 Foundry tests in
+// 34 suites.
+//
+// The lane-2 round (B.3 ApeBond refactor, 2026-10-05):
+//
+//   * ApeBondPositionAdapter (lines 97 -> 126, branches 25 -> 34) is a rewrite: the signature,
+//     the purchase struct and the spent-id books are gone; `depositFor(tokenId, campaignId,
+//     beneficiary)` values the position at the vault's TWAP and computes the bonus; campaigns
+//     carry range, cliff, rate and minimum, validated in `setCampaign`.
+//   * BonusEscrow (lines 66 -> 111, branches 12 -> 23) is a rewrite: tokenId keys, the vault
+//     immutable and its pool-token check, the two vault hooks with the active-reservation rule,
+//     the rebalance scaling, `InsufficientFunds` at claim and no balance check at reserve.
+//   * LPStakingVault (lines 191 -> 199, branches 34 -> 35): the stake-operator allowlist beside
+//     the zapper (`setStakeOperator`, `isStakeOperator`, the widened `stakeFor` check).
+//   * TickMath, LiquidityAmounts and PositionValue are new (the vendored Uniswap math and the
+//     one valuation the adapter and the escrow share).
 //
 // The 2026-10-05 round moved every denominator except TwapGuard's:
 //
@@ -78,24 +100,25 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //     namespaced storage accessor, the `operator` tier (`onlyOperator`, `setOperator`,
 //     `operator()`), `_authorizeUpgrade`.
 //
-// The twenty uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
-// gap. Each is a call site, an assembly body, an empty OZ initializer or a jump whose effect is
+// The twenty-three uncovered LINES are all an `--ir-minimum` line attribution artefact rather
+// than a gap (line numbers as of lane 2: the vault's moved with the allowlist). Each is a call site, an assembly body, an empty OZ initializer or a jump whose effect is
 // asserted by a test that passes in the same run; the inlined site simply loses its mapping:
 //
-//   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:207`,
+//   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:213`, `BonusEscrow.sol:205`,
 //     `LPZapper.sol:147`, `RewardsDistributor.sol:147`, `LPEpochRegistry.sol:93`,
 //     `TokenOverture.sol:82`, `libraries/TwapGuard.sol:126`; every getter reaches them and each
 //     file's `test_Storage_*` test reads the pinned slot directly.
-//   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:396`,
+//   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:415`,
+//     `BonusEscrow.sol:269`,
 //     `LPZapper.sol:257`, `RewardsDistributor.sol:194`, `LPEpochRegistry.sol:112`,
 //     `TokenOverture.sol:90`; each `test_Constructor_DisablesTheImplementationsInitializers`
 //     proves it ran.
 //   * the empty OpenZeppelin initializers — `__Ownable2Step_init();` at
-//     `LPStakingVault.sol:427`, `LPZapper.sol:276`, `RewardsDistributor.sol:217`,
+//     `LPStakingVault.sol:446`, `BonusEscrow.sol:285`, `LPZapper.sol:276`, `RewardsDistributor.sol:217`,
 //     `LPEpochRegistry.sol:120`, `TokenOverture.sol:108`, and `__ERC20Burnable_init();` at
 //     `TokenOverture.sol:105` — kept because the upgrades plugin validates the parent-initializer
 //     chain.
-//   * `_checkTwapDeviation();` — `LPStakingVault.sol:1003`, `LPZapper.sol:545`.
+//   * `_checkTwapDeviation();` — `LPStakingVault.sol:1073`, `LPZapper.sol:545`.
 //   * `break;` in the token scan of `setEpochAmount` — `LPEpochRegistry.sol:186`; executed by
 //     `test_SetEpochAmount_ChangesALiveNotStartedEpochAndAnnouncesIt` and
 //     `test_SetEpochAmount_AppendsANewTokenExactlyOnce`, both arms of its `if` are covered.
@@ -104,16 +127,16 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/ApeBondPositionAdapter.sol": {
-    lines: {found: 97, minHit: 97},
-    branches: {found: 25, minHit: 25},
+    lines: {found: 126, minHit: 126},
+    branches: {found: 34, minHit: 34},
   },
   "contracts/lp-staking/BonusEscrow.sol": {
-    lines: {found: 66, minHit: 63},
-    branches: {found: 12, minHit: 12},
+    lines: {found: 111, minHit: 108},
+    branches: {found: 23, minHit: 23},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 191, minHit: 187},
-    branches: {found: 34, minHit: 34},
+    lines: {found: 199, minHit: 195},
+    branches: {found: 35, minHit: 35},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},
@@ -134,6 +157,18 @@ export const PER_FILE_FLOORS = {
   "contracts/lp-staking/libraries/TwapGuard.sol": {
     lines: {found: 43, minHit: 42},
     branches: {found: 7, minHit: 7},
+  },
+  "contracts/lp-staking/libraries/TickMath.sol": {
+    lines: {found: 25, minHit: 25},
+    branches: {found: 21, minHit: 21},
+  },
+  "contracts/lp-staking/libraries/LiquidityAmounts.sol": {
+    lines: {found: 15, minHit: 15},
+    branches: {found: 7, minHit: 7},
+  },
+  "contracts/lp-staking/libraries/PositionValue.sol": {
+    lines: {found: 4, minHit: 4},
+    branches: {found: 0, minHit: 0},
   },
 };
 

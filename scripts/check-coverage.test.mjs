@@ -92,7 +92,7 @@ test("a run exactly at every pinned floor passes", () => {
 test("coverage above the floor passes, and the wrong LF/LH summary lines are ignored", () => {
   // One more line covered than the floor demands, on the file with the widest gap.
   const lcov = buildLcov({
-    "contracts/lp-staking/LPStakingVault.sol": {lines: [188, 191], branches: [34, 34]},
+    "contracts/lp-staking/LPStakingVault.sol": {lines: [196, 199], branches: [35, 35]},
   });
   assert.equal(runChecker(lcov).code, 0);
 });
@@ -122,12 +122,12 @@ test("one newly uncovered branch fails the gate — every branch floor is the ce
 // ceiling: a line that arrives uncovered has to fail, exactly the way a branch does.
 test("the adapter's line floor is its ceiling — one uncovered line fails", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/ApeBondPositionAdapter.sol": {lines: [96, 97], branches: [25, 25]},
+    "contracts/lp-staking/ApeBondPositionAdapter.sol": {lines: [125, 126], branches: [34, 34]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /ApeBondPositionAdapter\.sol: lines coverage 98\.97% \(96\/97\)/);
-  assert.match(stderr, /below the floor 100\.00% \(97\/97\)/);
+  assert.match(stderr, /ApeBondPositionAdapter\.sol: lines coverage 99\.21% \(125\/126\)/);
+  assert.match(stderr, /below the floor 100\.00% \(126\/126\)/);
 });
 
 test("all violations are reported, not just the first", () => {
