@@ -5,6 +5,11 @@
         "internalType": "contract IERC20",
         "name": "bonusToken_",
         "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "vault_",
+        "type": "address"
       }
     ],
     "stateMutability": "nonpayable",
@@ -24,12 +29,33 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       }
     ],
     "name": "AlreadyClaimed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "bonusToken",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "token0",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "token1",
+        "type": "address"
+      }
+    ],
+    "name": "BonusTokenNotInPool",
     "type": "error"
   },
   {
@@ -51,9 +77,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       }
     ],
     "name": "DuplicateReservation",
@@ -78,6 +104,33 @@
   {
     "inputs": [],
     "name": "FailedCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "Forfeited",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "needed",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "balance",
+        "type": "uint256"
+      }
+    ],
+    "name": "InsufficientFunds",
     "type": "error"
   },
   {
@@ -109,6 +162,22 @@
   {
     "inputs": [],
     "name": "NotInitializing",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "vault",
+        "type": "address"
+      }
+    ],
+    "name": "NotVault",
     "type": "error"
   },
   {
@@ -156,6 +225,11 @@
   },
   {
     "inputs": [],
+    "name": "T",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "UUPSUnauthorizedCallContext",
     "type": "error"
   },
@@ -174,24 +248,8 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "available",
+        "name": "tokenId",
         "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "requested",
-        "type": "uint256"
-      }
-    ],
-    "name": "Underfunded",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
       }
     ],
     "name": "UnknownReservation",
@@ -231,9 +289,9 @@
     "inputs": [
       {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       },
       {
         "indexed": true,
@@ -256,9 +314,71 @@
     "inputs": [
       {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "beneficiary",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusForfeited",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "beneficiary",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "previousAmount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "newAmount",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusMoved",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       },
       {
         "indexed": true,
@@ -400,6 +520,19 @@
   },
   {
     "inputs": [],
+    "name": "bonusIsToken0",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "bonusToken",
     "outputs": [
       {
@@ -414,9 +547,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       }
     ],
     "name": "claim",
@@ -433,9 +566,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       }
     ],
     "name": "claimable",
@@ -463,6 +596,100 @@
       }
     ],
     "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "isActive",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "oldTokenId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "newTokenId",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "int24",
+            "name": "tickLower",
+            "type": "int24"
+          },
+          {
+            "internalType": "int24",
+            "name": "tickUpper",
+            "type": "int24"
+          },
+          {
+            "internalType": "uint128",
+            "name": "liquidity",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct IBonusEscrowHooks.Snapshot",
+        "name": "old_",
+        "type": "tuple"
+      },
+      {
+        "components": [
+          {
+            "internalType": "int24",
+            "name": "tickLower",
+            "type": "int24"
+          },
+          {
+            "internalType": "int24",
+            "name": "tickUpper",
+            "type": "int24"
+          },
+          {
+            "internalType": "uint128",
+            "name": "liquidity",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct IBonusEscrowHooks.Snapshot",
+        "name": "new_",
+        "type": "tuple"
+      }
+    ],
+    "name": "onRebalance",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "onUnstake",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -529,9 +756,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       }
     ],
     "name": "reservationOf",
@@ -555,6 +782,11 @@
         "internalType": "bool",
         "name": "claimed",
         "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "forfeited",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -563,9 +795,9 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       },
       {
         "internalType": "address",
@@ -643,6 +875,19 @@
     "name": "upgradeToAndCall",
     "outputs": [],
     "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "vault",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   }
 ]

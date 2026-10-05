@@ -18,32 +18,12 @@
       },
       {
         "internalType": "address",
-        "name": "_token0",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_token1",
-        "type": "address"
-      },
-      {
-        "internalType": "uint24",
-        "name": "_fee",
-        "type": "uint24"
-      },
-      {
-        "internalType": "address",
         "name": "_initialOwner",
         "type": "address"
       },
       {
         "internalType": "address",
         "name": "_guardian",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_purchaseSigner",
         "type": "address"
       }
     ],
@@ -53,33 +33,44 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "deadline",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "blockTimestamp",
-        "type": "uint256"
+        "internalType": "uint16",
+        "name": "bonusBps",
+        "type": "uint16"
       }
     ],
-    "name": "AuthorizationExpired",
+    "name": "BonusBpsTooHigh",
     "type": "error"
   },
   {
     "inputs": [
       {
         "internalType": "address",
-        "name": "authorized",
+        "name": "bonusToken",
         "type": "address"
       },
       {
         "internalType": "address",
-        "name": "caller",
+        "name": "token0",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "token1",
         "type": "address"
       }
     ],
-    "name": "CallerMismatch",
+    "name": "BonusTokenNotInPool",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "CampaignDisabled",
     "type": "error"
   },
   {
@@ -109,33 +100,6 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ECDSAInvalidSignature",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "length",
-        "type": "uint256"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureLength",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "s",
-        "type": "bytes32"
-      }
-    ],
-    "name": "ECDSAInvalidSignatureS",
-    "type": "error"
-  },
-  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -149,17 +113,17 @@
   {
     "inputs": [
       {
-        "internalType": "uint128",
-        "name": "liquidity",
-        "type": "uint128"
+        "internalType": "address",
+        "name": "escrowVault",
+        "type": "address"
       },
       {
-        "internalType": "uint128",
-        "name": "minLiquidity",
-        "type": "uint128"
+        "internalType": "address",
+        "name": "vault",
+        "type": "address"
       }
     ],
-    "name": "InsufficientLiquidity",
+    "name": "EscrowVaultMismatch",
     "type": "error"
   },
   {
@@ -174,24 +138,24 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "InvalidShortString",
-    "type": "error"
-  },
-  {
     "inputs": [
       {
-        "internalType": "address",
-        "name": "recovered",
-        "type": "address"
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
       },
       {
-        "internalType": "address",
-        "name": "expected",
-        "type": "address"
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickSpacing",
+        "type": "int24"
       }
     ],
-    "name": "InvalidSignature",
+    "name": "InvalidCampaignRange",
     "type": "error"
   },
   {
@@ -234,12 +198,17 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "nonce",
-        "type": "uint256"
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
       }
     ],
-    "name": "NonceAlreadyUsed",
+    "name": "NotCampaignCaller",
     "type": "error"
   },
   {
@@ -320,12 +289,22 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "int24",
+        "name": "currentTick",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "twapTick",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "maxDeviationTicks",
+        "type": "int24"
       }
     ],
-    "name": "PurchaseAlreadyProcessed",
+    "name": "PriceOutsideTwapBounds",
     "type": "error"
   },
   {
@@ -336,12 +315,22 @@
   {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "str",
-        "type": "string"
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
       }
     ],
-    "name": "StringTooLong",
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "T",
     "type": "error"
   },
   {
@@ -374,27 +363,22 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "tokenA",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "tokenB",
-        "type": "address"
-      }
-    ],
-    "name": "TokensNotSorted",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
         "name": "sender",
         "type": "address"
       }
     ],
     "name": "UnexpectedNftSender",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "UnknownCampaign",
     "type": "error"
   },
   {
@@ -424,13 +408,18 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "ZeroCampaignId",
+    "type": "error"
+  },
+  {
     "anonymous": false,
     "inputs": [
       {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "purchaseId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
       },
       {
         "indexed": true,
@@ -443,12 +432,6 @@
         "internalType": "address",
         "name": "beneficiary",
         "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "tokenId",
-        "type": "uint256"
       },
       {
         "indexed": false,
@@ -470,26 +453,20 @@
       },
       {
         "indexed": false,
-        "internalType": "address",
-        "name": "inputToken",
-        "type": "address"
+        "internalType": "int24",
+        "name": "twapTick",
+        "type": "int24"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "grossInputAmount",
+        "name": "positionValue",
         "type": "uint256"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "netInputAmount",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "guaranteedBonusAmount",
+        "name": "bonusAmount",
         "type": "uint256"
       },
       {
@@ -506,6 +483,99 @@
     "anonymous": false,
     "inputs": [
       {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
+      }
+    ],
+    "name": "CampaignCallerSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      }
+    ],
+    "name": "CampaignEnabledSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "bonusCliffSeconds",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint16",
+        "name": "bonusBps",
+        "type": "uint16"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "minBonusAmount",
+        "type": "uint256"
+      }
+    ],
+    "name": "CampaignSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": false,
         "internalType": "bool",
         "name": "depositsPaused",
@@ -513,12 +583,6 @@
       }
     ],
     "name": "DepositsPausedSet",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [],
-    "name": "EIP712DomainChanged",
     "type": "event"
   },
   {
@@ -563,25 +627,6 @@
     "anonymous": false,
     "inputs": [
       {
-        "indexed": false,
-        "internalType": "address",
-        "name": "previousSigner",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "newSigner",
-        "type": "address"
-      }
-    ],
-    "name": "PurchaseSignerSet",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
         "indexed": true,
         "internalType": "address",
         "name": "caller",
@@ -599,12 +644,25 @@
   },
   {
     "inputs": [],
-    "name": "PURCHASE_AUTHORIZATION_TYPEHASH",
+    "name": "BPS",
     "outputs": [
       {
-        "internalType": "bytes32",
+        "internalType": "uint16",
         "name": "",
-        "type": "bytes32"
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusIsToken0",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -612,37 +670,67 @@
   },
   {
     "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "campaignCallers",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "name": "campaigns",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "uint64",
+        "name": "bonusCliffSeconds",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "bonusBps",
+        "type": "uint16"
+      },
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "minBonusAmount",
         "type": "uint256"
-      }
-    ],
-    "name": "consumedNonces",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "name": "consumedPurchaseIds",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "",
-        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -656,86 +744,14 @@
         "type": "uint256"
       },
       {
-        "components": [
-          {
-            "internalType": "bytes32",
-            "name": "purchaseId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "campaignId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "address",
-            "name": "beneficiary",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "soulZapCaller",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "inputToken",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "grossInputAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "netInputAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "guaranteedBonusAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint64",
-            "name": "bonusUnlockAt",
-            "type": "uint64"
-          },
-          {
-            "internalType": "uint128",
-            "name": "minLiquidity",
-            "type": "uint128"
-          },
-          {
-            "internalType": "int24",
-            "name": "expectedTickLower",
-            "type": "int24"
-          },
-          {
-            "internalType": "int24",
-            "name": "expectedTickUpper",
-            "type": "int24"
-          },
-          {
-            "internalType": "uint256",
-            "name": "nonce",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "deadline",
-            "type": "uint256"
-          }
-        ],
-        "internalType": "struct ApeBondPositionAdapter.PurchaseAuthorization",
-        "name": "authorization",
-        "type": "tuple"
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
       },
       {
-        "internalType": "bytes",
-        "name": "realSignature",
-        "type": "bytes"
+        "internalType": "address",
+        "name": "beneficiary",
+        "type": "address"
       }
     ],
     "name": "depositFor",
@@ -758,53 +774,10 @@
   },
   {
     "inputs": [],
-    "name": "eip712Domain",
-    "outputs": [
-      {
-        "internalType": "bytes1",
-        "name": "fields",
-        "type": "bytes1"
-      },
-      {
-        "internalType": "string",
-        "name": "name",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "version",
-        "type": "string"
-      },
-      {
-        "internalType": "uint256",
-        "name": "chainId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "verifyingContract",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "salt",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint256[]",
-        "name": "extensions",
-        "type": "uint256[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "escrow",
     "outputs": [
       {
-        "internalType": "contract IApeBondBonusEscrow",
+        "internalType": "contract IApeBondEscrow",
         "name": "",
         "type": "address"
       }
@@ -833,97 +806,6 @@
         "internalType": "address",
         "name": "",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "components": [
-          {
-            "internalType": "bytes32",
-            "name": "purchaseId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "bytes32",
-            "name": "campaignId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "address",
-            "name": "beneficiary",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "soulZapCaller",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "inputToken",
-            "type": "address"
-          },
-          {
-            "internalType": "uint256",
-            "name": "grossInputAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "netInputAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "guaranteedBonusAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint64",
-            "name": "bonusUnlockAt",
-            "type": "uint64"
-          },
-          {
-            "internalType": "uint128",
-            "name": "minLiquidity",
-            "type": "uint128"
-          },
-          {
-            "internalType": "int24",
-            "name": "expectedTickLower",
-            "type": "int24"
-          },
-          {
-            "internalType": "int24",
-            "name": "expectedTickUpper",
-            "type": "int24"
-          },
-          {
-            "internalType": "uint256",
-            "name": "nonce",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "deadline",
-            "type": "uint256"
-          }
-        ],
-        "internalType": "struct ApeBondPositionAdapter.PurchaseAuthorization",
-        "name": "authorization",
-        "type": "tuple"
-      }
-    ],
-    "name": "hashPurchaseAuthorization",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -990,13 +872,34 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "purchaseSigner",
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint128",
+        "name": "liquidity",
+        "type": "uint128"
+      }
+    ],
+    "name": "previewBonus",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
+        "internalType": "uint256",
+        "name": "positionValue",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bonus",
+        "type": "uint256"
+      },
+      {
+        "internalType": "int24",
+        "name": "twapTick",
+        "type": "int24"
       }
     ],
     "stateMutability": "view",
@@ -1005,6 +908,97 @@
   {
     "inputs": [],
     "name": "renounceOwnership",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bool",
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "internalType": "int24",
+            "name": "tickLower",
+            "type": "int24"
+          },
+          {
+            "internalType": "int24",
+            "name": "tickUpper",
+            "type": "int24"
+          },
+          {
+            "internalType": "uint64",
+            "name": "bonusCliffSeconds",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint16",
+            "name": "bonusBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint256",
+            "name": "minBonusAmount",
+            "type": "uint256"
+          }
+        ],
+        "internalType": "struct ApeBondPositionAdapter.CampaignConfig",
+        "name": "config",
+        "type": "tuple"
+      }
+    ],
+    "name": "setCampaign",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "allowed",
+        "type": "bool"
+      }
+    ],
+    "name": "setCampaignCaller",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      }
+    ],
+    "name": "setCampaignEnabled",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1031,19 +1025,6 @@
       }
     ],
     "name": "setGuardian",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "newSigner",
-        "type": "address"
-      }
-    ],
-    "name": "setPurchaseSigner",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1080,6 +1061,19 @@
         "internalType": "bool",
         "name": "",
         "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "tickSpacing",
+    "outputs": [
+      {
+        "internalType": "int24",
+        "name": "",
+        "type": "int24"
       }
     ],
     "stateMutability": "view",
@@ -1129,7 +1123,7 @@
     "name": "vault",
     "outputs": [
       {
-        "internalType": "contract ILPStakingVault",
+        "internalType": "contract IApeBondVault",
         "name": "",
         "type": "address"
       }
