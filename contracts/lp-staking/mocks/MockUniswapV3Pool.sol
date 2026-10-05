@@ -127,6 +127,16 @@ contract MockUniswapV3Pool {
         return _fee;
     }
 
+    /// @notice The factory's spacing for the fee tier, as `UniswapV3Factory.feeAmountTickSpacing`
+    ///         enables it (100 -> 1, 500 -> 10, 3000 -> 60, 10000 -> 200). Read by the ApeBond
+    ///         adapter, which validates every campaign range against it.
+    function tickSpacing() external view returns (int24) {
+        if (_fee == 100) return 1;
+        if (_fee == 500) return 10;
+        if (_fee == 10000) return 200;
+        return 60;
+    }
+
     function slot0()
         external
         view

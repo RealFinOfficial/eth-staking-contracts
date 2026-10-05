@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 
@@ -15,32 +15,29 @@ interface IMockNft {
     function ownerOf(uint256 tokenId) external view returns (address);
 }
 
+/// @dev The one vault call the loop lever makes.
+interface IMockVault {
+    function unstake(uint256 tokenId) external;
+}
+
 /**
  * @title MockSoulZapCaller
  * @notice Test-only stand-in for the SoulZap router contract that calls
  *         {ApeBondPositionAdapter-depositFor}.
  *
- *  Why it has to be a contract at all: every one of the adapter's caller-side checks is about
- *  `msg.sender` — the allowlist, `authorization.soulZapCaller`, `ownerOf(tokenId) == msg.sender`
- *  and the NFT approval. A plain signer can satisfy all four, but not the thing production
- *  actually does: hold the freshly minted NFT in a contract, approve the adapter for it, and
- *  call `depositFor` in the same transaction. This does exactly that and nothing else — it
- *  swaps nothing and mints nothing, because SoulZap's routing is not what these tests are
- *  about.
+ *  Why it has to be a contract: every caller-side check of the adapter is about `msg.sender` —
+ *  the two allowlists, `ownerOf(tokenId) == msg.sender` and the NFT approval — and production
+ *  holds the freshly minted NFT in a contract, approves the adapter and calls `depositFor` in the
+ *  same transaction. This does exactly that and nothing else: it swaps nothing and mints nothing.
  *
- *  Three levers:
- *    * {Approval} picks how the adapter is authorized for the NFT — per token, as an operator
- *      for everything, or not at all (the `NftNotApproved` leg).
- *    * {depositTwice} presents the same authorization twice inside ONE outer transaction. That
- *      is the replay the spent-id book has to stop by itself: both calls are in the same
- *      transaction, so no revert rolls the first one back between them.
+ *  Levers:
+ *    * {Approval} picks how the adapter is authorized for the NFT — per token, as an operator for
+ *      everything, or not at all (the `NftNotApproved` leg).
+ *    * {depositTwice} presents the same NFT twice inside ONE outer transaction.
+ *    * {depositAndUnstake} is the B.3 P2 loop: buy, credit THIS contract as the beneficiary, and
+ *      unstake in the same transaction. The bonus must be forfeited.
  *    * {execute} forwards an arbitrary call, so a test can make this contract do anything an
- *      allowlisted caller could — transfer the NFT away first, call with a stale signature, and
- *      so on — without a lever per case.
- *
- *  It implements {IERC721Receiver} so a position can be pushed to it with `safeTransferFrom`.
- *  It has no re-entrant hook: the adapter never sends anything back to its caller — no NFT, no
- *  refund, no callback — so there is no path on which one would fire.
+ *      allowlisted caller could.
  */
 contract MockSoulZapCaller is IERC721Receiver {
     enum Approval {
@@ -64,28 +61,41 @@ contract MockSoulZapCaller is IERC721Receiver {
         ApeBondPositionAdapter adapter,
         address positionManager,
         uint256 tokenId,
-        ApeBondPositionAdapter.PurchaseAuthorization calldata authorization,
-        bytes calldata realSignature
+        bytes32 campaignId,
+        address beneficiary
     ) external {
         _approve(adapter, positionManager, tokenId);
         deposits++;
-        adapter.depositFor(tokenId, authorization, realSignature);
+        adapter.depositFor(tokenId, campaignId, beneficiary);
     }
 
     /// @notice The same deposit twice, back to back, in one transaction.
-    /// @dev The second call is the one under test: it must fail on the spent purchase id
-    ///      rather than on anything the first call left half-done.
     function depositTwice(
         ApeBondPositionAdapter adapter,
         address positionManager,
         uint256 tokenId,
-        ApeBondPositionAdapter.PurchaseAuthorization calldata authorization,
-        bytes calldata realSignature
+        bytes32 campaignId,
+        address beneficiary
     ) external {
         _approve(adapter, positionManager, tokenId);
         deposits += 2;
-        adapter.depositFor(tokenId, authorization, realSignature);
-        adapter.depositFor(tokenId, authorization, realSignature);
+        adapter.depositFor(tokenId, campaignId, beneficiary);
+        adapter.depositFor(tokenId, campaignId, beneficiary);
+    }
+
+    /// @notice The loop of B.3 P2: deposit with THIS contract as the beneficiary, then unstake
+    ///         the position in the same transaction. The NFT comes back here.
+    function depositAndUnstake(
+        ApeBondPositionAdapter adapter,
+        address positionManager,
+        uint256 tokenId,
+        bytes32 campaignId,
+        address vault
+    ) external {
+        _approve(adapter, positionManager, tokenId);
+        deposits++;
+        adapter.depositFor(tokenId, campaignId, address(this));
+        IMockVault(vault).unstake(tokenId);
     }
 
     /// @notice Forwards a call, bubbling the revert reason so a test can assert on it.
