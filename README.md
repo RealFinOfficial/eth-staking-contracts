@@ -243,8 +243,13 @@ REWARD_AMOUNT=50000 CONFIRM=yes npx hardhat run scripts/fund-rewards.js --networ
 ```
 
 `scripts/README.md` documents every variable, the attestation options and the
-historical Sepolia addresses. Compiled ABIs for both pools are checked in under
-`abi/`.
+historical Sepolia addresses. Compiled ABIs for both pools and for the five LP contracts
+(`LPStakingVault`, `RewardsDistributor`, `LPEpochRegistry`, `TokenOverture`, `LPZapper`) are
+checked in under `abi/`.
+
+The LP staking stack has its own scripts — `deploy-lp-staking.js`, `lp-fund-rewards.js`,
+`lp-epoch.js`, `add-reward-token.js`, `lp-timelock.js`, `lp-switch-timelock.js`,
+`deploy-implementation.js` — documented in `scripts/README.md` under "The LP staking stack".
 
 ## Functions
 
@@ -308,27 +313,27 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 - **Hardhat** 2.x — unit suites, the fork suites, the 48-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
 - **OpenZeppelin Contracts** v5.6 — `Ownable2Step`, IERC20, SafeERC20, ReentrancyGuard, EIP712,
-  ECDSA. All four LP contracts are `Ownable2Step` and every one of them overrides
+  ECDSA. All five LP contracts are `Ownable2Step` and every one of them overrides
   `renounceOwnership()` to revert `RenounceDisabled()`: an ownership move needs the new owner to
   call `acceptOwnership`, and no contract in the stack can be left ownerless
-- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — `RewardsDistributor` and
-  `LPStakingVault` are UUPS (ERC-1967) proxies. The distributor's `claimed[user]` ledger is
-  cumulative, so a bug fixed by redeploying would make every outstanding lifetime voucher
-  payable twice; the vault's `stakers[tokenId]` is the only record of who owns each custodied
-  NFT, and the NFTs sit at the vault's address, so a redeploy would strand both. Both proxies
-  are **born owned** by a `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet):
-  `initialize` names it inside the proxy's own deployment transaction, so no key ever holds the
-  owner tier, and an upgrade is public for the whole delay before it can run while `unstake` —
-  never pausable — is the exit window. Two further tiers sit outside the timelock: a
-  `guardian`, a hot key holding the three pause switches and nothing else, and an `operator`
-  multisig holding `setTwapParams`, `rescuePosition`, `setSigner`, `recoverExcessAsset` and
-  `setGuardian` — plus those same pause switches as the cold fallback for a lost guardian key.
-  Since 2026-09-14 `setGuardian` takes the owner OR the operator, so a compromised hot key can
-  be revoked — by passing `address(0)`, which is the explicit "no guardian" state — or replaced
-  in one transaction, instead of the revocation waiting out the 48 h delay; `setOperator` did
-  not move and is still owner-only, so the operator cannot rotate itself. `TokenX` and
-  `LPZapper` stay non-upgradeable and are owned by the operator. Operating the timelock is
-  `scripts/lp-timelock.js`; the runbook and the reasoning are in
+- **OpenZeppelin Contracts Upgradeable** v5.6 + **hardhat-upgrades** — ALL FIVE LP contracts are
+  UUPS (ERC-1967) proxies behind `LPProxy`: `LPStakingVault`, `RewardsDistributor`,
+  `LPEpochRegistry`, `TokenOverture` (the Overture token, `$OVTR`) and `LPZapper`. The
+  distributor's `claimed[token][user]` ledger is cumulative, so a bug fixed by redeploying would
+  make every outstanding lifetime voucher payable twice; the vault's `stakers[tokenId]` is the
+  only record of who owns each custodied NFT. Every proxy is **born owned** by a plain
+  `TimelockController` (`LP_TIMELOCK_MIN_DELAY`, 48 h on mainnet): `initialize` names it inside
+  the proxy's own deployment transaction, so no key ever holds the owner tier, and an upgrade is
+  public for the whole delay before it can run while `unstake` — never pausable — is the exit
+  window. The timelock itself stays a plain contract and is replaceable by a planned switch
+  (`scripts/lp-switch-timelock.js`). Two further tiers sit outside the timelock: a `guardian`,
+  a hot key holding the three pause switches and nothing else, and an `operator` multisig
+  holding the immediate levers — `setTwapParams`, `rescuePosition`, `sweep`, `setSigner`,
+  `recoverExcess`, the epoch schedule in `LPEpochRegistry`, `setGuardian`, the pause switches as
+  the cold fallback — and the Overture token's minter role. Every reward token is pre-funded:
+  the distributor pays by transfer out of its own balance, a claim whose token balance is short
+  reverts `InsufficientFunds` until it is funded, and there is no cap of any kind. Operating the
+  timelock is `scripts/lp-timelock.js`; the runbook and the reasoning are in
   `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
 
@@ -349,7 +354,7 @@ npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 s
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
 npx hardhat coverage             # solidity-coverage over everything under test/
-npm run test:coverage:unit       # solidity-coverage over the four LP unit suites only
+npm run test:coverage:unit       # solidity-coverage over the five LP unit suites only
 ```
 
 ### Test tiers
@@ -381,11 +386,14 @@ forks Sepolia at block 11,562,000.
   the contracts against the real Uniswap V3 pool.
 - `test/lp-staking/integration/LPStakingLocalFork.test.js` starts its own `hardhat node --fork`
   on a free port, creates a fresh pool from mock tokens, deploys the stack with the repo's own
-  scripts (`hardhat run --network localhost`), drives a forty-eight step scenario one
-  transaction per block, and asserts the resulting logs are retrievable from the chain. It
-  writes to a scratch registry, never to `deployments.json`. The last three steps rehearse an
-  upgrade end to end: schedule it on the timelock, watch a premature `execute` revert, then
-  execute it after the delay and prove every staked position survived.
+  scripts (`hardhat run --network localhost`), funds the distributor and schedules epoch 1 with
+  the operator scripts, drives a forty-eight step scenario one transaction per block (claims
+  per reward token, the registry, a third reward token added through the timelock), and
+  asserts the resulting logs are retrievable from the chain. It writes to a scratch registry,
+  never to `deployments.json`. Steps A46–A48 rehearse an upgrade end to end: schedule it on the
+  timelock, watch a premature `execute` revert, then execute it after the delay and prove every
+  staked position survived. Its last section runs the planned timelock switch
+  (`scripts/lp-switch-timelock.js`) and moves all five proxies to a new timelock.
 - `test/lp-staking/integration/LPStakingSepoliaFork.test.js` is the same scenario driven
   through the network profile — the same 48 steps against the team's real tREAL/tUSDC and the
   Uniswap Sepolia deployment.
@@ -468,8 +476,8 @@ a first run, records the deployment in the **tracked** `deployments.json` under 
 |---|---|
 | `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + `SEPOLIA_RPC_URL` \| `INFURA_API_KEY` | all three required; without them the suite skips and names what is missing |
 | `SEPOLIA_LIVE_CREATE_POOL=1` | one-time: creates the tREAL/tUSDC pool. **Permanent** — the address is fixed forever afterwards |
-| `SEPOLIA_LIVE_DEPLOY=1` | one-time: deploys the four contracts and writes them into the tracked registry. That commit is the staging record |
-| `LP_SIGNER_KEY` | optional: redeems a real 1-wei TokenX voucher. Without it the suite proves a foreign voucher is refused, by static call, costing no gas |
+| `SEPOLIA_LIVE_DEPLOY=1` | one-time: deploys the timelock and the five proxies and writes them into the tracked registry. That commit is the staging record |
+| `LP_SIGNER_KEY` | optional: redeems a real 1-wei `$OVTR` voucher. Without it the suite proves a foreign voucher is refused, by static call, costing no gas |
 
 **Known precondition, not a bug:** a freshly created Uniswap V3 pool stores one observation, so
 `pool.observe([twapWindow, 0])` reverts `OLD` and every TWAP-guarded path reverts with it. The
@@ -492,7 +500,7 @@ npm run test:coverage:unit     # the Hardhat unit-only signal
 ```
 
 `scripts/check-coverage.mjs` recomputes totals from the raw `DA:` / `BRDA:` records rather than
-trusting the optional `LF` / `BRF` summary lines, scopes to the four LP contracts plus
+trusting the optional `LF` / `BRF` summary lines, scopes to the five LP contracts plus
 `libraries/TwapGuard.sol`, and pins both the floors and their denominators — a moved
 measurement basis fails loudly instead of being graded against a bar that no longer describes
 it. `--ir-minimum` is not optional: coverage disables the optimizer and the un-optimized build
@@ -503,26 +511,27 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Re-measured 2026-09-14, after the guardian-revocation round moved the two proxies' line
-denominators (the vault 167 -> 171, the distributor 99 -> 103; no branch denominator moved).
-Branch coverage is 100% on all five files, so every branch floor is also the ceiling:
+Re-measured 2026-10-05, after the Wednesday-launch round (Overture token, multi-token
+distributor, epoch registry, the zapper as a proxy, the vault's bonus-escrow notifications) on
+546 Foundry tests in 28 suites. Branch coverage is 100% on all six files, so every branch floor
+is also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.66% (167/171) | 100.00% (28/28) |
-| `LPZapper.sol` | 98.73% (78/79) | 100.00% (17/17) |
-| `RewardsDistributor.sol` | 97.09% (100/103) | 100.00% (15/15) |
-| `TokenX.sol` | 97.87% (46/47) | 100.00% (7/7) |
+| `LPStakingVault.sol` | 97.91% (187/191) | 100.00% (34/34) |
+| `LPZapper.sol` | 96.08% (98/102) | 100.00% (20/20) |
+| `RewardsDistributor.sol` | 97.54% (119/122) | 100.00% (18/18) |
+| `LPEpochRegistry.sol` | 96.46% (109/113) | 100.00% (21/21) |
+| `TokenOverture.sol` | 84.62% (22/26) | 100.00% (2/2) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
 
-The ten uncovered lines are the call sites `_checkTwapDeviation();` (`LPStakingVault.sol:895`,
-`LPZapper.sol:442`), `_rollPendingEpoch();` (`TokenX.sol:170`), the three ERC-7201 assembly
-bodies (`LPStakingVault.sol:157`, `RewardsDistributor.sol:174`,
-`libraries/TwapGuard.sol:127`), and each proxy's `_disableInitializers();` /
-`__Ownable2Step_init();` (`LPStakingVault.sol:334`, `:365`; `RewardsDistributor.sol:259`,
-`:276`). Each is reached by tests that assert its effect, so all ten are demonstrably executed
-— `--ir-minimum` loses the inlined call site's mapping and the assembly body's. They are named
-in the checker and in the audit notes rather than chased with contrived tests.
+The twenty uncovered lines are, without exception, sites `--ir-minimum` cannot attribute: the six
+ERC-7201 accessor bodies (`$.slot := …`), the five implementations' `_disableInitializers();`,
+the empty OpenZeppelin initializers (`__Ownable2Step_init();` ×5, `__ERC20Burnable_init();`), the
+two `_checkTwapDeviation();` call sites and one `break;` in `LPEpochRegistry.setEpochAmount`. Each
+is reached by tests that assert its effect, so all twenty are demonstrably executed. They are
+named, with file and line, in `scripts/check-coverage.mjs` and in the audit notes rather than
+chased with contrived tests.
 
 ### Foundry beside Hardhat
 

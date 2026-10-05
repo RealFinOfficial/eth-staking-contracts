@@ -1,37 +1,45 @@
 # LP staking — audit notes
 
 Known and deliberate properties of the V1 LP staking stack (`LPStakingVault`, `LPZapper`,
-`TokenX`, `RewardsDistributor`, `libraries/TwapGuard`). Each item is something a reviewer
-is expected to flag; each is recorded here with the reasoning behind the decision so the
-answer does not have to be reconstructed from the diff.
+`TokenOverture`, `RewardsDistributor`, `LPEpochRegistry`, `libraries/TwapGuard`). Each item is
+something a reviewer is expected to flag; each is recorded here with the reasoning behind the
+decision so the answer does not have to be reconstructed from the diff.
+
+Revision 2026-10-05 (Wednesday launch, tracks M / P / R / U): the pre-v1 reward token is replaced
+by the Overture token (`TokenOverture`, ticker `$OVTR`), which carries no cap of any kind;
+`RewardsDistributor` v1 pays any number of pre-funded reward tokens against one `RewardClaim`
+voucher type; the emission schedule moved on-chain into `LPEpochRegistry`; all five LP
+contracts are UUPS proxies owned by the timelock; the vault gained the bonus-escrow
+notifications, OFF at launch (item 15). Items 1, 3, 5, 6, 10 and 14 were rewritten for it.
 
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
 ---
 
-## 1. `recoverExcessAsset` has no timing restriction
+## 1. `recoverExcess` has no timing restriction
 
-`RewardsDistributor.recoverExcessAsset(amount)` transfers ASSET out at any time, in any
-amount up to the contract's balance, including ASSET that pre-funds vouchers users have not
+`RewardsDistributor.recoverExcess(token, amount)` transfers any token out at any time, in any
+amount up to the contract's balance, including tokens that pre-fund vouchers users have not
 claimed yet. There is no "only after the program ends" gate — unlike
 `StakingPool.recoverExcessRewards()`, which requires `block.timestamp >= endEpoch`.
 
-Deliberate. The ASSET leg is funded ad hoc by the treasury and its vouchers are cumulative
-with no program end date on-chain, so there is no schedule a timing rule could key off; any
-threshold would be an arbitrary number that also blocks legitimate cleanup. Two properties
-bound the exposure:
+Deliberate. Every reward token is funded ad hoc by the company (the operator mints `$OVTR` into
+the distributor and transfers `$ASSET` into it) and the vouchers are cumulative with no program
+end date on-chain, so there is no schedule a timing rule could key off; any threshold would be an
+arbitrary number that also blocks legitimate cleanup — overfunding, a retired reward token, a
+stray transfer of an unrelated token. Two properties bound the exposure:
 
-- **The recipient is fixed to `operator()`** (it was `owner()` before the proxy split and
-  `guardian()` between 2026-08-26 and 2026-09-09). The function takes no destination argument,
-  so a compromised or mistaken call cannot route funds to a third party — it can only move them
-  to the operator multisig, which already holds the tier the call belongs to.
-- **The balance held here is the damage cap for the ASSET leg**, as the contract header
-  states. The TokenX leg is unaffected: it mints, and minting is bounded separately by the
-  token's epoch cap.
+- **The recipient is fixed to `operator()`.** The function takes no destination argument, so a
+  compromised or mistaken call cannot route funds to a third party — it can only move them to
+  the operator multisig, which is also the party that funds the balances.
+- **A short balance never pays partially.** A claim whose token balance is below the payment
+  reverts `InsufficientFunds(token, needed, balance)` and writes nothing, so a recovery that
+  over-reaches leaves claims REVERTING until the operator funds the contract again — it cannot
+  make a user lose an entitlement, because `claimed[token][user]` only moves on a full payment.
 
-Net effect: the ASSET leg's solvency reduces to trust in the operator multisig. Accepted, and
-since the 2026-08-26 review the same sentence is in the function's own NatSpec, so a reader
-of the contract meets the assumption without opening this file.
+Net effect: each token's solvency reduces to trust in the operator multisig. Accepted, and the
+same sentence is in the function's own NatSpec, so a reader of the contract meets the assumption
+without opening this file.
 
 ## 2. The TWAP ceiling is measured in ticks (fixed 2026-08-26)
 
@@ -67,12 +75,12 @@ pricing oracle: it caps the damage of a compromised frontend feeding `amountOutM
 custodied position, and no slippage protection rests on it. The exact bounds are the
 caller's own `amountOutMin`, `amount0Min` and `amount1Min`.
 
-## 3. Ownership: all four contracts are two-step and non-renounceable (fixed 2026-09-10)
+## 3. Ownership: all five contracts are two-step and non-renounceable
 
-**Fixed 2026-09-10 (finding N-1).** `TokenX` and `LPZapper` moved from OpenZeppelin `Ownable` to
-`Ownable2Step`, and both now override `renounceOwnership()` to revert `RenounceDisabled()`. The
-two proxies have had that shape since the 2026-08-26 upgradeability revision (item 14), so all
-four contracts behave identically:
+**Fixed 2026-09-10 (finding N-1), extended 2026-10-05.** Every LP contract — `LPStakingVault`,
+`RewardsDistributor`, `LPEpochRegistry`, `TokenOverture`, `LPZapper` — is
+`Ownable2StepUpgradeable` behind a proxy and overrides `renounceOwnership()` to revert
+`RenounceDisabled()`, so all five behave identically:
 
 - `transferOwnership(newOwner)` only NOMINATES. `owner()` does not move, `pendingOwner()` is
   set, and the handover completes only when the nominee itself calls `acceptOwnership()`. A
@@ -82,60 +90,53 @@ four contracts behave identically:
   `OwnableUnauthorizedAccount` for anybody else. No contract in this stack can be left
   ownerless, by accident or on purpose.
 
-The original finding, kept for the record: the two non-upgradeable contracts used plain
-`Ownable`, so `transferOwnership` took effect immediately with no acceptance from the new owner
-and the inherited `renounceOwnership()` was callable and set the owner to `address(0)`. A wrong
-address in either call bricked every admin path permanently, with no recovery.
+The original finding, kept for the record: the two then non-upgradeable contracts (the reward
+pre-v1 reward token, and the zapper) used plain `Ownable`, so `transferOwnership` took
+effect immediately with no acceptance from the new owner and the inherited
+`renounceOwnership()` was callable and set the owner to `address(0)`. A wrong address in either
+call bricked every admin path permanently, with no recovery.
 
-Who owns what after a deployment — item 14 holds the full three-tier matrix: the two proxies are
-owned by the `LPTimelock` from their own deployment transaction onwards, and `TokenX` and
-`LPZapper` are owned by the **operator** multisig, which the deploy script nominates and which
-completes each handover with one `acceptOwnership()`.
+Who owns what after a deployment — item 14 holds the full matrix: all five proxies are owned by
+the `LPTimelock` from their own deployment transaction onwards. Nothing is handed over after the
+deploy; the operator multisig holds the operator tier (and the Overture minter role) by
+`initialize`, not by ownership.
 
-**History — what a LOST owner key still costs, per contract.** Renouncing is impossible now, but
-a key can still be lost, so this table is kept from the original finding: it is the failure
-analysis, not a description of a live risk of renouncing.
+**What a LOST owner (a dead timelock, decision T19 case 2) still costs, per contract.**
+Renouncing is impossible, but the timelock can still become unusable, so this table is the
+failure analysis:
 
 | Contract | Lost | Survives |
 |---|---|---|
-| `TokenX` | `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` | transfers, `permit`, `burn`; `mint` keeps working until the running epoch's cap is reached, then reverts `EpochMintCapExceeded` forever — **minting dies when the cap runs out** |
-| `LPZapper` | `setTwapParams`, `sweep`, `rescuePosition` | `zapIn` / `zapInWithPermit`; and the vault's owner can point the deposit path at a replacement zapper, which is what makes this the least severe of the four |
-| `LPStakingVault` | the upgrade path, `setZapper`, `setOperator` | everything else; the three tiers are independent slots, so an ownership handover leaves the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` untouched, and a guardian or operator rotation leaves the owner's tier untouched. `setGuardian` is NOT lost either, because the operator holds it too since 2026-09-14. `stake` and `unstake` were never the owner's to lose |
-| `RewardsDistributor` | the upgrade path, `setAssetClaimsEnabled`, `setOperator` | everything else; the same tier independence — the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcessAsset` and `setGuardian` |
+| `TokenOverture` | the upgrade path, `setMinter` | transfers, `permit`, `burn`; `mint` by the standing minter keeps working |
+| `LPZapper` | the upgrade path, `setOperator` | `zapIn` / `zapInWithPermit`; the operator's `setTwapParams`, `sweep`, `rescuePosition` |
+| `LPEpochRegistry` | the upgrade path, `setOperator` | the operator's whole schedule (`scheduleEpoch`, `setEpochAmount`, `updateEpochBounds`, `cancelEpoch`) — the program keeps running for every token already registered |
+| `LPStakingVault` | the upgrade path, `setZapper`, `setBonusEscrow`, `setOperator` | everything else; the three tiers are independent slots, so the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` / `setGuardian` stay. `stake` and `unstake` were never the owner's to lose |
+| `RewardsDistributor` | the upgrade path, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setOperator` | `claim` for every registered token whose claims are open; the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcess` and `setGuardian` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
-because `unstake` is permissionless and unpausable. A lost guardian with `rebalancePaused` left
-on freezes re-ranging, but since the 2026-09-09 role split the operator holds the same three
-pause switches as the cold fallback and can lift it in one transaction; the exit works either
-way, so no position is trapped. Since 2026-09-14 the operator can also remove the lost or
-compromised key itself, by calling `setGuardian(address(0))` — see the `setGuardian` rule in
-item 3 below.
-The program-facing consequence is severe: rewards stop when the armed cap is exhausted and no
-new one can be armed.
+because `unstake` is permissionless and unpausable, and claims of open tokens keep paying. The
+program-facing consequence is the frozen owner tier: no upgrade, no new reward token, `$ASSET`
+claims cannot be opened if they were still closed. The way out is the migration of decision T19
+case 2 (`scripts/README.md`, "Replacing the timelock") — a planned switch to a new timelock
+(case 1) is only possible while the old one works.
 
 **Before deployment:** confirm every role address by executing a no-op transaction from it
-first. The "treat `renounceOwnership` as forbidden" line no longer needs to live in the ops
-runbook — the contracts enforce it.
+first.
 
 Tests: `test/forge/unit/AccessControl.t.sol` — the tier matrix per contract, plus
-`test_Ownership_TransferOnlyNominatesOnAllFourContracts`,
-`test_Ownership_AcceptanceIsWhatMovesTheOwnerOnAllFour`,
-`test_Ownership_OnlyTheNomineeCanAcceptOnAllFour`,
-`test_Ownership_TransferToZeroClearsThePendingOwnerOnAllFour`,
-`test_Ownership_AnUnacceptedTransferIsRecoverableOnAllFour`,
-`test_Ownership_NoneOfTheFourCanBeRenounced`,
+`test_Ownership_TransferOnlyNominatesOnAllFiveContracts`,
+`test_Ownership_AcceptanceIsWhatMovesTheOwnerOnAllFive`,
+`test_Ownership_OnlyTheNomineeCanAcceptOnAllFive`,
+`test_Ownership_TransferToZeroClearsThePendingOwnerOnAllFive`,
+`test_Ownership_AnUnacceptedTransferIsRecoverableOnAllFive`,
+`test_Ownership_NoneOfTheFiveCanBeRenounced`,
 `test_Ownership_AStrangerIsRejectedOnRenounceByTheOwnershipCheck`,
-`test_Renounce_VaultOwnerLosesTwoAdminCallsOnHandover`,
-`test_Renounce_VaultGuardianLosesBothPauseSwitchesOnRotation`,
-`test_Renounce_VaultOperatorLosesFourAdminCallsOnRotation`,
-`test_Renounce_DistributorOwnerLosesTwoAdminCallsOnHandover`,
-`test_Renounce_DistributorGuardianLosesThePauseSwitchOnRotation`,
-`test_Renounce_DistributorOperatorLosesThreeAdminCallsOnRotation`,
-`test_Renounce_TokenXLosesFourAdminCallsOnHandover`,
-`test_Renounce_ZapperLosesThreeAdminCallsOnHandover`,
+`test_Ownership_EveryUpgradeIsOwnerOnlyOnAllFive`, the `test_Renounce_*` handover-cost cases for
+each contract and tier, `test_Renounce_AFullyOwnerlessStackStillServesEveryUserPath`,
+`test_Renounce_AnAbandonedStackCanNeverOpenAddScheduleOrMint` and
 `test_Tiers_TheOperatorCanRevokeTheGuardianWithNoDelay`. Hardhat: the two-step and
-`RenounceDisabled` cases in `test/lp-staking/TokenX.test.js` and
-`test/lp-staking/LPZapper.test.js`.
+`RenounceDisabled` cases in `test/lp-staking/TokenOverture.test.js`,
+`test/lp-staking/LPEpochRegistry.test.js` and `test/lp-staking/LPZapper.test.js`.
 
 ## 4. Whole-balance mint and refund award stray ERC-20 balances to the next caller
 
@@ -163,42 +164,82 @@ behaviour: *"treats any balance already sitting in the vault as the rebalancer's
 The trade is: mistaken transfers of the two pool tokens go to the next user instead of back
 to the sender. Documented in natspec at all four functions.
 
-## 5. The epoch cap is an issuance throttle, not an emissions ledger
+## 5. No cap: a claim pays the voucher, or reverts until the token is funded
 
-`TokenX.epochCap` bounds how much can be **minted** in an epoch. It does not describe what
-users are **owed**. Claims are cumulative vouchers with no expiry, and
-`RewardsDistributor.claimTokenX` mints the outstanding difference against whichever epoch is
-effective **at claim time** — not the epoch the rewards were earned in. A user who skips
-three epochs and claims in the fourth draws the whole backlog from the fourth epoch's
-headroom.
+Decision T7/T8 (2026-10-05): there is NO cap, throttle, budget, running total or schedule bound
+on what the distributor pays, for any token. The per-epoch mint cap of the pre-v1 reward token is
+gone — `setEpochCap`, `armNextEpoch`, `cancelNextEpoch`, `effectiveEpoch`, `EpochMintCapExceeded`
+and the pending-epoch machinery no longer exist — and the distributor never mints.
 
-Sizing rule for ops, per epoch:
+How a claim is paid now:
 
-```
-cap  >=  expected new emissions for the epoch  +  outstanding unclaimed backlog
-cap  >=  largest single outstanding payout                        (hard floor)
-```
+- Every reward token is PRE-FUNDED. The operator mints `$OVTR` INTO the distributor (it is the
+  Overture minter) and transfers `$ASSET` into it (`scripts/lp-fund-rewards.js`).
+- `claim(token, cumulativeAmount, deadline, signature)` pays exactly
+  `cumulativeAmount - claimed[token][user]` by `safeTransfer` out of the distributor's own balance.
+- When that balance is short the claim reverts `InsufficientFunds(token, needed, balance)` —
+  after every other check, and before anything is written — until the company funds the
+  contract. A user who earned in epoch 1 and in epoch 2 can claim everything at any time; nothing
+  about epochs is consulted.
 
-The floor matters because a claim is atomic: a payout larger than the remaining headroom does
-not partially fill, it reverts with `EpochMintCapExceeded` and that user simply cannot claim
-until the cap is raised.
+What follows for operations:
 
-**Backend requirement:** a cap exhaustion is not self-healing. After the owner raises the cap
-or arms a new epoch, the backend must re-issue vouchers to the affected users, because the
-failed claims left `claimed[user]` untouched and the users are holding vouchers that reverted.
-Monitor `EpochMintCapExceeded` reverts and `mintedInEpoch(currentEpochId)` against
-`epochCap(currentEpochId)`; use `effectiveEpoch()` rather than `currentEpochId` when a
-scheduled rollover is armed, since the rollover is lazy and `currentEpochId` reads stale until
-the next mint.
+- **Funding is a liveness dependency, not a safety one.** An underfunded token stops ITS claims
+  and nothing else. The backend alerts when what it has signed but not yet seen claimed exceeds
+  the distributor's balance of that token (`lp.distributor.underfunded`, alert only).
+- **The trust note that replaces the cap.** With no bound anywhere, a leaked SIGNER key can sign
+  vouchers that take the whole funded balance of every token, in one block per token, until the
+  guardian pauses claims (`setPaused(true)`, one transaction, hot key). The guardian key must
+  therefore stay hot and watched, and the operator rotates the signer (`setSigner`) right after
+  the pause. Keeping the funded balance close to what is owed is the only lever that limits the
+  exposure, and it is an operational one.
+- **`$ASSET` claims are closed at launch** (`claimsEnabled = false`, decision Q-e) and opened later
+  by the timelock with `setClaimsEnabled(ASSET, true)`; `$OVTR` claims are open from the deploy.
 
-## 6. Emergency freeze must account for an armed scheduled epoch
+Tests: `test/forge/invariant/ClaimLedgerInvariants.t.sol` (per token: the ledger never decreases;
+paid = funded − balance − recovered; cross-token isolation; nothing pays while paused, while a
+token's claims are off, or for an unregistered token), the `InsufficientFunds` cases in
+`test/forge/unit/DistributorBranches.t.sol` and `test/lp-staking/RewardsDistributor.test.js`, and
+the integration scenarios' third-token flow (added through the timelock, `InsufficientFunds`,
+funded, pays).
 
-With the lazy rollover live, `setEpochCap(id, 0)` alone is **not** a durable freeze: if a
-scheduled epoch is armed, the first mint past its boundary rolls over and re-arms that
-epoch's cap, silently un-freezing the token. The correct emergency-freeze sequence is
-`cancelNextEpoch()` **then** `setEpochCap(id, 0)` — or `setMinter(address(0))`, which
-disables minting regardless of epoch state. (Reviewer-confirmed ops consequence of the
-setEpochCap-does-not-clear-pending semantics; belongs in the deploy/ops runbook.)
+## 6. The emission schedule (`LPEpochRegistry`) bounds nothing
+
+The per-epoch quantities of every reward token live on-chain in `LPEpochRegistry`: one record per
+epoch (`startsAt`, `endsAt`, `prevLiveId`, `cancelled`) plus `epochAmount(id, token)`. The
+OPERATOR multisig writes it with no delay (decision T9); the owner (timelock) only upgrades it and
+moves the operator role. The backend mirrors finalized epochs and spreads each quantity evenly
+over the epoch's 15-minute intervals.
+
+It is a SCHEDULE, never a budget: no contract reads it to limit a payment, and a valid voucher
+pays whatever the registry says. Its rules exist so the backend can never score against a
+schedule that later changes:
+
+- **The 30-minute margin** (`SCHEDULE_MARGIN = 1800`, decision T18): an epoch is scheduled or
+  changed only while `startsAt >= block.timestamp + 1800`. The backend scores only FINALIZED chain
+  data (~13 minutes on Ethereum) and mirrors the registry once a minute, so the margin guarantees
+  the start, the end and every quantity are final before the first interval is scored. Exactly
+  `now + 1800` is accepted; from `now > startsAt - 1800` on, the epoch is frozen.
+- **The 900-second grid**: every bound is a multiple of `INTERVAL = 900`, so no scoring interval
+  is split between two epochs.
+- **Order and no overlap**: ids are `epochCount + 1` and never reused (a cancelled id included);
+  live epochs are ordered and never overlap; gaps are allowed.
+- **Last-live edits only for bounds and cancel** (decision Q-m): quantities may change on any
+  live epoch before its margin, but `updateEpochBounds` and `cancelEpoch` act only on
+  `lastLiveId`, which keeps every check O(1). `cancelEpoch` relinks `lastLiveId` to the epoch it
+  was scheduled after.
+- **Every amount names a registered reward token** (`distributor.isRewardToken(token)` — registered
+  AND enabled — at write time). Adding a NEW token is the timelock's `addRewardToken` on the
+  distributor; scheduling it is then the operator's.
+
+What is NOT checked, deliberately: that the schedule's quantities are funded, or that they are
+reasonable. Both are business decisions recorded in configuration (decision A6 of the B.3
+document); the funded balance is item 5's concern, not the schedule's.
+
+Tests: `test/forge/unit/EpochRegistry.t.sol` (every gate, both sides of the margin edge),
+`test/forge/fuzz/EpochRegistryFuzz.t.sol` (an independent model of the accept/reject rule),
+`test/forge/invariant/EpochRegistryInvariants.t.sol` (order, no overlap, ids never reused,
+nothing changes inside the margin, grid, registered tokens), `test/lp-staking/LPEpochRegistry.test.js`.
 
 ## 7. SEC-01 — a fresh pool has one observation, so every swap-bearing path reverts `OLD`
 
@@ -289,24 +330,36 @@ Tests, inverted with the fix: `test/forge/fork/TwapManipulation.t.sol` —
 `test/forge/fuzz/TwapTickFuzz.t.sol:testFuzz_TwapParams_NoWindowPastTheMaximumIsEverAccepted`;
 `test/forge/unit/TwapGuardMath.t.sol:test_Guard_SetterRejectsAWindowOneSecondAboveTheMaximum`.
 
-## 10. SEC-04 — replacing the distributor replays every lifetime entitlement
+## 10. SEC-04 — replacing the distributor would replay every lifetime entitlement
 
-The claim ledger (`claimedTokenX`) lives on `RewardsDistributor`, not on `TokenX`.
-`TokenX.setMinter` is the migration escape hatch, and a replacement distributor starts with an
-EMPTY ledger — so after a migration every user can re-spend their entire lifetime entitlement
-against the new contract. Measured: a user paid once by v1 is paid a second time, in full, by
-v2. The epoch cap is the only thing that bounds the total.
+The claim ledger `claimed[token][user]` lives in the distributor PROXY's storage, and the
+vouchers state a LIFETIME figure per token. A replacement distributor would start with an EMPTY
+ledger, so every user could re-spend their entire lifetime entitlement against it — paid out of
+whatever the replacement is funded with.
 
-The old distributor loses its mint right the moment the minter moves, so this is an addition,
-never a doubling through both at once.
+The rule that remains, and the only one: **the distributor proxy is UPGRADED, never REPLACED.**
+An upgrade (`upgradeToAndCall` through the timelock) keeps the per-token ledgers exactly where
+they are, so every old voucher stays a no-op.
 
-**Operational mitigation, required before any migration:** either seed the new distributor's
-ledger with the old cumulatives, or arm a fresh epoch whose cap reflects what is genuinely
-still owed. There is no on-chain guard.
+What changed with v1 (2026-10-05):
+
+- **Fresh deploy, nothing to migrate.** v1 is a new storage layout in the same namespace; the
+  Sepolia stack #5 proxy that carried the pre-v1 layout is abandoned, not upgraded, and mainnet
+  starts empty.
+- **The old mitigations are gone.** The per-epoch mint cap that used to bound a replay, and the
+  "re-point the token's minter at a new distributor" escape hatch, no longer exist: the token has
+  no cap and the distributor never mints.
+- **The trust note that comes with it** (item 5): with no bound anywhere, a leaked signer key can
+  take the funded balance of every token until the guardian pauses claims.
+
+If a replacement ever becomes unavoidable (decision T19 case 2: the timelock is dead, so no
+upgrade is possible), the backend must sign the new distributor's vouchers NET of the old
+distributor's `claimed[token][user]` — there is no on-chain guard.
 
 Tests: `test/forge/fork/RewardVoucherFork.t.sol` —
-`test_SEC04_AReplacementDistributorReplaysEveryLifetimeEntitlement`,
-`test_SEC04_TheReplacedDistributorLosesItsMintRightImmediately`.
+`test_SEC04_AnUpgradeKeepsThePerTokenLedgers` and, kept as the measured reason for the rule,
+`test_SEC04_AReplacementProxyWouldReplayEveryLifetimeEntitlement` — plus the upgrade blocks of
+`test/forge/unit/DistributorBranches.t.sol` and `test/lp-staking/RewardsDistributor.test.js`.
 
 ## 11. SEC-05 — `stakeFor(vault)` / `stakeFor(zapper)` stranded the position permanently (FIXED 2026-09-10)
 
@@ -372,18 +425,20 @@ test rather than left to be rediscovered.
 * **A fee-on-transfer token would break the position manager's accounting**, not just the refund
   event: the manager credits the amount it asked for and receives less, and the shortfall only
   surfaces as an insufficient-balance revert on the NEXT withdrawal. The pool triple check makes
-  this unreachable on a correct deployment; it is recorded because `sweep` /
-  `recoverExcessAsset` touch arbitrary tokens.
-* **A fee-on-transfer ASSET would short every claimer permanently.** `claimAsset` books
-  `cumulativeAmount` into `claimedAsset` BEFORE the transfer, so the fee the token withholds can
-  never be re-claimed — the ledger already says it was paid. This is a **deployment constraint
-  on the ASSET token**, not a contract bug.
+  this unreachable on a correct deployment; it is recorded because `sweep` / `recoverExcess`
+  touch arbitrary tokens.
+* **A fee-on-transfer reward token would short every claimer permanently.** `claim` books
+  `cumulativeAmount` into `claimed[token][user]` BEFORE the transfer, so the fee the token
+  withholds can never be re-claimed — the ledger already says it was paid. This is a
+  **constraint on every reward token** (`addRewardToken` NatSpec: plain ERC-20 only), not a
+  contract bug.
   (`test/lp-staking/RewardsDistributor.test.js`: "books the amount sent, so a fee-on-transfer
-  ASSET shorts the claimer for good")
-* **An ASSET whose `transfer` returns false instead of reverting is rejected, and books
+  token shorts the claimer for good (unsupported, documented)"; the same numbers in
+  `test/forge/unit/HostileTokens.t.sol`)
+* **A reward token whose `transfer` returns false instead of reverting is rejected, and books
   nothing.** `SafeERC20` turns the false into a revert, the whole claim reverts, and
-  `claimedAsset` is left where it was — so the user can retry once the token is fixed.
-  (`test/lp-staking/RewardsDistributor.test.js`: "rejects an ASSET whose transfer returns false
+  `claimed[token][user]` is left where it was — so the user can retry once the token is fixed.
+  (`test/lp-staking/RewardsDistributor.test.js`: "rejects a token whose transfer returns false
   instead of reverting, and books nothing")
 * **A USDC-blacklisted staker cannot `rebalance`.** `_refundDust` sends the leftover USDC to
   the staker and Circle's blacklist reverts that transfer, so the whole rebalance reverts.
@@ -421,24 +476,47 @@ staker can still `unstake` and manage the position on Uniswap directly; that is 
 fork (`test/forge/fork/PositionLifecycle.t.sol:test_RebalancePaused_BlocksRebalanceButNeverUnstake`)
 and in both integration scenarios (steps A43-A45).
 
-## 14. Upgradeability (spec revision 2026-08-26) — `RewardsDistributor` and `LPStakingVault`
+## 14. Upgradeability — all five LP contracts (spec revision 2026-08-26, extended 2026-10-05)
 
 Management requirement, recorded in `docs/specs/00-architecture-overview.md` decision 5 and
-`docs/specs/01-contracts.md` §1/§2.1/§2.4: `RewardsDistributor` and `LPStakingVault` become
-UUPS (ERC-1967) proxies owned by a `TimelockController`. `TokenX` and `LPZapper` stay
-non-upgradeable — TokenX's escape hatch is minter re-pointing, and the zapper is stateless
-periphery the vault can replace with `setZapper`. The `TimelockController` is deployed and wired
-in by `scripts/deploy-lp-staking.js`; the runbook for operating it is at the end of this item.
+`docs/specs/01-contracts.md` §1/§2.1/§2.4, extended on 2026-10-05 (decision T12/U: "make all
+contracts upgradable UUPS for the LP (ALL)"): `LPStakingVault`, `RewardsDistributor`,
+`LPEpochRegistry`, `TokenOverture` and `LPZapper` are UUPS (ERC-1967) proxies behind `LPProxy`,
+every one owned by the `TimelockController` from its own deployment transaction. The
+`TimelockController` itself stays a plain contract (decision T15/T17): it holds no funds, its
+delay and roles change through operations scheduled on itself, and it is REPLACEABLE without any
+lock — the owner of each proxy is Ownable2Step storage, so a new timelock takes over by one
+scheduled `transferOwnership` per proxy plus `acceptOwnership` from the new one
+(`scripts/lp-switch-timelock.js`, decision T19 case 1). A UUPS timelock would be circular (owned
+by itself) and is not used. Fixed for real: the five PROXY addresses, the `LPProxy` shell code,
+and external contracts (the Uniswap pool, the position manager, the `$ASSET` token). The runbook
+for operating the timelock is at the end of this item.
 
 ### Why the distributor, specifically
 
-Item 10 (SEC-04) is the whole argument. `claimedTokenX[user]` and `claimedAsset[user]` are the
-only record of what has already been paid, and the vouchers state a LIFETIME figure. Fixing a
-bug by deploying a replacement contract starts those ledgers at zero, and every outstanding
-voucher becomes payable a second time — bounded only by the TokenX epoch cap. A proxy is what
-lets the code be replaced while the ledger stays exactly where it is. SEC-04 is therefore no
-longer the mitigation of last resort; it is what happens if the escape hatch is used instead of
-the upgrade path, and it stays documented for that reason.
+Item 10 (SEC-04) is the whole argument. `claimed[token][user]` is the only record of what has
+already been paid, and the vouchers state a LIFETIME figure per token. Fixing a bug by deploying
+a replacement contract starts that ledger at zero, and every outstanding voucher becomes payable
+a second time, out of whatever the replacement is funded with — there is no cap to bound it any
+more (item 5). A proxy is what lets the code be replaced while the ledger stays exactly where it
+is, which is why the rule is: upgrade, never replace.
+
+### Why the registry, the Overture token and the zapper
+
+Uniformity first (decision Q4 / T12), then a reason each:
+
+- **`LPEpochRegistry`** holds the emission schedule the backend scores against. A replacement
+  registry would restart the ids at 1 and the backend's mirror would have to be rebuilt; an
+  upgrade keeps every epoch, amount and id. Its `distributor` reference is an `immutable` of the
+  implementation, so the next implementation can change it if one ever has to.
+- **`TokenOverture`** is a token with holders. A replacement token would be a different asset
+  (new address, new balances, new permit domain); an upgrade keeps balances, allowances, permit
+  nonces, the name/symbol and the minter. Name, symbol and the permit domain live in
+  OpenZeppelin's namespaced storage, so even they can change by an upgrade with a reinitializer.
+- **`LPZapper`** holds nothing between transactions, but the vault whitelists it by ADDRESS
+  (`setZapper`, owner-tier, 48 h). Behind a proxy the address never changes, so a zapper fix is
+  one upgrade instead of a new deploy plus a `setZapper` operation, and every frontend keeps its
+  configured address. Its fixed references stay `immutable` in the implementation.
 
 ### Why the vault, specifically
 
@@ -467,16 +545,35 @@ mitigation still has to be a switch a key outside the timelock can throw by itse
   deliberately NOT open — and, because the OZ constructor grants it alongside `PROPOSER_ROLE`,
   the only canceller. `admin = address(0)` leaves the timelock its own `DEFAULT_ADMIN_ROLE`
   holder, so even a role change is a scheduled, publicly visible operation.
-- The implementation constructor takes the two immutables (`tokenX`, `asset`), keeps their zero
-  checks, and ends with `_disableInitializers()`.
-  `initialize(owner_, guardian_, operator_, signer_)` runs on the proxy, inside the proxy's own
-  deployment transaction, and `owner_` is the timelock from that transaction onwards — no key
-  ever holds the owner tier on a proxy, not even for one block (finding N-7, 2026-09-10).
-- Mutable state lives in ONE ERC-7201 namespace,
+- The distributor's implementation constructor takes NO arguments (every reward token is proxy
+  storage) and only calls `_disableInitializers()`.
+  `initialize(owner_, guardian_, operator_, signer_, RewardTokenInit[] tokens_)` runs on the
+  proxy, inside the proxy's own deployment transaction, and `owner_` is the timelock from that
+  transaction onwards — no key ever holds the owner tier on a proxy, not even for one block
+  (finding N-7, 2026-09-10).
+- The distributor's mutable state lives in ONE ERC-7201 namespace,
   `erc7201:real.lp.storage.RewardsDistributor`, at
-  `0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00`. The literal is pinned in
-  the contract and re-derived by `test_Storage_LivesAtThePinnedErc7201Slot`: if that slot ever
-  moved, every `claimed[user]` would read zero and every lifetime voucher would pay out again.
+  `0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00`, in the v1 layout
+  `signer`+`paused` | `guardian` | `operator` | `address[] rewardTokens` |
+  `mapping(token => RewardToken)` | `mapping(token => mapping(user => claimed))`. The literal is
+  pinned in the contract and re-derived by `test_Storage_LivesAtThePinnedErc7201Slot`, which also
+  reads `claimed[token][user]` at `keccak(user, keccak(token, base + 5))`: if that slot ever moved,
+  every ledger would read zero and every lifetime voucher would pay out again.
+- `LPEpochRegistry`: constructor `(distributor)` (immutable) + `_disableInitializers()`;
+  `initialize(owner_, operator_)`; namespace `erc7201:real.lp.storage.LPEpochRegistry` at
+  `0x9ecda8e3fad78b619c97eff816bc5317dd5b4101194b9333568095fc1dd01f00`.
+- `TokenOverture`: no constructor arguments; `initialize(name, symbol, owner_, minter_)` with
+  `__ERC20_init`, `__ERC20Burnable_init`, `__ERC20Permit_init(name)`, `__Ownable_init`,
+  `__Ownable2Step_init`; `minter` in `erc7201:real.lp.storage.TokenOverture` at
+  `0x7ca9f8db09cacc7881e534e068295c46832e8cbf76a90cb6e2f245c9bf51b600`. The permit domain's
+  `verifyingContract` is the proxy.
+- `LPZapper`: constructor `(vault, positionManager, pool, token0, token1, fee, swapRouter, usdc,
+  asset)` — the same zero/sort/pool-triple/pair checks as before, all immutables — ending in
+  `_disableInitializers()`; `initialize(owner_, operator_, twapWindow_, maxDeviationTicks_)`;
+  `operator` and the ERC-721 receive guard in `erc7201:real.lp.storage.LPZapper` at
+  `0x3f321486c4e46b59498f8814639a355cef7759e294075873ae5431d3955f3000`. Its owner (the
+  timelock) holds `_authorizeUpgrade` and `setOperator`; the immediate levers `setTwapParams`,
+  `sweep` and `rescuePosition` moved from the owner to the new `operator` tier (decision Q-d).
 - The EIP-712 domain is bound to the PROXY, so `verifyingContract` is stable across upgrades and
   no voucher is invalidated by one.
 - The vault's implementation constructor takes its six immutables (`positionManager`, `pool`,
@@ -496,22 +593,21 @@ mitigation still has to be a switch a key outside the timelock can throw by itse
 - `TwapGuard`'s two parameters have a namespace of their own,
   `erc7201:real.lp.storage.TwapGuard`, at
   `0xd1f904d9e9754969ffa2d33531f67fbdbb15fde03cb30a2cfdee997f4aa0c300`, because the guard is
-  inherited by BOTH the proxied vault and the plain `LPZapper`. In the zapper it is a fixed slot
-  like any other, so the namespace costs it nothing; the zapper's constructor now calls
-  `_setTwapParams` itself, which is the only change to that contract — its ABI is byte-identical
-  to the previous commit's. `TwapGuard`'s own constructor takes only the pool.
+  inherited by BOTH proxied contracts, the vault and the zapper; each seeds it from its own
+  `initialize`. `TwapGuard`'s own constructor takes only the pool.
 - **`initialize` seeds the vault's ERC-721 receive guard** (`receiveGuard = NOT_RECEIVING`). The
   old inline field initializer was constructor code, which a proxy never runs; left at zero the
   guard would still reject unsolicited transfers, but `_stake` would be writing a cold slot on
   every deposit. Measured by `test_Initialize_SeedsTheReceiveGuard`.
-- **Neither `initialize` calls `__UUPSUpgradeable_init()`, and it is not an omission.**
+- **No `initialize` calls `__UUPSUpgradeable_init()`, and it is not an omission.**
   OpenZeppelin 5.6.1 turned `contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol` into a
   re-export of the plain, non-upgradeable `UUPSUpgradeable`, which declares no initializer at
   all — the symbol does not exist in the pinned dependency, and calling it would not compile.
   There is also nothing for it to seed: the module's only state is the ERC-1967 implementation
   slot, and the proxy's own constructor writes that before `initialize` runs. Both `initialize`
-  bodies carry this as a comment so the next reader does not add the call back. The two
-  initializers that DO exist are called: `__Ownable_init(owner_)` and `__Ownable2Step_init()`.
+  bodies carry this as a comment so the next reader does not add the call back. The
+  initializers that DO exist are called: `__Ownable_init(owner_)` and `__Ownable2Step_init()`
+  everywhere, plus the ERC-20 ones on the Overture token.
 - `@openzeppelin/contracts/utils/ReentrancyGuard.sol` is used rather than a
   `ReentrancyGuardUpgradeable`: OZ v5.5 moved that guard to its own ERC-7201 namespace and
   marked it `@custom:stateless`, and v5.6 removed the upgradeable variant entirely. Its
@@ -537,23 +633,29 @@ now.
 
 | tier | functions | why |
 |---|---|---|
-| owner | `_authorizeUpgrade`, `setAssetClaimsEnabled`, `setGuardian`, `setOperator` | a code change, switching a whole reward leg on, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
-| guardian | `setPaused` | a bug in the claim path has to be stoppable in minutes |
-| operator | `setSigner`, `recoverExcessAsset`, **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, ASSET leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
+| owner | `_authorizeUpgrade`, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator` | a code change, a new reward token, opening or closing a token's claims, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
+| guardian | `setPaused` | a bug in the claim path — or a leaked signer key — has to be stoppable in minutes |
+| operator | `setSigner`, `recoverExcess`, **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, a token leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
 
 `LPStakingVault`:
 
 | tier | functions | why |
 |---|---|---|
-| owner | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` | code, pointing the deposit path at a new periphery contract, and the tier assignments are program decisions |
+| owner | `_authorizeUpgrade`, `setZapper`, `setBonusEscrow`, `setGuardian`, `setOperator` | code, pointing the deposit path at a new periphery contract, linking the bonus escrow every exit notifies (item 15), and the tier assignments are program decisions |
 | guardian | `setDepositsPaused`, `setRebalancePaused` | the two incident switches (item 13) have to act in one transaction |
 | operator | `setTwapParams`, `rescuePosition`, **plus both pause switches and `setGuardian`** | calibrating the guard is an operations decision, not an emergency one, a stranded NFT leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
 
-`TokenX` and `LPZapper` have no tiers of their own: they are plain `Ownable2Step` and the
-**operator** is their owner — `setMinter`, `setEpochCap`, `armNextEpoch`, `cancelNextEpoch` on
-the token; `setTwapParams`, `sweep`, `rescuePosition` on the zapper.
+`LPEpochRegistry`, `TokenOverture`, `LPZapper` (no guardian tier — nothing on them needs a
+pause):
 
-Three rules follow from the matrix, and each is asserted in both directions on both proxies:
+| contract | owner (timelock) | operator (multisig) |
+|---|---|---|
+| `LPEpochRegistry` | `_authorizeUpgrade`, `setOperator` | `scheduleEpoch`, `setEpochAmount`, `updateEpochBounds`, `cancelEpoch` (decision T9: arming the next epoch is immediate) |
+| `TokenOverture` | `_authorizeUpgrade`, `setMinter` | — ; the **minter** role (the operator multisig at launch) holds `mint` |
+| `LPZapper` | `_authorizeUpgrade`, `setOperator` | `setTwapParams`, `sweep`, `rescuePosition` (decision Q-d) |
+
+Three rules follow from the matrix, and each is asserted in both directions on the vault and the
+distributor:
 
 - **The three pause switches accept the guardian OR the operator** (`onlyGuardianOrOperator`).
   The guardian is the fast path; the operator is the cold fallback, so a lost hot key never
@@ -590,15 +692,14 @@ three pauses, `NotOperator(caller, operator)` on the operator-only functions,
 `OwnableUnauthorizedAccount` on the remaining owner functions. `NotGuardian` no longer exists on
 either contract.
 
-`recoverExcessAsset` sends to `operator()`, and so does `rescuePosition`. The owner is a
+`recoverExcess` sends to `operator()`, and so do both `rescuePosition`s. The owner is a
 timelock contract with no way to forward an ERC-20 or an ERC-721; the guardian is a hot key that
 should never hold value. The operator is the multisig that funded the one and would forward the
 other off-chain. Item 1's trust note is unchanged otherwise.
 
-`renounceOwnership()` reverts `RenounceDisabled()` on both proxies — and, since 2026-09-10, on
-`TokenX` and `LPZapper` as well (item 3). A renounce would leave `_authorizeUpgrade` with no
-caller and freeze the implementation forever, which is the exact failure the proxy exists to
-avoid.
+`renounceOwnership()` reverts `RenounceDisabled()` on all five proxies (item 3). A renounce would
+leave `_authorizeUpgrade` with no caller and freeze the implementation forever, which is the
+exact failure the proxy exists to avoid.
 
 Measured by `test/forge/unit/AccessControl.t.sol` —
 `test_Tiers_TheOwnerIsRejectedOnEveryGuardianAndOperatorFunction`,
@@ -610,15 +711,17 @@ Measured by `test/forge/unit/AccessControl.t.sol` —
 
 ### What is NOT guarded
 
-`recoverExcessAsset` is the ONE external function in the stack that carries no `nonReentrant`.
+`recoverExcess` is the ONE external function in the stack that carries no `nonReentrant`.
 `LPZapper.sweep` used to be its neighbour in that list; it gained the modifier on 2026-09-10
 (finding C-4), which closed the asymmetry item 12 used to record. What is left is deliberate: a
-hostile OPERATOR holding a hook-bearing ASSET really can reenter `recoverExcessAsset` and
-recover twice in one transaction — recorded as behaviour, not a vulnerability. It is
-`onlyOperator`, the destination is fixed to `operator()` and is not a caller-supplied argument,
-and the balance is treasury money the operator itself supplied; the modifier would remove
-nothing the operator cannot already do in two transactions. Measured by
-`test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter`.
+hostile OPERATOR recovering a hook-bearing token really can reenter `recoverExcess` and recover
+twice in one transaction — recorded as behaviour, not a vulnerability. It is `onlyOperator`, the
+destination is fixed to `operator()` and is not a caller-supplied argument, and the balance is
+company money the operator itself supplied; the modifier would remove nothing the operator
+cannot already do in two transactions. Measured by
+`test_Reentrancy_RecoverExcessIsUnguardedAndReallyDoesReenter`. `claim` IS `nonReentrant`: a
+hostile reward token whose transfer re-enters `claim` is rejected
+(`test_Reentrancy_ARewardPayoutHookCannotReenterClaim`).
 
 A hostile OWNER is not expressible at all: under `Ownable2Step` a contract that never calls
 `acceptOwnership` never becomes the owner. That is why the vault's reentrancy tests hand the
@@ -660,12 +763,11 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   holds the owner tier on a proxy, not for one block, and the run schedules nothing. What made
   that possible was moving the zapper address into `initialize` — see the runbook below for the
   nonce prediction it rests on and for what happens if the prediction misses.
-- `TokenX` and `LPZapper` ARE deployed deployer-owned, because the deployer has to call
-  `setMinter` and `setEpochCap`, and the run ends by nominating `LP_OPERATOR` on both. Being
-  `Ownable2Step` that only NOMINATES: the operator multisig finishes with two plain
-  transactions, `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()` — no timelock, no
-  delay. The script skips the two nominations when the operator IS the deploying key, which is
-  the staging case.
+- All five proxies are deployed timelock-owned; nothing is deployer-owned and nothing is
+  nominated at the end of the run (until 2026-10-05 the reward token and the zapper were
+  deployer-owned and nominated to the operator). The Overture token is born with the operator
+  as its minter, and the distributor with both launch reward tokens, so the deploy needs no
+  wiring transaction at all.
 
 ### Runbook — operating the timelock
 
@@ -685,9 +787,11 @@ TIMELOCK_ACTION=status  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js
 TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
 ```
 
-The owner tier is exactly: `acceptOwnership`, `setZapper`, `setGuardian`, `setOperator`,
-`setAssetClaimsEnabled`, `upgradeToAndCall`, `updateDelay`. Nothing else is routable, and
-nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
+The owner tier is exactly: `acceptOwnership`, `transferOwnership`, `upgradeToAndCall` (all five
+proxies), `setZapper`, `setBonusEscrow` (vault), `setGuardian` (vault, distributor),
+`setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
+`setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
+`updateDelay` (the timelock). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
 but since 2026-09-14 it is owner OR operator, so a guardian revocation or replacement that
 cannot wait is sent DIRECTLY by the operator multisig instead of being scheduled here. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
 now, sent directly by the multisig, and scheduling it here would revert
@@ -703,19 +807,19 @@ its state is `Done` and OZ refuses to re-schedule that id — so a repeat needs
 `TIMELOCK_SALT_TAG=<anything-new>`. OZ emits `CallSalt(id, salt)` next to every `CallScheduled`
 whenever the salt is non-zero, which here is always.
 
-**Mainnet bootstrap — there is nothing to schedule.** Both proxies are born owned by the
-timelock: `initialize` names it inside the proxy's own deployment transaction, so the run ends
-with `owner == timelock` and `pendingOwner == 0` on both, on every network, with no
+**Mainnet bootstrap — there is nothing to schedule.** All five proxies are born owned by the
+timelock: `initialize` names it inside each proxy's own deployment transaction, so the run ends
+with `owner == timelock` and `pendingOwner == 0` on all five, on every network, with no
 `acceptOwnership` operation anywhere. The deploy script builds no timelock operation at all.
 
 That rests on one mechanism. The single owner-only call the old bootstrap needed was
 `vault.setZapper(zapper)`, and it is now an `initialize` argument instead. A CREATE address is a
 pure function of `(deployer, nonce)`, and every transaction in `deploy-lp-staking.js` carries an
-explicit nonce, so the script can compute the zapper's address before the zapper exists: the
-vault implementation takes nonce N, the vault proxy N + 1 and the zapper N + 2. It passes
-`getCreateAddress({from: deployer, nonce: N + 2})` into the vault's `initialize`, deploys the
-zapper, records it in `deployments.json`, and only then asserts that it landed on the predicted
-address.
+explicit nonce, so the script can compute the zapper PROXY's address before the zapper exists:
+the vault implementation takes nonce N, the vault proxy N + 1, the zapper implementation N + 2
+and the zapper proxy N + 3. It passes `getCreateAddress({from: deployer, nonce: N + 3})` into
+the vault's `initialize`, deploys the zapper, records it in `deployments.json`, and only then
+asserts that its proxy landed on the predicted address.
 
 **If the prediction misses.** Anything that consumes an unexpected nonce on the deploying key
 between those transactions — a second process signing with the same key, a stuck replacement
@@ -733,12 +837,10 @@ TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setZapper \
 The thrown error names that command and both addresses, so the repair does not have to be
 reconstructed from the logs.
 
-**What still needs the Safe.** `TokenX` and `LPZapper` come out of the run owned by the DEPLOYER
-and nominated to `LP_OPERATOR`. The operator multisig completes both with one plain transaction
-each — `TokenX.acceptOwnership()` and `LPZapper.acceptOwnership()`, no timelock, no delay — and
-the script prints both target addresses. Until it does, the deploying key still holds TokenX's
-minter wiring and the zapper's `sweep`; neither can touch a staker's position or a user's funds.
-On staging the operator IS the deploying key, so the script skips the nominations entirely.
+**What still needs the Safe after the deploy.** No ownership step. The operator multisig funds
+the distributor (`scripts/lp-fund-rewards.js`: mint `$OVTR` into it, transfer `$ASSET` into it)
+and schedules epoch 1 at least 30 minutes ahead (`scripts/lp-epoch.js`). Both are operator
+calls with no delay.
 
 **Upgrades.** Build the new implementation, deploy it, then
 `TIMELOCK_FN=upgradeToAndCall TIMELOCK_ARGS=<impl>,0x` (the second argument is the
@@ -757,7 +859,7 @@ a stale record reads as an incident.
 **Emergencies do not go through here.** Pausing deposits, pausing rebalance and pausing claims
 are guardian-tier: one transaction from the hot key, no delay, no schedule — and the operator
 multisig can send those same three calls whenever the guardian key is unreachable. Rotating the
-voucher signer, rescuing a stranded NFT, `recoverExcessAsset` and retuning the TWAP guard are
+voucher signer, rescuing a stranded NFT, `recoverExcess` and retuning the TWAP guard are
 operator-tier: one transaction from the multisig, also undelayed. Revoking a compromised
 guardian does not go through here either, since 2026-09-14: `setGuardian(address(0))` from the
 operator multisig removes the hot key in one transaction, and a live address in the same call
@@ -768,41 +870,90 @@ mitigation and the upgrade is the slow follow-up.
 timelock's own address (`TIMELOCK_TARGET=TimelockController TIMELOCK_FN=updateDelay`), so it
 cannot be used to escape the delay it is changing.
 
-- The timelock path is exercised in the suites: `ForkHarness`, the `under a TimelockController`
-  blocks in `test/lp-staking/RewardsDistributor.test.js` and
-  `test/lp-staking/LPStakingVault.test.js`, and both Hardhat integration suites. The integration
-  fixtures no longer perform a handover — the deploy script hands them proxies that are already
-  timelock-owned — so what they route through `schedule -> increaseTime -> execute` is A28 (the
-  ASSET leg), A41 (cycling the zapper wiring) and the A46–A48 rehearsal upgrade. A19 changed
-  sides with the role split: `setTwapParams` is a DIRECT call from the operator with no timelock
-  in front of it, and the same step asserts that the owner is rejected on it.
-- The 2-step ownership mechanism itself is exercised on all four contracts in
-  `test/forge/unit/AccessControl.t.sol` (item 3) and, for `TokenX` and `LPZapper`, in their
-  Hardhat unit suites.
+- The timelock path is exercised in the suites: the timelock-owned blocks in
+  `test/lp-staking/RewardsDistributor.test.js`, `test/lp-staking/TokenOverture.test.js` and
+  `test/lp-staking/LPStakingVault.test.js`, and both Hardhat integration suites, which route
+  opening the `$ASSET` claims, adding a third reward token, cycling the zapper wiring and the
+  rehearsal upgrade through `schedule -> increaseTime -> execute`; the local-fork suite also runs
+  the whole planned timelock switch (`scripts/lp-switch-timelock.js`).
+- The 2-step ownership mechanism itself is exercised on all five contracts in
+  `test/forge/unit/AccessControl.t.sol` (item 3) and in the Hardhat unit suites.
 
 ### Sizes
 
-`forge build --sizes`, 2026-09-10, optimizer as configured in `foundry.toml`:
+`forge build --sizes`, 2026-10-05, optimizer as configured in `foundry.toml`:
 
 | contract | runtime (B) | EIP-170 margin (B) |
 |---|---|---|
-| `LPStakingVault` (implementation) | 15,256 | 9,320 |
-| `LPStakingVaultV2Mock` | 15,684 | 8,892 |
-| `RewardsDistributor` (implementation) | 8,935 | 15,641 |
-| `LPZapper` | 9,244 | 15,332 |
-| `TokenX` | 6,193 | 18,383 |
+| `LPStakingVault` (implementation) | 16,516 | 8,060 |
+| `LPZapper` (implementation) | 12,360 | 12,216 |
+| `RewardsDistributor` (implementation) | 10,593 | 13,983 |
+| `TokenOverture` (implementation) | 7,981 | 16,595 |
+| `LPEpochRegistry` (implementation) | 7,766 | 16,810 |
+| `LPTimelock` | 6,550 | 18,026 |
+| `LPProxy` | 163 | 24,413 |
 
-The vault implementation has grown 10,819 -> 14,378 -> 15,256 B: first the namespaced storage
-and its getters, then the 2026-09-09/10 round — the third admin tier with its two modifiers, the
-`operator()` getter, `setOperator`, the five extra `initialize` emissions, and the `SelfCredit`
-and `ZeroAmount` guards. The distributor moved 8,390 -> 8,935 B and the zapper 8,763 -> 9,244 B
-for the same reasons on their side, the zapper also carrying `Ownable2Step`, the disabled
-`renounceOwnership` and the paused-vault pre-check. 9,320 B of headroom against the 24,576 B
-limit is the number to re-check before any future feature lands in the vault; raising the
-optimizer runs is NOT the remedy if it ever gets close (Hardhat and Foundry must produce
-identical bytecode) — refactoring is.
+The vault grew 15,256 -> 16,516 B for the bonus-escrow link and the two notifications (item 15);
+the zapper 9,244 -> 12,360 B for the proxy machinery and the operator tier; the distributor
+8,935 -> 10,593 B for the multi-token ledger and the token registry. 8,060 B of headroom against
+the 24,576 B limit is the number to re-check before any future feature lands in the vault;
+raising the optimizer runs is NOT the remedy if it ever gets close (Hardhat and Foundry must
+produce identical bytecode) — refactoring is.
 
-`LPStakingVaultSwapHarness` (15,344 B) and `LPZapperSwapHarness` (9,328 B) appear in the same
-table and are NOT part of the deployment: they are test-only mocks under
-`contracts/lp-staking/mocks/`, each exposing its parent's internal `_executeSwap` so the
-`ZeroAmount` arm can be reached, which no production entry point can do.
+The V2 mocks (`*V2Mock`), `LPStakingVaultSwapHarness`, `LPZapperSwapHarness` and the three
+escrow mocks appear in the same table and are NOT part of the deployment: they are test-only
+contracts under `contracts/lp-staking/mocks/`.
+
+## 15. Bonus-escrow notifications in the vault (B.3 P2/P3 vault side; OFF at launch)
+
+`LPStakingVault` reports every exit and every re-range to a bonus escrow, so the ApeBond bonus
+(lane 2: `BonusEscrow`, `ApeBondPositionAdapter`, Sepolia only for now) can be forfeited on an
+exit before its cliff (P2) and scaled when a rebalance takes value out of the position (P3). The
+vault knows nothing else about bonuses (decision A3 of the B.3 document).
+
+- **Off at launch.** `bonusEscrow` is a storage field appended at the end of the vault's
+  namespace, zero by default, announced at `initialize` (`BonusEscrowSet(0, 0)`), and changed
+  only by the owner (the timelock) with `setBonusEscrow(address)`, which rejects a non-zero
+  address without code. Mainnet deploys with zero: no notification is sent, and the only cost is
+  one storage read per `unstake` / `rebalance`.
+- **`unstake` fails OPEN** (A4: the exit stays unconditional). After `delete stakers[tokenId]`
+  and before the NFT leaves, the vault requires `gasleft() >= BONUS_HOOK_GAS_FLOOR` (106,587) —
+  else `InsufficientGasForBonusHook()` — and calls `onUnstake(tokenId)` inside `try` with
+  `BONUS_HOOK_GAS` (100,000). If the escrow reverts, the exit completes and
+  `BonusHookFailed(tokenId)` is emitted. That event means a bonus that should have been forfeited
+  was not, so the backend's alert on it is MANDATORY whenever an escrow is linked. The floor is
+  `100,000 × 64 / 63 + 5,000`: EIP-150 forwards at most 63/64 of the remaining gas, so without it
+  a caller could pick a gas limit that starves the hook while the exit itself completes, and keep
+  the bonus. `catch` copies no return data, so an escrow cannot turn its revert into a gas sink.
+- **The allowance is measured, not guessed.** A realistic forfeiture (`MockForfeitingBonusEscrow`
+  behind an `LPProxy`: the vault check from storage, two cold reservation slots,
+  `totalReserved` read and write, the forfeiture writes, `BonusForfeited`) costs 29,941 gas
+  measured from the caller (cold account included); a position with no reservation 14,628. The
+  hook receives 99,764 gas at its first instruction. 100,000 is 3.3 times the forfeiture figure.
+- **`rebalance` fails CLOSED.** The old position's `(tickLower, tickUpper, liquidity)` is read
+  before its liquidity is withdrawn; after the staker record moves to the new NFT, the vault
+  calls `onRebalance(oldTokenId, newTokenId, old, new)` with no `try`. A reverting escrow reverts
+  the rebalance — failing open there would let a rebalance that takes value out of the position
+  escape the escrow's scaling, which is P3 again. `unstake` stays available whatever the escrow
+  does. `rebalance` keeps its refund behaviour; no refund limit was added (rejected 1 Oct).
+- **P5, stated in the vault header:** no bonus check is made at claim time or by timestamp — "the
+  position is staked when the bonus is claimed" is bypassed with a flash loan, "staked since time
+  T" by a stake/unstake/stake inside one block — so the vault pushes each event as it happens.
+- **P6, stated in the vault header — what rests on trust:** the adapter's router allowlist, the
+  router's word for the beneficiary, and this vault's TWAP parameters (operator-tier, no delay,
+  bounded to 300..3600 s and 1823 ticks), which the escrow reads to value a rebalanced position.
+
+The backend half of P3/P4 (decision D9: scale every reward token's accrued-unclaimed amount on a
+value-reducing `Rebalanced`, decision T13) does not depend on the escrow and runs from launch.
+
+Tests: `test/forge/unit/VaultBonusHooks.t.sol` —
+`test_Constants_TheFloorCoversTheAllowanceAfterTheSixtyFourthRule`,
+`test_Unstake_WithNoEscrowMakesNoCall`, `test_Unstake_WithNoEscrowNeedsNoGasFloor`,
+`test_Unstake_NotifiesTheEscrowAfterTheRecordIsDeletedAndBeforeTheNftLeaves`,
+`test_Unstake_ForwardsTheFullAllowanceToTheHook`, `test_Unstake_ARevertingEscrowNeverBlocksTheExit`,
+`test_Unstake_AnEscrowThatBurnsItsAllowanceNeverBlocksTheExit`,
+`test_Unstake_RevertsBelowTheGasFloor`, `test_Rebalance_ReportsBothPositionsAndCallsAfterTheRecordMoved`,
+`test_Rebalance_ARevertingEscrowRevertsTheRebalance`,
+`test_Unstake_StillWorksWhileTheEscrowRefusesEveryRebalance`, the three `test_HookGas_*` cases and
+`test_Storage_BonusEscrowSitsAtNamespaceSlotFive`; Hardhat: the "Bonus escrow hooks" block of
+`test/lp-staking/LPStakingVault.test.js`.
