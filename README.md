@@ -334,7 +334,12 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   the distributor pays by transfer out of its own balance, a claim whose token balance is short
   reverts `InsufficientFunds` until it is funded, and there is no cap of any kind. Operating the
   timelock is `scripts/lp-timelock.js`; the runbook and the reasoning are in
-  `docs/lp-staking-audit-notes.md` item 14
+  `docs/lp-staking-audit-notes.md` item 14. On Sepolia test stack #6 only, the ApeBond route
+  adds a sixth proxy, `BonusEscrow` (bonuses keyed by the position's `tokenId`, recorded with no
+  balance check and paid only when funded; forfeited by an exit before the cliff and scaled by a
+  rebalance before it, through the vault's notifications), and the plain, replaceable
+  `ApeBondPositionAdapter`, which computes each bonus itself from the position's value at the
+  vault's TWAP — no signature, no purchase id, no limit of any kind (audit notes items 16-17)
 - **Ethers.js** v6
 
 ## Development
@@ -500,8 +505,9 @@ npm run test:coverage:unit     # the Hardhat unit-only signal
 ```
 
 `scripts/check-coverage.mjs` recomputes totals from the raw `DA:` / `BRDA:` records rather than
-trusting the optional `LF` / `BRF` summary lines, scopes to the five LP contracts plus
-`libraries/TwapGuard.sol`, and pins both the floors and their denominators — a moved
+trusting the optional `LF` / `BRF` summary lines, scopes to the five LP contracts, the ApeBond
+escrow and adapter, and the four libraries (`TwapGuard`, `TickMath`, `LiquidityAmounts`,
+`PositionValue`), and pins both the floors and their denominators — a moved
 measurement basis fails loudly instead of being graded against a bar that no longer describes
 it. `--ir-minimum` is not optional: coverage disables the optimizer and the un-optimized build
 hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script passes
@@ -511,27 +517,31 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Re-measured 2026-10-05, after the Wednesday-launch round (Overture token, multi-token
-distributor, epoch registry, the zapper as a proxy, the vault's bonus-escrow notifications) on
-546 Foundry tests in 28 suites. Branch coverage is 100% on all six files, so every branch floor
-is also the ceiling:
+Re-measured 2026-10-05, after the lane-2 round (the B.3 ApeBond refactor on top of the
+Wednesday-launch round) on 720 Foundry tests in 34 suites. Branch coverage is 100% on every file,
+so every branch floor is also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
-| `LPStakingVault.sol` | 97.91% (187/191) | 100.00% (34/34) |
+| `ApeBondPositionAdapter.sol` | 100.00% (126/126) | 100.00% (34/34) |
+| `BonusEscrow.sol` | 97.30% (108/111) | 100.00% (23/23) |
+| `LPStakingVault.sol` | 97.99% (195/199) | 100.00% (35/35) |
 | `LPZapper.sol` | 96.08% (98/102) | 100.00% (20/20) |
 | `RewardsDistributor.sol` | 97.54% (119/122) | 100.00% (18/18) |
 | `LPEpochRegistry.sol` | 96.46% (109/113) | 100.00% (21/21) |
 | `TokenOverture.sol` | 84.62% (22/26) | 100.00% (2/2) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |
+| `libraries/TickMath.sol` | 100.00% (25/25) | 100.00% (21/21) |
+| `libraries/LiquidityAmounts.sol` | 100.00% (15/15) | 100.00% (7/7) |
+| `libraries/PositionValue.sol` | 100.00% (4/4) | — (0/0) |
 
-The twenty uncovered lines are, without exception, sites `--ir-minimum` cannot attribute: the six
-ERC-7201 accessor bodies (`$.slot := …`), the five implementations' `_disableInitializers();`,
-the empty OpenZeppelin initializers (`__Ownable2Step_init();` ×5, `__ERC20Burnable_init();`), the
-two `_checkTwapDeviation();` call sites and one `break;` in `LPEpochRegistry.setEpochAmount`. Each
-is reached by tests that assert its effect, so all twenty are demonstrably executed. They are
-named, with file and line, in `scripts/check-coverage.mjs` and in the audit notes rather than
-chased with contrived tests.
+The twenty-three uncovered lines are, without exception, sites `--ir-minimum` cannot attribute:
+the seven ERC-7201 accessor bodies (`$.slot := …`), the six implementations'
+`_disableInitializers();`, the empty OpenZeppelin initializers (`__Ownable2Step_init();` ×6,
+`__ERC20Burnable_init();`), the two `_checkTwapDeviation();` call sites and one `break;` in
+`LPEpochRegistry.setEpochAmount`. Each is reached by tests that assert its effect. They are named,
+with file and line, in `scripts/check-coverage.mjs` and in the audit notes rather than chased with
+contrived tests.
 
 ### Foundry beside Hardhat
 

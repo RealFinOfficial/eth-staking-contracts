@@ -57,14 +57,7 @@ LP_NPM=0xC36442b4a4522E871399CD717aBDD847Ab11FE88 LP_INITIAL_SQRT_PRICE_X96=… 
 | `LOCALHOST_RPC_URL` | The node's URL. Unset means `http://127.0.0.1:8545` |
 | `LOCALHOST_GAS_PRICE` | Fixed gas price in wei. A forked node inherits mainnet's base fee at the pinned block, so leaving Hardhat to estimate can undershoot the next block and the transaction is rejected. These scripts do not pin fees themselves |
 | `DEPLOYMENTS_FILE` | Where `recordDeployment` writes. Point it at a scratch file so a throwaway chain-31337 deploy never rewrites the tracked `deployments.json` |
-| `LP_DEPLOYER_IMPERSONATE` | The ADDRESS every state-changing script should send from, played WITHOUT its private key by impersonating it on the node. **Chain 31337 only** — on any other chain id the run stops with an error instead of sending, because there the transaction would be signed by whatever key the network config holds and would therefore come from a different account than the one named |
-| `LP_REHEARSAL_CALLER_IMPERSONATE` | The same thing for the one wallet `apebond-rehearsal.js` does not take from `getSigner()`: the SoulZap seat. Same 31337-only rule, same refusal elsewhere, and mutually exclusive with `LP_REHEARSAL_CALLER_KEY` |
-
-The two impersonation variables exist for the ApeBond fork dry-run (below). They are read in
-`scripts/lib/pools.js:impersonatedSignerFromEnv`, which checks the chain id first, then calls
-`hardhat_impersonateAccount`, then tops the account up with `hardhat_setBalance` only when it
-holds less than 1 ETH — a forked account usually carries real ETH already, and overwriting a
-balance that is sufficient would erase a fact the run may be asserting.
+| `LP_DEPLOYER_IMPERSONATE` | The ADDRESS every state-changing script should send from, played WITHOUT its private key by impersonating it on the node. **Chain 31337 only** — on any other chain id the run stops with an error instead of sending (`scripts/lib/pools.js:impersonatedSignerFromEnv`) |
 
 A fork reports chain id **31337**, which neither LP script has Uniswap defaults for, so
 `LP_FACTORY`, `LP_NPM` and `LP_ROUTER` all have to be passed explicitly — the mainnet
@@ -143,6 +136,10 @@ deployment transaction: `LPStakingVault`, `RewardsDistributor`, `LPEpochRegistry
 OpenZeppelin `TimelockController`; the multisig (`LP_MULTISIG`) is its only proposer, executor
 and canceller.
 
+On Sepolia test stack #6 only (mainnet launches without it, `vault.bonusEscrow() == 0`), the
+ApeBond route adds a sixth proxy, `BonusEscrow`, and one plain contract,
+`ApeBondPositionAdapter` — see "The ApeBond route" below and audit notes items 16 and 17.
+
 | Script | Purpose |
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
@@ -150,14 +147,15 @@ and canceller.
 | `lp-fund-rewards.js` | Fund the distributor: the operator mints `$OVTR` into it (it is the Overture minter) and transfers `$ASSET` into it. `LP_FUND_OVTR_AMOUNT` / `LP_FUND_ASSET_AMOUNT` in whole tokens. Sends when the signer is the minter / holds the `$ASSET`; prints the Safe transaction otherwise |
 | `lp-epoch.js` | Drive the emission schedule in `LPEpochRegistry`: `EPOCH_ACTION=show\|schedule\|set-amount\|update-bounds\|cancel`. Quantities in whole tokens per symbol (`EPOCH_AMOUNTS="OVTR=1000000,ASSET=3000"`); the grid, the 30-minute margin and the overlap rule are checked against chain time before anything is proposed. Sends when the signer is the registry operator; prints the Safe transaction otherwise |
 | `add-reward-token.js` | Prepare a NEW reward token: deploy an Overture-shaped token proxy (or take `REWARD_TOKEN_ADDRESS`), record `RewardToken:<SYMBOL>` in `deployments.json`, and print the `addRewardToken(token, conditional, claimsEnabled)` timelock operation and the follow-ups. Sends nothing to the timelock |
-| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending`. Also exports the operation and batch builders the other scripts and the suites use |
+| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending`. Also exports the operation and batch builders the other scripts and the suites use |
 | `lp-switch-timelock.js` | Move all five proxies to a NEW timelock (planned switch): `SWITCH_ACTION=deploy\|schedule\|execute\|accept\|raise-delay\|verify`. See "Replacing the timelock" below |
-| `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor\|LPEpochRegistry\|TokenOverture\|LPZapper`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
-| `validate-upgrade-safety.js` | UUPS implementation safety for the five (network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
+| `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor\|LPEpochRegistry\|TokenOverture\|LPZapper\|BonusEscrow`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
+| `validate-upgrade-safety.js` | UUPS implementation safety for the six (the five and `BonusEscrow`; network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
+| `deploy-apebond.js` | The ApeBond route on a stack that is ALREADY live. `LP_APEBOND_MODE=activate` (default): a new vault implementation when the live vault lacks the route (a lane-1 vault), the escrow and the adapter unless already recorded, the adapter's callers and campaign, then ONE timelock batch (`[upgradeToAndCall]`, `setBonusEscrow`, `setStakeOperator`, `setAdapter`) — driven end to end when the deploying key holds both timelock roles on a test chain, printed as Safe calldata otherwise — and the post-checks, of which `vault.bonusEscrow() == escrow` and `escrow.vault() == vault` are mandatory. `replace-adapter`, `upgrade-vault`, and the read-only `verify` |
+| `fund-escrow.js` | Send `$ASSET` into the escrow. Reservations need no balance; claims revert `InsufficientFunds` until the escrow holds them. `LP_APEBOND_FUND_AMOUNT` sends exactly that; `LP_APEBOND_FUND_TARGET` makes `balance − totalReserved` equal it (0 = cover exactly what is owed) and sends nothing when already there |
+| `apebond-rehearsal.js` | TEST STACKS ONLY (refuses chain 1): `LP_REHEARSAL_PHASE=caller\|deposit\|loop\|withdrawal\|claim\|status` — deploy a `MockSoulZapCaller`, buy through it, show the P2 loop forfeited, show the P3 two-rebalance withdrawal scaled, claim after the cliff |
+| `lib/apebond.js` | The ApeBond pair's shared pieces: env and campaign parsing, escrow + adapter deploy, adapter wiring, the link batch, the link checks |
 | `lib/proxies.js` | `deployContract` and `deployProxyPair` (validate, implementation, `LPProxy` with the `initialize` calldata, `forceImport`): the one code path every proxy in the stack is born through |
-| `deploy-apebond.js` | Activate the ApeBond route on a stack that is ALREADY deployed: a new vault implementation, the `BonusEscrow` proxy and the `ApeBondPositionAdapter`, then ONE timelock batch that upgrades the proxy and allowlists the adapter in that order. Every phase reads the chain first and skips what is already there, so an interrupted run is resumed by running the same command again. `LP_APEBOND_MODE` also offers `replace-adapter` (swap the adapter, keep the escrow) and `upgrade-vault` (the plain upgrade, nothing ApeBond-shaped touched) |
-| `set-purchase-signer.js` | GUARDIAN tier: point `ApeBondPositionAdapter.purchaseSigner` at the backend key that signs purchases, which is what OPENS the deposit path `deploy-apebond.js` deliberately leaves closed. Takes the address (`LP_APEBOND_PURCHASE_SIGNER`) or the private key it belongs to (`LP_APEBOND_PURCHASE_SIGNER_KEY`, never printed). Checks the tier on chain and names it rather than reverting, sends nothing when the signer is already that address, and refuses `address(0)` — which closes the route outright — unless `LP_APEBOND_ALLOW_CLOSE=1` |
-| `fund-escrow.js` | Transfer the escrow's own `bonusToken()` into the `BonusEscrow` proxy. A plain ERC-20 transfer, because the escrow has no funding function: what makes a reservation possible is the proxy's balance covering `totalReserved`. `LP_APEBOND_FUND_AMOUNT` sends exactly that much; `LP_APEBOND_FUND_TARGET` tops the FREE balance (`balance - totalReserved`) up to that much and sends nothing when it is already there, so the same command is safe to repeat. Prints both sides' balances before and after, and refuses an amount the sender cannot cover |
 | `lib/uniswap.js` | The per-chain Uniswap V3 addresses — `factory`, `positionManager`, `swapRouter02` — for chain 1 and chain 11155111. Plain Node, no network. `deploy-lp-staking.js` and `create-sepolia-pool.js` both import it, so the two cannot drift apart; `LP_FACTORY` / `LP_NPM` / `LP_ROUTER` override it, and a chain the map does not list (a local fork reports 31337) must set them |
 
 ### What `deploy-lp-staking.js` deploys, in order
@@ -190,38 +188,45 @@ the registry's scheduler) are both REQUIRED and have no defaults; the script THR
 are equal and WARNS when either collapses onto `LP_MULTISIG` or onto the deploying key, which is
 what staging deliberately does.
 
+### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 only)
+
+With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision document, overrides of
+2026-10-05; there is NO purchase signer anywhere):
+
+7. `BonusEscrow` proxy: implementation `(bonusToken = LP_APEBOND_BONUS_TOKEN (LP_ASSET), vault)`,
+   `initialize(owner = timelock, adapter = 0)` — born owned by the timelock, reserve path closed.
+8. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian =
+   LP_APEBOND_GUARDIAN (LP_GUARDIAN))`; then, from the deployer, `setSoulZapCaller` for every
+   `LP_APEBOND_SOULZAP_CALLERS` entry, `setCampaign` for the `LP_APEBOND_CAMPAIGN_*` campaign (its
+   exact range, cliff, rate and minimum — nothing else exists), `setCampaignCaller` for each
+   caller, and `transferOwnership(timelock)`.
+9. The link — ONE timelock batch, PRINTED and FILED (`apebond-link-batch.json` beside the
+   registry), not sent, because every proxy is born owned by the timelock:
+
+   ```
+   0. LPStakingVault.setBonusEscrow(escrow)
+   1. LPStakingVault.setStakeOperator(adapter, true)
+   2. BonusEscrow.setAdapter(adapter)
+   ```
+
+   Until it executes no purchase can be made (the vault refuses the adapter's `stakeFor`, the
+   escrow its `reserve`); the run's post-checks pass everything but the link and say so as a WARN.
+   Drive it with `deploy-apebond.js` (default mode: it finds the pair recorded, builds the same
+   batch, and on a test chain where the deploying key holds both timelock roles schedules, waits
+   in chain time, executes and asserts the link), or from the multisig with
+   `TIMELOCK_ACTION=schedule-batch` / `execute-batch` and the filed batch.
+
+A vault proxy that does NOT carry the route (lane 1's vault, as mainnet deploys it) is activated
+in place by `deploy-apebond.js`: phase 2 deploys the current `LPStakingVault` implementation
+(hardhat-upgrades validates the lane-1 → current layout: `stakeOperators` is appended after
+`bonusEscrow`), and the batch starts with `upgradeToAndCall(newImplementation, 0x)` — it has to be
+one operation, because `setStakeOperator` does not exist before the upgrade. Replacing the adapter
+later is `LP_APEBOND_MODE=replace-adapter`: a new adapter configured and handed over, then one
+batch `setStakeOperator(new, true)`, `setStakeOperator(old, false)`, `escrow.setAdapter(new)`.
+`LP_APEBOND_MODE=verify` re-runs the link checks read-only at any time — a wrong link fails OPEN
+(exits would keep their bonus), so run it after any owner-tier change touching the route.
+
 ### The timelock
-
-`LP_APEBOND_ENABLED=1` adds a third proxy to exactly that flow — the `BonusEscrow`, born owned
-by the timelock like the other two — and one plain `Ownable` contract, the
-`ApeBondPositionAdapter`, which the deployer hands to the timelock in a single transaction. The
-escrow needs its adapter's address in `initialize` for the same reason the vault needs the
-zapper's (`setAdapter` is owner-tier and the owner is the timelock from birth), so the script
-runs the prediction a second time: escrow implementation at nonce M, escrow proxy at M + 1,
-adapter at M + 2, and it asserts the adapter landed there.
-
-The route is deployed CLOSED: with `LP_APEBOND_PURCHASE_SIGNER` unset the adapter's signer is
-`address(0)` and every `depositFor` reverts, and with `LP_APEBOND_SOULZAP_CALLERS` empty no
-caller is allowlisted. Opening it is two deliberate acts afterwards — the guardian's undelayed
-`setPurchaseSigner`, and the timelock's delayed `setSoulZapCaller`.
-
-One call the run CANNOT make: `vault.setStakeOperator(adapter, true)` is owner-tier on a vault
-the timelock owns from birth. The script prints the exact `schedule`/`execute` line for the
-multisig and reports the missing allowlist entry as a WARN, not a failure; until it executes,
-`depositFor` reverts `NotZapper` and nothing else is affected. See the env table at the top of
-the script; `.env.example` carries the same block commented out.
-
-On a stack that is ALREADY deployed the adapter is added to an EXISTING vault, and that call has
-a precondition: the live proxy has to be running an implementation that HAS `setStakeOperator`.
-A vault proxy deployed before this round does not, so `schedule` would be accepted by the
-timelock and `execute` would revert on the proxy. The upgrade and the allowlist entry therefore
-have to be ONE timelock batch, in that order, and `scripts/deploy-apebond.js` is the script that
-builds it — see **"Activating ApeBond on an existing stack (Sepolia test stack #5)"** below. It
-does the whole thing in one command: the new implementation (through the very same
-`deploy-implementation.js` code), the escrow and the adapter, the wiring, the batch, the wait and
-the execute, then the post-checks and the registry. Nothing about it is a second copy of the
-fresh-stack script — it reuses that script's own `deployContract` and `deployProxyPair`, so both
-paths produce the same shapes.
 
 `hardhat run` accepts no positional arguments, so `lp-timelock.js` takes its subcommand and
 operands from the environment. `schedule` and `execute` take the SAME operands — the operation
@@ -238,11 +243,27 @@ TIMELOCK_ACTION=execute  TIMELOCK_TARGET=RewardsDistributor TIMELOCK_FN=setClaim
 TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
 ```
 
+`schedule-batch` and `execute-batch` send SEVERAL owner-tier calls as ONE operation, which the
+timelock runs in order, all or nothing. The calls come from a JSON file named by
+`TIMELOCK_BATCH` — an array of `{target, fn, args}`, `target` a registry kind or a raw address,
+`args` in the function's own order (a tuple such as `setCampaign`'s config as a nested array or
+an object; a bool component must be `true`/`false`, never left to truthiness):
+
+```bash
+TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=./apebond-link-batch.json \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=./apebond-link-batch.json \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
 Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` and
 `upgradeToAndCall` (all five proxies), `setZapper` and `setBonusEscrow` (vault), `setGuardian`
 (vault, distributor), `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
-`updateDelay` (the timelock itself). The other two tiers are deliberately NOT here, because
+`updateDelay` (the timelock itself); with the ApeBond route also `setStakeOperator` (vault),
+`upgradeToAndCall` / `acceptOwnership` / `transferOwnership` / `setAdapter` / `recoverSurplus`
+(escrow) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
+`setGuardian` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
 pause switches (`setDepositsPaused`, `setRebalancePaused`, `setPaused`), sent directly by the hot
 key; the operator tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper),
@@ -284,6 +305,34 @@ REWARD_TOKEN_NAME="Test Reward" REWARD_TOKEN_SYMBOL=TRW REWARD_TOKEN_CONDITIONAL
 Then hand the five proxy addresses, the timelock and the block numbers to the indexer module
 and the backend (`deployments.json` holds them all), and check one `$OVTR` claim end to end.
 
+Stack #6 also carries the ApeBond route (lane 2's head; mainnet does not). Steps 0 and 1 replace
+step 1 above:
+
+```bash
+# 0. the SoulZap stand-in the rehearsal buys through (its address goes into step 1)
+LP_REHEARSAL_PHASE=caller npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+# 1. the stack WITH the route: escrow + adapter + one campaign (300 s cliff, 10 %, min 1 $ASSET)
+LP_TIMELOCK_MIN_DELAY=300 LP_APEBOND_ENABLED=1 LP_APEBOND_SOULZAP_CALLERS=<caller>,<Doublo router> \
+  LP_APEBOND_CAMPAIGN_ID=apebond-sepolia-1 LP_APEBOND_HALF_WIDTH_TICKS=1200 \
+  LP_APEBOND_CLIFF_SECONDS=300 LP_APEBOND_BONUS_BPS=1000 LP_APEBOND_MIN_BONUS=1 \
+  npx hardhat run scripts/deploy-lp-staking.js --network sepolia
+# 5. the link batch (printed by step 1): schedule, wait 300 s, execute, assert the link
+npx hardhat run scripts/deploy-apebond.js --network sepolia
+LP_APEBOND_MODE=verify npx hardhat run scripts/deploy-apebond.js --network sepolia
+# 6. the rehearsal: a purchase, the loop (forfeited), the two-rebalance withdrawal (scaled)
+LP_REHEARSAL_PHASE=deposit    npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+LP_REHEARSAL_PHASE=loop       npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+LP_REHEARSAL_PHASE=withdrawal npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+# 7. after the cliff: claim (reverts InsufficientFunds while the escrow is short), fund, claim
+LP_REHEARSAL_PHASE=claim npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+LP_APEBOND_FUND_TARGET=0 npx hardhat run scripts/fund-escrow.js --network sepolia
+LP_REHEARSAL_PHASE=claim npx hardhat run scripts/apebond-rehearsal.js --network sepolia
+```
+
+Step 5 needs the deploying key to hold the timelock's proposer and executor roles (it does when
+`LP_MULTISIG` is that key, the test-stack arrangement). Otherwise the multisig sends the filed
+batch with `lp-timelock.js schedule-batch` / `execute-batch`, and `verify` asserts the link after.
+
 ### Replacing the timelock
 
 **Case 1 — the timelock works, the switch is planned.** No contract stores the timelock address
@@ -314,37 +363,6 @@ distributor's claimed ledger; users unstake from the old vault and stake into th
 registry restarts; the operator funds the new distributor) — days, not hours.
 
 ### Activating a new implementation (written for Sepolia test stack #5; the same steps apply to #6 and mainnet)
-`schedule-batch` and `execute-batch` send SEVERAL owner-tier calls as ONE operation, which the
-timelock runs in order, all or nothing. The calls come from a JSON file named by
-`TIMELOCK_BATCH` — an array of `{target, fn, args}`, where `target` is a registry kind or a raw
-address and `args` is an array in the function's own order:
-
-```json
-[
-  { "target": "LPStakingVault", "fn": "upgradeToAndCall", "args": ["0xNewImpl", "0x"] },
-  { "target": "LPStakingVault", "fn": "setStakeOperator", "args": ["0xAdapter", "true"] }
-]
-```
-
-```bash
-TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=./activation.json \
-  npx hardhat run scripts/lp-timelock.js --network sepolia
-
-TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=./activation.json \
-  npx hardhat run scripts/lp-timelock.js --network sepolia
-```
-
-That pair is exactly the ApeBond activation on a live vault proxy, and it has to be one
-operation: `setStakeOperator` does not exist on the implementation the proxy runs before the
-upgrade, so as two separate operations the second would be scheduled against code without that
-function and would revert after the whole delay. The same `OWNER_TIER` table, kind check,
-argument parsing and `CONFIRM=yes` rule apply per call; every value is zero and the predecessor
-is zero, as for a single operation. The salt is derived the same way under its own namespace —
-`keccak256(abi.encode("real.lp.timelock.v1.batch", keccak256(abi.encode(targets, payloads)),
-tag))` — so a repeat again needs `TIMELOCK_SALT_TAG`. `status` and `cancel` need no batch
-variant, both taking an id; `pending` lists a batch as one row with every call under it.
-
-### Activating a new implementation (Sepolia test stack #5)
 
 A contract change is not live until a NEW implementation of each changed proxy is on chain and
 the timelock has pointed the proxy at it. Nothing about this is automatic: the implementation
@@ -447,362 +465,6 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
    `lp.upgrade.unexpected_implementation`, because what it reads from the ERC-1967 slot no
    longer matches what it was told to expect. The indexer needs nothing: it already handles the
    `Upgraded` event, and the proxy addresses it indexes do not change.
-
-### Activating ApeBond on an existing stack (Sepolia test stack #5)
-
-`deploy-lp-staking.js` with `LP_APEBOND_ENABLED=1` deploys the route as part of a FRESH stack.
-On a stack that is already live and already holds staked positions none of that is available:
-the vault proxy exists, it runs an implementation that has no `setStakeOperator`, and the only
-way to give it one is an in-place UUPS upgrade through the timelock that owns it.
-`scripts/deploy-apebond.js` is that second path, and this is how it is run.
-
-The stack it is run against: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, timelock
-`0x591c51A6EE2ef571C44dF2339A7c92b57850C082` with a **300 second** `minDelay`, distributor proxy
-`0x1D6aB18aFeF3196B4E3F883C7aD36F49b003C8DA`. All three come out of `deployments.json`, so no
-command below carries an address.
-
-1. **Prove the endpoint before anything else.** Every phase reads the chain, and a run that
-   loses the endpoint halfway through leaves an implementation on chain that nothing points at.
-   One read is enough to know the Infura project id in `.env` is still serving Sepolia:
-
-   ```bash
-   TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia
-   ```
-
-   It prints the timelock's address and its `minDelay` before it does anything else, and those
-   two lines are the probe. A `402` here is the company Infura key over quota — switch to the
-   configured fallback endpoint rather than starting the run.
-
-2. **Bring the indexer's stored vault ABI to 15 events FIRST — before `executeBatch`, not
-   after.** This is the one step whose order cannot be recovered from. The indexer decodes a log
-   by looking its `topic0` up in the ABI it has STORED for that address; a log whose `topic0` is
-   not in that ABI is dropped, and it is dropped for good, because the indexer never re-reads a
-   block it has already passed. The upgraded vault emits `StakeOperatorSet`, which is the
-   fifteenth event and the one the fourteen-event ABI deployed before this round does not
-   carry — and the very first transaction the new implementation is involved in, the
-   `executeBatch` itself, emits it. Register the 15-event ABI (`abi/LPStakingVault.json` in
-   this repo is that ABI), confirm the indexer reports 15, and only then run step 3.
-
-   Every file under `abi/` is the bare `abi` array of the compiled artifact, 2-space JSON with a
-   trailing newline, and there is no generator script. After a contract change, regenerate the
-   file from the repo root with this one line (the argument is the contract name; the path
-   assumes a contract under `contracts/lp-staking/`):
-
-   ```bash
-   npx hardhat compile && node -e 'const n=process.argv[1];require("fs").writeFileSync(`abi/${n}.json`,JSON.stringify(require(`./artifacts/contracts/lp-staking/${n}.sol/${n}.json`).abi,null,2)+"\n")' ApeBondPositionAdapter
-   ```
-
-3. **Run the script.** One command. It deploys the implementation, the escrow and the adapter,
-   writes the adapter's SoulZap allowlist, hands the adapter to the timelock, schedules the
-   batch, waits out the 300 seconds and executes it.
-
-   ```bash
-   LP_APEBOND_GUARDIAN=<the multisig> \
-   LP_APEBOND_SOULZAP_CALLERS=<the SoulZap router> \
-     npx hardhat run scripts/deploy-apebond.js --network sepolia
-   ```
-
-   `LP_APEBOND_PURCHASE_SIGNER` is deliberately left unset: the route is activated CLOSED, and
-   the guardian opens it with one undelayed `setPurchaseSigner` when the campaign starts. The
-   run says so as a WARN rather than a failure. `LP_APEBOND_BONUS_TOKEN` defaults to the vault's
-   own `token0()`, read off the proxy.
-
-   The run also writes `apebond-activate-batch.json` beside `deployments.json`. That file is the
-   same batch in the shape `lp-timelock.js` reads, so the operation can be driven by hand if the
-   script is interrupted between the schedule and the execute:
-
-   ```bash
-   TIMELOCK_ACTION=execute-batch TIMELOCK_BATCH=./apebond-activate-batch.json \
-     npx hardhat run scripts/lp-timelock.js --network sepolia
-   ```
-
-   Re-running the script does the same thing and is the preferred repair: it recomputes the same
-   operation id, finds it pending, waits and executes.
-
-4. **Read the post-checks.** The run prints them and throws if any of them fails. The ones that
-   matter most are the state-preservation block — `owner`, `guardian`, `operator`, `zapper`, the
-   TWAP parameters, both pause flags and `stakerOf` for every id in
-   `LP_APEBOND_ASSERT_POSITIONS` (NFT 231913 on this stack, by default) — plus the distributor's
-   ERC-1967 implementation slot, which this run must not have moved.
-
-5. **Commit `deployments.json`.** The run has already written it: `LPStakingVault.implementation`
-   now names the new implementation, and the two new kinds `BonusEscrow` and
-   `ApeBondPositionAdapter` carry their addresses, their owner and their configuration. Record
-   the commit that was deployed from, so the implementation on chain can be traced back to a
-   build.
-
-6. **The backend needs nothing on a test stack.** `LP_EXPECTED_IMPLEMENTATION_VAULT` and
-   `LP_EXPECTED_IMPLEMENTATION_DISTRIBUTOR` are empty on the test stacks, so nothing there pins
-   an implementation and nothing raises `lp.upgrade.unexpected_implementation`. Whether mainnet
-   pins them at all is still open — see the env-keys note sent to krumbgf on 2026-09-14.
-
-7. **The route is deployed, not open.** `purchaseSigner` is `address(0)` and the escrow holds no
-   bonus tokens, so nothing can be bought yet. The next section is how that is turned into a
-   working campaign and proved with one real purchase.
-
-### After the activation: opening the route (Sepolia test stack #5)
-
-The activation leaves the route DEPLOYED and CLOSED on purpose: `purchaseSigner` is
-`address(0)`, so every `depositFor` reverts, and the escrow holds no bonus tokens, so the first
-purchase that got past the signature would revert at the reserve step anyway. Four commands turn
-that into a proven, working campaign, in this order. Each one refuses to run when the one before
-it has not happened, so the order is enforced rather than remembered.
-
-1. **Open the deposit path.** Guardian tier — `setPurchaseSigner` carries `onlyGuardian`, not
-   `onlyOwner`, so the timelock that OWNS the adapter cannot make this call at all and there is
-   no scheduled route to it. Run it from the guardian key:
-
-   ```bash
-   LP_APEBOND_PURCHASE_SIGNER=<the backend key's address> \
-     npx hardhat run scripts/set-purchase-signer.js --network sepolia
-   ```
-
-   `LP_APEBOND_PURCHASE_SIGNER_KEY=<the private key>` is the alternative when the operator holds
-   the key itself: the address is derived from it and the key is never printed. The run reads
-   `purchaseSigner()` before and after, sends nothing when it is already that address, refuses a
-   contract (the adapter verifies with `ECDSA.recover`, which only ever returns an EOA), and
-   refuses `address(0)` unless `LP_APEBOND_ALLOW_CLOSE=1` — because zero CLOSES the route, which
-   repudiates every authorization the backend has issued and is a deliberate act.
-
-   Rotating the signer later is the same command. Every outstanding authorization stops working
-   the moment it lands, so switch the backend over in the same window.
-
-2. **Fund the escrow.** The escrow has no funding function: a bonus can be reserved only while
-   the proxy's own `bonusToken` balance covers `totalReserved` plus the new amount, so funding it
-   is an ordinary ERC-20 transfer to the proxy.
-
-   ```bash
-   LP_APEBOND_FUND_TARGET=10000 npx hardhat run scripts/fund-escrow.js --network sepolia
-   ```
-
-   `LP_APEBOND_FUND_TARGET` is the FREE balance to reach — `balance - totalReserved`, which is
-   what a new purchase can actually reserve against. The run sends the difference and sends
-   nothing when the free balance is already there, so the command is safe to repeat and safe to
-   run while purchases are landing. `LP_APEBOND_FUND_AMOUNT=10000` is the other form: send
-   exactly that much, once. Either way the run prints both sides' balances before and after,
-   `totalReserved` (which funding must not move, and the run fails if it did), and the free
-   balance the escrow ends up with.
-
-3. **Buy one position for real — the deposit phase.** SoulZap is not deployed on a test stack, so
-   its seat is played by a wallet the operator holds, allowlisted on the adapter at activation
-   through `LP_APEBOND_SOULZAP_CALLERS`. That wallet needs both pool tokens and some Sepolia ETH.
-
-   ```bash
-   LP_REHEARSAL_CALLER_KEY=<the SoulZap-seat wallet's private key> \
-   LP_REHEARSAL_BENEFICIARY=<the buyer's address> \
-   LP_APEBOND_PURCHASE_SIGNER_KEY=<the backend key from step 1> \
-   LP_REHEARSAL_CLIFF_SECONDS=300 \
-     npx hardhat run scripts/apebond-rehearsal.js --network sepolia
-   ```
-
-   Before it spends a single unit of gas the run checks the six things that have to be true — the
-   caller is allowlisted, the key matches `adapter.purchaseSigner()`, neither pause flag is on,
-   the vault has the adapter as a stake operator, the escrow points back at the adapter, and the
-   escrow can back the bonus — and stops with all of them printed if any fails. Then it approves
-   the position manager, mints the campaign's range around the pool's current tick, reads the
-   minted liquidity back, signs the 14-field `PurchaseAuthorization` under the
-   `RealApeBondPurchase`/`1` domain, approves the adapter for the NFT and calls `depositFor`.
-
-   The figures are the SAMPLE campaign from `test/lp-staking/helpers/constants.js` — 10,000
-   gross, 9,900 net after a 1% SoulZap fee, a 495 guaranteed bonus — overridable with
-   `LP_REHEARSAL_GROSS` / `_NET` / `_BONUS` in whole tokens. The mint amounts are computed
-   value-balanced at the pool's own price for the chosen range and sized to fit the caller's
-   balances; `LP_REHEARSAL_AMOUNT0` / `_AMOUNT1` state them outright instead.
-
-   Afterwards the run asserts what the purchase was supposed to produce: the position manager
-   reports the VAULT as the NFT's owner, the vault credits the BENEFICIARY (not the caller) as
-   its staker, `escrow.reservationOf(purchaseId)` holds the beneficiary, the bonus, the unlock
-   timestamp and `claimed = false`, `claimable` is still 0 because the cliff has not passed, and
-   `ApeBondPositionDeposited` is in the receipt with the same purchase id.
-
-4. **Claim the bonus — after the cliff.** The cliff is 300 seconds on Sepolia test stack #5
-   (`LP_REHEARSAL_CLIFF_SECONDS`, default 300); production is TBD with ApeBond, expected 2–3
-   months. It is a FULL cliff with no vesting: the buyer's position is an NFT and cannot be
-   split into time-released parts, so the whole bonus unlocks at once (decided 2026-09-15).
-   Run it early and it prints the seconds remaining and exits non-zero without sending
-   anything.
-
-   ```bash
-   LP_REHEARSAL_PHASE=claim npx hardhat run scripts/apebond-rehearsal.js --network sepolia
-   ```
-
-   `claim` takes no role and no permission: it is triggered here by the DEPLOYER, deliberately
-   not the beneficiary, and the money still goes to the beneficiary recorded at purchase time.
-   The run asserts the beneficiary's bonus-token balance grew by exactly the bonus, that
-   `totalReserved` fell by exactly the same, that the reservation is marked claimed, and that a
-   second claim reverts.
-
-**The record file.** The deposit phase writes `apebond-rehearsal-<chainId>.json` beside
-`deployments.json` — token id, purchase id, campaign id, the figures, the unlock timestamp and
-every transaction hash — and the claim phase reads it and appends its own hash. That is what lets
-the two phases run in different shells on different days with no arguments carried between them;
-`LP_REHEARSAL_PURCHASE_ID` names a purchase directly when there is no record to read. Like
-`apebond-*-batch.json` it is a run artifact and is gitignored: everything durable about the
-deployment is already in `deployments.json`.
-
-`scripts/apebond-rehearsal.js` REFUSES chain 1, with no `CONFIRM=yes` escape. It mints liquidity,
-signs an authorization with a key read out of the environment and spends a purchase id; on
-mainnet the purchase comes from SoulZap and the signature from the backend, and neither is driven
-from a script in this repo.
-
-### Signing for a third-party router (test stacks only)
-
-`apebond-rehearsal.js` plays both sides of a purchase: it mints the position AND signs the
-authorization in the same run. When ApeBond's own SoulZap router is the caller, the router mints
-the position in its contract and needs only REAL's half: one signed `PurchaseAuthorization` and
-its signature. `scripts/apebond-sign-authorization.js` produces exactly that pair and nothing else.
-It signs off chain with the purchase-signer key, sends no transaction and changes nothing on chain.
-
-```bash
-LP_SIGN_BENEFICIARY=<the buyer> \
-LP_SIGN_SOULZAP_CALLER=<the router contract, allowlisted on the adapter> \
-LP_SIGN_INPUT_TOKEN=<one of the pool's two tokens> \
-LP_SIGN_GROSS=1000 LP_SIGN_NET=990 LP_SIGN_BONUS=100 \
-LP_SIGN_TICK_LOWER=-291360 LP_SIGN_TICK_UPPER=-288960 \
-  npx hardhat run scripts/apebond-sign-authorization.js --network sepolia
-```
-
-Gross and net are whole tokens of the input token, the bonus is whole tokens of
-`escrow.bonusToken()`. The optional inputs and their defaults are `LP_SIGN_CLIFF_SECONDS` (300),
-`LP_SIGN_MIN_LIQUIDITY` (1), `LP_SIGN_CAMPAIGN` (the rehearsal campaign id),
-`LP_SIGN_DEADLINE_SECONDS` (3600), `LP_SIGN_NONCE` (chain time, moved forward past consumed
-nonces), `LP_SIGN_PURCHASE_ID` (`keccak256(abi.encode(campaign, beneficiary, caller, nonce,
-chainId))`) and `LP_SIGN_OUT`. The adapter, escrow and vault come from the registry, with the same
-`LP_APEBOND_ADAPTER` / `_ESCROW` / `_VAULT` overrides as the rehearsal. The header of the script lists
-every variable.
-
-Before it signs, the run reads the chain and stops, having signed nothing, if any of these fails:
-the key's address is `adapter.purchaseSigner()`, the adapter's EIP-712 domain is
-`RealApeBondPurchase`/`1` on this chain and its type hash is the 14-field one,
-`soulZapCallers(caller)` is true, the beneficiary is not one of the four addresses the adapter
-rejects, the input token is one of the pool's two tokens, net is not above gross, the bonus is not
-above the escrow's free balance (balance minus `totalReserved`), the ticks are ordered and on the
-pool's `tickSpacing` grid, and neither the nonce nor the purchase id is spent. After signing it
-asserts that `adapter.hashPurchaseAuthorization(authorization)`, read from the chain, equals the
-local EIP-712 digest, and that ECDSA recovery of the signature over that digest gives
-`purchaseSigner`. It then writes `apebond-authorization-<chainId>-<first 8 hex of purchaseId>.json`
-beside the registry (gitignored) and prints a "FOR THE ROUTER SIDE" block that holds no secret and is
-pasted to the third party as it is: the 14 fields in struct order, the signature, the digest, the
-deadline in UTC and the reminder to mint exactly on the signed ticks, with at least `minLiquidity`,
-and to call `depositFor` from the named caller, once.
-
-Two facts the router side should know. `bonusUnlockAt` is fixed when the pair is SIGNED (chain time
-plus the cliff), not when it is deposited. And a signed pair consumes nothing on chain until it
-lands, so two runs in the same second for the same buyer and caller produce the same default nonce;
-set `LP_SIGN_NONCE` to issue several pairs at once.
-
-This script is for TEST STACKS ONLY and refuses chain 1 with no `CONFIRM=yes` escape. On mainnet a
-purchase authorization is issued by the backend's signing endpoint (roadmap step 5), never by hand
-from a key in an operator's `.env`.
-
-### Rehearsing the whole sequence on a fork first (the dry-run)
-
-The four commands above are the live day. Before running them against Sepolia test stack #5
-for real, the same four can be run against a **fork of that stack**, in the same order, with
-the same environment, by the same scripts — as one opt-in test:
-
-```bash
-LP_APEBOND_DRYRUN=1 \
-  npx hardhat test test/lp-staking/integration/ApeBondUpgradeInPlace.test.js
-```
-
-`test/lp-staking/integration/ApeBondUpgradeInPlace.test.js` starts a
-`hardhat node --fork <sepolia>` with **no `--fork-block-number`**, so the node forks the chain
-head and the world it serves is stack #5 exactly as it stands right now: the vault proxy on
-implementation `0xEac50B6B…`, the 300-second timelock, NFT 231913 staked by the operator, the
-real tASSET/tUSDC pool and the real Uniswap Sepolia position manager. It then runs
-`deploy-apebond.js`, `set-purchase-signer.js`, `fund-escrow.js` and both phases of
-`apebond-rehearsal.js` as child processes against that node.
-
-**What it proves, that no other tier can.** Every other ApeBond test builds its world out of
-mocks, so what it proves is that the scripts are correct. This one proves that the LIVE STACK
-can be activated by them: that the new `LPStakingVault` compiled from this branch passes the
-storage-layout check against the layout recorded for the implementation the live proxy
-actually runs, that the deployer key really holds both timelock roles, that the batch really
-clears a 300-second `minDelay` and executes, that NFT 231913's staker survives the upgrade,
-that the distributor's implementation slot does not move, and that a purchase minted on the
-REAL position manager in the real campaign range lands in the vault, credits the buyer and
-pays its bonus after the cliff.
-
-**No key is used and no transaction reaches Sepolia.** The two live seats — the operator
-`0x5576bD37…` and the SoulZap seat `0x2b9818c8…` — are impersonated through
-`LP_DEPLOYER_IMPERSONATE` and `LP_REHEARSAL_CALLER_IMPERSONATE`, which are honoured on chain
-31337 only. The only traffic the endpoint sees is the reads the fork needs to answer.
-
-**It is NOT a CI gate, and it cannot become one.** A fork at the chain head is not
-deterministic: the pool price, the operator's balances and the staked position are whatever
-Sepolia holds at the minute the node starts, so a run could go red because somebody else moved
-the pool. `.github/workflows/ci.yml` never sets `LP_APEBOND_DRYRUN`, so `npx hardhat test`
-reports the suite as pending. Both gates are one-sided in the usual way: without the flag it
-skips and says so, and with the flag AND an endpoint set it FAILS rather than skips when the
-fork cannot be established.
-
-**Nothing in the repository is written.** The children record into a scratch
-`DEPLOYMENTS_FILE` — a copy of the tracked registry with the live stack's entry ALSO recorded
-under chain 31337, which is what a fork is: Sepolia's state on a node that reports 31337. The
-tracked `deployments.json` and the committed `.openzeppelin/sepolia.json` are compared by
-sha256 before and after, `git status --porcelain -- deployments.json .openzeppelin` must be
-empty, and the whole-tree `git status --porcelain` must have gained no entry over the run (so
-run it on a tree nobody else is editing). The `hardhat-upgrades` manifest is safe by
-construction: on a forked development node
-the plugin writes to `<os.tmpdir()>/openzeppelin-upgrades/hardhat-31337-<instance>.json` and
-keeps the committed `.openzeppelin/sepolia.json` as a read-only PARENT, which is exactly why
-the layout check grades against the real deployed layout.
-
-At the end the run prints one block with every address and every transaction hash it produced
-on the fork. That block is the rehearsal record for the round's notes.
-
-### Replacing the adapter, and upgrading the vault alone
-
-The same script, with `LP_APEBOND_MODE`:
-
-```bash
-LP_APEBOND_MODE=replace-adapter LP_APEBOND_SOULZAP_CALLERS=<the SoulZap router> \
-  npx hardhat run scripts/deploy-apebond.js --network sepolia
-
-LP_APEBOND_MODE=upgrade-vault \
-  npx hardhat run scripts/deploy-apebond.js --network sepolia
-```
-
-`replace-adapter` is the runbook of `docs/lp-staking-audit-notes.md` item 15, automated: the
-adapter is REPLACEABLE, not upgradeable, because everything it stores is spent state and nothing
-is owed at its address. It deploys a new adapter against the EXISTING escrow, wires its
-allowlist, hands it to the timelock, and then runs ONE batch of three —
-`setStakeOperator(old, false)`, `setStakeOperator(new, true)`, `BonusEscrow.setAdapter(new)` — so
-the old adapter loses the reserve right in the same transaction the new one gains it. The new
-adapter is recorded as `pendingAdapter` on the registry entry BEFORE it is activated, which is
-what lets an interrupted replacement resume rather than deploy a third one; a run started after
-the previous one completed is a NEW replacement and deploys another adapter, which is the point
-of the command.
-
-Once the batch's effects are on chain — executed by this run, or found already executed by a
-re-run after an interruption or after the Safe sent it — the run rebuilds the
-`ApeBondPositionAdapter` entry for the NEW adapter: its own `deployTx` and `block` (promoted from
-`pendingAdapterTx` / `pendingAdapterBlock`), the guardian, signer and callers read back off it,
-`previousAdapter`, and nothing carried over from the old entry (no old `block`, no old
-`purchaseSignerTx`). `BonusEscrow.adapter` is re-pointed in the same phase.
-
-The replacement on Sepolia test stack #5 can be rehearsed first on a fork of the chain head, with
-the live-day environment, followed by one 14-field purchase and its claim through the new adapter:
-
-```bash
-LP_APEBOND_DRYRUN=1 \
-  npx hardhat test test/lp-staking/integration/ApeBondReplaceAdapter.test.js
-```
-
-Like the activation dry-run it is opt-in and pending in CI; unlike it, it falls back to the
-public Sepolia endpoints when no `SEPOLIA_RPC_URL` / `INFURA_API_KEY` is set, and fails (rather
-than skips) when none of them can be forked.
-
-`upgrade-vault` is the plain UUPS upgrade as a one-call batch, with no ApeBond contract deployed
-or touched. It is the same end state step 3 of "Activating a new implementation" reaches, done
-in one command instead of four.
-
-On mainnet — and on any chain where the deploying key is not the timelock's proposer AND
-executor — neither mode sends the timelock transactions. The run deploys and wires everything it
-can, prints the targets, the payloads, the predecessor, the salt, the operation id and the
-`scheduleBatch` / `executeBatch` calldata, asserts that the vault is still exactly as it found
-it, and stops. The Safe sends the two transactions.
 
 ## Test tooling (plain Node, not `hardhat run`)
 
