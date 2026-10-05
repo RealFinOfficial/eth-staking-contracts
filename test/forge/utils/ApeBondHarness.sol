@@ -106,7 +106,14 @@ abstract contract ApeBondHarness is LocalHarness {
         mathNpm = new MockMathPositionManager(address(mathPool));
 
         VaultProxyParams memory params = _vaultParams(
-            address(mathNpm), address(mathPool), token0, token1, address(routerMock), address(this), MIN_TWAP_WINDOW, 500
+            address(mathNpm),
+            address(mathPool),
+            token0,
+            token1,
+            address(routerMock),
+            address(this),
+            MIN_TWAP_WINDOW,
+            500
         );
         params.fee = MATH_FEE;
         mathVault = _deployVaultProxy(params);
@@ -171,8 +178,7 @@ abstract contract ApeBondHarness is LocalHarness {
 
     /// @notice The bonus the adapter must compute for `liquidity` on the local campaign range.
     function _expectedBonus(uint128 liquidity) internal view returns (uint256 value, uint256 bonus) {
-        value =
-            PositionValue.valueAt(liquidity, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER, poolMock.twapTick(), true);
+        value = PositionValue.valueAt(liquidity, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER, poolMock.twapTick(), true);
         bonus = value * BONUS_BPS / 10_000;
         if (bonus < MIN_BONUS) bonus = 0;
     }

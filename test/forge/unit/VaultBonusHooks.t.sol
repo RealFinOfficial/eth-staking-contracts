@@ -197,6 +197,44 @@ contract VaultBonusHooksTest is LocalHarness {
         );
     }
 
+    /**
+     * @dev `stakeOperators` — the `stakeFor` allowlist the ApeBond adapter sits on — is appended
+     *      AFTER `bonusEscrow`, so it opens namespace slot 6: an allowlisted address reads `true`
+     *      at `keccak256(abi.encode(account, base + 6))`. The mapping's own slot stays empty, as a
+     *      Solidity mapping's always does, and slot 5 still holds the escrow link. A layout that
+     *      put the allowlist anywhere else would make every recorded right read as revoked after
+     *      an upgrade, or worse, read another field's bytes as a right.
+     */
+    function test_Storage_StakeOperatorsSitAtNamespaceSlotSix() public {
+        vault.setBonusEscrow(address(escrow));
+        vault.setStakeOperator(carol, true);
+
+        bytes32 slotSix = bytes32(uint256(VAULT_STORAGE) + 6);
+        assertEq(
+            uint256(vm.load(address(vault), keccak256(abi.encode(carol, slotSix)))),
+            1,
+            "an allowlisted operator reads true in the mapping at slot 6"
+        );
+        assertEq(uint256(vm.load(address(vault), slotSix)), 0, "the mapping's own slot stays empty");
+        assertEq(
+            uint256(vm.load(address(vault), keccak256(abi.encode(stranger, slotSix)))),
+            0,
+            "and an address never allowlisted reads false"
+        );
+        assertEq(
+            address(uint160(uint256(vm.load(address(vault), bytes32(uint256(VAULT_STORAGE) + 5))))),
+            address(escrow),
+            "slot 5 is still `bonusEscrow`"
+        );
+
+        vault.setStakeOperator(carol, false);
+        assertEq(
+            uint256(vm.load(address(vault), keccak256(abi.encode(carol, slotSix)))),
+            0,
+            "and a revocation clears exactly that entry"
+        );
+    }
+
     // ──────────────────────── No escrow: no call, no floor ─────
 
     function test_Unstake_WithNoEscrowMakesNoCall() public {
