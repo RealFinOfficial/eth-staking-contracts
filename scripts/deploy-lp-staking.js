@@ -113,6 +113,9 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //                               staging runs 300 so the flow can be rehearsed end to end;
 //                               the fork suites run 60. 0 is legal and means no delay at all,
 //                               which is only ever right on a throwaway chain
+//   LP_VAULT_CONTRACT         — TEST HOOK, refused on mainnet: the vault implementation's artifact
+//                               (LPStakingVault). The ApeBond activation suite deploys the lane-1
+//                               vault (LPStakingVaultLane1Mock) to rehearse the in-place upgrade
 //   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (150). Must be at least
 //                               2 * ceil(LP_TWAP_WINDOW / 12): one slot per block in the
 //                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
@@ -302,6 +305,19 @@ async function main() {
   // $ASSET claims are CLOSED at launch (Q-e): they open later, after maturity, through a
   // timelock `setClaimsEnabled(ASSET, true)`. The flag exists for rehearsals that need them open.
   const assetClaimsEnabled = readFlag("LP_ASSET_CLAIMS_ENABLED", false);
+  // The vault implementation's artifact. Production never sets it. The ApeBond activation suite
+  // sets `LPStakingVaultLane1Mock` — lane 1's vault as mainnet deploys it, without the
+  // stake-operator allowlist — to rehearse activating the route on a live mainnet-shaped stack.
+  const vaultContract = process.env.LP_VAULT_CONTRACT || "LPStakingVault";
+  if (mainnet && vaultContract !== "LPStakingVault") {
+    throw new Error(`LP_VAULT_CONTRACT=${vaultContract} is a test hook and is refused on mainnet`);
+  }
+  if (process.env.LP_APEBOND_ENABLED === "1" && vaultContract !== "LPStakingVault") {
+    throw new Error(
+      `LP_APEBOND_ENABLED=1 deploys the route onto a FRESH current vault; LP_VAULT_CONTRACT=${vaultContract} ` +
+        `is the pre-route vault, which scripts/deploy-apebond.js activates in place instead`
+    );
+  }
 
   // ──── the ApeBond route, off unless asked for ────
   // Every value below is read only when the flag is on, so a stale LP_APEBOND_* left in a shell
@@ -672,7 +688,7 @@ async function main() {
   // zapper proxy will land on. `bonusEscrow` is not an initialize argument and stays zero: the
   // ApeBond escrow is not part of this stack, and linking one is a timelock `setBonusEscrow`.
   const vaultDeploy = await deployProxyPair(
-    "LPStakingVault",
+    vaultContract,
     [positionManager, poolAddress, token0, token1, fee, swapRouter],
     [timelockDeploy.address, guardian, operator, predictedZapper, twapWindow, twapMaxDeviationTicks],
     deployer
