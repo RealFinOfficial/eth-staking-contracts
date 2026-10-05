@@ -45,14 +45,13 @@ struct SwapParams {
  *  `onlyOwner` setter (the guard deliberately knows nothing about access control).
  *
  *  The two parameters live in an ERC-7201 namespace rather than in ordinary slots, because
- *  one of the two inheritors — `LPStakingVault` — runs behind a UUPS proxy and every slot it
- *  owns has to be immune to what an upgrade does to the inheritance layout above it. The
- *  namespace costs the other inheritor — the non-upgradeable `LPZapper` — nothing: it is a
- *  fixed slot either way. The `pool` reference stays `immutable`, so it is bytecode on both.
+ *  both inheritors — `LPStakingVault` and `LPZapper` — run behind UUPS proxies and every slot
+ *  they own has to be immune to what an upgrade does to the inheritance layout above it. The
+ *  `pool` reference stays `immutable`, so it is implementation bytecode on both.
  *
- *  The constructor therefore takes ONLY the pool. The parameters are seeded by whoever knows
- *  when it is safe to write storage: the zapper's own constructor, and the vault's
- *  `initialize` — an inline field initializer or a base constructor never runs behind a proxy.
+ *  The constructor therefore takes ONLY the pool. The parameters are seeded by each
+ *  inheritor's `initialize` — an inline field initializer or a base constructor never runs
+ *  behind a proxy.
  *
  *  Mechanics:
  *    - Arithmetic-mean tick over `twapWindow` from `pool.observe([window, 0])`.
@@ -145,9 +144,8 @@ abstract contract TwapGuard {
     /**
      * @param _pool Uniswap V3 pool used as the price oracle.
      * @dev The parameters are NOT set here. A constructor never runs against proxy storage,
-     *      and this guard is inherited by one contract that has some — see the note above.
-     *      Every inheritor must call {_setTwapParams} itself: the zapper from its own
-     *      constructor, the vault from `initialize`.
+     *      and both inheritors run behind one — see the note above. Every inheritor must call
+     *      {_setTwapParams} itself, from its `initialize`.
      */
     constructor(address _pool) {
         if (_pool == address(0)) revert InvalidPool();

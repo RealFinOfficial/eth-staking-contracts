@@ -18,8 +18,10 @@ import "../LPZapper.sol";
  *  protects is an invariant nobody is testing. This harness is what turns it into a measured
  *  branch instead of an unexecuted one.
  *
- *  Nothing else is changed: the zap flow, the refunds and the owner surface are inherited
- *  untouched, and the constructor's checks run exactly as they do in production.
+ *  Nothing else is changed: the zap flow, the refunds and the admin surface are inherited
+ *  untouched, and the constructor's checks run exactly as they do in production. Like the
+ *  vault's harness it is deployed BARE (no proxy, initializers disabled): the branch under
+ *  test fires before any namespaced storage is read.
  */
 contract LPZapperSwapHarness is LPZapper {
     constructor(
@@ -31,26 +33,8 @@ contract LPZapperSwapHarness is LPZapper {
         uint24 _fee,
         address _swapRouter,
         address _usdc,
-        address _asset,
-        address _initialOwner,
-        uint32 _twapWindow,
-        uint24 _maxTwapDeviationTicks
-    )
-        LPZapper(
-            _vault,
-            _positionManager,
-            _pool,
-            _token0,
-            _token1,
-            _fee,
-            _swapRouter,
-            _usdc,
-            _asset,
-            _initialOwner,
-            _twapWindow,
-            _maxTwapDeviationTicks
-        )
-    {}
+        address _asset
+    ) LPZapper(_vault, _positionManager, _pool, _token0, _token1, _fee, _swapRouter, _usdc, _asset) {}
 
     /// @notice Calls the internal swap leg directly, with no `_zapIn` around it.
     /// @param swap The swap parameters `_zapIn` would have passed through.

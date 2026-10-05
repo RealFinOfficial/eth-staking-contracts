@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 
 import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/ISwapRouter02.sol";
@@ -41,19 +44,34 @@ interface ILPStakingVault {
  * @title LPZapper
  * @notice One-transaction entry into LP staking: USDC in, staked ASSET-USDC position out.
  *
- *  Replaceable periphery. All custody and accounting live in `LPStakingVault`; this
- *  contract only sequences swap -> mint -> `stakeFor` and refunds what is left over. It
- *  holds no funds and no NFTs between transactions — every balance it ends a transaction
- *  with is dust from a failed refund, recoverable by the owner through `sweep`, and every
- *  position NFT it ends a transaction with was pushed in from outside, recoverable through
- *  `rescuePosition`.
+ *  Periphery. All custody and accounting live in `LPStakingVault`; this contract only
+ *  sequences swap -> mint -> `stakeFor` and refunds what is left over. It holds no funds and
+ *  no NFTs between transactions — every balance it ends a transaction with is dust from a
+ *  failed refund, recoverable by the operator through `sweep`, and every position NFT it ends
+ *  a transaction with was pushed in from outside, recoverable through `rescuePosition`.
  *
- *  The vault must whitelist this address via `setZapper` before zapping works.
+ *  The vault must whitelist this address via `setZapper` before zapping works. The vault
+ *  whitelists the PROXY address, which never changes across upgrades.
  *
- *  Ownership is two-step (`Ownable2Step`): a mistyped `transferOwnership` is recoverable
- *  until the new owner calls `acceptOwnership`, and it can never be renounced. An
- *  ownerless zapper could neither be retuned nor swept, and `rescuePosition` would have
- *  nowhere to send a stray NFT.
+ *  UPGRADEABILITY. This contract is the implementation behind a UUPS (ERC-1967) proxy — see
+ *  `contracts/lp-staking/deploy/LPProxy.sol`.
+ *    - Its fixed references (vault, position manager, pool, router, the token pair, the fee,
+ *      the USDC/ASSET roles) stay `immutable`: they are implementation bytecode, set in the
+ *      constructor together with the live pool triple check, and the next implementation
+ *      carries its own. The TWAP parameters live in {TwapGuard}'s ERC-7201 namespace; the
+ *      operator and the NFT receive guard live in this contract's own namespace
+ *      `real.lp.storage.LPZapper`, seeded by {initialize}.
+ *    - The implementation's own initializers are disabled in its constructor.
+ *
+ *  TWO-TIER ADMIN:
+ *
+ *    | tier                | functions                                                     |
+ *    |---------------------|---------------------------------------------------------------|
+ *    | owner (timelock)    | `_authorizeUpgrade`, `setOperator`                            |
+ *    | operator (multisig) | `setTwapParams`, `sweep`, `rescuePosition` — immediate levers |
+ *
+ *  Ownership is two-step and can never be renounced: an ownerless zapper could never be
+ *  upgraded nor have its operator moved.
  *
  *  There is no pause flag of its own here, and that is deliberate: the zapper READS the
  *  vault's switch up front. `_zapIn` calls `vault.depositsPaused()` before it pulls a
@@ -65,7 +83,14 @@ interface ILPStakingVault {
  *
  *  Zap-out is out of scope for V1: `unstake` returns the position NFT itself.
  */
-contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
+contract LPZapper is
+    Initializable,
+    UUPSUpgradeable,
+    Ownable2StepUpgradeable,
+    ReentrancyGuard,
+    TwapGuard,
+    IERC721Receiver
+{
     using SafeERC20 for IERC20;
 
     // ──────────────────────── Constants ────────────────────────
@@ -99,8 +124,29 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
     /// @notice True when USDC is the pool's token0. Fixes the only valid swap direction.
     bool public immutable usdcIsToken0;
 
-    /// @dev NOT_RECEIVING outside the zapper's own mint, RECEIVING during it.
-    uint256 private _receiveGuard = NOT_RECEIVING;
+    // ──────────────────────── Storage ──────────────────────────
+
+    /// @custom:storage-location erc7201:real.lp.storage.LPZapper
+    struct LPZapperStorage {
+        /// The multisig holding the immediate levers: `setTwapParams`, `sweep`, `rescuePosition`.
+        address operator;
+        /// NOT_RECEIVING outside the zapper's own mint, RECEIVING during it. Seeded by
+        /// `initialize`: an inline initializer is constructor code and never runs behind a proxy.
+        uint256 receiveGuard;
+    }
+
+    /**
+     * @dev ERC-7201 slot for {LPZapperStorage}, computed as
+     *      `keccak256(abi.encode(uint256(keccak256("real.lp.storage.LPZapper")) - 1)) & ~bytes32(uint256(0xff))`.
+     *      `test/forge/unit/ZapperUpgrade.t.sol` recomputes it and fails if it drifts.
+     */
+    bytes32 private constant LP_ZAPPER_STORAGE = 0x3f321486c4e46b59498f8814639a355cef7759e294075873ae5431d3955f3000;
+
+    function _zapperStorage() private pure returns (LPZapperStorage storage $) {
+        assembly {
+            $.slot := LP_ZAPPER_STORAGE
+        }
+    }
 
     // ──────────────────────── Events ───────────────────────────
 
@@ -115,13 +161,16 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
         uint256 timestamp
     );
 
-    /// @notice Dust recovered by the owner.
+    /// @notice Dust recovered by the operator.
     event Swept(address indexed token, address indexed to, uint256 amount);
 
     /// @notice A position NFT that was sitting on this contract outside a zap went to the
-    ///         owner. The zapper holds no NFT between transactions, so every emission of
+    ///         operator. The zapper holds no NFT between transactions, so every emission of
     ///         this event is a misdirected transfer being undone.
     event PositionRescued(uint256 indexed tokenId, address indexed to, uint256 timestamp);
+
+    /// @notice The operator tier changed. Carries both sides for auditability.
+    event OperatorSet(address previousOperator, address newOperator);
 
     // ──────────────────────── Errors ───────────────────────────
 
@@ -140,15 +189,28 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
     ///      frontend decoder keyed on it — is identical whichever contract raised it.
     error DepositsArePaused();
 
-    /// @dev `renounceOwnership` is disabled: the zapper is replaceable but not upgradeable,
-    ///      and `owner()` is where {rescuePosition} sends a stray NFT. An ownerless zapper
-    ///      could be neither retuned nor swept, and its rescue path would aim at address(0).
+    /// @dev An operator-tier function was called by someone else — the owner included.
+    error NotOperator(address caller, address operator);
+
+    /// @dev `renounceOwnership` is disabled: an ownerless zapper could never be upgraded nor
+    ///      have its operator moved.
     error RenounceDisabled();
+
+    // ──────────────────────── Modifiers ────────────────────────
+
+    /// @dev The immediate-lever tier. Not satisfied by `owner()`.
+    modifier onlyOperator() {
+        address operator_ = _zapperStorage().operator;
+        if (msg.sender != operator_) revert NotOperator(msg.sender, operator_);
+        _;
+    }
 
     // ──────────────────────── Constructor ──────────────────────
 
     /**
-     * @param _vault LPStakingVault that will hold the minted position.
+     * @notice Deploys the IMPLEMENTATION. Every argument is an immutable; the proxy in front of
+     *         it runs {initialize}.
+     * @param _vault LPStakingVault (proxy) that will hold the minted position.
      * @param _positionManager Uniswap V3 NonfungiblePositionManager address.
      * @param _pool The ASSET-USDC pool to mint into and to read the TWAP from.
      * @param _token0 Expected pool token0 (must sort below `_token1`).
@@ -157,9 +219,6 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
      * @param _swapRouter SwapRouter02 address.
      * @param _usdc USDC address; must be one side of the pair.
      * @param _asset ASSET address; must be the other side of the pair.
-     * @param _initialOwner Owner (multisig) for `setTwapParams` and `sweep`.
-     * @param _twapWindow Initial TWAP window in seconds.
-     * @param _maxTwapDeviationTicks Initial spot-vs-TWAP deviation ceiling, in ticks.
      */
     constructor(
         address _vault,
@@ -170,18 +229,8 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
         uint24 _fee,
         address _swapRouter,
         address _usdc,
-        address _asset,
-        address _initialOwner,
-        uint32 _twapWindow,
-        uint24 _maxTwapDeviationTicks
-    ) Ownable(_initialOwner) TwapGuard(_pool) {
-        // {TwapGuard} no longer seeds its own parameters: they live in an ERC-7201 namespace
-        // shared with the vault, whose proxy cannot be written from a base constructor. The
-        // zapper is a plain contract, so its constructor is the right place — and calling it
-        // first keeps the emitted order (`OwnershipTransferred`, `TwapParamsSet`) and the
-        // bounds-check-before-anything-else behaviour exactly as they were.
-        _setTwapParams(_twapWindow, _maxTwapDeviationTicks);
-
+        address _asset
+    ) TwapGuard(_pool) {
         if (_vault == address(0) || _positionManager == address(0) || _swapRouter == address(0)) {
             revert ZeroAddress();
         }
@@ -204,6 +253,36 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
         usdc = _usdc;
         asset = _asset;
         usdcIsToken0 = _usdcIsToken0;
+
+        _disableInitializers();
+    }
+
+    // ──────────────────────── Initializer ──────────────────────
+
+    /**
+     * @notice One-time setup, executed on the PROXY in its own deployment transaction.
+     * @param owner_ Owner: the timelock. Upgrades and `setOperator`.
+     * @param operator_ Operator: the multisig. `setTwapParams`, `sweep`, `rescuePosition`.
+     * @param twapWindow_ Initial TWAP window in seconds.
+     * @param maxDeviationTicks_ Initial spot-vs-TWAP deviation ceiling, in ticks.
+     * @dev Every mutable field is written AND emitted here, so the state is rebuildable from
+     *      logs alone: `OwnershipTransferred`, `OperatorSet`, `TwapParamsSet`.
+     */
+    function initialize(address owner_, address operator_, uint32 twapWindow_, uint24 maxDeviationTicks_)
+        external
+        initializer
+    {
+        __Ownable_init(owner_);
+        __Ownable2Step_init();
+        // No `__UUPSUpgradeable_init()` — see `RewardsDistributor.initialize`.
+
+        if (operator_ == address(0)) revert ZeroAddress();
+        LPZapperStorage storage $ = _zapperStorage();
+        $.operator = operator_;
+        $.receiveGuard = NOT_RECEIVING;
+        emit OperatorSet(address(0), operator_);
+
+        _setTwapParams(twapWindow_, maxDeviationTicks_); // emits TwapParamsSet
     }
 
     // ──────────────────────── User functions ───────────────────
@@ -285,31 +364,61 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
      *      The canonical position manager mints with `_mint` and never calls back, so the
      *      window is opened defensively: it keeps the zap working against a position manager
      *      that does call back, and costs nothing against one that does not.
-     * @param operator Address that triggered the transfer.
+     * @param operator_ Address that triggered the transfer. Trailing underscore because
+     *        `operator()` is a view on this contract.
      * @param from Previous owner.
      * @param tokenId The NFT being transferred.
      * @return The ERC-721 receiver magic value.
      */
-    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata)
+    function onERC721Received(address operator_, address from, uint256 tokenId, bytes calldata)
         external
         view
         override
         returns (bytes4)
     {
         if (msg.sender != address(positionManager)) revert UnexpectedNftSender(msg.sender);
-        if (_receiveGuard != RECEIVING) revert UnsolicitedPosition(operator, from, tokenId);
+        if (_zapperStorage().receiveGuard != RECEIVING) revert UnsolicitedPosition(operator_, from, tokenId);
         return IERC721Receiver.onERC721Received.selector;
     }
 
     // ──────────────────────── Owner functions ──────────────────
 
     /**
+     * @notice Moves the operator tier. Owner (timelock) tier, zero rejected: the operator cannot
+     *         rotate itself, so losing the multisig is recoverable through the timelock.
+     */
+    function setOperator(address newOperator) external onlyOwner {
+        if (newOperator == address(0)) revert ZeroAddress();
+        LPZapperStorage storage $ = _zapperStorage();
+        emit OperatorSet($.operator, newOperator);
+        $.operator = newOperator;
+    }
+
+    /// @notice UUPS upgrade hook: the owner (the timelock) authorizes every code change.
+    function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    /// @notice Disabled. See {RenounceDisabled}.
+    /// @dev Kept `onlyOwner` and deliberately NOT `view` (solc suggests it): the ABI entry must
+    ///      keep looking like the transaction it overrides so a caller gets the revert on-chain.
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceDisabled();
+    }
+
+    // ──────────────────────── Operator functions ───────────────
+
+    /// @notice The multisig holding the immediate levers.
+    function operator() external view returns (address) {
+        return _zapperStorage().operator;
+    }
+
+    /**
      * @notice Retunes this contract's own spot-vs-TWAP guard.
-     * @dev Independent of the vault's parameters; both are tuned separately.
+     * @dev Independent of the vault's parameters; both are tuned separately. Operator tier:
+     *      a bounded calibration, needed without a delay.
      * @param window New TWAP window in seconds (MIN_TWAP_WINDOW..MAX_TWAP_WINDOW).
      * @param maxDeviationTicks New deviation ceiling in ticks (0 < x <= MAX_TWAP_DEVIATION_TICKS).
      */
-    function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOwner {
+    function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOperator {
         _setTwapParams(window, maxDeviationTicks);
     }
 
@@ -318,13 +427,13 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
      * @dev The zapper holds no funds between transactions; any balance is dust left by a
      *      failed refund or a stray transfer.
      *      `nonReentrant` for consistency with every other external function in the stack —
-     *      the owner could equally sweep twice in two transactions, so this closes an
+     *      the operator could equally sweep twice in two transactions, so this closes an
      *      asymmetry, not a vulnerability.
      * @param token Token to sweep.
      * @param amount Amount to sweep.
      * @param to Recipient.
      */
-    function sweep(address token, uint256 amount, address to) external onlyOwner nonReentrant {
+    function sweep(address token, uint256 amount, address to) external onlyOperator nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         IERC20(token).safeTransfer(to, amount);
         emit Swept(token, to, amount);
@@ -349,29 +458,23 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
      *      guard with both zap entry points closes that window: this call cannot execute
      *      while a zap is in flight, only before or after one.
      *
-     *      The destination is `owner()` rather than a caller-supplied address, matching
-     *      `RewardsDistributor.recoverExcessAsset`. A position NFT is unique and a mistyped
-     *      recipient is unrecoverable, so the recovery path offers no place to mistype one;
-     *      the owner multisig forwards it to the rightful holder off-chain. A plain
+     *      The destination is `operator()` rather than a caller-supplied address, matching
+     *      `LPStakingVault.rescuePosition`. A position NFT is unique and a mistyped recipient
+     *      is unrecoverable, so the recovery path offers no place to mistype one; the operator
+     *      multisig forwards it to the rightful holder off-chain. Not `owner()`, which is a
+     *      timelock with no way to forward an ERC-721. A plain
      *      `transferFrom` is used for the same reason {LPStakingVault-unstake} uses one — a
      *      multisig without an `onERC721Received` hook must not be locked out of its own
      *      recovery path.
      *
      *      Reverts through the position manager's own authorization check when this
      *      contract does not own `tokenId`.
-     * @param tokenId Position NFT held by this contract to send to the owner.
+     * @param tokenId Position NFT held by this contract to send to the operator.
      */
-    function rescuePosition(uint256 tokenId) external onlyOwner nonReentrant {
-        address to = owner();
+    function rescuePosition(uint256 tokenId) external onlyOperator nonReentrant {
+        address to = _zapperStorage().operator;
         positionManager.transferFrom(address(this), to, tokenId);
         emit PositionRescued(tokenId, to, block.timestamp);
-    }
-
-    /// @notice Disabled. See {RenounceDisabled}.
-    /// @dev Kept `onlyOwner` and deliberately NOT `view` (solc suggests it): the ABI entry must
-    ///      keep looking like the transaction it overrides so a caller gets the revert on-chain.
-    function renounceOwnership() public override onlyOwner {
-        revert RenounceDisabled();
     }
 
     // ──────────────────────── Internal helpers ─────────────────
@@ -479,7 +582,8 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
         // The canonical position manager uses `_mint`, not `_safeMint`, so no receipt hook
         // fires here. The guard is opened anyway so the flow stays correct against any
         // position manager that does call back.
-        _receiveGuard = RECEIVING;
+        LPZapperStorage storage $ = _zapperStorage();
+        $.receiveGuard = RECEIVING;
         (tokenId, , , ) = positionManager.mint(
             INonfungiblePositionManager.MintParams({
                 token0: token0,
@@ -495,7 +599,7 @@ contract LPZapper is Ownable2Step, ReentrancyGuard, TwapGuard, IERC721Receiver {
                 deadline: deadline
             })
         );
-        _receiveGuard = NOT_RECEIVING;
+        $.receiveGuard = NOT_RECEIVING;
 
         IERC20(token0).forceApprove(address(positionManager), 0);
         IERC20(token1).forceApprove(address(positionManager), 0);
