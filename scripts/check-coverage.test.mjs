@@ -92,7 +92,7 @@ test("a run exactly at every pinned floor passes", () => {
 test("coverage above the floor passes, and the wrong LF/LH summary lines are ignored", () => {
   // One more line covered than the floor demands, on the file with the widest gap.
   const lcov = buildLcov({
-    "contracts/lp-staking/LPStakingVault.sol": {lines: [168, 171], branches: [28, 28]},
+    "contracts/lp-staking/LPStakingVault.sol": {lines: [188, 191], branches: [34, 34]},
   });
   assert.equal(runChecker(lcov).code, 0);
 });
@@ -101,27 +101,27 @@ test("coverage above the floor passes, and the wrong LF/LH summary lines are ign
 
 test("one newly uncovered line fails the gate and names the file", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/TokenX.sol": {lines: [45, 47], branches: [7, 7]},
+    "contracts/lp-staking/TokenOverture.sol": {lines: [21, 26], branches: [2, 2]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /TokenX\.sol: lines coverage 95\.74% \(45\/47\)/);
-  assert.match(stderr, /below the floor 97\.87% \(46\/47\)/);
+  assert.match(stderr, /TokenOverture\.sol: lines coverage 80\.77% \(21\/26\)/);
+  assert.match(stderr, /below the floor 84\.62% \(22\/26\)/);
 });
 
 test("one newly uncovered branch fails the gate — every branch floor is the ceiling", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/RewardsDistributor.sol": {lines: [100, 103], branches: [14, 15]},
+    "contracts/lp-staking/RewardsDistributor.sol": {lines: [119, 122], branches: [17, 18]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /RewardsDistributor\.sol: branches coverage 93\.33% \(14\/15\)/);
+  assert.match(stderr, /RewardsDistributor\.sol: branches coverage 94\.44% \(17\/18\)/);
 });
 
 test("all violations are reported, not just the first", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/TokenX.sol": {lines: [45, 47], branches: [6, 7]},
-    "contracts/lp-staking/LPZapper.sol": {lines: [74, 79], branches: [17, 17]},
+    "contracts/lp-staking/TokenOverture.sol": {lines: [21, 26], branches: [1, 2]},
+    "contracts/lp-staking/LPZapper.sol": {lines: [94, 102], branches: [20, 20]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
@@ -132,11 +132,11 @@ test("all violations are reported, not just the first", () => {
 
 test("a moved denominator fails instead of being graded against the old bar", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/LPZapper.sol": {lines: [80, 80], branches: [17, 17]},
+    "contracts/lp-staking/LPZapper.sol": {lines: [103, 103], branches: [20, 20]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /LPZapper\.sol: lines denominator moved — the run measured 80 where the pinned basis has 79/);
+  assert.match(stderr, /LPZapper\.sol: lines denominator moved — the run measured 103 where the pinned basis has 102/);
 });
 
 test("a file that vanished from the report fails instead of skipping its floor", () => {

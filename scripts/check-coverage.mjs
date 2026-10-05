@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Blocking coverage gate for the four LP-staking contracts plus the guard they share.
+ * Blocking coverage gate for the five LP-staking contracts plus the guard they share.
  *
  * Reads the lcov file `forge coverage --report lcov` writes and enforces three things:
  *
@@ -15,7 +15,7 @@
  *   (c) the per-file line and branch FLOORS are met, expressed as a minimum number of
  *       covered entities rather than a percentage so no rounding can creep in.
  *
- * Scope is `contracts/lp-staking/{the four contracts}` + `libraries/TwapGuard.sol`. The mocks,
+ * Scope is `contracts/lp-staking/{the five contracts}` + `libraries/TwapGuard.sol`. The mocks,
  * the interfaces and the two legacy staking pools are deliberately out of scope: they are
  * test scaffolding and frozen pre-LP code, and including them would dilute the number in both
  * directions.
@@ -41,113 +41,87 @@ import {pathToFileURL} from "node:url";
 // re-ratification of the floors, not a configuration tweak.
 //
 // The `forge-1.7` half names the TOOLCHAIN, and it is a real dependency: a newer forge
-// attributes `--ir-minimum` coverage differently (it moved TokenX's line denominator from 42
-// to 43). `.github/workflows/ci.yml` therefore pins the toolchain to `v1.7.1` rather than
+// attributes `--ir-minimum` coverage differently (it moved the former reward token's line
+// denominator from 42 to 43). `.github/workflows/ci.yml` therefore pins the toolchain to `v1.7.1` rather than
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-09-14 (the operator can revoke the guardian) ───────────
+// ── Pinned floors, re-measured 2026-10-05 (Wednesday launch: tracks M / P / R / U) ──────────
 //
-// | file                    | lines            | branches        |
-// |-------------------------|------------------|-----------------|
-// | LPStakingVault.sol      |  97.66% (167/171)| 100.00% (28/28) |
-// | LPZapper.sol            |  98.73% (78/79)  | 100.00% (17/17) |
-// | RewardsDistributor.sol  |  97.09% (100/103)| 100.00% (15/15) |
-// | TokenX.sol              |  97.87% (46/47)  | 100.00% (7/7)   |
-// | libraries/TwapGuard.sol |  97.67% (42/43)  | 100.00% (7/7)   |
+// | file                     | lines             | branches        |
+// |--------------------------|-------------------|-----------------|
+// | LPStakingVault.sol       |  97.91% (187/191) | 100.00% (34/34) |
+// | LPZapper.sol             |  96.08% (98/102)  | 100.00% (20/20) |
+// | RewardsDistributor.sol   |  97.54% (119/122) | 100.00% (18/18) |
+// | LPEpochRegistry.sol      |  96.46% (109/113) | 100.00% (21/21) |
+// | TokenOverture.sol        |  84.62% (22/26)   | 100.00% (2/2)   |
+// | libraries/TwapGuard.sol  |  97.67% (42/43)   | 100.00% (7/7)   |
 //
-// Branch coverage is 100% on all five, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate.
+// Branch coverage is 100% on all six, so every branch floor is the ceiling: one newly uncovered
+// branch fails the gate. Measured on 546 Foundry tests in 28 suites.
 //
-// The 2026-09-09 role split (owner = timelock, guardian = hot pause-only key, operator =
-// multisig) moved both proxies' denominators:
+// The 2026-10-05 round moved every denominator except TwapGuard's:
 //
-//   * The vault's branches moved 24 -> 28. `onlyGuardian` became `onlyOperator` (two arms) and
-//     `onlyGuardianOrOperator` (which is two comparisons, so three arms of its own), the
-//     `initialize` zero check now covers guardian OR operator, `setOperator` has a zero check,
-//     `stakeFor` has the `SelfCredit` pair, and `_executeSwap` has the `ZeroAmount` guard —
-//     whose reverting arm is unreachable from `rebalance` and is measured through
-//     `contracts/lp-staking/mocks/LPStakingVaultSwapHarness.sol`.
-//   * The vault's lines moved 146 -> 167 for the same reasons plus the `operator()` getter, the
-//     five extra `initialize` emissions and the second modifier's body.
-//   * The distributor's branches moved 13 -> 15 and its lines 82 -> 99: the same modifier
-//     split, `setOperator`, the operator zero check, the `operator()` getter and the two extra
-//     `initialize` emissions.
+//   * RewardsDistributor (lines 103 -> 122, branches 15 -> 18) is a rewrite: v1 pays any number
+//     of pre-funded reward tokens against one `RewardClaim` voucher (`claim(token, …)`, the
+//     seven-gate check order ending in `InsufficientFunds`), with `addRewardToken`,
+//     `setRewardTokenEnabled`, `setClaimsEnabled`, `recoverExcess(token, amount)` and the
+//     token-list views; the immutables and the two-leg functions are gone.
+//   * TokenOverture.sol replaces the former reward token (47 lines, 7 branches): a UUPS token
+//     with a minter and no cap, 26 lines and 2 branches.
+//   * LPEpochRegistry.sol is new: 113 lines, 21 branches.
+//   * The vault (lines 171 -> 191, branches 28 -> 34): the bonus-escrow link (`setBonusEscrow`
+//     with its code check, the `bonusEscrow()` view, the init announcement), the fail-open
+//     `onUnstake` notification with its gas floor, the fail-closed `onRebalance` notification
+//     and the old-position snapshot.
+//   * The zapper (lines 79 -> 102, branches 17 -> 20) became a UUPS proxy: `initialize`, the
+//     namespaced storage accessor, the `operator` tier (`onlyOperator`, `setOperator`,
+//     `operator()`), `_authorizeUpgrade`.
 //
-// The 2026-09-10 N-1/N-4/N-5/N-6/C-4 round moved the other two:
+// The twenty uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
+// gap. Each is a call site, an assembly body, an empty OZ initializer or a jump whose effect is
+// asserted by a test that passes in the same run; the inlined site simply loses its mapping:
 //
-//   * The zapper's branches moved 15 -> 17. `_zapIn` gained the `vault.depositsPaused()`
-//     pre-check (one arm each way) and `_executeSwap` gained the `ZeroAmount` guard — whose
-//     reverting arm is unreachable from `zapIn`, which gates the swap leg behind
-//     `amountIn > 0`, and is measured through
-//     `contracts/lp-staking/mocks/LPZapperSwapHarness.sol`.
-//   * The zapper's lines moved 75 -> 79 for the same two guards plus the disabled
-//     `renounceOwnership` body (its `revert` and the function line).
-//   * TokenX's lines moved 42 -> 47: the two constructor emissions, the disabled
-//     `renounceOwnership` body, and the `Ownable2Step` inheritance the file now carries.
-//     Its branch count is unchanged at 7 — neither the constructor emissions nor an
-//     unconditional `revert` adds an arm.
-//
-// The 2026-09-14 guardian-revocation round moved the two proxies' LINE denominators and left
-// every branch denominator alone:
-//
-//   * The vault's lines moved 167 -> 171 and the distributor's 99 -> 103. Each file gained the
-//     same four measurable lines: the `onlyOwnerOrOperator` modifier's three body lines (the
-//     `owner()` read, the operator read and the `revert`) and its `_;` placeholder, minus the
-//     `if (newGuardian == address(0)) revert ZeroAddress();` line that left `setGuardian`.
-//     All four are covered, so the number of uncovered lines is unchanged on both files — four
-//     on the vault, three on the distributor.
-//   * Neither branch denominator moved, and that is arithmetic rather than luck: `setGuardian`
-//     gave up one `if` (two arms, the zero-address rejection) and `onlyOwnerOrOperator` brought
-//     one `if` back (two arms, the rejection of a caller who is neither tier). 28 and 15 stand,
-//     and both are still fully covered — a stranger, the standing guardian and the two allowed
-//     tiers are each measured in `AccessControl.t.sol` and in the two branch suites.
-//
-// Earlier history: the vault's line denominator moved 109 -> 146 when the proxy split its state
-// into an ERC-7201 struct behind five getters and added `initialize`, `setGuardian`,
-// `_authorizeUpgrade` and the renounce override; TwapGuard moved 37 -> 43 for the same reason
-// (a namespace, its accessor and two getters), and the zapper 74 -> 75 for the
-// `_setTwapParams` call its constructor now makes itself.
-//
-// The ten uncovered LINES are all an `--ir-minimum` line attribution artefact rather than a
-// gap. Each is a call site or an assembly body whose callee reports 100% coverage in the same
-// run, so all ten are demonstrably executed; the inlined site simply loses its own mapping:
-//
-//   * `contracts/lp-staking/LPStakingVault.sol:157`     `$.slot := LP_STAKING_VAULT_STORAGE`
-//     — every getter and every stake reaches it; `test_Storage_LivesAtThePinnedErc7201Slot`
-//     reads the resulting slot directly.
-//   * `contracts/lp-staking/LPStakingVault.sol:334`     `_disableInitializers();` — asserted by
-//     `test_Constructor_DisablesTheImplementationsInitializers`, which proves it ran.
-//   * `contracts/lp-staking/LPStakingVault.sol:365`     `__Ownable2Step_init();` — an empty OZ
-//     initializer, kept because the upgrades plugin validates the parent-initializer chain.
-//   * `contracts/lp-staking/LPStakingVault.sol:895`     `_checkTwapDeviation();`
-//   * `contracts/lp-staking/LPZapper.sol:442`           `_checkTwapDeviation();`
-//   * `contracts/lp-staking/libraries/TwapGuard.sol:127` `$.slot := TWAP_GUARD_STORAGE`
-//     — read by `twapWindow()` on both inheritors;
-//     `test_Storage_TheTwapGuardHasItsOwnPinnedNamespace` reads the slot directly.
-//   * `contracts/lp-staking/TokenX.sol:170`             `_rollPendingEpoch();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:174` `$.slot := REWARDS_DISTRIBUTOR_STORAGE`
-//   * `contracts/lp-staking/RewardsDistributor.sol:259` `_disableInitializers();`
-//   * `contracts/lp-staking/RewardsDistributor.sol:276` `__Ownable2Step_init();`
+//   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:207`,
+//     `LPZapper.sol:147`, `RewardsDistributor.sol:147`, `LPEpochRegistry.sol:93`,
+//     `TokenOverture.sol:82`, `libraries/TwapGuard.sol:126`; every getter reaches them and each
+//     file's `test_Storage_*` test reads the pinned slot directly.
+//   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:396`,
+//     `LPZapper.sol:257`, `RewardsDistributor.sol:194`, `LPEpochRegistry.sol:112`,
+//     `TokenOverture.sol:90`; each `test_Constructor_DisablesTheImplementationsInitializers`
+//     proves it ran.
+//   * the empty OpenZeppelin initializers — `__Ownable2Step_init();` at
+//     `LPStakingVault.sol:427`, `LPZapper.sol:276`, `RewardsDistributor.sol:217`,
+//     `LPEpochRegistry.sol:120`, `TokenOverture.sol:108`, and `__ERC20Burnable_init();` at
+//     `TokenOverture.sol:105` — kept because the upgrades plugin validates the parent-initializer
+//     chain.
+//   * `_checkTwapDeviation();` — `LPStakingVault.sol:1003`, `LPZapper.sol:545`.
+//   * `break;` in the token scan of `setEpochAmount` — `LPEpochRegistry.sol:186`; executed by
+//     `test_SetEpochAmount_ChangesALiveNotStartedEpochAndAnnouncesIt` and
+//     `test_SetEpochAmount_AppendsANewTokenExactlyOnce`, both arms of its `if` are covered.
 //
 // They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 171, minHit: 167},
-    branches: {found: 28, minHit: 28},
+    lines: {found: 191, minHit: 187},
+    branches: {found: 34, minHit: 34},
   },
   "contracts/lp-staking/LPZapper.sol": {
-    lines: {found: 79, minHit: 78},
-    branches: {found: 17, minHit: 17},
+    lines: {found: 102, minHit: 98},
+    branches: {found: 20, minHit: 20},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 103, minHit: 100},
-    branches: {found: 15, minHit: 15},
+    lines: {found: 122, minHit: 119},
+    branches: {found: 18, minHit: 18},
   },
-  "contracts/lp-staking/TokenX.sol": {
-    lines: {found: 47, minHit: 46},
-    branches: {found: 7, minHit: 7},
+  "contracts/lp-staking/LPEpochRegistry.sol": {
+    lines: {found: 113, minHit: 109},
+    branches: {found: 21, minHit: 21},
+  },
+  "contracts/lp-staking/TokenOverture.sol": {
+    lines: {found: 26, minHit: 22},
+    branches: {found: 2, minHit: 2},
   },
   "contracts/lp-staking/libraries/TwapGuard.sol": {
     lines: {found: 43, minHit: 42},
