@@ -442,6 +442,9 @@ contract LPStakingVault is
         emit GuardianSet(address(0), guardian_);
         emit OperatorSet(address(0), operator_);
         emit ZapperSet(address(0), zapper_);
+        // `bonusEscrow` starts at zero (notifications off) and is announced like every other
+        // field, so an indexer rebuilds it from this transaction's logs too.
+        emit BonusEscrowSet(address(0), address(0));
         emit DepositsPausedSet(false);
         emit RebalancePausedSet(false);
 
