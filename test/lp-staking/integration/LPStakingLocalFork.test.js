@@ -94,6 +94,7 @@ const signing = require("../helpers/signing");
 const runner = require("../helpers/scripts");
 const lpTimelock = require("../../../scripts/lp-timelock");
 const { Ledger } = require("../helpers/ledger");
+const redact = require("../helpers/redact");
 
 /**
  * Captured at file load, before a single test has run. Asserted again at the very end:
@@ -304,6 +305,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     node = established.node;
     provider = established.provider;
     rpcUsed = established.url;
+    // The node's log opens with its `--fork <url>` line; mask the endpoint's key in place.
+    redact.scrubDirectory(scratchDir);
 
     // ── Phase 2: build the world. No catch — every failure below is a real defect. ────
     fees = await chain.derivePinnedFees(provider);
@@ -526,7 +529,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     expect(await registry.epochAmount(C.EPOCH_ONE, assetAddr)).to.equal(C.EPOCH_ONE_ASSET);
 
     notes.push(
-      `rpc=${rpcUsed} port=${node.port} block=${C.PINNED_BLOCK} scratch=${scratchDir}`,
+      `rpc=${redact.redactRpc(rpcUsed)} port=${node.port} block=${C.PINNED_BLOCK} scratch=${scratchDir}`,
       `pinned fees: baseFee=${fees.baseFee} maxFee=${fees.maxFeePerGas} priority=${fees.maxPriorityFeePerGas}`,
       `tASSET=${assetAddr} tUSDC=${usdcAddr} assetIsToken0=${assetIsToken0} zeroForOne=${zeroForOne}`,
       `pool=${poolAddr} sqrtPriceX96=${initialSqrtPriceX96} tick=${await uni.currentTick(pool)}`,
@@ -547,6 +550,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     if (scratchDir) console.log(`  [local-fork] node and script logs: ${scratchDir}`);
     if (provider) provider.destroy();
     if (node) await node.stop();
+    // Again once the node has stopped writing, whatever happened above — a failed fork included.
+    if (scratchDir) redact.scrubDirectory(scratchDir);
   });
 
   // ── environment for the two script children ────────────────────────────
@@ -2825,6 +2830,6 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
     }
   }
   throw new Error(
-    `could not read block ${blockNumber} from ${url}: ${lastError.message}`
+    `could not read block ${blockNumber} from ${redact.redactRpc(url)}: ${redact.redactRpcText(lastError.message)}`
   );
 }

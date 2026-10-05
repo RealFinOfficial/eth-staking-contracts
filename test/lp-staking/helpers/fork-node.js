@@ -36,6 +36,7 @@ const ethers = require("ethers");
 
 const { POOL_ABI, ERC20_ABI } = require("./constants");
 const profiles = require("./profiles");
+const { redactRpcText } = require("./redact");
 
 /**
  * Every function below takes the profile as its LAST parameter and defaults it to the
@@ -469,7 +470,8 @@ async function establishFork({ logDir, profile = DEFAULT_PROFILE }) {
       }
     } catch (error) {
       if (node) await node.stop();
-      failures.push(`${url}: ${error.shortMessage || error.message}`);
+      // Printed or thrown by decideOnForkFailure: the endpoint's key must not go with it.
+      failures.push(redactRpcText(`${url}: ${error.shortMessage || error.message}`));
     }
   }
 

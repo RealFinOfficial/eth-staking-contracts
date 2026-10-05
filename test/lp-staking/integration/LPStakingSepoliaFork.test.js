@@ -121,6 +121,8 @@ const signing = require("../helpers/signing");
 const runner = require("../helpers/scripts");
 const lpTimelock = require("../../../scripts/lp-timelock");
 const { Ledger } = require("../helpers/ledger");
+// The endpoint's key never reaches a log line, an error or a scratch file (helpers/redact.js).
+const { redactRpc, redactRpcText, scrubDirectory } = require("../helpers/redact");
 
 /** The world this run builds. Read once, at file load, so the titles below can name it. */
 const P = profiles.resolveProfile();
@@ -404,6 +406,8 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     node = established.node;
     provider = established.provider;
     rpcUsed = established.url;
+    // The node's log opens with its `--fork <url>` line; mask the endpoint's key in place.
+    scrubDirectory(scratchDir);
     probe = established.probe;
 
     // ── Phase 2: build the world. No catch — every failure below is a real defect. ────
@@ -662,6 +666,8 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     if (scratchDir) console.log(`  [${P.logLabel}] node and script logs: ${scratchDir}`);
     if (provider) provider.destroy();
     if (node) await node.stop();
+    // Again once the node has stopped writing, whatever happened above — a failed fork included.
+    if (scratchDir) scrubDirectory(scratchDir);
   });
 
   // ── environment for the two script children ────────────────────────────
@@ -2900,15 +2906,6 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 });
 
 /**
- * Strips the API key out of an endpoint before it is printed. The suite reports which
- * endpoint it used, and for Infura that string ends in the company project id — a secret
- * that would otherwise land in every CI log.
- */
-function redactRpc(url) {
-  return String(url).replace(/\/v3\/[^/?#]+/, "/v3/<redacted>");
-}
-
-/**
  * Reads a block straight from the upstream endpoint, bypassing the fork, so the local block
  * can be compared against the source of truth. Retried, because the fork itself may have
  * been served entirely from the on-disk RPC cache and a public endpoint can throttle a cold
@@ -2938,5 +2935,7 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
     }
   }
-  throw new Error(`could not read block ${blockNumber} from ${url}: ${lastError.message}`);
+  throw new Error(
+    `could not read block ${blockNumber} from ${redactRpc(url)}: ${redactRpcText(lastError.message)}`
+  );
 }
