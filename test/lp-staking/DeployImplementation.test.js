@@ -2,6 +2,9 @@ const { expect } = require("chai");
 const { ethers, network, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 const { Manifest } = require("@openzeppelin/upgrades-core");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 
 const lpTimelock = require("../../scripts/lp-timelock");
 const {
@@ -17,7 +20,8 @@ const {
  *
  * The script's one job is to put a NEW implementation of a live proxy on chain, validated
  * against that proxy's storage layout, and to hand the operator the two timelock commands
- * that activate it. Both halves are exercised here end to end: the function deploys the
+ * that activate it. Both halves are exercised here end to end, for each of the FIVE proxies
+ * (vault, distributor, epoch registry, Overture token, zapper): the function deploys the
  * implementation, and the operation `scripts/lp-timelock.js` builds from the very same
  * arguments is scheduled, waited out and executed on a real `LPTimelock` — so what the
  * script PRINTS and what this suite SENDS are produced by one builder and cannot drift.
@@ -26,14 +30,15 @@ const {
  *
  *   - the proxy address is passed in rather than looked up in `deployments.json`, because
  *     chain 31337 has no entry there. That is the script's own `IMPL_PROXY_ADDRESS` path,
- *     and the registry branch is covered by its error message below. The tracked registry is
- *     never written to by this suite.
- *   - the "next revision" is `LPStakingVaultV2Mock` / `RewardsDistributorV2Mock`, handed in
- *     through the script's `contractName`. One Solidity source cannot be compiled at two
- *     revisions in one run, so a genuinely different implementation has to be a different
- *     contract. Both mocks declare a `reinitializer(2)` and no `initializer` of their own,
- *     which is what `missing-initializer` in `unsafeAllowExtra` allows — the same flag the
- *     upgrade tests in LPStakingVault.test.js and RewardsDistributor.test.js pass.
+ *     and the registry branch is covered by its error message below. The registry
+ *     cross-check is exercised against a THROWAWAY registry file (`DEPLOYMENTS_FILE`); the
+ *     tracked registry is never written to by this suite.
+ *   - the "next revision" of each kind is its V2 mock (`LPStakingVaultV2Mock`,
+ *     `RewardsDistributorV2Mock`, `LPEpochRegistryV2Mock`, `TokenOvertureV2Mock`,
+ *     `LPZapperV2Mock`), handed in through the script's `contractName`. One Solidity source
+ *     cannot be compiled at two revisions in one run, so a genuinely different implementation
+ *     has to be a different contract. Each mock declares a `reinitializer(2)`, which is what
+ *     `missing-initializer` in `unsafeAllowExtra` allows.
  *
  * The `hardhat-upgrades` manifest lands in the OS temp directory on a development chain
  * (os.tmpdir()/openzeppelin-upgrades/hardhat-31337-<instanceId>.json), never in the repo's
@@ -42,8 +47,9 @@ const {
 describe("deploy-implementation.js", function () {
   let deployer, multisig, guardian, operatorSafe, voucherSigner, alice;
   let timelock, timelockAddr;
-  let vault, vaultAddr, distributor, distributorAddr;
-  let tokenX, tokenXAddr, assetToken, assetAddr;
+  let vault, vaultAddr, distributor, distributorAddr, registry, registryAddr;
+  let overture, overtureAddr, zapper, zapperAddr;
+  let assetToken, assetAddr, usdc, usdcAddr;
   let pool, poolAddr, nfpm, nfpmAddr, router, routerAddr;
   let token0, token1, token0Addr, token1Addr;
 
@@ -54,13 +60,22 @@ describe("deploy-implementation.js", function () {
   const TICK_UPPER = 600;
   const LIQUIDITY = 1_000_000n;
   const MIN_DELAY = 60n;
-  const EPOCH = 1n;
   const TOKENS = (n) => ethers.parseEther(String(n));
   const FAR_DEADLINE = 10n ** 12n;
 
   /// The V2 mocks are upgrades of an ALREADY-initialized proxy, so they declare no
   /// `initializer` of their own. Everything else is the script's own fixed flag list.
   const V2_UNSAFE_ALLOW_EXTRA = ["missing-initializer"];
+
+  /// The one voucher type, for every reward token.
+  const REWARD_CLAIM_TYPES = {
+    RewardClaim: [
+      { name: "token", type: "address" },
+      { name: "user", type: "address" },
+      { name: "cumulativeAmount", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
 
   /// One owner-tier operation, built by scripts/lp-timelock.js and sent by the multisig.
   /// The salt is the derived one, so this is byte-for-byte the call the printed command makes.
@@ -95,9 +110,9 @@ describe("deploy-implementation.js", function () {
     return tokenId;
   }
 
-  /// A TokenX voucher signed by the distributor's signer, so the claim ledger has an entry
-  /// that has to survive the upgrade.
-  async function claimTokenX(user, cumulativeAmount) {
+  /// A `RewardClaim` voucher for `token` signed by the distributor's signer, redeemed by
+  /// `user`, so the per-token claim ledger has an entry that has to survive the upgrade.
+  async function claim(user, token, cumulativeAmount) {
     const signature = await voucherSigner.signTypedData(
       {
         name: "RealLPRewards",
@@ -105,32 +120,48 @@ describe("deploy-implementation.js", function () {
         chainId: (await ethers.provider.getNetwork()).chainId,
         verifyingContract: distributorAddr,
       },
-      {
-        TokenXClaim: [
-          { name: "user", type: "address" },
-          { name: "cumulativeAmount", type: "uint256" },
-          { name: "deadline", type: "uint256" },
-        ],
-      },
-      { user: user.address, cumulativeAmount, deadline: FAR_DEADLINE }
+      REWARD_CLAIM_TYPES,
+      { token, user: user.address, cumulativeAmount, deadline: FAR_DEADLINE }
     );
-    return distributor.connect(user).claimTokenX(cumulativeAmount, FAR_DEADLINE, signature);
+    return distributor.connect(user).claim(token, cumulativeAmount, FAR_DEADLINE, signature);
+  }
+
+  /**
+   * A fresh copy of the script whose `deployments.json` is `registryFile`.
+   *
+   * `scripts/lib/pools.js` fixes its registry path when it is first required, from
+   * `DEPLOYMENTS_FILE`. Re-requiring both modules with the variable set gives this one test
+   * its own instance pointed at a throwaway file; the cache entries are dropped again
+   * afterwards, so every other `require` in the run still gets the default path.
+   */
+  function scriptWithRegistry(registryFile) {
+    const modules = ["../../scripts/lib/pools", "../../scripts/deploy-implementation"].map((m) =>
+      require.resolve(m)
+    );
+    const previous = process.env.DEPLOYMENTS_FILE;
+    process.env.DEPLOYMENTS_FILE = registryFile;
+    try {
+      for (const m of modules) delete require.cache[m];
+      return require("../../scripts/deploy-implementation");
+    } finally {
+      if (previous === undefined) delete process.env.DEPLOYMENTS_FILE;
+      else process.env.DEPLOYMENTS_FILE = previous;
+      for (const m of modules) delete require.cache[m];
+    }
   }
 
   beforeEach(async function () {
     [deployer, multisig, guardian, operatorSafe, voucherSigner, alice] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    const usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
+    usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
+    usdcAddr = await usdc.getAddress();
     assetToken = await Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18);
     assetAddr = await assetToken.getAddress();
 
     // Uniswap sorts the pair ascending by address, so which of the two ends up as token0 is
-    // an accident of deployment order; the vault only ever sees the sorted pair.
-    const sorted =
-      (await usdc.getAddress()).toLowerCase() < assetAddr.toLowerCase()
-        ? [usdc, assetToken]
-        : [assetToken, usdc];
+    // an accident of deployment order; the vault and the zapper only ever see the sorted pair.
+    const sorted = usdcAddr.toLowerCase() < assetAddr.toLowerCase() ? [usdc, assetToken] : [assetToken, usdc];
     [token0, token1] = sorted;
     token0Addr = await token0.getAddress();
     token1Addr = await token1.getAddress();
@@ -147,10 +178,6 @@ describe("deploy-implementation.js", function () {
     router = await Router.deploy();
     routerAddr = await router.getAddress();
 
-    const TokenXFactory = await ethers.getContractFactory("TokenX");
-    tokenX = await TokenXFactory.deploy("Token X", "TKX", deployer.address);
-    tokenXAddr = await tokenX.getAddress();
-
     // The multisig is the timelock's only proposer, executor and canceller, and the timelock
     // is its own admin — the production shape, and the one deploy-lp-staking.js deploys.
     const Timelock = await ethers.getContractFactory("LPTimelock");
@@ -162,8 +189,41 @@ describe("deploy-implementation.js", function () {
     );
     timelockAddr = await timelock.getAddress();
 
-    // Both proxies are born owned by the timelock, exactly as on Sepolia test stack #5: no
-    // key ever holds the owner tier, so an upgrade can only be a scheduled operation.
+    // All five proxies are born owned by the timelock, exactly as deploy-lp-staking.js leaves
+    // them: no key ever holds the owner tier, so an upgrade can only be a scheduled operation.
+    const Overture = await ethers.getContractFactory("TokenOverture");
+    overture = await upgrades.deployProxy(
+      Overture,
+      ["Overture", "OVTR", timelockAddr, operatorSafe.address],
+      { kind: "uups", unsafeAllow: UUPS_UNSAFE_ALLOW }
+    );
+    overtureAddr = await overture.getAddress();
+
+    const Distributor = await ethers.getContractFactory("RewardsDistributor");
+    distributor = await upgrades.deployProxy(
+      Distributor,
+      [
+        timelockAddr,
+        guardian.address,
+        operatorSafe.address,
+        voucherSigner.address,
+        [
+          [assetAddr, true, true],
+          [overtureAddr, false, true],
+        ],
+      ],
+      { kind: "uups", unsafeAllow: UUPS_UNSAFE_ALLOW }
+    );
+    distributorAddr = await distributor.getAddress();
+
+    const Registry = await ethers.getContractFactory("LPEpochRegistry");
+    registry = await upgrades.deployProxy(Registry, [timelockAddr, operatorSafe.address], {
+      kind: "uups",
+      constructorArgs: [distributorAddr],
+      unsafeAllow: UUPS_UNSAFE_ALLOW,
+    });
+    registryAddr = await registry.getAddress();
+
     const Vault = await ethers.getContractFactory("LPStakingVault");
     vault = await upgrades.deployProxy(
       Vault,
@@ -183,20 +243,32 @@ describe("deploy-implementation.js", function () {
     );
     vaultAddr = await vault.getAddress();
 
-    const Distributor = await ethers.getContractFactory("RewardsDistributor");
-    distributor = await upgrades.deployProxy(
-      Distributor,
-      [timelockAddr, guardian.address, operatorSafe.address, voucherSigner.address],
+    const Zapper = await ethers.getContractFactory("LPZapper");
+    zapper = await upgrades.deployProxy(
+      Zapper,
+      [timelockAddr, operatorSafe.address, TWAP_WINDOW, MAX_DEVIATION_TICKS],
       {
         kind: "uups",
-        constructorArgs: [tokenXAddr, assetAddr],
+        constructorArgs: [
+          vaultAddr,
+          nfpmAddr,
+          poolAddr,
+          token0Addr,
+          token1Addr,
+          FEE,
+          routerAddr,
+          usdcAddr,
+          assetAddr,
+        ],
         unsafeAllow: UUPS_UNSAFE_ALLOW,
       }
     );
-    distributorAddr = await distributor.getAddress();
+    zapperAddr = await zapper.getAddress();
 
-    await tokenX.setMinter(distributorAddr);
-    await tokenX.setEpochCap(EPOCH, TOKENS(1_000_000));
+    // Funding, the way the operator does it: $OVTR minted INTO the distributor by the minter,
+    // $ASSET transferred into it. Claims pay out of these balances.
+    await overture.connect(operatorSafe).mint(distributorAddr, TOKENS(1_000_000));
+    await assetToken.transfer(distributorAddr, TOKENS(100_000));
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -254,14 +326,17 @@ describe("deploy-implementation.js", function () {
       expect(await upgraded.operator()).to.equal(operatorSafe.address);
       expect(await upgraded.twapWindow()).to.equal(TWAP_WINDOW);
       expect(await upgraded.maxTwapDeviationTicks()).to.equal(MAX_DEVIATION_TICKS);
+      // The escrow link is ordinary proxy storage too, and it ships off.
+      expect(await upgraded.bonusEscrow()).to.equal(ethers.ZeroAddress);
 
       // And the exit still works against the new code.
       await vault.connect(alice).unstake(tokenId);
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
     });
 
-    it("deploys a distributor implementation the timelock upgrades onto, ledger kept", async function () {
-      await claimTokenX(alice, TOKENS(100));
+    it("deploys a distributor implementation the timelock upgrades onto, per-token ledgers kept", async function () {
+      await claim(alice, overtureAddr, TOKENS(100));
+      await claim(alice, assetAddr, TOKENS(40));
       const before = await upgrades.erc1967.getImplementationAddress(distributorAddr);
 
       const result = await deployImplementation({
@@ -277,7 +352,8 @@ describe("deploy-implementation.js", function () {
       expect(result.currentImplementation).to.equal(ethers.getAddress(before));
       expect(result.implementation).to.not.equal(result.currentImplementation);
       expect(await ethers.provider.getCode(result.implementation)).to.not.equal("0x");
-      expect(result.constructorArgs).to.deep.equal([tokenXAddr, assetAddr]);
+      // No immutables: every reward token is proxy storage.
+      expect(result.constructorArgs).to.deep.equal([]);
       expect(await upgrades.erc1967.getImplementationAddress(distributorAddr)).to.equal(before);
 
       await expect(
@@ -292,17 +368,154 @@ describe("deploy-implementation.js", function () {
 
       const upgraded = await ethers.getContractAt("RewardsDistributorV2Mock", distributorAddr);
       expect(await upgraded.version()).to.equal(2n);
-      expect(await upgraded.claimedTokenX(alice.address)).to.equal(TOKENS(100));
-      expect(await tokenX.balanceOf(alice.address)).to.equal(TOKENS(100));
+      expect(await upgraded.claimed(overtureAddr, alice.address)).to.equal(TOKENS(100));
+      expect(await upgraded.claimed(assetAddr, alice.address)).to.equal(TOKENS(40));
+      expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(100));
+      expect(await assetToken.balanceOf(alice.address)).to.equal(TOKENS(40));
+      expect(await upgraded.rewardTokens()).to.deep.equal([assetAddr, overtureAddr]);
+      const assetState = await upgraded.rewardToken(assetAddr);
+      expect(assetState.registered).to.equal(true);
+      expect(assetState.conditional).to.equal(true);
+      expect(assetState.claimsEnabled).to.equal(true);
       expect(await upgraded.signer()).to.equal(voucherSigner.address);
       expect(await upgraded.owner()).to.equal(timelockAddr);
       expect(await upgraded.guardian()).to.equal(guardian.address);
       expect(await upgraded.operator()).to.equal(operatorSafe.address);
 
       // The EIP-712 domain is the proxy's own address, so a voucher signed after the upgrade
-      // still spends against the same ledger.
-      await claimTokenX(alice, TOKENS(150));
-      expect(await upgraded.claimedTokenX(alice.address)).to.equal(TOKENS(150));
+      // still spends against the same per-token ledger, and an old voucher stays a no-op.
+      await claim(alice, overtureAddr, TOKENS(150));
+      expect(await upgraded.claimed(overtureAddr, alice.address)).to.equal(TOKENS(150));
+      await expect(claim(alice, assetAddr, TOKENS(40))).to.be.revertedWithCustomError(
+        distributor,
+        "NothingToClaim"
+      );
+    });
+
+    it("deploys a registry implementation bound to the same distributor, schedule kept", async function () {
+      const now = await time.latest();
+      const startsAt = BigInt(Math.ceil((now + 3600) / 900) * 900);
+      const endsAt = startsAt + 7n * 24n * 3600n;
+      await registry
+        .connect(operatorSafe)
+        .scheduleEpoch(1n, startsAt, endsAt, [overtureAddr, assetAddr], [TOKENS(1000), TOKENS(30)]);
+
+      const result = await deployImplementation({
+        kind: "LPEpochRegistry",
+        proxyAddress: registryAddr,
+        contractName: "LPEpochRegistryV2Mock",
+        unsafeAllowExtra: V2_UNSAFE_ALLOW_EXTRA,
+        deployer,
+        quiet: true,
+      });
+
+      expect(result.reused).to.equal(false);
+      // The one immutable, read back off the live proxy.
+      expect(result.constructorArgs).to.deep.equal([distributorAddr]);
+
+      await scheduleAndExecute(registryAddr, "upgradeToAndCall", [result.implementation, "0x"]);
+
+      const upgraded = await ethers.getContractAt("LPEpochRegistryV2Mock", registryAddr);
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.distributor()).to.equal(distributorAddr);
+      expect(await upgraded.epochCount()).to.equal(1n);
+      expect(await upgraded.lastLiveId()).to.equal(1n);
+      const epoch = await upgraded.epoch(1n);
+      expect(epoch.startsAt).to.equal(startsAt);
+      expect(epoch.endsAt).to.equal(endsAt);
+      expect(await upgraded.epochAmount(1n, overtureAddr)).to.equal(TOKENS(1000));
+      expect(await upgraded.epochAmount(1n, assetAddr)).to.equal(TOKENS(30));
+      expect(await upgraded.epochTokens(1n)).to.deep.equal([overtureAddr, assetAddr]);
+      expect(await upgraded.operator()).to.equal(operatorSafe.address);
+      expect(await upgraded.owner()).to.equal(timelockAddr);
+    });
+
+    it("deploys an Overture token implementation the timelock upgrades onto, balances kept", async function () {
+      await overture.connect(operatorSafe).mint(alice.address, TOKENS(7));
+
+      const result = await deployImplementation({
+        kind: "TokenOverture",
+        proxyAddress: overtureAddr,
+        contractName: "TokenOvertureV2Mock",
+        unsafeAllowExtra: V2_UNSAFE_ALLOW_EXTRA,
+        deployer,
+        quiet: true,
+      });
+
+      expect(result.reused).to.equal(false);
+      expect(result.constructorArgs).to.deep.equal([]);
+
+      await scheduleAndExecute(overtureAddr, "upgradeToAndCall", [result.implementation, "0x"]);
+
+      const upgraded = await ethers.getContractAt("TokenOvertureV2Mock", overtureAddr);
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.name()).to.equal("Overture");
+      expect(await upgraded.symbol()).to.equal("OVTR");
+      expect(await upgraded.balanceOf(alice.address)).to.equal(TOKENS(7));
+      expect(await upgraded.balanceOf(distributorAddr)).to.equal(TOKENS(1_000_000));
+      expect(await upgraded.minter()).to.equal(operatorSafe.address);
+      expect(await upgraded.owner()).to.equal(timelockAddr);
+    });
+
+    it("deploys a zapper implementation carrying the nine immutables of the live one", async function () {
+      const result = await deployImplementation({
+        kind: "LPZapper",
+        proxyAddress: zapperAddr,
+        contractName: "LPZapperV2Mock",
+        unsafeAllowExtra: V2_UNSAFE_ALLOW_EXTRA,
+        deployer,
+        quiet: true,
+      });
+
+      expect(result.reused).to.equal(false);
+      // Read back off the live proxy, in constructor order.
+      expect(result.constructorArgs).to.deep.equal([
+        vaultAddr,
+        nfpmAddr,
+        poolAddr,
+        token0Addr,
+        token1Addr,
+        FEE,
+        routerAddr,
+        usdcAddr,
+        assetAddr,
+      ]);
+
+      await scheduleAndExecute(zapperAddr, "upgradeToAndCall", [result.implementation, "0x"]);
+
+      const upgraded = await ethers.getContractAt("LPZapperV2Mock", zapperAddr);
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.vault()).to.equal(vaultAddr);
+      expect(await upgraded.usdc()).to.equal(usdcAddr);
+      expect(await upgraded.asset()).to.equal(assetAddr);
+      expect(await upgraded.owner()).to.equal(timelockAddr);
+      expect(await upgraded.operator()).to.equal(operatorSafe.address);
+      expect(await upgraded.twapWindow()).to.equal(TWAP_WINDOW);
+      expect(await upgraded.maxTwapDeviationTicks()).to.equal(MAX_DEVIATION_TICKS);
+    });
+
+    it("cross-checks the zapper's immutables against its deployments.json entry", async function () {
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "lp-deployimpl-"));
+      const registryFile = path.join(scratch, "deployments.json");
+      const write = (entry) =>
+        fs.writeFileSync(registryFile, JSON.stringify({ 31337: { LPZapper: entry } }, null, 2) + "\n");
+
+      // A registry entry that agrees with the chain: the run reads the same nine values and,
+      // with the same contract, resolves to the implementation the proxy already runs.
+      write({ address: zapperAddr, vault: vaultAddr, usdc: usdcAddr, asset: assetAddr });
+      const agreeing = scriptWithRegistry(registryFile);
+      const result = await agreeing.deployImplementation({ kind: "LPZapper", deployer, quiet: true });
+      expect(result.proxyAddress).to.equal(zapperAddr);
+      expect(result.reused).to.equal(true);
+
+      // A registry entry that names another USDC describes a different deployment: fatal.
+      write({ address: zapperAddr, vault: vaultAddr, usdc: assetAddr, asset: assetAddr });
+      const disagreeing = scriptWithRegistry(registryFile);
+      await expect(
+        disagreeing.deployImplementation({ kind: "LPZapper", deployer, quiet: true })
+      ).to.be.rejectedWith(/disagrees with the LPZapper entry in deployments\.json[\s\S]*usdc/);
+
+      fs.rmSync(scratch, { recursive: true, force: true });
     });
 
     it("prints the two timelock commands for the address it deployed", async function () {
@@ -369,19 +582,22 @@ describe("deploy-implementation.js", function () {
       expect(await ethers.provider.getTransaction(result.deployTxHash)).to.not.equal(null);
     });
 
-    it("reuses an identical implementation instead of deploying a second copy", async function () {
+    it("reuses an identical implementation instead of deploying a second copy, for all five", async function () {
       for (const [kind, proxyAddress] of [
         ["LPStakingVault", vaultAddr],
         ["RewardsDistributor", distributorAddr],
+        ["LPEpochRegistry", registryAddr],
+        ["TokenOverture", overtureAddr],
+        ["LPZapper", zapperAddr],
       ]) {
         // Same contract, same constructor arguments, so the plugin's (bytecode, args) key
         // resolves to the implementation the proxy already runs: nothing is deployed, and the
         // script says there is nothing to upgrade to.
         const result = await deployImplementation({ kind, proxyAddress, deployer, quiet: true });
 
-        expect(result.reused).to.equal(true);
-        expect(result.implementation).to.equal(result.currentImplementation);
-        expect(await upgrades.erc1967.getImplementationAddress(proxyAddress)).to.equal(
+        expect(result.reused, kind).to.equal(true);
+        expect(result.implementation, kind).to.equal(result.currentImplementation);
+        expect(await upgrades.erc1967.getImplementationAddress(proxyAddress), kind).to.equal(
           result.implementation
         );
       }
@@ -409,9 +625,19 @@ describe("deploy-implementation.js", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("inputs", function () {
-    it("rejects a target that is not one of the two proxies", async function () {
+    it("knows exactly the five proxies", function () {
+      expect(IMPL_KINDS).to.deep.equal([
+        "LPStakingVault",
+        "RewardsDistributor",
+        "LPEpochRegistry",
+        "TokenOverture",
+        "LPZapper",
+      ]);
+    });
+
+    it("rejects a target that is not one of the five proxies", async function () {
       await expect(
-        deployImplementation({ kind: "LPZapper", proxyAddress: vaultAddr, deployer, quiet: true })
+        deployImplementation({ kind: "LPTimelock", proxyAddress: vaultAddr, deployer, quiet: true })
       ).to.be.rejectedWith(`IMPL_TARGET must be one of ${IMPL_KINDS.join(", ")}`);
     });
 

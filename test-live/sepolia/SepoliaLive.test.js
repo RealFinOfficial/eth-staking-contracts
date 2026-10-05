@@ -26,22 +26,31 @@
  * Two further gates guard the two irreversible, one-time actions. Both are off by default,
  * because each one writes a fact the team then has to live with:
  *   SEPOLIA_LIVE_CREATE_POOL=1   create the tREAL/tUSDC pool (one real tx, forever)
- *   SEPOLIA_LIVE_DEPLOY=1        deploy the five contracts and RECORD them in the tracked
- *                                deployments.json under chain 11155111
+ *   SEPOLIA_LIVE_DEPLOY=1        deploy the stack (the timelock and the five proxies) and RECORD
+ *                                it in the tracked deployments.json under chain 11155111
  * Without them, a run with nothing deployed fails and says which flag to add. A run with
  * everything already deployed reuses it and touches neither.
  *
  * ── The deploy waits for nothing ──────────────────────────────────────────────────────
  *
- * Since the born-owned bootstrap (N-7) the deploy script schedules no timelock operation and
- * sleeps out no delay: `initialize` names the LPTimelock as the owner of both proxies inside
- * each proxy's own deployment transaction, and the vault is born pointing at a zapper whose
- * address the script predicted from the deployer's nonce. The run is a straight line of about
- * a dozen transactions at Sepolia block times. `LP_TIMELOCK_MIN_DELAY` is still forwarded —
- * it is the delay the timelock will enforce on every LATER owner-tier call — but no part of
- * this run waits for it. TokenX and the zapper are the only handover left: the script
- * NOMINATES `LP_OPERATOR` on each and prints the two `acceptOwnership()` payloads. On staging
- * the operator is the deploying wallet, so even that is skipped and both are already owned.
+ * The deploy script schedules no timelock operation and sleeps out no delay: `initialize`
+ * names the LPTimelock as the owner of all five proxies (`TokenOverture`, `RewardsDistributor`,
+ * `LPEpochRegistry`, `LPStakingVault`, `LPZapper`) inside each proxy's own deployment
+ * transaction, the Overture token is born with the operator as its minter, the distributor
+ * with both launch reward tokens, and the vault pointing at the zapper PROXY whose address the
+ * script predicted from the deployer's nonce. The run is a straight line of about a dozen
+ * transactions at Sepolia block times. `LP_TIMELOCK_MIN_DELAY` is still forwarded — it is the
+ * delay the timelock will enforce on every LATER owner-tier call — but no part of this run
+ * waits for it, and there is no ownership handover left at all.
+ *
+ * ── Which Sepolia stack ───────────────────────────────────────────────────────────────
+ *
+ * The tracked deployments.json still records Sepolia test stack #5, deployed from the
+ * pre-Overture contracts (a distributor with one claim function per reward leg, no
+ * `LPEpochRegistry`). Stack #5 is abandoned, not upgraded. Step 3 therefore finds no
+ * `LPEpochRegistry` entry and refuses to continue until the run is given
+ * SEPOLIA_LIVE_DEPLOY=1, which deploys Sepolia stack #6 with the current scripts and records
+ * it. Every step after 3 needs stack #6.
  *
  * ── Idempotence ───────────────────────────────────────────────────────────────────────
  *
@@ -53,10 +62,12 @@
  *
  * `RewardsDistributor` only honours vouchers from its configured signer, which is a backend
  * key and deliberately NOT the deployer. When `LP_SIGNER_KEY` is set and matches
- * `distributor.signer()`, the suite redeems a real 1-wei-TokenX voucher. When it is not, it
+ * `distributor.signer()`, the suite redeems a real 1-wei $OVTR voucher (`claim(token, …)`) —
+ * out of the distributor's pre-funded balance; when that balance is empty it proves the
+ * `InsufficientFunds` revert with a static call instead. When the key is not available, it
  * proves the other half of the same property — that a voucher from any other key is refused
- * — with a static call that spends nothing. Both arms assert real contract behaviour; the
- * test title says which one ran.
+ * — with a static call that spends nothing. Every arm asserts real contract behaviour; the
+ * log says which one ran.
  */
 
 const fs = require("fs");
@@ -121,8 +132,8 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     "function allowance(address,address) view returns (uint256)",
     "function approve(address,uint256) returns (bool)",
   ];
-  let vault, zapper, tokenX, distributor, timelock;
-  let vaultAddr, zapperAddr, tokenXAddr, distributorAddr, poolAddr, timelockAddr;
+  let vault, zapper, overture, distributor, registry, timelock;
+  let vaultAddr, zapperAddr, overtureAddr, distributorAddr, registryAddr, poolAddr, timelockAddr;
   let assetIsToken0, token0, token1, zeroForOne;
   let tickSpacing;
   let oracleReady = false;
@@ -289,10 +300,13 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     console.log(`  [sepolia-live] pool    ${EXPLORER}/address/${poolAddr}`);
   });
 
-  it("3. has the five contracts, deploying them only when explicitly asked", async function () {
+  it("3. has the stack (timelock + five proxies), deploying it only when explicitly asked", async function () {
+    // Stack #5 has no LPEpochRegistry entry: this step refuses to continue on it, and a run
+    // with SEPOLIA_LIVE_DEPLOY=1 deploys and records stack #6 (see the header).
     const kinds = [
-      "TokenX",
+      "TokenOverture",
       "RewardsDistributor",
+      "LPEpochRegistry",
       "LPStakingVault",
       "LPZapper",
       "TimelockController",
@@ -328,21 +342,24 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
       for (const kind of kinds) recorded[kind] = registryEntry(kind);
     }
 
-    tokenXAddr = recorded.TokenX.address;
+    overtureAddr = recorded.TokenOverture.address;
     distributorAddr = recorded.RewardsDistributor.address;
+    registryAddr = recorded.LPEpochRegistry.address;
     vaultAddr = recorded.LPStakingVault.address;
     zapperAddr = recorded.LPZapper.address;
     timelockAddr = recorded.TimelockController.address;
 
     vault = await hre.ethers.getContractAt("LPStakingVault", vaultAddr, signer);
     zapper = await hre.ethers.getContractAt("LPZapper", zapperAddr, signer);
-    tokenX = await hre.ethers.getContractAt("TokenX", tokenXAddr, signer);
+    overture = await hre.ethers.getContractAt("TokenOverture", overtureAddr, signer);
     distributor = await hre.ethers.getContractAt("RewardsDistributor", distributorAddr, signer);
+    registry = await hre.ethers.getContractAt("LPEpochRegistry", registryAddr, signer);
     timelock = await hre.ethers.getContractAt("LPTimelock", timelockAddr, signer);
 
     for (const [label, address] of [
-      ["TokenX", tokenXAddr],
+      ["TokenOverture", overtureAddr],
       ["RewardsDistributor", distributorAddr],
+      ["LPEpochRegistry", registryAddr],
       ["LPStakingVault", vaultAddr],
       ["LPZapper", zapperAddr],
       ["LPTimelock", timelockAddr],
@@ -352,18 +369,26 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     }
 
     expect(await vault.pool()).to.equal(poolAddr);
-    // Born owned by the timelock, with nothing pending: the one legal end state since N-7.
+    // Born owned by the timelock, with nothing pending: the one legal end state, all five.
     for (const [label, contract] of [
-      ["LPStakingVault", vault],
+      ["TokenOverture", overture],
       ["RewardsDistributor", distributor],
+      ["LPEpochRegistry", registry],
+      ["LPStakingVault", vault],
+      ["LPZapper", zapper],
     ]) {
       expect(await contract.owner(), `${label}.owner`).to.equal(timelockAddr);
       expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(ethers.ZeroAddress);
     }
     expect(await vault.zapper()).to.equal(zapperAddr);
+    expect(await vault.bonusEscrow()).to.equal(ethers.ZeroAddress);
     expect(await zapper.vault()).to.equal(vaultAddr);
     expect(await zapper.usdcIsToken0()).to.equal(zeroForOne);
-    expect(await distributor.tokenX()).to.equal(tokenXAddr);
+    expect(await registry.distributor()).to.equal(distributorAddr);
+    // Both launch reward tokens are registered; $ASSET's claims may have been opened since.
+    const rewardTokens = await distributor.rewardTokens();
+    expect(rewardTokens).to.include(P.asset.address);
+    expect(rewardTokens).to.include(overtureAddr);
 
     // Read once here so the zap step can state its precondition instead of guessing.
     try {
@@ -519,11 +544,12 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     }
   );
 
-  it("8. redeems a TokenX voucher, or proves a foreign voucher is refused", async function () {
+  it("8. redeems a $OVTR voucher, or proves a foreign voucher is refused", async function () {
     const onChainSigner = await distributor.signer();
     const domain = await signing.readEip712Domain(distributor);
     expect(domain.chainId).to.equal(BigInt(CHAIN_ID));
     expect(domain.verifyingContract).to.equal(distributorAddr);
+    expect(await distributor.REWARD_CLAIM_TYPEHASH()).to.equal(signing.rewardClaimTypeHash());
 
     const key = process.env.LP_SIGNER_KEY;
     const haveKey = Boolean(key) && new ethers.Wallet(key).address === onChainSigner;
@@ -537,38 +563,48 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
           "proving voucher rejection instead"
       );
       const stranger = ethers.Wallet.createRandom();
-      const forged = await signing.signVoucher({
+      const forged = await signing.signRewardClaim({
         signer: stranger,
         domain,
-        leg: "TokenXClaim",
+        token: overtureAddr,
         user: signer.address,
         cumulativeAmount: 1n,
       });
       await expect(
-        distributor.claimTokenX.staticCall(1n, FAR_DEADLINE, forged)
+        distributor.claim.staticCall(overtureAddr, 1n, FAR_DEADLINE, forged)
       ).to.be.revertedWithCustomError(distributor, "InvalidSignature");
       return;
     }
 
-    const before = await distributor.claimedTokenX(signer.address);
+    const before = await distributor.claimed(overtureAddr, signer.address);
     const cumulative = before + 1n;
-    const voucher = await signing.signVoucher({
+    const voucher = await signing.signRewardClaim({
       signer: new ethers.Wallet(key),
       domain,
-      leg: "TokenXClaim",
+      token: overtureAddr,
       user: signer.address,
       cumulativeAmount: cumulative,
     });
 
-    const balanceBefore = await tokenX.balanceOf(signer.address);
-    const receipt = await send("claimTokenX", distributor.claimTokenX(cumulative, FAR_DEADLINE, voucher));
+    // The distributor pays out of its pre-funded balance. An unfunded stack #6 proves the
+    // other outcome — InsufficientFunds, with nothing paid — by static call, costing no gas.
+    if ((await overture.balanceOf(distributorAddr)) === 0n) {
+      console.log("  [sepolia-live] the distributor holds no $OVTR yet; proving InsufficientFunds instead");
+      await expect(distributor.claim.staticCall(overtureAddr, cumulative, FAR_DEADLINE, voucher))
+        .to.be.revertedWithCustomError(distributor, "InsufficientFunds")
+        .withArgs(overtureAddr, 1n, 0n);
+      return;
+    }
+
+    const balanceBefore = await overture.balanceOf(signer.address);
+    const receipt = await send("claim $OVTR", distributor.claim(overtureAddr, cumulative, FAR_DEADLINE, voucher));
 
     const args = parseEvent(receipt, distributor.interface, distributorAddr, "Claimed");
     expect(args.user).to.equal(signer.address);
-    expect(args.token).to.equal(tokenXAddr);
+    expect(args.token).to.equal(overtureAddr);
     expect(args.paidAmount).to.equal(1n);
-    expect(await distributor.claimedTokenX(signer.address)).to.equal(cumulative);
-    expect((await tokenX.balanceOf(signer.address)) - balanceBefore).to.equal(1n);
+    expect(await distributor.claimed(overtureAddr, signer.address)).to.equal(cumulative);
+    expect((await overture.balanceOf(signer.address)) - balanceBefore).to.equal(1n);
   });
 
   it("9. unstakes everything it staked, leaving the wallet whole", async function () {
@@ -593,8 +629,9 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
     // frontend, the backend and the indexer all read.
     for (const [kind, address] of [
       ["UniswapV3Pool", poolAddr],
-      ["TokenX", tokenXAddr],
+      ["TokenOverture", overtureAddr],
       ["RewardsDistributor", distributorAddr],
+      ["LPEpochRegistry", registryAddr],
       ["LPStakingVault", vaultAddr],
       ["LPZapper", zapperAddr],
     ]) {

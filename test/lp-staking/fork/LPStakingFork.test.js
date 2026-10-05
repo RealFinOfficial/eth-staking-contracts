@@ -104,7 +104,7 @@ const USDC_WHALES = [
 
 const USDC = (n) => BigInt(Math.round(n * 1e6));
 const ASSET = (n) => ethers.parseUnits(String(n), 18);
-/** TokenX is 18 decimals like ASSET; a separate name keeps reward amounts readable as such. */
+/** $OVTR is 18 decimals like ASSET; a separate name keeps reward amounts readable as such. */
 const TOKENS = (n) => ethers.parseUnits(String(n), 18);
 
 /**
@@ -119,17 +119,20 @@ const FEE_HEADROOM = 100n;
 const MIN_MAX_FEE_PER_GAS = ethers.parseUnits("10", "gwei");
 const PRIORITY_FEE_PER_GAS = ethers.parseUnits("1", "gwei");
 
-/** TokenX branding is a deploy-time decision; the unit suite's placeholder is reused here. */
-const TOKENX_NAME = "Token X";
-const TOKENX_SYMBOL = "TKX";
+/** The Overture token's launch branding (LP_OVERTURE_NAME / LP_OVERTURE_SYMBOL defaults). */
+const OVERTURE_NAME = "Overture";
+const OVERTURE_SYMBOL = "OVTR";
 
-/** Epoch ids and caps armed on TokenX for the reward-leg tests. */
-const EPOCH_ONE = 1n;
-const EPOCH_TWO = 2n;
-const EPOCH_ONE_CAP = TOKENS(1_000_000);
-const EPOCH_TWO_CAP = TOKENS(500_000);
-/** How far ahead of the arming the scheduled epoch is due. */
-const EPOCH_ROLLOVER_DELAY = 3600;
+/**
+ * What the operator mints INTO the distributor before claims open. The distributor pays every
+ * claim out of its own balance by transfer; nothing is minted at claim time and nothing caps a
+ * claim but that balance.
+ */
+const FUND_OVTR = TOKENS(1_000_000);
+
+/** LPEpochRegistry's grid and margin, re-declared so a change to the contract fails here. */
+const REGISTRY_INTERVAL = 900;
+const REGISTRY_SCHEDULE_MARGIN = 1800;
 
 /** Total USDC the suite needs the whale to be able to hand out and to trade with. */
 const WHALE_BUDGET = USDC(1_000_000);
@@ -212,7 +215,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
   let pool, npm, npmRead, router, asset, usdc;
   let vault, zapper, vaultAddr, zapperAddr;
-  let tokenX, distributor, tokenXAddr, distributorAddr;
+  let overture, distributor, registry, overtureAddr, distributorAddr, registryAddr;
 
   /** EIP-712 domain read back from the deployed distributor, never assumed. */
   let voucherDomain;
@@ -501,20 +504,28 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
     };
   }
 
-  /** Field list of both claim legs; order and names must match the on-chain type strings. */
-  const CLAIM_FIELDS = [
-    { name: "user", type: "address" },
-    { name: "cumulativeAmount", type: "uint256" },
-    { name: "deadline", type: "uint256" },
-  ];
+  /**
+   * The one voucher type, for every reward token. Field order and names must match the
+   * on-chain type string `RewardClaim(address token,address user,uint256 cumulativeAmount,
+   * uint256 deadline)`; `token` is signed, so a voucher for one token is worthless for another.
+   */
+  const REWARD_CLAIM_TYPES = {
+    RewardClaim: [
+      { name: "token", type: "address" },
+      { name: "user", type: "address" },
+      { name: "cumulativeAmount", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
 
-  /** The back office attesting a lifetime TokenX entitlement, as it would in production. */
-  async function signTokenXVoucher(user, cumulativeAmount, deadline = FAR_DEADLINE) {
-    return backOffice.signTypedData(
-      voucherDomain,
-      { TokenXClaim: CLAIM_FIELDS },
-      { user: user.address, cumulativeAmount, deadline }
-    );
+  /** The back office attesting a lifetime entitlement in `token`, as it would in production. */
+  async function signRewardClaim(token, user, cumulativeAmount, deadline = FAR_DEADLINE) {
+    return backOffice.signTypedData(voucherDomain, REWARD_CLAIM_TYPES, {
+      token,
+      user: user.address,
+      cumulativeAmount,
+      deadline,
+    });
   }
 
   /** What the vault would pull out of a position: principal, then accrued fees. */
@@ -675,16 +686,17 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       const vaultImpl = await Vault.deploy(NPM_ADDR, POOL_ADDR, ASSET_ADDR, USDC_ADDR, FEE, ROUTER_ADDR);
       await vaultImpl.waitForDeployment();
 
-      // The zapper is deployed by the SAME key, in the very next transaction, so its CREATE
-      // address is known before it exists: address = f(deployer, nonce). That is what lets
-      // the proxy be born fully wired — owner and zapper both final in the proxy's own
-      // deployment transaction — which is exactly what scripts/deploy-lp-staking.js does
-      // (N-7). No `setZapper` follows, and no ownership handover either.
+      // The zapper is a UUPS proxy too, deployed by the SAME key right after the vault
+      // proxy: its implementation takes the next nonce and its PROXY the one after, so the
+      // proxy's CREATE address is known before it exists: address = f(deployer, nonce). That
+      // is what lets the vault be born fully wired — owner and zapper both final in its own
+      // deployment transaction — which is exactly what scripts/deploy-lp-staking.js does.
+      // No `setZapper` follows, and no ownership handover either.
       const VaultProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
       const vaultProxyNonce = await ethers.provider.getTransactionCount(deployer.address);
       const predictedZapper = ethers.getCreateAddress({
         from: deployer.address,
-        nonce: vaultProxyNonce + 1,
+        nonce: vaultProxyNonce + 2,
       });
       const vaultProxy = await VaultProxyFactory.deploy(
         await vaultImpl.getAddress(),
@@ -701,8 +713,10 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       vaultAddr = await vaultProxy.getAddress();
       vault = await ethers.getContractAt("LPStakingVault", vaultAddr, deployer);
 
+      // Implementation (nine immutables + the live pool triple check + disabled
+      // initializers), then LPProxy with `initialize(owner, operator, window, ticks)`.
       const Zapper = await ethers.getContractFactory("LPZapper", deployer);
-      zapper = await Zapper.deploy(
+      const zapperImpl = await Zapper.deploy(
         vaultAddr,
         NPM_ADDR,
         POOL_ADDR,
@@ -711,14 +725,22 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         FEE,
         ROUTER_ADDR,
         USDC_ADDR,
-        ASSET_ADDR,
-        deployer.address,
-        TWAP_WINDOW,
-        MAX_DEVIATION_TICKS
+        ASSET_ADDR
       );
-      await zapper.waitForDeployment();
-      zapperAddr = await zapper.getAddress();
-      expect(zapperAddr, "the zapper must land on the pre-computed address").to.equal(
+      await zapperImpl.waitForDeployment();
+      const zapperProxy = await VaultProxyFactory.deploy(
+        await zapperImpl.getAddress(),
+        Zapper.interface.encodeFunctionData("initialize", [
+          multisig.address, // owner — upgrades and setOperator
+          multisig.address, // operator — setTwapParams, sweep, rescuePosition
+          TWAP_WINDOW,
+          MAX_DEVIATION_TICKS,
+        ])
+      );
+      await zapperProxy.waitForDeployment();
+      zapperAddr = await zapperProxy.getAddress();
+      zapper = await ethers.getContractAt("LPZapper", zapperAddr, deployer);
+      expect(zapperAddr, "the zapper proxy must land on the pre-computed address").to.equal(
         predictedZapper
       );
       expect(await vault.zapper()).to.equal(zapperAddr);
@@ -734,23 +756,33 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       // and a premature execute that reverts — is proven in the unit suites' "under a
       // TimelockController" blocks and end to end in both integration suites.
 
-      // 8. Deploy the reward leg in the order scripts/deploy-lp-staking.js fixes: TokenX
-      //    first, then the distributor that becomes its minter, then the epoch armed by
-      //    the deployer, and only then ownership handed to the multisig. `asset` is the
-      //    real mainnet ASSET token, exactly as the script passes LP_ASSET.
-      const TokenXFactory = await ethers.getContractFactory("TokenX", deployer);
-      tokenX = await TokenXFactory.deploy(TOKENX_NAME, TOKENX_SYMBOL, deployer.address);
-      await tokenX.waitForDeployment();
-      tokenXAddr = await tokenX.getAddress();
-
-      // The distributor is a UUPS proxy: implementation (immutables + disabled initializers)
-      // then LPProxy, whose constructor runs `initialize` in the same transaction — the shape
-      // scripts/deploy-lp-staking.js deploys.
-      const DistributorFactory = await ethers.getContractFactory("RewardsDistributor", deployer);
-      const distributorImpl = await DistributorFactory.deploy(tokenXAddr, ASSET_ADDR);
-      await distributorImpl.waitForDeployment();
-
+      // 8. Deploy the reward side the way scripts/deploy-lp-staking.js does: the Overture
+      //    token proxy (minter = the operator), the distributor proxy born with both launch
+      //    reward tokens ($ASSET conditional with claims CLOSED, $OVTR with claims open),
+      //    and the epoch registry proxy bound to the distributor. `ASSET_ADDR` is the real
+      //    mainnet ASSET token, exactly as the script passes LP_ASSET. Every proxy is born
+      //    owned by the multisig here (the timelock's seat), so nothing is handed over.
       const ProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
+
+      const OvertureFactory = await ethers.getContractFactory("TokenOverture", deployer);
+      const overtureImpl = await OvertureFactory.deploy();
+      await overtureImpl.waitForDeployment();
+      const overtureProxy = await ProxyFactory.deploy(
+        await overtureImpl.getAddress(),
+        OvertureFactory.interface.encodeFunctionData("initialize", [
+          OVERTURE_NAME,
+          OVERTURE_SYMBOL,
+          multisig.address, // owner — upgrades and setMinter
+          multisig.address, // minter — the operator, collapsed onto the multisig in this tier
+        ])
+      );
+      await overtureProxy.waitForDeployment();
+      overtureAddr = await overtureProxy.getAddress();
+      overture = await ethers.getContractAt("TokenOverture", overtureAddr, deployer);
+
+      const DistributorFactory = await ethers.getContractFactory("RewardsDistributor", deployer);
+      const distributorImpl = await DistributorFactory.deploy();
+      await distributorImpl.waitForDeployment();
       const distributorProxy = await ProxyFactory.deploy(
         await distributorImpl.getAddress(),
         DistributorFactory.interface.encodeFunctionData("initialize", [
@@ -758,22 +790,31 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
           multisig.address, // guardian — the hot pause key, never behind a timelock
           multisig.address, // operator — collapsed onto the multisig in this tier, see below
           backOffice.address, // LP_SIGNER — the back office key, never the deployer
+          [
+            [ASSET_ADDR, true, false], // $ASSET: conditional, claims closed at launch
+            [overtureAddr, false, true], // $OVTR: unconditional, claims open
+          ],
         ])
       );
       await distributorProxy.waitForDeployment();
       distributorAddr = await distributorProxy.getAddress();
       distributor = await ethers.getContractAt("RewardsDistributor", distributorAddr, deployer);
 
-      await (await tokenX.setMinter(distributorAddr)).wait();
-      await (await tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP)).wait();
-      // TokenX is the one contract still handed over: the deployer had to own it to call
-      // `setMinter` and `setEpochCap` above, exactly as the deploy script does. Ownable2Step
-      // since N-1, so the transfer only NOMINATES and the multisig has to accept — on TokenX
-      // and the zapper the deploy script leaves that nomination behind for the operator Safe;
-      // here the multisig completes it at once. The distributor needs none of this: it was
-      // born owned by the multisig.
-      await (await tokenX.transferOwnership(multisig.address)).wait();
-      await (await tokenX.connect(multisig).acceptOwnership()).wait();
+      const RegistryFactory = await ethers.getContractFactory("LPEpochRegistry", deployer);
+      const registryImpl = await RegistryFactory.deploy(distributorAddr);
+      await registryImpl.waitForDeployment();
+      const registryProxy = await ProxyFactory.deploy(
+        await registryImpl.getAddress(),
+        RegistryFactory.interface.encodeFunctionData("initialize", [multisig.address, multisig.address])
+      );
+      await registryProxy.waitForDeployment();
+      registryAddr = await registryProxy.getAddress();
+      registry = await ethers.getContractAt("LPEpochRegistry", registryAddr, deployer);
+
+      // Funding, as the operator does it before claims open: $OVTR minted INTO the
+      // distributor by the minter. The $ASSET side is funded inside the reward tests, from a
+      // real swap, because the real ASSET token has no mint.
+      await (await overture.connect(multisig).mint(distributorAddr, FUND_OVTR)).wait();
 
       // The voucher domain is a runtime fact of the deployed contract — its chain id is
       // the fork's, and its verifying contract only exists as of a minute ago.
@@ -1323,7 +1364,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("7. reward leg: zap -> signed voucher -> claimTokenX", function () {
+  describe("7. reward leg: zap -> signed voucher -> claim(token, ...)", function () {
     const FIRST_VOUCHER = TOKENS(1_000);
     const SECOND_VOUCHER = TOKENS(1_750);
 
@@ -1349,22 +1390,53 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       return parseEvent(receipt, zapper, zapperAddr, "ZappedIn");
     }
 
-    it("is wired the way the deploy script wires it, with the domain read back on chain", async function () {
-      expect(await tokenX.minter()).to.equal(distributorAddr);
-      expect(await tokenX.owner()).to.equal(multisig.address);
-      expect(await tokenX.totalSupply()).to.equal(0n);
-      expect(await tokenX.currentEpochId()).to.equal(EPOCH_ONE);
-      expect(await tokenX.epochCap(EPOCH_ONE)).to.equal(EPOCH_ONE_CAP);
+    /**
+     * Funds the $ASSET side the only way the real token allows: the deployer buys ASSET with
+     * USDC on the real pool and transfers what it got into the distributor — the operator's
+     * `transfer` in production. Returns the amount funded.
+     */
+    async function fundAssetLeg(usdcIn = USDC(2_000)) {
+      const before = await asset.balanceOf(deployer.address);
+      await (await swapUsdcForAsset(deployer, usdcIn)).wait();
+      const bought = (await asset.balanceOf(deployer.address)) - before;
+      await (await asset.connect(deployer).transfer(distributorAddr, bought)).wait();
+      return bought;
+    }
 
-      expect(await distributor.tokenX()).to.equal(tokenXAddr);
-      expect(await distributor.asset()).to.equal(ASSET_ADDR); // the real mainnet ASSET
+    it("is wired the way the deploy script wires it, with the domain read back on chain", async function () {
+      expect(await overture.name()).to.equal(OVERTURE_NAME);
+      expect(await overture.symbol()).to.equal(OVERTURE_SYMBOL);
+      expect(await overture.decimals()).to.equal(18n);
+      expect(await overture.minter()).to.equal(multisig.address);
+      expect(await overture.owner()).to.equal(multisig.address);
+      // Funded, not minted on demand: the whole supply sits in the distributor.
+      expect(await overture.totalSupply()).to.equal(FUND_OVTR);
+      expect(await overture.balanceOf(distributorAddr)).to.equal(FUND_OVTR);
+
+      expect(await distributor.rewardTokens()).to.deep.equal([ASSET_ADDR, overtureAddr]);
+      const assetState = await distributor.rewardToken(ASSET_ADDR); // the real mainnet ASSET
+      expect(assetState.registered).to.equal(true);
+      expect(assetState.enabled).to.equal(true);
+      expect(assetState.conditional).to.equal(true);
+      expect(assetState.claimsEnabled).to.equal(false);
+      expect(assetState.decimals).to.equal(18n);
+      const overtureState = await distributor.rewardToken(overtureAddr);
+      expect(overtureState.conditional).to.equal(false);
+      expect(overtureState.claimsEnabled).to.equal(true);
+      expect(await distributor.REWARD_CLAIM_TYPEHASH()).to.equal(
+        ethers.id("RewardClaim(address token,address user,uint256 cumulativeAmount,uint256 deadline)")
+      );
       expect(await distributor.signer()).to.equal(backOffice.address);
       expect(await distributor.owner()).to.equal(multisig.address);
       expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
       expect(await distributor.guardian()).to.equal(multisig.address);
       expect(await distributor.operator()).to.equal(multisig.address);
       expect(await distributor.paused()).to.equal(false);
-      expect(await distributor.assetClaimsEnabled()).to.equal(false);
+
+      expect(await registry.distributor()).to.equal(distributorAddr);
+      expect(await registry.owner()).to.equal(multisig.address);
+      expect(await registry.operator()).to.equal(multisig.address);
+      expect(await registry.epochCount()).to.equal(0n);
 
       expect(await vault.zapper()).to.equal(zapperAddr);
       expect(await vault.owner()).to.equal(multisig.address);
@@ -1373,6 +1445,10 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await vault.operator()).to.equal(multisig.address);
       expect(await vault.depositsPaused()).to.equal(false);
       expect(await vault.rebalancePaused()).to.equal(false);
+      expect(await vault.bonusEscrow()).to.equal(ethers.ZeroAddress);
+
+      expect(await zapper.owner()).to.equal(multisig.address);
+      expect(await zapper.operator()).to.equal(multisig.address);
 
       // The domain the back office must sign against, as the contract reports it.
       expect(voucherDomain.name).to.equal("RealLPRewards");
@@ -1381,7 +1457,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(voucherDomain.verifyingContract).to.equal(distributorAddr);
     });
 
-    it("zaps USDC into a staked position and pays the back office's voucher in TokenX", async function () {
+    it("zaps USDC into a staked position and pays the back office's voucher in $OVTR", async function () {
       const zapped = await zapIntoStakedPosition(carol);
 
       // The position the reward is being paid for is real, staked and in custody.
@@ -1389,81 +1465,115 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await npm.ownerOf(zapped.tokenId)).to.equal(vaultAddr);
       expect((await npm.positions(zapped.tokenId)).liquidity).to.be.greaterThan(0n);
 
-      // The back office attests a lifetime entitlement for that staker and nobody else.
-      const signature = await signTokenXVoucher(carol, FIRST_VOUCHER);
-      expect(await tokenX.balanceOf(carol.address)).to.equal(0n);
+      const signature = await signRewardClaim(overtureAddr, carol, FIRST_VOUCHER);
+      expect(await overture.balanceOf(carol.address)).to.equal(0n);
 
-      const tx = await distributor.connect(carol).claimTokenX(FIRST_VOUCHER, FAR_DEADLINE, signature);
+      const tx = await distributor.connect(carol).claim(overtureAddr, FIRST_VOUCHER, FAR_DEADLINE, signature);
       const receipt = await tx.wait();
       const ts = await receiptTimestamp(receipt);
 
       await expect(tx)
         .to.emit(distributor, "Claimed")
-        .withArgs(carol.address, tokenXAddr, FIRST_VOUCHER, FIRST_VOUCHER, ts);
+        .withArgs(carol.address, overtureAddr, FIRST_VOUCHER, FIRST_VOUCHER, ts);
 
-      expect(await tokenX.balanceOf(carol.address)).to.equal(FIRST_VOUCHER);
-      expect(await distributor.claimedTokenX(carol.address)).to.equal(FIRST_VOUCHER);
-      expect(await tokenX.totalSupply()).to.equal(FIRST_VOUCHER);
-      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
+      // Paid by TRANSFER out of the funded balance: supply unchanged, distributor down.
+      expect(await overture.balanceOf(carol.address)).to.equal(FIRST_VOUCHER);
+      expect(await distributor.claimed(overtureAddr, carol.address)).to.equal(FIRST_VOUCHER);
+      expect(await overture.totalSupply()).to.equal(FUND_OVTR);
+      expect(await overture.balanceOf(distributorAddr)).to.equal(FUND_OVTR - FIRST_VOUCHER);
 
-      // Cumulative, not per-epoch: the next voucher pays only what it adds.
-      const second = await signTokenXVoucher(carol, SECOND_VOUCHER);
+      // A later, larger cumulative voucher pays only the difference.
+      const second = await signRewardClaim(overtureAddr, carol, SECOND_VOUCHER);
       const delta = SECOND_VOUCHER - FIRST_VOUCHER;
-      const tx2 = await distributor.connect(carol).claimTokenX(SECOND_VOUCHER, FAR_DEADLINE, second);
+      const tx2 = await distributor.connect(carol).claim(overtureAddr, SECOND_VOUCHER, FAR_DEADLINE, second);
       const ts2 = await receiptTimestamp(await tx2.wait());
 
       await expect(tx2)
         .to.emit(distributor, "Claimed")
-        .withArgs(carol.address, tokenXAddr, SECOND_VOUCHER, delta, ts2);
+        .withArgs(carol.address, overtureAddr, SECOND_VOUCHER, delta, ts2);
 
-      expect(await tokenX.balanceOf(carol.address)).to.equal(SECOND_VOUCHER);
-      expect(await distributor.claimedTokenX(carol.address)).to.equal(SECOND_VOUCHER);
-      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(SECOND_VOUCHER);
-
-      // The zapped stake is untouched by the reward leg — the two are independent.
-      expect(await vault.stakerOf(zapped.tokenId)).to.equal(carol.address);
+      expect(await overture.balanceOf(carol.address)).to.equal(SECOND_VOUCHER);
+      expect(await distributor.claimed(overtureAddr, carol.address)).to.equal(SECOND_VOUCHER);
+      // Cumulative vouchers are worth nothing twice.
+      await expect(
+        distributor.connect(carol).claim(overtureAddr, SECOND_VOUCHER, FAR_DEADLINE, second)
+      ).to.be.revertedWithCustomError(distributor, "NothingToClaim");
     });
 
-    it("rolls the scheduled epoch in on the claim that crosses its boundary", async function () {
-      await zapIntoStakedPosition(carol);
+    it("keeps $ASSET claims closed until the owner opens them, then pays the real ASSET token", async function () {
+      const funded = await fundAssetLeg();
+      const award = funded / 4n;
+      const assetVoucher = await signRewardClaim(ASSET_ADDR, carol, award);
 
+      // Closed at launch: a perfectly valid voucher is refused, and nothing moves.
+      await expect(distributor.connect(carol).claim(ASSET_ADDR, award, FAR_DEADLINE, assetVoucher))
+        .to.be.revertedWithCustomError(distributor, "TokenClaimsDisabled")
+        .withArgs(ASSET_ADDR);
+
+      // A $OVTR voucher for the same amount is worthless for $ASSET: the token is signed.
+      const overtureVoucher = await signRewardClaim(overtureAddr, carol, award);
+      await (await distributor.connect(multisig).setClaimsEnabled(ASSET_ADDR, true)).wait();
+      await expect(
+        distributor.connect(carol).claim(ASSET_ADDR, award, FAR_DEADLINE, overtureVoucher)
+      ).to.be.revertedWithCustomError(distributor, "InvalidSignature");
+
+      // Opened by the owner (the timelock's seat in this tier): the same voucher now pays.
+      const before = await asset.balanceOf(carol.address);
+      const tx = await distributor.connect(carol).claim(ASSET_ADDR, award, FAR_DEADLINE, assetVoucher);
+      const ts = await receiptTimestamp(await tx.wait());
+      await expect(tx).to.emit(distributor, "Claimed").withArgs(carol.address, ASSET_ADDR, award, award, ts);
+      expect((await asset.balanceOf(carol.address)) - before).to.equal(award);
+      expect(await distributor.claimed(ASSET_ADDR, carol.address)).to.equal(award);
+      // The two ledgers are separate: the $OVTR ledger never moved.
+      expect(await distributor.claimed(overtureAddr, carol.address)).to.equal(0n);
+    });
+
+    it("reverts InsufficientFunds while a balance is short and pays once it is refunded", async function () {
+      // The operator takes the whole $OVTR balance out — overfunding, a wind-down — with
+      // recoverExcess, to itself.
+      await expect(distributor.connect(multisig).recoverExcess(overtureAddr, FUND_OVTR))
+        .to.emit(distributor, "ExcessRecovered")
+        .withArgs(overtureAddr, multisig.address, FUND_OVTR, anyValue);
+      expect(await overture.balanceOf(distributorAddr)).to.equal(0n);
+
+      // No cap and no partial payment: the claim reverts with the exact shortfall.
+      const voucher = await signRewardClaim(overtureAddr, dave, FIRST_VOUCHER);
+      await expect(distributor.connect(dave).claim(overtureAddr, FIRST_VOUCHER, FAR_DEADLINE, voucher))
+        .to.be.revertedWithCustomError(distributor, "InsufficientFunds")
+        .withArgs(overtureAddr, FIRST_VOUCHER, 0n);
+      expect(await distributor.claimed(overtureAddr, dave.address)).to.equal(0n);
+
+      // The minter funds it again; the very same voucher pays.
+      await (await overture.connect(multisig).mint(distributorAddr, FIRST_VOUCHER)).wait();
+      await (await distributor.connect(dave).claim(overtureAddr, FIRST_VOUCHER, FAR_DEADLINE, voucher)).wait();
+      expect(await overture.balanceOf(dave.address)).to.equal(FIRST_VOUCHER);
+      expect(await overture.balanceOf(distributorAddr)).to.equal(0n);
+    });
+
+    it("lets the operator schedule an epoch on the registry, which bounds no claim", async function () {
+      const now = await blockTimestamp();
+      const startsAt = BigInt(
+        Math.ceil((now + REGISTRY_SCHEDULE_MARGIN + REGISTRY_INTERVAL) / REGISTRY_INTERVAL) * REGISTRY_INTERVAL
+      );
+      const endsAt = startsAt + 7n * 24n * 3600n;
+      await expect(
+        registry
+          .connect(multisig)
+          .scheduleEpoch(1n, startsAt, endsAt, [overtureAddr, ASSET_ADDR], [TOKENS(1_000), ASSET(10)])
+      )
+        .to.emit(registry, "EpochScheduled")
+        .withArgs(1n, startsAt, endsAt);
+      expect(await registry.epochAmount(1n, overtureAddr)).to.equal(TOKENS(1_000));
+
+      // A voucher far above the epoch's quantity still pays: the schedule is a schedule, and
+      // only the funded balance stands between a valid voucher and its payment.
+      const big = TOKENS(50_000);
       await (
         await distributor
           .connect(carol)
-          .claimTokenX(FIRST_VOUCHER, FAR_DEADLINE, await signTokenXVoucher(carol, FIRST_VOUCHER))
+          .claim(overtureAddr, big, FAR_DEADLINE, await signRewardClaim(overtureAddr, carol, big))
       ).wait();
-      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
-
-      // The multisig parks the next epoch. No keeper, no timed transaction.
-      const activatesAt = BigInt((await blockTimestamp()) + EPOCH_ROLLOVER_DELAY);
-      await expect(tokenX.connect(multisig).armNextEpoch(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt))
-        .to.emit(tokenX, "NextEpochArmed")
-        .withArgs(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt);
-
-      await advance(EPOCH_ROLLOVER_DELAY + 60);
-
-      // Lazy by design: the running epoch still reads stale, `effectiveEpoch()` does not.
-      expect(await tokenX.currentEpochId()).to.equal(EPOCH_ONE);
-      const effective = await tokenX.effectiveEpoch();
-      expect(effective.epochId).to.equal(EPOCH_TWO);
-      expect(effective.cap).to.equal(EPOCH_TWO_CAP);
-
-      const delta = SECOND_VOUCHER - FIRST_VOUCHER;
-      const tx = await distributor
-        .connect(carol)
-        .claimTokenX(SECOND_VOUCHER, FAR_DEADLINE, await signTokenXVoucher(carol, SECOND_VOUCHER));
-
-      await expect(tx)
-        .to.emit(tokenX, "EpochActivated")
-        .withArgs(EPOCH_TWO, EPOCH_TWO_CAP, activatesAt, anyValue);
-
-      // The claim paid the same difference, but charged it to the new epoch's headroom.
-      expect(await tokenX.balanceOf(carol.address)).to.equal(SECOND_VOUCHER);
-      expect(await tokenX.currentEpochId()).to.equal(EPOCH_TWO);
-      expect(await tokenX.epochCap(EPOCH_TWO)).to.equal(EPOCH_TWO_CAP);
-      expect(await tokenX.mintedInEpoch(EPOCH_TWO)).to.equal(delta);
-      expect(await tokenX.mintedInEpoch(EPOCH_ONE)).to.equal(FIRST_VOUCHER);
-      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(0n);
+      expect(await overture.balanceOf(carol.address)).to.equal(big);
     });
   });
 });

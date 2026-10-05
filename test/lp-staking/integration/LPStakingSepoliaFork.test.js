@@ -5,7 +5,11 @@
  * `hardhat node --fork <chain> --fork-block-number <pinned>` started by the suite itself and
  * driven over HTTP, the whole stack deployed by running the repo's own scripts as child
  * processes, forty-eight scenario steps each in its own block, and then assertions that
- * everything they emitted is stored on that chain and retrievable from it.
+ * everything they emitted is stored on that chain and retrievable from it. The stack is the
+ * five-proxy one (`TokenOverture`, the multi-token `RewardsDistributor`, `LPEpochRegistry`,
+ * `LPStakingVault`, `LPZapper`, all born owned by the `LPTimelock`), and the operator
+ * scripts `lp-fund-rewards.js`, `lp-epoch.js` and `add-reward-token.js` run as children too.
+ * The timelock replacement is exercised once, in the local-fork suite only.
  *
  * ── What is different, and why ────────────────────────────────────────────────────────
  *
@@ -44,18 +48,19 @@
  *   S4     MaxUint256 approvals to the position manager and the router
  *   S5     create + initialize the pool at 0.50 USDC per ASSET          [pool script]
  *   S6     deployer seeds a wide position, 1e24 ASSET / 5e11 USDC
- *   S7     deploy the whole stack, born owned by the timelock            [deploy script]
- *   S7b    the operator accepts TokenX and the zapper: two plain transactions
+ *   S7     deploy the whole stack, five proxies born owned by the timelock [deploy script]
  *   S8     warm the oracle: 8 round trips, 60 s apart
+ *   S9     fund the distributor: 10000 ASSET + 2,000,000 $OVTR    [lp-fund-rewards.js]
+ *   S10    the operator schedules epoch 1 on the registry          [lp-epoch.js]
  *
- *   A1  alice mints P1                 A22 carol claims 1750 TokenX (pays 750)
- *   A2  alice approves the vault       A23 operator arms epoch 2
+ *   A1  alice mints P1                 A22 carol claims 1750 $OVTR (pays 750)
+ *   A2  alice approves the vault       A23 operator schedules epoch 2
  *   A3  alice stakes P1                A24 operator cancels it
- *   A4  bob mints P2                   A25 operator arms it again
- *   A5  bob stakes P2 by NFT permit    A26 clock jumps past the boundary
- *   A6  carol approves the zapper      A27 dave's claim rolls epoch 2 in
- *   A7  carol zaps in -> P3            A28 ASSET leg enabled via the timelock
- *   A8  dave zaps in by permit -> P4   A29 deployer funds the distributor
+ *   A4  bob mints P2                   A25 operator schedules epoch 3, adjusts it
+ *   A5  bob stakes P2 by NFT permit    A26 clock jumps into epoch 1
+ *   A6  carol approves the zapper      A27 dave claims 2000 $OVTR inside epoch 1
+ *   A7  carol zaps in -> P3            A28 $ASSET claims closed, opened via timelock
+ *   A8  dave zaps in by permit -> P4   A29 a third reward token joins via timelock
  *   A9  trading generates real fees    A30 bob claims 3000 ASSET
  *   A10 alice rebalances P1 -> P5      A31 operator recovers 1000 ASSET
  *   A11 bob rebalances P2 -> P6        A32 guardian pauses claims
@@ -68,7 +73,7 @@
  *   A18 carol stakes P7                A39 stray USDC swept from the zapper
  *   A19 operator retunes the vault     A40 snapshot, stake P10, revert, re-mine
  *   A20 operator retunes the zapper    A41 zapper wiring cycled via the timelock
- *   A21 carol claims 1000 TokenX       A42 operator cycles the minter wiring
+ *   A21 carol claims 1000 $OVTR        A42 Overture minter cycled via the timelock
  *                                      A43 guardian pauses rebalance
  *                                      A44 alice's rebalance reverts
  *                                      A45 guardian resumes rebalance
@@ -125,7 +130,7 @@ const TICK_SPACING = forkNode.TICK_SPACING_BY_FEE[P.fee];
 /**
  * What the deployer must hold before S6. The seed position is the bulk of it; the rest is
  * everything the deployer later spends on its own account — the oracle warm-up round trips
- * (S8), the fee generator (A9), the distributor's funding (A29) and A39's stray transfer.
+ * (S8), the fee generator (A9), the distributor's funding (S9) and A39's stray transfer.
  */
 const DEPLOYER_ASSET = C.SEED_ASSET + C.ASSET(150_000);
 const DEPLOYER_USDC = C.SEED_USDC + C.USDC(100_000);
@@ -150,9 +155,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
   let fees = null;
   let w = null; // named wallets
 
-  let assetAddr, usdcAddr, poolAddr, vaultAddr, zapperAddr, tokenXAddr, distributorAddr;
+  let assetAddr, usdcAddr, poolAddr, vaultAddr, zapperAddr, overtureAddr, distributorAddr;
+  let registryAddr, thirdTokenAddr;
   let asset, usdc, pool, npm, npmRead, router, factory;
-  let vault, zapper, tokenX, distributor, timelock;
+  let vault, zapper, overture, distributor, registry, timelock, thirdToken;
   let timelockAddr, vaultV2ImplAddr;
   /** The scheduled vault upgrade, built in A46 and re-used by A47 and A48. */
   let upgradeOperation = null;
@@ -174,7 +180,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
   const notes = [];
   const positions = {}; // "P1" -> tokenId
   const reorg = {}; // observations A40 hands to the reorg tests
-  const epochs = {}; // arming timestamps A23/A25 hand to A24/A27
+  const epochs = {}; // the schedule S10/A23/A25 write and A24/A26 read
   const blockTags = {};
 
   // ── small helpers bound to the run ──────────────────────────────────────
@@ -242,14 +248,47 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     });
   }
 
-  const voucher = (leg, role, cumulativeAmount) =>
-    signing.signVoucher({
+  /** The back office's `RewardClaim` voucher for `role`, in `token`. */
+  const voucher = (token, role, cumulativeAmount) =>
+    signing.signRewardClaim({
       signer: w.backOffice,
       domain: voucherDomain,
-      leg,
+      token,
       user: w[role].address,
       cumulativeAmount,
     });
+
+  /** The next 900-second grid point at or after `seconds`. */
+  const onGrid = (seconds) =>
+    BigInt(Math.ceil(Number(seconds) / C.REGISTRY_INTERVAL) * C.REGISTRY_INTERVAL);
+
+  /**
+   * Every `to` / `data` pair a script printed for a Safe to send. The operator scripts send
+   * only when the key they run with holds the role the call needs; in these suites they run
+   * with the DEPLOYER's key, so they print the payload instead — exactly what the operator
+   * multisig gets on mainnet. The suite then sends each payload from the role's own key.
+   */
+  function safePayloads(stdout) {
+    const out = [];
+    const pattern = /to:\s+(0x[0-9a-fA-F]{40})[\s\S]*?data:\s+(0x[0-9a-fA-F]*)/g;
+    let match;
+    while ((match = pattern.exec(stdout)) !== null) out.push({ to: match[1], data: match[2] });
+    return out;
+  }
+
+  /** The transaction hashes a script reported as sent (`pools.send` prints `done: <hash>`). */
+  function sentHashes(stdout) {
+    return [...stdout.matchAll(/done: (0x[0-9a-f]{64})/g)].map((m) => m[1]);
+  }
+
+  /** Runs an operator script as a child and fails loudly on a non-zero exit. */
+  async function runScript(script, env) {
+    const run = await runner.runHardhatScript(script, env, {
+      logFile: path.join(scratchDir, "scripts.log"),
+    });
+    if (run.code !== 0) throw new Error(`${script} exited ${run.code}\n${run.stdout}\n${run.stderr}`);
+    return run;
+  }
 
   /**
    * Runs one owner-tier call the only way it can be run once the timelock owns the proxy:
@@ -462,10 +501,12 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     seedTokenId = seed.tokenId;
     ledger.record("S6", "seed the pool with liquidity", seed.receipt);
 
-    // S7 — deploy the whole stack and grow the oracle, by the repo's own script. Both
-    //      proxies come out of it owned by the timelock already (N-7): `initialize` names
-    //      the timelock inside the proxy's own deployment transaction, and the vault is born
-    //      pointing at a zapper whose address the script predicted from the deployer's nonce.
+    // S7 — deploy the whole stack and grow the oracle, by the repo's own script. All five
+    //      proxies come out of it owned by the timelock already: `initialize` names the
+    //      timelock inside each proxy's own deployment transaction, the Overture token is born
+    //      with the operator as its minter, the distributor with both launch reward tokens,
+    //      and the vault pointing at the zapper PROXY whose address the script predicted from
+    //      the deployer's nonce. Nothing is left to wire or to hand over.
     deployFromBlock = (await head()) + 1;
     deployRun = await runner.runHardhatScript("scripts/deploy-lp-staking.js", deployScriptEnv(), {
       logFile: path.join(scratchDir, "scripts.log"),
@@ -475,42 +516,29 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         `scripts/deploy-lp-staking.js exited ${deployRun.code}\n${deployRun.stdout}\n${deployRun.stderr}`
       );
     }
-    const registry = runner.readRegistry(registryFile)["31337"];
-    tokenXAddr = registry.TokenX.address;
-    distributorAddr = registry.RewardsDistributor.address;
-    vaultAddr = registry.LPStakingVault.address;
-    zapperAddr = registry.LPZapper.address;
-    timelockAddr = registry.TimelockController.address;
+    const entries = runner.readRegistry(registryFile)["31337"];
+    overtureAddr = entries.TokenOverture.address;
+    distributorAddr = entries.RewardsDistributor.address;
+    registryAddr = entries.LPEpochRegistry.address;
+    vaultAddr = entries.LPStakingVault.address;
+    zapperAddr = entries.LPZapper.address;
+    timelockAddr = entries.TimelockController.address;
 
     vault = await contractAt("LPStakingVault", vaultAddr);
     zapper = await contractAt("LPZapper", zapperAddr);
-    tokenX = await contractAt("TokenX", tokenXAddr);
+    overture = await contractAt("TokenOverture", overtureAddr);
     distributor = await contractAt("RewardsDistributor", distributorAddr);
+    registry = await contractAt("LPEpochRegistry", registryAddr);
     timelock = await contractAt("LPTimelock", timelockAddr);
 
-    // S7b — the second half of the same deployment, and all that is left of it.
-    //
-    // The two proxies need nothing: the script handed them to the timelock at birth. TokenX
-    // and the zapper are `Ownable2Step` and the script only NOMINATED the operator on each,
-    // which is as far as a deploying key can take them. Completing it takes two ordinary
-    // transactions from the operator with no timelock in the path — exactly the two payloads
-    // the script prints at the end of its run.
-    //
-    // It happens before `deployToBlock` closes the window on purpose: the scenario below then
-    // starts from the state the runbook describes, and its step numbering is untouched.
+    // Nothing follows the script inside the deploy window: every proxy was born owned by the
+    // timelock, so there is no `acceptOwnership` left for anyone to send.
     for (const [label, contract] of [
-      ["TokenX", tokenX],
-      ["LPZapper", zapper],
-    ]) {
-      await chain.send(contract.connect(w.operator).acceptOwnership());
-      if ((await contract.owner()) !== w.operator.address) {
-        throw new Error(`${label} did not end up owned by the operator`);
-      }
-    }
-
-    for (const [label, contract] of [
+      ["TokenOverture", overture],
       ["RewardsDistributor", distributor],
+      ["LPEpochRegistry", registry],
       ["LPStakingVault", vault],
+      ["LPZapper", zapper],
     ]) {
       if ((await contract.owner()) !== timelockAddr) {
         throw new Error(`${label} was not born owned by the timelock`);
@@ -546,6 +574,63 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(preview.withinBounds).to.equal(true);
     }
 
+    // S9 — the operator funds the distributor, through scripts/lp-fund-rewards.js. Claims pay
+    //      out of the distributor's own balance by transfer; nothing is minted at claim time.
+    //      The script runs with the deployer's key: the deployer holds the ASSET here (the
+    //      treasury), so the script sends that leg itself; it is NOT the Overture token's
+    //      minter, so it prints the mint for the operator's Safe, and the operator sends it.
+    const fundRun = await runScript("scripts/lp-fund-rewards.js", {
+      ...baseScriptEnv(),
+      LP_ASSET: assetAddr,
+      LP_FUND_OVTR_AMOUNT: ethers.formatUnits(C.FUND_OVTR, 18),
+      LP_FUND_ASSET_AMOUNT: ethers.formatUnits(C.FUND_ASSET, 18),
+    });
+    const [assetFundingHash] = sentHashes(fundRun.stdout);
+    ledger.record("S9", "the treasury transfers ASSET into the distributor", await provider.getTransactionReceipt(assetFundingHash), [
+      { address: assetAddr, name: "Transfer" },
+    ]);
+    const [mintPayload] = safePayloads(fundRun.stdout);
+    expect(mintPayload.to).to.equal(overtureAddr);
+    ledger.record(
+      "S9",
+      "the operator mints $OVTR into the distributor",
+      await chain.send(w.operator.sendTransaction({ to: mintPayload.to, data: mintPayload.data })),
+      [{ address: overtureAddr, name: "Transfer" }]
+    );
+    expect(await overture.balanceOf(distributorAddr)).to.equal(C.FUND_OVTR);
+    expect(await asset.balanceOf(distributorAddr)).to.equal(C.FUND_ASSET);
+
+    // S10 — the operator schedules epoch 1 through scripts/lp-epoch.js: 7 days, on the
+    //       900-second grid, starting at least 30 minutes after the chain's clock. The script
+    //       validates all of it against chain time and prints the Safe payload; the operator
+    //       sends it.
+    epochs.oneStartsAt = onGrid((await latestTimestamp()) + C.REGISTRY_SCHEDULE_MARGIN + C.REGISTRY_INTERVAL);
+    epochs.oneEndsAt = epochs.oneStartsAt + BigInt(C.EPOCH_LENGTH);
+    const epochRun = await runScript("scripts/lp-epoch.js", {
+      ...baseScriptEnv(),
+      LP_ASSET: assetAddr,
+      EPOCH_ACTION: "schedule",
+      EPOCH_ID: "1",
+      EPOCH_STARTS_AT: String(epochs.oneStartsAt),
+      EPOCH_ENDS_AT: String(epochs.oneEndsAt),
+      EPOCH_AMOUNTS: `${C.OVERTURE_SYMBOL}=${ethers.formatUnits(C.EPOCH_ONE_OVTR, 18)},ASSET=${ethers.formatUnits(C.EPOCH_ONE_ASSET, 18)}`,
+    });
+    const [schedulePayload] = safePayloads(epochRun.stdout);
+    expect(schedulePayload.to).to.equal(registryAddr);
+    ledger.record(
+      "S10",
+      "the operator schedules epoch 1",
+      await chain.send(w.operator.sendTransaction({ to: schedulePayload.to, data: schedulePayload.data })),
+      [
+        { address: registryAddr, name: "EpochScheduled" },
+        { address: registryAddr, name: "EpochAmountSet" },
+        { address: registryAddr, name: "EpochAmountSet" },
+      ]
+    );
+    expect(await registry.epochCount()).to.equal(C.EPOCH_ONE);
+    expect(await registry.epochAmount(C.EPOCH_ONE, overtureAddr)).to.equal(C.EPOCH_ONE_OVTR);
+    expect(await registry.epochAmount(C.EPOCH_ONE, assetAddr)).to.equal(C.EPOCH_ONE_ASSET);
+
     notes.push(
       `profile=${P.name} rpc=${redactRpc(rpcUsed)} port=${node.port} block=${P.pinnedBlock} ` +
         `scratch=${scratchDir}`,
@@ -560,7 +645,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         `assetIsToken0=${assetIsToken0} zeroForOne=${zeroForOne}`,
       `pool=${poolAddr} (${poolIsCreated ? "created by the script" : "pre-existing"}) ` +
         `sqrtPriceX96=${initialSqrtPriceX96} tick=${await uni.currentTick(pool)}`,
-      `vault=${vaultAddr} zapper=${zapperAddr} tokenX=${tokenXAddr} distributor=${distributorAddr}`,
+      `vault=${vaultAddr} zapper=${zapperAddr} overture=${overtureAddr} distributor=${distributorAddr} registry=${registryAddr}`,
       `timelock=${timelockAddr} minDelay=${C.TIMELOCK_MIN_DELAY}s`,
       `scripts: create-sepolia-pool ${poolRun.durationMs} ms, deploy-lp-staking ${deployRun.durationMs} ms`
     );
@@ -629,17 +714,18 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       // The guardian tier is the three pause switches and nothing else (A15/A17, A32/A34,
       // A43/A45 send from `w.guardian`).
       LP_GUARDIAN: w.guardian.address,
-      // The operator tier is the vault's setTwapParams and rescuePosition, the distributor's
-      // setSigner and recoverExcessAsset, and the ownership of TokenX and LPZapper (A19/A20,
-      // A23-A25, A31, A35-A39, A42 send from `w.operator`).
+      // The operator tier is the vault's and the zapper's setTwapParams and rescuePosition, the
+      // zapper's sweep, the distributor's setSigner and recoverExcess, the registry's epoch
+      // schedule, and the Overture token's minter (S9/S10, A19/A20, A23-A25, A29, A31,
+      // A35-A39 send from `w.operator`).
       LP_OPERATOR: w.operator.address,
       LP_TIMELOCK_MIN_DELAY: String(C.TIMELOCK_MIN_DELAY),
-      LP_TOKENX_NAME: C.TOKENX_NAME,
-      LP_TOKENX_SYMBOL: C.TOKENX_SYMBOL,
+      LP_OVERTURE_NAME: C.OVERTURE_NAME,
+      LP_OVERTURE_SYMBOL: C.OVERTURE_SYMBOL,
+      // $ASSET claims closed at launch, as on mainnet: A28 opens them through the timelock.
+      LP_ASSET_CLAIMS_ENABLED: "0",
       LP_TWAP_WINDOW: String(P.twapWindow),
       LP_TWAP_MAX_DEVIATION_BPS: String(P.maxDevBps),
-      LP_EPOCH_ID: "1",
-      LP_EPOCH_CAP: "1000000",
       LP_OBSERVATION_CARDINALITY: String(C.OBSERVATION_CARDINALITY),
       ...overrides,
     };
@@ -876,56 +962,75 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(deployRun.stdout).to.include("All post-deploy checks passed.");
       expect(deployRun.stdout).to.not.include("FAIL");
 
-      const registry = runner.readRegistry(registryFile)["31337"];
+      const entries = runner.readRegistry(registryFile)["31337"];
       for (const kind of [
-        "TokenX",
+        "TokenOverture",
         "RewardsDistributor",
+        "LPEpochRegistry",
         "LPStakingVault",
         "LPZapper",
         "TimelockController",
       ]) {
-        const entry = registry[kind];
+        const entry = entries[kind];
         const receipt = await provider.getTransactionReceipt(entry.deployTx);
         expect(receipt, `${kind} deploy tx ${entry.deployTx} is not on chain`).to.not.equal(null);
         expect(receipt.blockNumber).to.equal(entry.block);
         expect(receipt.contractAddress).to.equal(entry.address);
         expect(await provider.getCode(entry.address)).to.not.equal("0x");
+        if (kind === "TimelockController") continue;
+        // Every proxy also records the implementation it was born with.
+        const implReceipt = await provider.getTransactionReceipt(entry.implementationTx);
+        expect(implReceipt.contractAddress, `${kind} implementation`).to.equal(entry.implementation);
       }
     });
 
-    it("born-owned proxies, TokenX and the zapper accepted by the operator", async function () {
-      // The two non-upgradeable contracts belong to the OPERATOR: the script nominated it and
-      // S7b sent the two `acceptOwnership` transactions the script printed. `pendingOwner` is
-      // clear, which is what separates a finished Ownable2Step handover from one that stalled
-      // with the deploying key still in charge.
-      for (const [label, contract] of [
-        ["tokenX", tokenX],
-        ["zapper", zapper],
+    it("five proxies born owned by the timelock, each delegating to its recorded implementation", async function () {
+      const entries = runner.readRegistry(registryFile)["31337"];
+      // All five are UUPS proxies owned by the timelock — the only address that can upgrade
+      // them — and they were born that way: `initialize` named it inside each proxy's own
+      // deployment transaction, so no key ever held the owner tier, not for one block.
+      // `pendingOwner` is zero because nothing was ever nominated. The ERC-1967 implementation
+      // slot names the implementation deployments.json records, and the ADMIN slot is empty
+      // (UUPS: no ProxyAdmin, no second upgrade path).
+      for (const [kind, contract, address] of [
+        ["TokenOverture", overture, overtureAddr],
+        ["RewardsDistributor", distributor, distributorAddr],
+        ["LPEpochRegistry", registry, registryAddr],
+        ["LPStakingVault", vault, vaultAddr],
+        ["LPZapper", zapper, zapperAddr],
       ]) {
-        expect(await contract.owner(), `${label}.owner`).to.equal(w.operator.address);
-        expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
+        expect(await contract.owner(), `${kind}.owner`).to.equal(timelockAddr);
+        expect(await contract.pendingOwner(), `${kind}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
+        const implSlot = await provider.getStorage(address, C.ERC1967_IMPLEMENTATION_SLOT);
+        expect(ethers.getAddress("0x" + implSlot.slice(-40)), `${kind} implementation slot`).to.equal(
+          entries[kind].implementation
+        );
+        const adminSlot = await provider.getStorage(address, C.ERC1967_ADMIN_SLOT);
+        expect(BigInt(adminSlot), `${kind} admin slot`).to.equal(0n);
       }
 
-      // The two proxies are owned by the timelock — the only address that can upgrade them —
-      // and they were born that way: `initialize` named it inside the proxy's own deployment
-      // transaction, so no key ever held the owner tier, not for one block. `pendingOwner` is
-      // zero because nothing was ever nominated. Beside the owner sit the two undelayed
-      // tiers, on two different keys: `guardian` (the pause switches, nothing else) and
-      // `operator` (calibration, rescue, key rotation, and those same pause switches).
+      // Beside the owner sit the two undelayed tiers, on two different keys: `guardian` (the
+      // pause switches, nothing else) and `operator` (calibration, rescue, key rotation, the
+      // schedule, the zapper's sweep, and those same pause switches).
       for (const [label, contract] of [
         ["distributor", distributor],
         ["vault", vault],
       ]) {
-        expect(await contract.owner(), `${label}.owner`).to.equal(timelockAddr);
-        expect(await contract.pendingOwner(), `${label}.pendingOwner`).to.equal(C.ZERO_ADDRESS);
         expect(await contract.guardian(), `${label}.guardian`).to.equal(w.guardian.address);
         expect(await contract.operator(), `${label}.operator`).to.equal(w.operator.address);
       }
+      expect(await registry.operator(), "registry.operator").to.equal(w.operator.address);
+      expect(await zapper.operator(), "zapper.operator").to.equal(w.operator.address);
+      // The Overture token's minter is the operator, from birth: no `setMinter` transaction
+      // exists in this run, and the distributor is NOT the minter — it pays by transfer.
+      expect(await overture.minter(), "overture.minter").to.equal(w.operator.address);
 
-      // The zapper landed on the address the script predicted from the deployer's nonce, and
-      // the vault was initialized with it: no `setZapper` transaction exists in this run.
+      // The zapper's PROXY landed on the address the script predicted from the deployer's
+      // nonce, and the vault was initialized with it: no `setZapper` transaction exists here.
       expect(await vault.zapper(), "vault.zapper").to.equal(zapperAddr);
-      expect(deployRun.stdout).to.include(`Predicted LPZapper address: ${zapperAddr}`);
+      expect(deployRun.stdout).to.include(`Predicted LPZapper proxy address: ${zapperAddr}`);
+      // The ApeBond escrow hooks ship OFF.
+      expect(await vault.bonusEscrow(), "vault.bonusEscrow").to.equal(C.ZERO_ADDRESS);
 
       // The timelock itself: the multisig proposes, executes and cancels; nobody else does,
       // and the timelock is its own admin, so even a role change is a scheduled operation.
@@ -944,18 +1049,38 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await timelock.hasRole(adminRole, w.deployer.address)).to.equal(false);
       expect(await timelock.hasRole(adminRole, w.multisig.address)).to.equal(false);
 
-      expect(await tokenX.minter()).to.equal(distributorAddr);
-      expect(await tokenX.name()).to.equal(C.TOKENX_NAME);
-      expect(await tokenX.symbol()).to.equal(C.TOKENX_SYMBOL);
-      expect(await tokenX.totalSupply()).to.equal(0n);
-      expect(await tokenX.currentEpochId()).to.equal(C.EPOCH_ONE);
-      expect(await tokenX.epochCap(C.EPOCH_ONE)).to.equal(C.EPOCH_ONE_CAP);
+      expect(await overture.name()).to.equal(C.OVERTURE_NAME);
+      expect(await overture.symbol()).to.equal(C.OVERTURE_SYMBOL);
+      expect(await overture.decimals()).to.equal(18n);
 
-      expect(await distributor.tokenX()).to.equal(tokenXAddr);
-      expect(await distributor.asset()).to.equal(assetAddr);
+      // The two launch reward tokens, in order: $ASSET conditional with claims CLOSED, $OVTR
+      // unconditional with claims open. deployments.json records the same list.
+      expect(await distributor.rewardTokens()).to.deep.equal([assetAddr, overtureAddr]);
+      const assetState = await distributor.rewardToken(assetAddr);
+      expect([assetState.registered, assetState.enabled, assetState.conditional, assetState.claimsEnabled]).to.deep.equal([
+        true,
+        true,
+        true,
+        false,
+      ]);
+      expect(assetState.decimals).to.equal(18n);
+      const overtureState = await distributor.rewardToken(overtureAddr);
+      expect([
+        overtureState.registered,
+        overtureState.enabled,
+        overtureState.conditional,
+        overtureState.claimsEnabled,
+      ]).to.deep.equal([true, true, false, true]);
+      expect(entries.RewardsDistributor.rewardTokens.map((t) => [t.address, t.conditional, t.claimsEnabled])).to.deep.equal([
+        [assetAddr, true, false],
+        [overtureAddr, false, true],
+      ]);
       expect(await distributor.signer()).to.equal(w.backOffice.address);
       expect(await distributor.paused()).to.equal(false);
-      expect(await distributor.assetClaimsEnabled()).to.equal(false);
+
+      expect(await registry.distributor()).to.equal(distributorAddr);
+      expect(await registry.INTERVAL()).to.equal(BigInt(C.REGISTRY_INTERVAL));
+      expect(await registry.SCHEDULE_MARGIN()).to.equal(BigInt(C.REGISTRY_SCHEDULE_MARGIN));
 
       expect(await vault.pool()).to.equal(poolAddr);
       expect(await vault.positionManager()).to.equal(P.npm);
@@ -1000,25 +1125,24 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
     });
 
-    it("emitted the wiring events the runbook documents, in script order", async function () {
+    it("emitted the initialization events the runbook documents, in script order", async function () {
+      // Every contract below was deployed by the script and touched by nothing else inside
+      // the deploy window. Each proxy's deploy transaction is the PROXY's: `Upgraded` names the
+      // implementation the ERC-1967 slot got, then `initialize` runs inside the same
+      // transaction — its single `OwnershipTransferred` names the TIMELOCK, because every
+      // proxy is born owned by it — and `Initialized` closes it. `initialize` announces EVERY
+      // mutable field, the ones whose initial value is the type's default included, so an
+      // indexer needs no hardcoded defaults. There is no later `OwnershipTransferStarted` /
+      // `OwnershipTransferred` pair anywhere: nothing is handed over.
       const expectedPerContract = {
-        [tokenXAddr.toLowerCase()]: [
-          "OwnershipTransferred", // Ownable(deployer), in the constructor
-          "MinterChanged", // constructor: (0, 0) — the initial "no minter" state, logged
-          "EpochCapSet", // constructor: (0, 0) — epoch 0 with a zero cap, logged
-          "MinterChanged", // the wiring: -> the distributor
-          "EpochCapSet", // the wiring: -> the armed epoch
-          "OwnershipTransferStarted", // -> operator (the script's nomination)
-          "OwnershipTransferred", // -> operator (the operator's own acceptOwnership, S7b)
+        // name/symbol/permit domain are OZ storage writes with no event; the minter is ours.
+        [overtureAddr.toLowerCase()]: [
+          "Upgraded",
+          "OwnershipTransferred",
+          "MinterChanged",
+          "Initialized",
         ],
-        // The distributor is a UUPS proxy, so its deploy tx is the PROXY's: `Upgraded` names
-        // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
-        // transaction and `Initialized` closes it. The single `OwnershipTransferred` is
-        // `initialize`'s own, and it names the TIMELOCK — the proxy is born owned by it, so
-        // there is no later `OwnershipTransferStarted`/`OwnershipTransferred` pair at all.
-        // Since the 2026-09-09 change request `initialize` announces EVERY mutable field, the
-        // two flags whose initial value is `false` included, so an indexer needs no hardcoded
-        // defaults.
+        // The launch reward tokens are announced one `RewardTokenAdded` each, in list order.
         [distributorAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
@@ -1026,41 +1150,39 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
           "OperatorSet",
           "SignerChanged",
           "Paused",
-          "AssetClaimsEnabled",
+          "RewardTokenAdded",
+          "RewardTokenAdded",
           "Initialized",
         ],
-        // The vault is a UUPS proxy too, and its deploy tx is the PROXY's: `Upgraded` names
-        // the implementation the ERC-1967 slot got, then `initialize` runs inside the same
-        // transaction (owner = the timelock, guardian, operator, the PREDICTED zapper, TWAP
-        // parameters) and `Initialized` closes it. There is exactly ONE `ZapperSet` and it is
-        // `initialize`'s own, carrying the real zapper address: the owner-only `setZapper`
-        // that used to follow the deploy is gone, which is what lets the proxy be born owned
-        // by the timelock. Both pause flags are announced at initialization too, so an
-        // indexer needs no hardcoded defaults.
+        [registryAddr.toLowerCase()]: ["Upgraded", "OwnershipTransferred", "OperatorSet", "Initialized"],
+        // Exactly ONE `ZapperSet`, `initialize`'s own, carrying the predicted zapper proxy:
+        // the owner-only `setZapper` is not part of the bootstrap. `BonusEscrowSet(0, 0)`
+        // announces that the escrow hooks start off.
         [vaultAddr.toLowerCase()]: [
           "Upgraded",
           "OwnershipTransferred",
           "GuardianSet",
           "OperatorSet",
           "ZapperSet",
+          "BonusEscrowSet",
           "DepositsPausedSet",
           "RebalancePausedSet",
           "TwapParamsSet",
           "Initialized",
         ],
         [zapperAddr.toLowerCase()]: [
-          "OwnershipTransferred", // Ownable(deployer), in the constructor
+          "Upgraded",
+          "OwnershipTransferred",
+          "OperatorSet",
           "TwapParamsSet",
-          "OwnershipTransferStarted", // -> operator (the script's nomination)
-          "OwnershipTransferred", // -> operator (the operator's own acceptOwnership, S7b)
+          "Initialized",
         ],
-        // The timelock is deployed FIRST now, because both proxies name it in their own
-        // deployment transaction. Its constructor grants four roles — DEFAULT_ADMIN to
-        // itself, PROPOSER and CANCELLER to the multisig (OZ grants both to every proposer),
-        // EXECUTOR to the multisig — and closes with `MinDelayChange(0, minDelay)`. That is
-        // the whole list: the bootstrap schedules and executes nothing, so the deploy window
-        // holds no `CallScheduled`/`CallSalt`/`CallExecuted` at all. The first operation this
-        // timelock ever runs is A28's, in the scenario below.
+        // The timelock is deployed FIRST, because every proxy names it in its own deployment
+        // transaction. Its constructor grants four roles — DEFAULT_ADMIN to itself, PROPOSER
+        // and CANCELLER to the multisig (OZ grants both to every proposer), EXECUTOR to the
+        // multisig — and closes with `MinDelayChange(0, minDelay)`. That is the whole list: the
+        // bootstrap schedules and executes nothing. The first operation this timelock ever runs
+        // is A28's, in the scenario below.
         [timelockAddr.toLowerCase()]: [
           "RoleGranted",
           "RoleGranted",
@@ -1085,30 +1207,36 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         );
       }
 
-      const tokenXLogs = chain.decodeLogs(
-        await rpc.getLogs(provider, {
-          address: tokenXAddr,
-          fromBlock: deployFromBlock,
-          toBlock: deployToBlock,
-        }),
-        ifaces
-      );
-      expect(tokenXLogs[0].args.previousOwner).to.equal(C.ZERO_ADDRESS);
-      expect(tokenXLogs[0].args.newOwner).to.equal(w.deployer.address);
-      // The two constructor emissions (C-7): the initial state is "no minter, epoch 0, zero
-      // cap", and it is now logged rather than left for an indexer to assume.
-      expect(tokenXLogs[1].args.previousMinter).to.equal(C.ZERO_ADDRESS);
-      expect(tokenXLogs[1].args.newMinter).to.equal(C.ZERO_ADDRESS);
-      expect(tokenXLogs[2].args.epochId).to.equal(0n);
-      expect(tokenXLogs[2].args.cap).to.equal(0n);
-      // Then the wiring the script does.
-      expect(tokenXLogs[3].args.newMinter).to.equal(distributorAddr);
-      expect(tokenXLogs[4].args.epochId).to.equal(C.EPOCH_ONE);
-      expect(tokenXLogs[4].args.cap).to.equal(C.EPOCH_ONE_CAP);
-      // And the two-step handover: the script's nomination, then the operator's acceptance.
-      expect(tokenXLogs[5].args.newOwner).to.equal(w.operator.address);
-      expect(tokenXLogs[6].args.previousOwner).to.equal(w.deployer.address);
-      expect(tokenXLogs[6].args.newOwner).to.equal(w.operator.address);
+      const logsOf = async (address) =>
+        chain.decodeLogs(
+          await rpc.getLogs(provider, { address, fromBlock: deployFromBlock, toBlock: deployToBlock }),
+          ifaces
+        );
+
+      // The Overture token: born owned by the timelock, with the operator as its minter.
+      const overtureLogs = await logsOf(overtureAddr);
+      expect(overtureLogs[1].args.previousOwner).to.equal(C.ZERO_ADDRESS);
+      expect(overtureLogs[1].args.newOwner).to.equal(timelockAddr);
+      expect(overtureLogs[2].args.previousMinter).to.equal(C.ZERO_ADDRESS);
+      expect(overtureLogs[2].args.newMinter).to.equal(w.operator.address);
+
+      // The distributor announces both launch tokens with their full state.
+      const distributorLogs = await logsOf(distributorAddr);
+      const [assetAdded, overtureAdded] = distributorLogs.filter((l) => l.name === "RewardTokenAdded");
+      expect(assetAdded.args.token).to.equal(assetAddr);
+      expect(assetAdded.args.conditional).to.equal(true);
+      expect(assetAdded.args.claimsEnabled).to.equal(false);
+      expect(assetAdded.args.decimals).to.equal(18n);
+      expect(assetAdded.args.symbol).to.equal(P.asset.symbol);
+      expect(overtureAdded.args.token).to.equal(overtureAddr);
+      expect(overtureAdded.args.conditional).to.equal(false);
+      expect(overtureAdded.args.claimsEnabled).to.equal(true);
+      expect(overtureAdded.args.symbol).to.equal(C.OVERTURE_SYMBOL);
+
+      // The vault's escrow link is announced as off.
+      const escrowSet = (await logsOf(vaultAddr)).find((l) => l.name === "BonusEscrowSet");
+      expect(escrowSet.args.previousEscrow).to.equal(C.ZERO_ADDRESS);
+      expect(escrowSet.args.newEscrow).to.equal(C.ZERO_ADDRESS);
     });
 
     it("reports the EIP-712 domain and type hashes the back office must sign against", async function () {
@@ -1119,18 +1247,12 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(voucherDomain.chainId).to.equal(P.localChainId);
       expect(voucherDomain.verifyingContract).to.equal(distributorAddr);
 
-      // Recomputed from the struct strings signing.js signs with, so a change to either
-      // type string in RewardsDistributor.sol fails here rather than at the first claim.
-      expect(await distributor.TOKENX_CLAIM_TYPEHASH()).to.equal(
-        signing.claimTypeHash("TokenXClaim")
-      );
-      expect(await distributor.ASSET_CLAIM_TYPEHASH()).to.equal(
-        signing.claimTypeHash("AssetClaim")
-      );
-      // Distinct struct names are the whole reason a voucher for one leg cannot pay the other.
-      expect(signing.claimTypeHash("TokenXClaim")).to.not.equal(
-        signing.claimTypeHash("AssetClaim")
-      );
+      // Recomputed from the struct string signing.js signs with, so a change to the type
+      // string in RewardsDistributor.sol fails here rather than at the first claim. One type
+      // for every reward token: the token is a SIGNED field, which is what makes a voucher
+      // for one token worthless for another.
+      expect(await distributor.REWARD_CLAIM_TYPEHASH()).to.equal(signing.rewardClaimTypeHash());
+      expect(signing.rewardClaimTypeHash()).to.equal(C.REWARD_CLAIM_TYPEHASH);
     });
 
     it("refuses a swapped LP_ASSET / LP_USDC pair before spending any gas", async function () {
@@ -1175,11 +1297,12 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       const override = runner.readRegistry(registryFile);
       expect(Object.keys(override)).to.deep.equal(["31337"]);
       expect(Object.keys(override["31337"]).sort()).to.deep.equal([
+        "LPEpochRegistry",
         "LPStakingVault",
         "LPZapper",
         "RewardsDistributor",
         "TimelockController",
-        "TokenX",
+        "TokenOverture",
         "UniswapV3Pool",
       ]);
     });
@@ -1610,11 +1733,18 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     });
 
     it("A20: the operator retunes the zapper's TWAP guard directly", async function () {
-      // The zapper is NOT upgradeable and NOT behind the timelock: `Ownable2Step`, owner =
-      // the operator since S7b. Same call, same guard, one transaction — and since A19 the
-      // vault's own `setTwapParams` is undelayed too, so the two now differ only in which
-      // role holds the call: the zapper's OWNER against the vault's OPERATOR, which here are
-      // the same key by design (the operator owns TokenX and the zapper outright).
+      // The zapper is a UUPS proxy owned by the timelock, and like the vault it keeps its
+      // immediate levers on the OPERATOR tier: `setTwapParams`, `sweep`, `rescuePosition`.
+      // Same call, same guard, one transaction, no schedule. The owner (the timelock) holds
+      // only upgrades and `setOperator`, and is rejected here exactly as on the vault.
+      await chain.expectCustomError(
+        provider,
+        zapper
+          .connect(new ethers.JsonRpcSigner(provider, timelockAddr))
+          .setTwapParams(C.RETUNED_TWAP_WINDOW, C.RETUNED_MAX_DEVIATION_TICKS),
+        zapper.interface,
+        "NotOperator"
+      );
       const receipt = await chain.send(
         zapper
           .connect(w.operator)
@@ -1627,163 +1757,281 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect((await zapper.previewTwap()).withinBounds).to.equal(true);
     });
 
-    it("A21: carol redeems a 1000 TokenX voucher", async function () {
+    it("A21: carol redeems a 1000 $OVTR voucher", async function () {
       const amount = C.TOKENS(1_000);
-      const signature = await voucher("TokenXClaim", "carol", amount);
+      const signature = await voucher(overtureAddr, "carol", amount);
+      const fundedBefore = await overture.balanceOf(distributorAddr);
       const receipt = await chain.send(
-        distributor.connect(w.carol).claimTokenX(amount, C.FAR_DEADLINE, signature)
+        distributor.connect(w.carol).claim(overtureAddr, amount, C.FAR_DEADLINE, signature)
       );
-      ledger.record("A21", "carol claims 1000 TokenX", receipt, [
-        { address: tokenXAddr, name: "Transfer" },
+      // Paid by TRANSFER out of the funded balance: the Transfer is from the distributor.
+      ledger.record("A21", "carol claims 1000 $OVTR", receipt, [
+        { address: overtureAddr, name: "Transfer" },
         { address: distributorAddr, name: "Claimed" },
       ]);
 
       const args = chain.parseEvent(receipt, distributor.interface, distributorAddr, "Claimed");
       expect(args.user).to.equal(w.carol.address);
-      expect(args.token).to.equal(tokenXAddr);
+      expect(args.token).to.equal(overtureAddr);
       expect(args.cumulativeAmount).to.equal(amount);
       expect(args.paidAmount).to.equal(amount);
       expect(args.timestamp).to.equal(BigInt(await timestampOf(receipt.blockNumber)));
+      const transfer = chain.parseEvent(receipt, overture.interface, overtureAddr, "Transfer");
+      expect(transfer.from).to.equal(distributorAddr);
+      expect(transfer.to).to.equal(w.carol.address);
 
-      expect(await tokenX.balanceOf(w.carol.address)).to.equal(amount);
-      expect(await distributor.claimedTokenX(w.carol.address)).to.equal(amount);
-      expect(await tokenX.mintedInEpoch(C.EPOCH_ONE)).to.equal(amount);
+      expect(await overture.balanceOf(w.carol.address)).to.equal(amount);
+      expect(await distributor.claimed(overtureAddr, w.carol.address)).to.equal(amount);
+      expect(await overture.balanceOf(distributorAddr)).to.equal(fundedBefore - amount);
+      // Nothing was minted: the supply is still exactly what S9 minted.
+      expect(await overture.totalSupply()).to.equal(C.FUND_OVTR);
     });
 
     it("A22: carol's second voucher pays only the difference", async function () {
       const cumulative = C.TOKENS(1_750);
       const delta = cumulative - C.TOKENS(1_000);
-      const signature = await voucher("TokenXClaim", "carol", cumulative);
+      const signature = await voucher(overtureAddr, "carol", cumulative);
       const receipt = await chain.send(
-        distributor.connect(w.carol).claimTokenX(cumulative, C.FAR_DEADLINE, signature)
+        distributor.connect(w.carol).claim(overtureAddr, cumulative, C.FAR_DEADLINE, signature)
       );
-      ledger.record("A22", "carol claims 1750 TokenX cumulative", receipt, [
-        { address: tokenXAddr, name: "Transfer" },
+      ledger.record("A22", "carol claims 1750 $OVTR cumulative", receipt, [
+        { address: overtureAddr, name: "Transfer" },
         { address: distributorAddr, name: "Claimed" },
       ]);
 
       const args = chain.parseEvent(receipt, distributor.interface, distributorAddr, "Claimed");
       expect(args.cumulativeAmount).to.equal(cumulative);
       expect(args.paidAmount).to.equal(delta);
-      expect(await tokenX.balanceOf(w.carol.address)).to.equal(cumulative);
-      expect(await tokenX.mintedInEpoch(C.EPOCH_ONE)).to.equal(cumulative);
+      expect(await overture.balanceOf(w.carol.address)).to.equal(cumulative);
+      expect(await distributor.claimed(overtureAddr, w.carol.address)).to.equal(cumulative);
     });
 
-    it("A23: the operator arms epoch 2", async function () {
-      const activatesAt = BigInt((await latestTimestamp()) + C.EPOCH_ROLLOVER_DELAY);
+    it("A23: the operator schedules epoch 2 on the registry", async function () {
+      // Directly, with no timelock: the schedule is the operator's immediate lever. Epoch 2
+      // starts exactly where epoch 1 ends — back to back is legal, overlap is not.
+      epochs.twoStartsAt = epochs.oneEndsAt;
+      epochs.twoEndsAt = epochs.twoStartsAt + BigInt(C.EPOCH_LENGTH);
       const receipt = await chain.send(
-        tokenX.connect(w.operator).armNextEpoch(C.EPOCH_TWO, C.EPOCH_TWO_CAP, activatesAt)
+        registry
+          .connect(w.operator)
+          .scheduleEpoch(
+            C.EPOCH_TWO,
+            epochs.twoStartsAt,
+            epochs.twoEndsAt,
+            [overtureAddr, assetAddr],
+            [C.EPOCH_TWO_OVTR, C.EPOCH_TWO_ASSET]
+          )
       );
-      ledger.record("A23", "operator arms epoch 2", receipt, [
-        { address: tokenXAddr, name: "NextEpochArmed" },
+      ledger.record("A23", "operator schedules epoch 2", receipt, [
+        { address: registryAddr, name: "EpochScheduled" },
+        { address: registryAddr, name: "EpochAmountSet" },
+        { address: registryAddr, name: "EpochAmountSet" },
       ]);
 
-      const args = chain.parseEvent(receipt, tokenX.interface, tokenXAddr, "NextEpochArmed");
-      expect(args.epochId).to.equal(C.EPOCH_TWO);
-      expect(args.cap).to.equal(C.EPOCH_TWO_CAP);
-      expect(args.activatesAt).to.equal(activatesAt);
-      epochs.firstArming = activatesAt;
-      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(activatesAt);
+      const args = chain.parseEvent(receipt, registry.interface, registryAddr, "EpochScheduled");
+      expect(args.id).to.equal(C.EPOCH_TWO);
+      expect(args.startsAt).to.equal(epochs.twoStartsAt);
+      expect(args.endsAt).to.equal(epochs.twoEndsAt);
+      expect(await registry.epochCount()).to.equal(C.EPOCH_TWO);
+      expect(await registry.lastLiveId()).to.equal(C.EPOCH_TWO);
+      expect((await registry.epoch(C.EPOCH_TWO)).prevLiveId).to.equal(C.EPOCH_ONE);
     });
 
-    it("A24: the operator cancels the armed epoch", async function () {
-      const receipt = await chain.send(tokenX.connect(w.operator).cancelNextEpoch());
+    it("A24: the operator cancels epoch 2 before its margin", async function () {
+      const receipt = await chain.send(registry.connect(w.operator).cancelEpoch(C.EPOCH_TWO));
       ledger.record("A24", "operator cancels epoch 2", receipt, [
-        { address: tokenXAddr, name: "NextEpochCancelled" },
+        { address: registryAddr, name: "EpochCancelled" },
       ]);
 
-      const args = chain.parseEvent(receipt, tokenX.interface, tokenXAddr, "NextEpochCancelled");
-      expect(args.epochId).to.equal(C.EPOCH_TWO);
-      expect(args.cap).to.equal(C.EPOCH_TWO_CAP);
-      expect(args.activatesAt).to.equal(epochs.firstArming);
-      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(0n);
-    });
-
-    it("A25: the operator arms epoch 2 again", async function () {
-      const activatesAt = BigInt((await latestTimestamp()) + C.EPOCH_ROLLOVER_DELAY);
-      const receipt = await chain.send(
-        tokenX.connect(w.operator).armNextEpoch(C.EPOCH_TWO, C.EPOCH_TWO_CAP, activatesAt)
+      expect(chain.parseEvent(receipt, registry.interface, registryAddr, "EpochCancelled").id).to.equal(
+        C.EPOCH_TWO
       );
-      ledger.record("A25", "operator re-arms epoch 2", receipt, [
-        { address: tokenXAddr, name: "NextEpochArmed" },
+      expect((await registry.epoch(C.EPOCH_TWO)).cancelled).to.equal(true);
+      // `lastLiveId` falls back to epoch 1; the id 2 is spent for good.
+      expect(await registry.lastLiveId()).to.equal(C.EPOCH_ONE);
+      expect(await registry.epochCount()).to.equal(C.EPOCH_TWO);
+    });
+
+    it("A25: the operator schedules epoch 3 in its place, then adjusts it", async function () {
+      // Ids are never reused: the replacement for the cancelled epoch 2 is epoch 3.
+      const three = C.EPOCH_TWO + 1n;
+      epochs.threeStartsAt = epochs.oneEndsAt;
+      epochs.threeEndsAt = epochs.threeStartsAt + BigInt(C.EPOCH_LENGTH);
+      const scheduled = await chain.send(
+        registry
+          .connect(w.operator)
+          .scheduleEpoch(three, epochs.threeStartsAt, epochs.threeEndsAt, [overtureAddr], [C.EPOCH_TWO_OVTR])
+      );
+      ledger.record("A25", "operator schedules epoch 3", scheduled, [
+        { address: registryAddr, name: "EpochScheduled" },
+        { address: registryAddr, name: "EpochAmountSet" },
       ]);
-      epochs.secondArming = activatesAt;
-      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(activatesAt);
+      expect((await registry.epoch(three)).prevLiveId).to.equal(C.EPOCH_ONE);
+
+      // A quantity for a token the epoch did not name yet: it joins the epoch's token list.
+      const amount = await chain.send(
+        registry.connect(w.operator).setEpochAmount(three, assetAddr, C.EPOCH_TWO_ASSET)
+      );
+      ledger.record("A25", "operator adds the $ASSET quantity of epoch 3", amount, [
+        { address: registryAddr, name: "EpochAmountSet" },
+      ]);
+      expect(await registry.epochTokens(three)).to.deep.equal([overtureAddr, assetAddr]);
+
+      // The last live epoch's bounds may still move: two weeks instead of one.
+      epochs.threeEndsAt = epochs.threeStartsAt + 2n * BigInt(C.EPOCH_LENGTH);
+      const moved = await chain.send(
+        registry.connect(w.operator).updateEpochBounds(three, epochs.threeStartsAt, epochs.threeEndsAt)
+      );
+      ledger.record("A25", "operator stretches epoch 3", moved, [
+        { address: registryAddr, name: "EpochUpdated" },
+      ]);
+      const updated = chain.parseEvent(moved, registry.interface, registryAddr, "EpochUpdated");
+      expect(updated.endsAt).to.equal(epochs.threeEndsAt);
+      expect(await registry.lastLiveId()).to.equal(three);
     });
 
-    it("A26: the clock jumps past the boundary without activating anything", async function () {
-      const blockNumber = await rpc.advance(provider, C.EPOCH_ROLLOVER_OVERSHOOT);
-      ledger.recordBlock("A26", "clock jumps past the epoch boundary", blockNumber);
+    it("A26: the clock jumps into epoch 1, which is now frozen", async function () {
+      const now = await latestTimestamp();
+      const blockNumber = await rpc.advance(provider, Number(epochs.oneStartsAt) - now + 60);
+      ledger.recordBlock("A26", "clock jumps into epoch 1", blockNumber);
 
-      expect(BigInt(await latestTimestamp())).to.be.greaterThanOrEqual(epochs.secondArming);
-      // Lazy by design: the running epoch still reads stale, `effectiveEpoch()` does not.
-      expect(await tokenX.currentEpochId()).to.equal(C.EPOCH_ONE);
-      const effective = await tokenX.effectiveEpoch();
-      expect(effective.epochId).to.equal(C.EPOCH_TWO);
-      expect(effective.cap).to.equal(C.EPOCH_TWO_CAP);
+      expect(BigInt(await latestTimestamp())).to.be.greaterThanOrEqual(epochs.oneStartsAt);
+      expect(await registry.currentEpoch()).to.equal(C.EPOCH_ONE);
+      // Inside its own margin nothing about epoch 1 can change any more. Read-only proof:
+      // the refusal comes out of `eth_estimateGas`, so nothing is mined.
+      await chain.expectCustomError(
+        provider,
+        registry.connect(w.operator).setEpochAmount(C.EPOCH_ONE, overtureAddr, 0n),
+        registry.interface,
+        "StartTooSoon"
+      );
     });
 
-    it("A27: dave's claim rolls epoch 2 in and is charged to it", async function () {
+    it("A27: dave claims 2000 $OVTR inside epoch 1; the schedule bounds nothing", async function () {
       const amount = C.TOKENS(2_000);
-      const signature = await voucher("TokenXClaim", "dave", amount);
+      const signature = await voucher(overtureAddr, "dave", amount);
       const receipt = await chain.send(
-        distributor.connect(w.dave).claimTokenX(amount, C.FAR_DEADLINE, signature)
+        distributor.connect(w.dave).claim(overtureAddr, amount, C.FAR_DEADLINE, signature)
       );
-      ledger.record("A27", "dave's claim activates epoch 2", receipt, [
-        { address: tokenXAddr, name: "EpochActivated" },
-        { address: tokenXAddr, name: "Transfer" },
+      ledger.record("A27", "dave claims 2000 $OVTR", receipt, [
+        { address: overtureAddr, name: "Transfer" },
         { address: distributorAddr, name: "Claimed" },
       ]);
-
-      const activated = chain.parseEvent(receipt, tokenX.interface, tokenXAddr, "EpochActivated");
-      expect(activated.epochId).to.equal(C.EPOCH_TWO);
-      expect(activated.cap).to.equal(C.EPOCH_TWO_CAP);
-      expect(activated.scheduledFor).to.equal(epochs.secondArming);
-      expect(activated.activatedAt).to.equal(BigInt(await timestampOf(receipt.blockNumber)));
 
       const claimed = chain.parseEvent(receipt, distributor.interface, distributorAddr, "Claimed");
       expect(claimed.user).to.equal(w.dave.address);
       expect(claimed.paidAmount).to.equal(amount);
-
-      expect(await tokenX.currentEpochId()).to.equal(C.EPOCH_TWO);
-      expect(await tokenX.mintedInEpoch(C.EPOCH_TWO)).to.equal(amount);
-      expect(await tokenX.mintedInEpoch(C.EPOCH_ONE)).to.equal(C.TOKENS(1_750));
-      expect((await tokenX.pendingEpoch()).activatesAt).to.equal(0n);
+      expect(await overture.balanceOf(w.dave.address)).to.equal(amount);
+      // The claim touched the schedule in no way.
+      expect(await registry.epochAmount(C.EPOCH_ONE, overtureAddr)).to.equal(C.EPOCH_ONE_OVTR);
     });
 
-    it("A28: the ASSET reward leg is enabled through the timelock", async function () {
-      // Switching a whole reward leg on is owner-tier: visible on-chain for the delay before
-      // it can happen, like every other program decision.
-      const { executed } = await throughTimelock("A28", "enable the ASSET leg", {
-        target: distributorAddr,
-        fn: "setAssetClaimsEnabled",
-        args: [true],
-        expected: [{ address: distributorAddr, name: "AssetClaimsEnabled" }],
-      });
-      expect(
-        chain.parseEvent(executed, distributor.interface, distributorAddr, "AssetClaimsEnabled")
-          .enabled
-      ).to.equal(true);
-      expect(await distributor.assetClaimsEnabled()).to.equal(true);
-    });
-
-    it("A29: the treasury funds the distributor with 10000 ASSET", async function () {
-      const receipt = await chain.send(
-        asset.connect(w.deployer).transfer(distributorAddr, C.ASSET(10_000))
+    it("A28: $ASSET claims stay closed until the timelock opens them", async function () {
+      // Closed at launch: a perfectly valid $ASSET voucher is refused, and nothing is mined.
+      const amount = C.ASSET(3_000);
+      const signature = await voucher(assetAddr, "bob", amount);
+      const { headBefore, args } = await chain.expectCustomError(
+        provider,
+        distributor.connect(w.bob).claim(assetAddr, amount, C.FAR_DEADLINE, signature),
+        distributor.interface,
+        "TokenClaimsDisabled"
       );
-      ledger.record("A29", "fund the distributor", receipt, [
-        { address: assetAddr, name: "Transfer" },
+      expect(args.token).to.equal(assetAddr);
+      ledger.recordRevert("A28", "bob's $ASSET claim is refused", headBefore, "TokenClaimsDisabled");
+
+      // Opening a token's claims is owner-tier: visible on-chain for the delay before it can
+      // happen, like every other program decision.
+      const { executed } = await throughTimelock("A28", "open $ASSET claims", {
+        target: distributorAddr,
+        fn: "setClaimsEnabled",
+        args: [assetAddr, true],
+        expected: [{ address: distributorAddr, name: "RewardTokenUpdated" }],
+      });
+      const updated = chain.parseEvent(executed, distributor.interface, distributorAddr, "RewardTokenUpdated");
+      expect(updated.token).to.equal(assetAddr);
+      expect(updated.enabled).to.equal(true);
+      expect(updated.claimsEnabled).to.equal(true);
+      expect((await distributor.rewardToken(assetAddr)).claimsEnabled).to.equal(true);
+    });
+
+    it("A29: a third reward token joins through the timelock and pays once it is funded", async function () {
+      // The token: an Overture-shaped proxy deployed by scripts/add-reward-token.js (owner =
+      // the timelock, minter = the operator), recorded as RewardToken:TRW. The script sends
+      // nothing to the timelock; it prints the operation, which the multisig runs below.
+      const addRun = await runScript("scripts/add-reward-token.js", {
+        ...baseScriptEnv(),
+        REWARD_TOKEN_NAME: "Third Reward",
+        REWARD_TOKEN_SYMBOL: "TRW",
+        REWARD_TOKEN_CONDITIONAL: "0",
+        REWARD_TOKEN_CLAIMS_ENABLED: "1",
+        REWARD_TOKEN_MINTER: w.operator.address,
+      });
+      const entry = runner.registryEntry(registryFile, 31337, "RewardToken:TRW");
+      thirdTokenAddr = entry.address;
+      thirdToken = await contractAt("TokenOverture", thirdTokenAddr);
+      ledger.record("A29", "deploy the TRW implementation", await provider.getTransactionReceipt(entry.implementationTx));
+      // The proxy's deploy transaction carries its whole initialization, as S7 did for $OVTR.
+      ledger.record("A29", "deploy the TRW proxy", await provider.getTransactionReceipt(entry.deployTx), [
+        { address: thirdTokenAddr, name: "Upgraded" },
+        { address: thirdTokenAddr, name: "OwnershipTransferred" },
+        { address: thirdTokenAddr, name: "MinterChanged" },
+        { address: thirdTokenAddr, name: "Initialized" },
       ]);
-      expect(await asset.balanceOf(distributorAddr)).to.equal(C.ASSET(10_000));
+      expect(await thirdToken.owner()).to.equal(timelockAddr);
+      expect(await thirdToken.minter()).to.equal(w.operator.address);
+      expect(addRun.stdout).to.include("TIMELOCK_FN=addRewardToken");
+
+      const { executed } = await throughTimelock("A29", "add TRW as a reward token", {
+        target: distributorAddr,
+        fn: "addRewardToken",
+        args: [thirdTokenAddr, false, true],
+        expected: [{ address: distributorAddr, name: "RewardTokenAdded" }],
+      });
+      const added = chain.parseEvent(executed, distributor.interface, distributorAddr, "RewardTokenAdded");
+      expect(added.token).to.equal(thirdTokenAddr);
+      expect(added.symbol).to.equal("TRW");
+      expect(await distributor.isRewardToken(thirdTokenAddr)).to.equal(true);
+
+      // Registered but not funded: a valid voucher reverts with the exact shortfall, and
+      // nothing is paid partially. There is no cap anywhere; the balance is the only bound.
+      const amount = C.TOKENS(500);
+      const signature = await voucher(thirdTokenAddr, "alice", amount);
+      const { headBefore, args } = await chain.expectCustomError(
+        provider,
+        distributor.connect(w.alice).claim(thirdTokenAddr, amount, C.FAR_DEADLINE, signature),
+        distributor.interface,
+        "InsufficientFunds"
+      );
+      expect(args.token).to.equal(thirdTokenAddr);
+      expect(args.needed).to.equal(amount);
+      expect(args.balance).to.equal(0n);
+      ledger.recordRevert("A29", "alice's TRW claim reverts: not funded", headBefore, "InsufficientFunds");
+
+      // The operator funds it; the very same voucher pays.
+      ledger.record(
+        "A29",
+        "operator mints TRW into the distributor",
+        await chain.send(thirdToken.connect(w.operator).mint(distributorAddr, amount)),
+        [{ address: thirdTokenAddr, name: "Transfer" }]
+      );
+      const receipt = await chain.send(
+        distributor.connect(w.alice).claim(thirdTokenAddr, amount, C.FAR_DEADLINE, signature)
+      );
+      ledger.record("A29", "alice claims 500 TRW", receipt, [
+        { address: thirdTokenAddr, name: "Transfer" },
+        { address: distributorAddr, name: "Claimed" },
+      ]);
+      expect(await thirdToken.balanceOf(w.alice.address)).to.equal(amount);
+      expect(await distributor.claimed(thirdTokenAddr, w.alice.address)).to.equal(amount);
     });
 
     it("A30: bob claims 3000 ASSET", async function () {
       const amount = C.ASSET(3_000);
-      const signature = await voucher("AssetClaim", "bob", amount);
+      const signature = await voucher(assetAddr, "bob", amount);
       const balanceBefore = await asset.balanceOf(w.bob.address);
 
       const receipt = await chain.send(
-        distributor.connect(w.bob).claimAsset(amount, C.FAR_DEADLINE, signature)
+        distributor.connect(w.bob).claim(assetAddr, amount, C.FAR_DEADLINE, signature)
       );
       ledger.record("A30", "bob claims 3000 ASSET", receipt, [
         { address: assetAddr, name: "Transfer" },
@@ -1795,30 +2043,26 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(args.token).to.equal(assetAddr);
       expect(args.paidAmount).to.equal(amount);
       expect((await asset.balanceOf(w.bob.address)) - balanceBefore).to.equal(amount);
-      expect(await distributor.claimedAsset(w.bob.address)).to.equal(amount);
-      expect(await asset.balanceOf(distributorAddr)).to.equal(C.ASSET(7_000));
+      expect(await distributor.claimed(assetAddr, w.bob.address)).to.equal(amount);
+      expect(await asset.balanceOf(distributorAddr)).to.equal(C.FUND_ASSET - amount);
     });
 
-    it("A31: the multisig recovers 1000 ASSET of overfunding", async function () {
+    it("A31: the operator recovers 1000 ASSET of overfunding", async function () {
       const amount = C.ASSET(1_000);
       const balanceBefore = await asset.balanceOf(w.operator.address);
-      const receipt = await chain.send(distributor.connect(w.operator).recoverExcessAsset(amount));
+      const receipt = await chain.send(distributor.connect(w.operator).recoverExcess(assetAddr, amount));
       ledger.record("A31", "operator recovers 1000 ASSET", receipt, [
         { address: assetAddr, name: "Transfer" },
-        { address: distributorAddr, name: "ExcessAssetRecovered" },
+        { address: distributorAddr, name: "ExcessRecovered" },
       ]);
 
-      const args = chain.parseEvent(
-        receipt,
-        distributor.interface,
-        distributorAddr,
-        "ExcessAssetRecovered"
-      );
+      const args = chain.parseEvent(receipt, distributor.interface, distributorAddr, "ExcessRecovered");
+      expect(args.token).to.equal(assetAddr);
       expect(args.to).to.equal(w.operator.address);
       expect(args.amount).to.equal(amount);
       expect(args.timestamp).to.equal(BigInt(await timestampOf(receipt.blockNumber)));
       expect((await asset.balanceOf(w.operator.address)) - balanceBefore).to.equal(amount);
-      expect(await asset.balanceOf(distributorAddr)).to.equal(C.ASSET(6_000));
+      expect(await asset.balanceOf(distributorAddr)).to.equal(C.FUND_ASSET - C.ASSET(4_000));
     });
 
     it("A32: the guardian pauses claims", async function () {
@@ -1831,15 +2075,15 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 
     it("A33: bob's next claim reverts with ClaimsPaused and mines nothing", async function () {
       const amount = C.ASSET(4_000);
-      const signature = await voucher("AssetClaim", "bob", amount);
+      const signature = await voucher(assetAddr, "bob", amount);
       const { headBefore } = await chain.expectCustomError(
         provider,
-        distributor.connect(w.bob).claimAsset(amount, C.FAR_DEADLINE, signature),
+        distributor.connect(w.bob).claim(assetAddr, amount, C.FAR_DEADLINE, signature),
         distributor.interface,
         "ClaimsPaused"
       );
       ledger.recordRevert("A33", "bob's claim is refused", headBefore, "ClaimsPaused");
-      expect(await distributor.claimedAsset(w.bob.address)).to.equal(C.ASSET(3_000));
+      expect(await distributor.claimed(assetAddr, w.bob.address)).to.equal(C.ASSET(3_000));
     });
 
     it("A34: the guardian unpauses claims", async function () {
@@ -2016,23 +2260,29 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await vault.zapper()).to.equal(zapperAddr);
     });
 
-    it("A42: the operator cycles the minter off the distributor and back", async function () {
-      const away = await chain.send(tokenX.connect(w.operator).setMinter(w.signer2.address));
-      ledger.record("A42", "operator repoints the minter", away, [
-        { address: tokenXAddr, name: "MinterChanged" },
-      ]);
-      let args = chain.parseEvent(away, tokenX.interface, tokenXAddr, "MinterChanged");
-      expect(args.previousMinter).to.equal(distributorAddr);
+    it("A42: the Overture minter is cycled away and back through the timelock", async function () {
+      // `setMinter` is owner-tier on the Overture token proxy, so moving the minter is a
+      // scheduled, public operation: two full round trips, two different operation ids.
+      const { executed: away } = await throughTimelock("A42", "move the minter away", {
+        target: overtureAddr,
+        fn: "setMinter",
+        args: [w.signer2.address],
+        expected: [{ address: overtureAddr, name: "MinterChanged" }],
+      });
+      let args = chain.parseEvent(away, overture.interface, overtureAddr, "MinterChanged");
+      expect(args.previousMinter).to.equal(w.operator.address);
       expect(args.newMinter).to.equal(w.signer2.address);
 
-      const back = await chain.send(tokenX.connect(w.operator).setMinter(distributorAddr));
-      ledger.record("A42", "operator restores the minter", back, [
-        { address: tokenXAddr, name: "MinterChanged" },
-      ]);
-      args = chain.parseEvent(back, tokenX.interface, tokenXAddr, "MinterChanged");
+      const { executed: back } = await throughTimelock("A42", "restore the minter", {
+        target: overtureAddr,
+        fn: "setMinter",
+        args: [w.operator.address],
+        expected: [{ address: overtureAddr, name: "MinterChanged" }],
+      });
+      args = chain.parseEvent(back, overture.interface, overtureAddr, "MinterChanged");
       expect(args.previousMinter).to.equal(w.signer2.address);
-      expect(args.newMinter).to.equal(distributorAddr);
-      expect(await tokenX.minter()).to.equal(distributorAddr);
+      expect(args.newMinter).to.equal(w.operator.address);
+      expect(await overture.minter()).to.equal(w.operator.address);
     });
 
     it("A43: the guardian pauses rebalance", async function () {
@@ -2246,11 +2496,13 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
     });
 
-    it("mined nothing for any of the four reverted calls", async function () {
+    it("mined nothing for any of the six reverted calls", async function () {
       const reverts = ledger.reverts;
-      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A33", "A44", "A47"]);
+      expect(reverts.map((r) => r.step)).to.deep.equal(["A16", "A28", "A29", "A33", "A44", "A47"]);
       expect(reverts.map((r) => r.errorName)).to.deep.equal([
         "DepositsArePaused",
+        "TokenClaimsDisabled",
+        "InsufficientFunds",
         "ClaimsPaused",
         "RebalanceIsPaused",
         "TimelockUnexpectedOperationState",
@@ -2295,10 +2547,13 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         expect(warmup[i] - warmup[i - 1]).to.be.at.least(C.WARMUP_STEP_SECONDS);
       }
 
-      // A27 crossed the epoch boundary, so it is at least the rollover delay after A25.
-      const a25 = timestamps.find((t) => t.step === "A25").ts;
+      // S10 scheduled epoch 1 at least SCHEDULE_MARGIN ahead of the chain's clock, and A27
+      // claims inside it: the schedule was final long before the epoch began.
+      const s10 = timestamps.find((t) => t.step === "S10").ts;
       const a27 = timestamps.find((t) => t.step === "A27").ts;
-      expect(a27 - a25).to.be.at.least(C.EPOCH_ROLLOVER_OVERSHOOT);
+      expect(Number(epochs.oneStartsAt) - s10).to.be.at.least(C.REGISTRY_SCHEDULE_MARGIN);
+      expect(a27).to.be.at.least(Number(epochs.oneStartsAt));
+      expect(a27).to.be.below(Number(epochs.oneEndsAt));
     });
   });
 
@@ -2316,7 +2571,15 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 
     it("returns each contract's whole event sequence in ledger order", async function () {
       const ifaces = ifacesByAddress();
-      for (const address of [vaultAddr, zapperAddr, tokenXAddr, distributorAddr, timelockAddr]) {
+      for (const address of [
+        vaultAddr,
+        zapperAddr,
+        overtureAddr,
+        distributorAddr,
+        registryAddr,
+        timelockAddr,
+        thirdTokenAddr,
+      ]) {
         const decoded = chain.decodeLogs(await logsFrom(address), ifaces);
         const scenarioNames = decoded
           .filter((d) => d.blockNumber > deployToBlock)
@@ -2342,6 +2605,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         "GuardianSet",
         "OperatorSet",
         "ZapperSet",
+        "BonusEscrowSet",
         "DepositsPausedSet",
         "RebalancePausedSet",
         "TwapParamsSet",
@@ -2396,6 +2660,44 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(assetLeg.length).to.equal(1);
       expect(assetLeg[0].args.user).to.equal(w.bob.address);
       expect(assetLeg[0].args.paidAmount).to.equal(C.ASSET(3_000));
+
+      // One topic per token, one ledger per token: the three tokens never mix.
+      const overtureLeg = chain.decodeLogs(
+        await logsFrom(distributorAddr, { topics: [topic, null, chain.addressTopic(overtureAddr)] }),
+        ifaces
+      );
+      expect(overtureLeg.map((l) => l.args.user)).to.deep.equal([
+        w.carol.address,
+        w.carol.address,
+        w.dave.address,
+      ]);
+      const thirdLeg = chain.decodeLogs(
+        await logsFrom(distributorAddr, { topics: [topic, null, chain.addressTopic(thirdTokenAddr)] }),
+        ifaces
+      );
+      expect(thirdLeg.map((l) => l.args.user)).to.deep.equal([w.alice.address]);
+    });
+
+    it("filters the schedule by the indexed epoch id and by the indexed token", async function () {
+      const scheduledTopic = ethers.id("EpochScheduled(uint256,uint64,uint64)");
+      const amountTopic = ethers.id("EpochAmountSet(uint256,address,uint256)");
+      const ifaces = ifacesByAddress();
+
+      // Three ids were issued — 1, 2 (cancelled) and 3 — and every one of them is in the log.
+      const scheduled = chain.decodeLogs(await logsFrom(registryAddr, { topics: [scheduledTopic] }), ifaces);
+      expect(scheduled.map((l) => l.args.id)).to.deep.equal([C.EPOCH_ONE, C.EPOCH_TWO, C.EPOCH_TWO + 1n]);
+
+      const forEpochThree = chain.decodeLogs(
+        await logsFrom(registryAddr, { topics: [amountTopic, chain.uintTopic(C.EPOCH_TWO + 1n)] }),
+        ifaces
+      );
+      expect(forEpochThree.map((l) => l.args.token)).to.deep.equal([overtureAddr, assetAddr]);
+
+      const assetAmounts = chain.decodeLogs(
+        await logsFrom(registryAddr, { topics: [amountTopic, null, chain.addressTopic(assetAddr)] }),
+        ifaces
+      );
+      expect(assetAmounts.map((l) => l.args.id)).to.deep.equal([C.EPOCH_ONE, C.EPOCH_TWO, C.EPOCH_TWO + 1n]);
     });
 
     it("filters Rebalanced by the indexed old tokenId", async function () {
@@ -2429,7 +2731,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     it("returns the same logs in seven-block chunks as in one range", async function () {
       const from = ledger.firstBlock;
       const to = await head();
-      const addresses = [vaultAddr, zapperAddr, tokenXAddr, distributorAddr];
+      const addresses = [vaultAddr, zapperAddr, overtureAddr, distributorAddr, registryAddr];
 
       const whole = await rpc.getLogs(provider, { address: addresses, fromBlock: from, toBlock: to });
 
@@ -2582,8 +2884,11 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     return {
       [vaultAddr.toLowerCase()]: vault.interface,
       [zapperAddr.toLowerCase()]: zapper.interface,
-      [tokenXAddr.toLowerCase()]: tokenX.interface,
+      [overtureAddr.toLowerCase()]: overture.interface,
       [distributorAddr.toLowerCase()]: distributor.interface,
+      [registryAddr.toLowerCase()]: registry.interface,
+      // The third reward token is an Overture-shaped proxy: the same ABI decodes it.
+      ...(thirdTokenAddr ? { [thirdTokenAddr.toLowerCase()]: overture.interface } : {}),
       [timelockAddr.toLowerCase()]: timelock.interface,
       [poolAddr.toLowerCase()]: pool.interface,
       [assetAddr.toLowerCase()]: asset.interface,
