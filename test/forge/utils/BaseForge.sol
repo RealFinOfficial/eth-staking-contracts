@@ -6,6 +6,10 @@ import {Profiles} from "./Profiles.sol";
 
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {LPEpochRegistry} from "../../../contracts/lp-staking/LPEpochRegistry.sol";
+import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
+import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
+import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 
 /**
@@ -60,13 +64,17 @@ abstract contract BaseForge is Test {
     uint256 internal constant FAR_DEADLINE = 10 ** 12;
     uint128 internal constant MAX_UINT128 = type(uint128).max;
 
-    /// @dev TokenX branding is a deploy-time decision; the Hardhat suites' placeholder is reused.
-    string internal constant TOKENX_NAME = "Token X";
-    string internal constant TOKENX_SYMBOL = "TKX";
+    /// @dev The Overture token's launch branding (LP_OVERTURE_NAME / LP_OVERTURE_SYMBOL defaults).
+    string internal constant OVERTURE_NAME = "Overture";
+    string internal constant OVERTURE_SYMBOL = "OVTR";
 
-    /// @dev Epoch armed by the harness. Production arms this through LP_EPOCH_ID/LP_EPOCH_CAP.
-    uint256 internal constant EPOCH_ONE = 1;
-    uint256 internal constant EPOCH_ONE_CAP = 1e24; // 1,000,000 TokenX
+    /// @dev EIP-712 type of the one voucher, re-declared so a change to the contract fails a test.
+    bytes32 internal constant REWARD_CLAIM_TYPEHASH =
+        keccak256("RewardClaim(address token,address user,uint256 cumulativeAmount,uint256 deadline)");
+
+    /// @dev What each harness funds the distributor with, per reward token, before any test runs.
+    ///      The distributor pays out of its balance; nothing is minted at claim time.
+    uint256 internal constant DISTRIBUTOR_FUNDING = 10_000_000e18;
 
     // ──────────────────────── Profile ──────────────────────────
 
@@ -119,25 +127,127 @@ abstract contract BaseForge is Test {
     // ──────────────────────── Proxy deployment ─────────────────
 
     /**
-     * @notice Deploys the distributor the way production does: an implementation carrying the
-     *         two immutables, then an {LPProxy} whose constructor delegatecalls `initialize`.
+     * @notice Deploys the distributor the way production does: a constructor-less implementation,
+     *         then an {LPProxy} whose constructor delegatecalls `initialize` with the launch tokens.
      * @dev Lives on this rung rather than on one harness because BOTH {LocalHarness} and
      *      {ForkHarness} need the identical two-transaction shape, and a test that deploys a
      *      bare implementation instead would be testing a contract nobody deploys.
      */
     function _deployDistributorProxy(
-        address tokenX_,
-        address asset_,
         address owner_,
         address guardian_,
         address operator_,
-        address signer_
+        address signer_,
+        IRewardsDistributor.RewardTokenInit[] memory tokens_
     ) internal returns (RewardsDistributor) {
-        RewardsDistributor impl = new RewardsDistributor(tokenX_, asset_);
+        RewardsDistributor impl = new RewardsDistributor();
         LPProxy proxy = new LPProxy(
-            address(impl), abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, operator_, signer_))
+            address(impl),
+            abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, operator_, signer_, tokens_))
         );
         return RewardsDistributor(address(proxy));
+    }
+
+    /**
+     * @notice The launch reward-token list the deploy script passes: $ASSET conditional (claims
+     *         per `assetClaimsEnabled`, closed at launch) and $OVTR unconditional with claims open.
+     */
+    function _launchRewardTokens(address asset_, bool assetClaimsEnabled, address overture_)
+        internal
+        pure
+        returns (IRewardsDistributor.RewardTokenInit[] memory tokens_)
+    {
+        tokens_ = new IRewardsDistributor.RewardTokenInit[](2);
+        tokens_[0] =
+            IRewardsDistributor.RewardTokenInit({token: asset_, conditional: true, claimsEnabled: assetClaimsEnabled});
+        tokens_[1] = IRewardsDistributor.RewardTokenInit({token: overture_, conditional: false, claimsEnabled: true});
+    }
+
+    /// @notice Deploys the Overture token the way production does: implementation, then a proxy.
+    function _deployOvertureProxy(string memory name_, string memory symbol_, address owner_, address minter_)
+        internal
+        returns (TokenOverture)
+    {
+        TokenOverture impl = new TokenOverture();
+        LPProxy proxy =
+            new LPProxy(address(impl), abi.encodeCall(TokenOverture.initialize, (name_, symbol_, owner_, minter_)));
+        return TokenOverture(address(proxy));
+    }
+
+    /// @notice Deploys the epoch registry the way production does: implementation bound to the
+    ///         distributor, then a proxy.
+    function _deployRegistryProxy(address distributor_, address owner_, address operator_)
+        internal
+        returns (LPEpochRegistry)
+    {
+        LPEpochRegistry impl = new LPEpochRegistry(distributor_);
+        LPProxy proxy = new LPProxy(address(impl), abi.encodeCall(LPEpochRegistry.initialize, (owner_, operator_)));
+        return LPEpochRegistry(address(proxy));
+    }
+
+    /// @notice Every argument {_deployZapperProxy} needs, in one struct (stack depth — see
+    ///         {VaultProxyParams}).
+    struct ZapperProxyParams {
+        address vault;
+        address positionManager;
+        address pool;
+        address token0;
+        address token1;
+        uint24 fee;
+        address swapRouter;
+        address usdc;
+        address asset;
+        address owner;
+        address operator;
+        uint32 twapWindow;
+        uint24 maxDeviationTicks;
+    }
+
+    /// @notice Deploys the zapper the way production does: implementation carrying the nine
+    ///         immutables (and running the live pool triple check), then a proxy.
+    function _deployZapperProxy(ZapperProxyParams memory p) internal returns (LPZapper) {
+        address impl = _deployZapperImpl(p);
+        LPProxy proxy = new LPProxy(
+            impl, abi.encodeCall(LPZapper.initialize, (p.owner, p.operator, p.twapWindow, p.maxDeviationTicks))
+        );
+        return LPZapper(address(proxy));
+    }
+
+    /// @dev The zapper implementation's `new`, in a frame of its own — the same build
+    ///      requirement as {_deployVaultImpl}.
+    function _deployZapperImpl(ZapperProxyParams memory p) private returns (address) {
+        return address(
+            new LPZapper(p.vault, p.positionManager, p.pool, p.token0, p.token1, p.fee, p.swapRouter, p.usdc, p.asset)
+        );
+    }
+
+    // ──────────────────────── Voucher digest ───────────────────
+
+    /// @dev EIP-712 domain separator rebuilt from what `distributor_` reports (ERC-5267).
+    function _domainSeparatorOf(RewardsDistributor distributor_) internal view returns (bytes32) {
+        (, string memory name_, string memory version_, uint256 chainId_, address verifying_,,) =
+            distributor_.eip712Domain();
+        return keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(name_)),
+                keccak256(bytes(version_)),
+                chainId_,
+                verifying_
+            )
+        );
+    }
+
+    /// @dev The digest `claim` recovers the signer from, rebuilt off-chain.
+    function _rewardClaimDigest(
+        RewardsDistributor distributor_,
+        address token,
+        address user,
+        uint256 cumulativeAmount,
+        uint256 deadline
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(REWARD_CLAIM_TYPEHASH, token, user, cumulativeAmount, deadline));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparatorOf(distributor_), structHash));
     }
 
     /**

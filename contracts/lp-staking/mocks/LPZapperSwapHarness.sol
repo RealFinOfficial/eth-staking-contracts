@@ -19,9 +19,10 @@ import "../LPZapper.sol";
  *  branch instead of an unexecuted one.
  *
  *  Nothing else is changed: the zap flow, the refunds and the admin surface are inherited
- *  untouched, and the constructor's checks run exactly as they do in production. Like the
- *  vault's harness it is deployed BARE (no proxy, initializers disabled): the branch under
- *  test fires before any namespaced storage is read.
+ *  untouched, and the constructor's checks run exactly as they do in production. Its
+ *  initializers are disabled like any implementation's, so the tests put it behind an
+ *  `LPProxy` and initialize it: the positive-amount swap reads the TWAP window, which a bare,
+ *  never-initialized implementation would hold at zero.
  */
 contract LPZapperSwapHarness is LPZapper {
     constructor(

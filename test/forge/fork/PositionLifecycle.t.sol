@@ -277,7 +277,7 @@ contract PositionLifecycleTest is ForkHarness {
         vm.prank(multisig);
         zapper.rescuePosition(tokenId);
 
-        assertEq(npm.ownerOf(tokenId), multisig, "the zapper's rescue must also land on the owner multisig");
+        assertEq(npm.ownerOf(tokenId), multisig, "the zapper's rescue must also land on the operator multisig");
     }
 
     function test_ZapperSweep_RecoversStrayTokens() public {
@@ -298,12 +298,12 @@ contract PositionLifecycleTest is ForkHarness {
         assertEq(IERC20Like(profile.usdc).balanceOf(address(zapper)), 0, "and clear the zapper");
     }
 
-    function test_ZapperSweep_IsOwnerOnlyAndRejectsTheZeroRecipient() public {
+    function test_ZapperSweep_IsOperatorOnlyAndRejectsTheZeroRecipient() public {
         vm.prank(alice);
         IERC20Like(profile.usdc).transfer(address(zapper), 10e6);
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(LPZapper.NotOperator.selector, alice, multisig));
         zapper.sweep(profile.usdc, 10e6, alice);
 
         vm.prank(multisig);

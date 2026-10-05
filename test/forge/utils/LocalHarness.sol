@@ -3,8 +3,9 @@ pragma solidity 0.8.28;
 
 import {BaseForge} from "./BaseForge.sol";
 
-import {TokenX} from "../../../contracts/lp-staking/TokenX.sol";
+import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {LPEpochRegistry} from "../../../contracts/lp-staking/LPEpochRegistry.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper, PermitData} from "../../../contracts/lp-staking/LPZapper.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
@@ -17,7 +18,7 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
 
 /**
  * @title LocalHarness
- * @notice Determinism rung: the four production contracts against the repo's own mocks, no
+ * @notice Determinism rung: the five production contracts against the repo's own mocks, no
  *         fork and no RPC.
  *
  *  This is the branch-coverage tier. Every `>` / `>=` boundary, every revert selector and
@@ -27,17 +28,19 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
  *  Uniswap behaviour belongs in {ForkHarness}, not here.
  *
  *  Harness-local divergences from production, all deliberate:
- *    * The test contract stays the owner of all four contracts, and is ALSO the `guardian`
- *      AND the `operator` of the two proxies (the vault and the distributor). Production
- *      splits all three: the owner is a timelock, the guardian is a hot pause-only key and
- *      the operator is a multisig. Collapsing them here keeps every admin call in this tier
- *      callable without a prank; the files where the split itself is the subject
- *      ({AccessControlTest}, {VaultBranchesTest}, {DistributorBranchesTest}) build a second
- *      proxy with three distinct roles through {BaseForge-_deployVaultProxy} and
- *      {BaseForge-_deployDistributorProxy}, using {multisig} as the guardian and
- *      {operatorSafe} as the operator. Production also transfers ownership to LP_MULTISIG at
- *      the end of the deploy script; the access-control file re-creates that split explicitly
- *      where it is the subject.
+ *    * The test contract is the owner of all five proxies, the `guardian` and `operator`
+ *      of the vault and the distributor, the operator of the registry and the zapper, and the
+ *      Overture token's minter. Production splits these: the owner is a timelock, the guardian
+ *      is a hot pause-only key and the operator (= the minter) is a multisig. Collapsing them
+ *      here keeps every admin call in this tier callable without a prank; the files where the
+ *      split itself is the subject ({AccessControlTest}, {VaultBranchesTest},
+ *      {DistributorBranchesTest}) build second proxies with distinct roles, using {multisig}
+ *      as the guardian and {operatorSafe} as the operator.
+ *    * The distributor is registered with the launch list: $ASSET conditional with claims
+ *      CLOSED (as at launch) and $OVTR with claims open. A test that claims $ASSET opens it
+ *      with `distributor.setClaimsEnabled(address(asset), true)` first. Both tokens are
+ *      pre-funded into the distributor ({DISTRIBUTOR_FUNDING} each): the harness mints $OVTR
+ *      into it as the minter and transfers $ASSET into it, exactly as the operator does.
  *    * `twapWindow` is {MIN_TWAP_WINDOW} (300), which is also the production default, so a
  *      test that warps past a window warps five minutes.
  *    * The pool mock reports spot == TWAP == tick 0, so the guard passes unless a test
@@ -62,8 +65,9 @@ abstract contract LocalHarness is BaseForge {
 
     // ──────────────────────── The stack ────────────────────────
 
-    TokenX internal tokenX;
+    TokenOverture internal overture;
     RewardsDistributor internal distributor;
+    LPEpochRegistry internal registry;
     LPStakingVault internal vault;
     LPZapper internal zapper;
 
@@ -156,10 +160,15 @@ abstract contract LocalHarness is BaseForge {
     }
 
     function _deployStack() private {
-        tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
+        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), address(this));
         distributor = _deployDistributorProxy(
-            address(tokenX), address(asset), address(this), address(this), address(this), voucherSigner
+            address(this),
+            address(this),
+            address(this),
+            voucherSigner,
+            _launchRewardTokens(address(asset), false, address(overture))
         );
+        registry = _deployRegistryProxy(address(distributor), address(this), address(this));
         // `zapper_` is left at zero and set by `setZapper` below: this harness IS the owner,
         // so it can. The deploy script cannot — its proxies are born owned by the timelock —
         // and pre-computes the address instead; {VaultBranchesTest} keeps one test on exactly
@@ -176,24 +185,25 @@ abstract contract LocalHarness is BaseForge {
                 500
             )
         );
-        zapper = new LPZapper(
-            address(vault),
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+        zapper = _deployZapperProxy(
+            ZapperProxyParams({
+                vault: address(vault),
+                positionManager: address(npmMock),
+                pool: address(poolMock),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: address(routerMock),
+                usdc: address(usdcToken),
+                asset: address(asset),
+                owner: address(this),
+                operator: address(this),
+                twapWindow: MIN_TWAP_WINDOW,
+                maxDeviationTicks: 500
+            })
         );
 
-        tokenX.setMinter(address(distributor));
         vault.setZapper(address(zapper));
-        tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP);
     }
 
     function _fundActors() private {
@@ -203,8 +213,10 @@ abstract contract LocalHarness is BaseForge {
             usdcToken.transfer(users[i], USER_USDC);
             vm.deal(users[i], 100 ether);
         }
-        // Pre-funds the ASSET leg so `claimAsset` has something to pay out.
-        asset.transfer(address(distributor), 10_000_000e18);
+        // Pre-funds both reward tokens, the way the operator does: $OVTR minted INTO the
+        // distributor (the harness is the minter), $ASSET transferred into it.
+        overture.mint(address(distributor), DISTRIBUTOR_FUNDING);
+        asset.transfer(address(distributor), DISTRIBUTOR_FUNDING);
     }
 
     // ──────────────────────── Position helpers ─────────────────
@@ -259,30 +271,26 @@ abstract contract LocalHarness is BaseForge {
     // ──────────────────────── Signing helpers ──────────────────
 
     function _distributorDomainSeparator() internal view returns (bytes32) {
-        (, string memory name_, string memory version_, uint256 chainId_, address verifying_,,) =
-            distributor.eip712Domain();
-        return keccak256(
-            abi.encode(
-                EIP712_DOMAIN_TYPEHASH, keccak256(bytes(name_)), keccak256(bytes(version_)), chainId_, verifying_
-            )
-        );
+        return _domainSeparatorOf(distributor);
     }
 
-    function _voucherDigest(bytes32 typehash, address user, uint256 cumulativeAmount, uint256 deadline)
+    /// @dev The digest `distributor.claim(token, ...)` recovers the signer from.
+    function _voucherDigest(address token, address user, uint256 cumulativeAmount, uint256 deadline)
         internal
         view
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(typehash, user, cumulativeAmount, deadline));
-        return keccak256(abi.encodePacked("\x19\x01", _distributorDomainSeparator(), structHash));
+        return _rewardClaimDigest(distributor, token, user, cumulativeAmount, deadline);
     }
 
-    function _signVoucher(uint256 pk, bytes32 typehash, address user, uint256 cumulativeAmount, uint256 deadline)
+    /// @notice Signs a `RewardClaim` voucher with an arbitrary key — {voucherSignerPk} for a valid
+    ///         one, anything else to prove the rejection path.
+    function _signVoucher(uint256 pk, address token, address user, uint256 cumulativeAmount, uint256 deadline)
         internal
         view
         returns (bytes memory)
     {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _voucherDigest(typehash, user, cumulativeAmount, deadline));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _voucherDigest(token, user, cumulativeAmount, deadline));
         return abi.encodePacked(r, s, v);
     }
 

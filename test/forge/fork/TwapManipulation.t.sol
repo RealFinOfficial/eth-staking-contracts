@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {ForkHarness} from "../utils/ForkHarness.sol";
 import {TwapGuard, SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
+import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
+import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
 
 /**
  * @notice Why this file exists: the spot-vs-TWAP guard is the only on-chain manipulation
@@ -384,13 +386,15 @@ contract TwapManipulationTest is ForkHarness {
         assertEq(zapper.maxTwapDeviationTicks(), profile.maxDevTicks, "the zapper's ceiling is untouched");
     }
 
-    function test_Guard_OnlyTheOwnerCanRetuneIt() public {
+    /// @dev Both guards are retuned by the OPERATOR multisig (immediate lever), on the vault and
+    ///      on the zapper proxy alike; anyone else is turned away with the operator-tier error.
+    function test_Guard_OnlyTheOperatorCanRetuneIt() public {
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, alice, multisig));
         vault.setTwapParams(600, 250);
 
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(LPZapper.NotOperator.selector, alice, multisig));
         zapper.setTwapParams(600, 250);
     }
 }

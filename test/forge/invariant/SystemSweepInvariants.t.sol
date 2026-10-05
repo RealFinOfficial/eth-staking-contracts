@@ -13,8 +13,8 @@ import {MockSwapRouter} from "../../../contracts/lp-staking/mocks/MockSwapRouter
 
 /**
  * @notice Bounded actor driving the WHOLE stack at once — zapper, vault, distributor and
- *         token — through zaps, direct stakes, exits, swap-bearing re-ranges, reward claims
- *         and both owner recovery hatches, in any order.
+ *         reward token — through zaps, direct stakes, exits, swap-bearing re-ranges, $OVTR
+ *         claims and both operator recovery hatches, in any order.
  *
  *  This is the campaign behind the system-wide sweep: the three facts asserted after every
  *  single call are the ones every individual test also ends on, and the point of driving them
@@ -34,6 +34,7 @@ struct Wiring {
     LPStakingVault vault;
     LPZapper zapper;
     RewardsDistributor distributor;
+    address rewardToken;
     MockPositionManager npm;
     MockSwapRouter router;
     MockERC20Permit asset;
@@ -48,6 +49,8 @@ contract SystemSweepHandler is Test {
     LPStakingVault internal immutable vault;
     LPZapper internal immutable zapper;
     RewardsDistributor internal immutable distributor;
+    /// @dev The reward token claimed in the sequence: $OVTR, whose claims are open at launch.
+    address internal immutable rewardToken;
     MockPositionManager internal immutable npm;
     MockSwapRouter internal immutable router;
     MockERC20Permit internal immutable asset;
@@ -86,6 +89,7 @@ contract SystemSweepHandler is Test {
         vault = w.vault;
         zapper = w.zapper;
         distributor = w.distributor;
+        rewardToken = w.rewardToken;
         npm = w.npm;
         router = w.router;
         asset = w.asset;
@@ -163,9 +167,10 @@ contract SystemSweepHandler is Test {
         _claimFor(actors[bound(actorSeed, 0, actors.length - 1)], bound(deltaSeed, 1, MAX_CLAIM_DELTA));
     }
 
-    /// @dev The owner's dust hatch on the zapper. The zapper holds nothing at rest, so this
-    ///      is the zero-amount arm — which is exactly the shape the audit notes record as
-    ///      permitted here and refused by `recoverExcessAsset`.
+    /// @dev The operator's dust hatch on the zapper (operator tier since the zapper became a
+    ///      proxy; the local harness's operator is `protocolOwner`). The zapper holds nothing at
+    ///      rest, so this is the zero-amount arm — which is exactly the shape the audit notes
+    ///      record as permitted here and refused by `recoverExcess`.
     function sweepZapper(uint256 tokenSeed) external {
         calls++;
         _prime();
@@ -179,7 +184,7 @@ contract SystemSweepHandler is Test {
         } catch {}
     }
 
-    /// @dev The treasury hatch on the distributor, which moves ASSET the reward float owns.
+    /// @dev The treasury hatch on the distributor, which moves $ASSET the distributor holds.
     ///      It is an OPERATOR call, not an owner call; the local harness gives the distributor
     ///      the same address for all three roles, so `protocolOwner` is also its operator here.
     function recoverDistributorAsset(uint256 amountSeed) external {
@@ -190,7 +195,7 @@ contract SystemSweepHandler is Test {
         if (balance == 0) return;
 
         vm.prank(distributor.operator());
-        try distributor.recoverExcessAsset(bound(amountSeed, 1, balance)) {} catch {}
+        try distributor.recoverExcess(address(asset), bound(amountSeed, 1, balance)) {} catch {}
     }
 
     // ──────────────────────── Views for the invariants ─────────
@@ -244,12 +249,13 @@ contract SystemSweepHandler is Test {
 
     function _claimFor(address actor, uint256 delta) private {
         uint256 cumulative = entitlement[actor] + delta;
-        bytes32 structHash = keccak256(abi.encode(distributor.TOKENX_CLAIM_TYPEHASH(), actor, cumulative, FAR_DEADLINE));
+        bytes32 structHash =
+            keccak256(abi.encode(distributor.REWARD_CLAIM_TYPEHASH(), rewardToken, actor, cumulative, FAR_DEADLINE));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, digest);
 
         vm.prank(actor);
-        try distributor.claimTokenX(cumulative, FAR_DEADLINE, abi.encodePacked(r, s, v)) {
+        try distributor.claim(rewardToken, cumulative, FAR_DEADLINE, abi.encodePacked(r, s, v)) {
             entitlement[actor] = cumulative;
             claims++;
         } catch {}
@@ -303,6 +309,7 @@ contract SystemSweepInvariantsTest is LocalHarness {
                 vault: vault,
                 zapper: zapper,
                 distributor: distributor,
+                rewardToken: address(overture),
                 npm: npmMock,
                 router: routerMock,
                 asset: asset,

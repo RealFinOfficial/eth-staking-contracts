@@ -14,6 +14,7 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
 import {MockSwapRouter} from "../../../contracts/lp-staking/mocks/MockSwapRouter.sol";
 import {ContractStakerNoReceiver} from "../../../contracts/lp-staking/mocks/ContractStakerNoReceiver.sol";
+import {MockBonusEscrow} from "../../../contracts/lp-staking/mocks/MockBonusEscrow.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
@@ -167,16 +168,19 @@ contract VaultBranchesTest is LocalHarness {
      *      hand the proxy straight to the timelock with the zap path already open: nobody has
      *      to send an owner-tier `setZapper` at bootstrap. This reproduces the script's own
      *      move — pre-compute the CREATE address of a contract that does not exist yet, pass
-     *      it to `initialize`, and check the deployment lands exactly there.
+     *      it to `initialize`, and check the deployment lands exactly there. The zapper is a
+     *      proxy too, so the address the vault must point at is the zapper PROXY's: its
+     *      implementation is deployed first and takes one nonce of its own.
      */
     function test_Initialize_AcceptsAPreComputedZapperAddress() public {
         address impl = address(_vaultImplementation());
 
-        // The proxy is the NEXT deployment from this address, and the zapper the one after
-        // it — the same (deployer, nonce) arithmetic `hre.ethers.getCreateAddress` does in
-        // scripts/deploy-lp-staking.js, where every transaction carries an explicit nonce.
+        // The vault proxy is the NEXT deployment from this address, the zapper implementation
+        // the one after it and the zapper proxy the one after that — the same (deployer, nonce)
+        // arithmetic `hre.ethers.getCreateAddress` does in scripts/deploy-lp-staking.js, where
+        // every transaction carries an explicit nonce.
         uint64 nonce = vm.getNonce(address(this));
-        address predictedZapper = vm.computeCreateAddress(address(this), nonce + 1);
+        address predictedZapper = vm.computeCreateAddress(address(this), nonce + 2);
 
         LPStakingVault born = LPStakingVault(
             address(
@@ -190,22 +194,25 @@ contract VaultBranchesTest is LocalHarness {
             )
         );
 
-        LPZapper deployed = new LPZapper(
-            address(born),
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+        LPZapper deployed = _deployZapperProxy(
+            ZapperProxyParams({
+                vault: address(born),
+                positionManager: address(npmMock),
+                pool: address(poolMock),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: address(routerMock),
+                usdc: address(usdcToken),
+                asset: address(asset),
+                owner: address(this),
+                operator: operatorSafe,
+                twapWindow: MIN_TWAP_WINDOW,
+                maxDeviationTicks: 500
+            })
         );
 
-        assertEq(address(deployed), predictedZapper, "the zapper must land on the pre-computed address");
+        assertEq(address(deployed), predictedZapper, "the zapper proxy must land on the pre-computed address");
         assertEq(born.zapper(), address(deployed), "and the vault must have been born already pointing at it");
 
         // The proof that matters: the zap path is open with no `setZapper` transaction in
@@ -286,6 +293,8 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectEmit(false, false, false, true);
         emit LPStakingVault.ZapperSet(address(0), address(0xcafe));
         vm.expectEmit(false, false, false, true);
+        emit LPStakingVault.BonusEscrowSet(address(0), address(0));
+        vm.expectEmit(false, false, false, true);
         emit LPStakingVault.DepositsPausedSet(false);
         vm.expectEmit(false, false, false, true);
         emit LPStakingVault.RebalancePausedSet(false);
@@ -307,6 +316,7 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(fresh.guardian(), multisig, "the guardian must be what GuardianSet announced");
         assertEq(fresh.operator(), operatorSafe, "the operator must be what OperatorSet announced");
         assertEq(fresh.zapper(), address(0xcafe), "the zapper must be what ZapperSet announced");
+        assertEq(fresh.bonusEscrow(), address(0), "the escrow link must be what BonusEscrowSet announced");
         assertFalse(fresh.depositsPaused(), "the deposit switch must be what DepositsPausedSet announced");
         assertFalse(fresh.rebalancePaused(), "the rebalance switch must be what RebalancePausedSet announced");
         assertEq(fresh.twapWindow(), MIN_TWAP_WINDOW, "the window must be what TwapParamsSet announced");
@@ -366,6 +376,14 @@ contract VaultBranchesTest is LocalHarness {
         // APPENDED after them, so it opens slot 4 and the custody ledger did not move.
         uint256 slot4 = uint256(vm.load(address(vault), bytes32(uint256(expected) + 4)));
         assertEq(address(uint160(slot4)), address(this), "namespace slot 4 must be `operator`");
+
+        // `bonusEscrow` was appended after `operator`, so it opens slot 5 and nothing before it
+        // moved. Zero until the owner links an escrow; mainnet launches with zero.
+        assertEq(uint256(vm.load(address(vault), bytes32(uint256(expected) + 5))), 0, "slot 5 starts at zero");
+        MockBonusEscrow escrow = new MockBonusEscrow(address(vault));
+        vault.setBonusEscrow(address(escrow));
+        uint256 slot5 = uint256(vm.load(address(vault), bytes32(uint256(expected) + 5)));
+        assertEq(address(uint160(slot5)), address(escrow), "namespace slot 5 must be `bonusEscrow`");
     }
 
     /// @dev {TwapGuard}'s parameters have a namespace of their own, shared with the zapper.
@@ -378,7 +396,7 @@ contract VaultBranchesTest is LocalHarness {
         assertEq(uint32(packed), MIN_TWAP_WINDOW, "namespace slot 0 must start with `twapWindow`");
         assertEq(uint24(packed >> 32), 500, "`maxTwapDeviationTicks` must sit right after it");
 
-        // And the plain zapper reads the very same slot on its own storage.
+        // And the zapper proxy reads the very same slot on its own storage.
         uint256 zapperPacked = uint256(vm.load(address(zapper), expected));
         assertEq(uint32(zapperPacked), MIN_TWAP_WINDOW, "the zapper shares the namespace, not the storage");
     }

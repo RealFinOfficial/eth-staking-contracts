@@ -2,7 +2,6 @@
 pragma solidity 0.8.28;
 
 import {ForkHarness} from "../utils/ForkHarness.sol";
-import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
 import {IERC20Like} from "../utils/Interfaces.sol";
 
 /**
@@ -23,40 +22,45 @@ contract ReorgRewardTest is ForkHarness {
         _deployForkedStack();
     }
 
-    function test_Reorg_RollingBackAClaimRestoresTheLedgerAndTheSupply() public {
-        bytes memory sig =
-            _signVoucher(voucherSignerPk, distributor.TOKENX_CLAIM_TYPEHASH(), alice, AWARD, FAR_DEADLINE);
+    /// @dev $OVTR is paid by transfer out of the funded balance, so the rollback has to undo the
+    ///      ledger write AND the move between the two balances — and nothing else may have changed.
+    function test_Reorg_RollingBackAClaimRestoresTheLedgerAndBothBalances() public {
+        address ovtr = address(overture);
+        bytes memory sig = _signVoucher(voucherSignerPk, ovtr, alice, AWARD, FAR_DEADLINE);
+        uint256 floatBefore = overture.balanceOf(address(distributor));
+        uint256 supplyBefore = overture.totalSupply();
 
         uint256 snap = vm.snapshotState();
 
         vm.prank(alice);
-        distributor.claimTokenX(AWARD, FAR_DEADLINE, sig);
-        assertEq(distributor.claimedTokenX(alice), AWARD, "anti-vacuity: the claim must really have landed");
-        assertEq(tokenX.totalSupply(), AWARD, "anti-vacuity: the mint must really have happened");
+        distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig);
+        assertEq(distributor.claimed(ovtr, alice), AWARD, "anti-vacuity: the claim must really have landed");
+        assertEq(overture.balanceOf(alice), AWARD, "anti-vacuity: the payout must really have happened");
 
         vm.revertToState(snap);
 
-        assertEq(distributor.claimedTokenX(alice), 0, "the ledger must return to its pre-claim value");
-        assertEq(tokenX.totalSupply(), 0, "the minted supply must be undone with the block");
-        assertEq(tokenX.mintedInEpoch(EPOCH_ONE), 0, "the epoch tally must be undone too");
+        assertEq(distributor.claimed(ovtr, alice), 0, "the ledger must return to its pre-claim value");
+        assertEq(overture.balanceOf(alice), 0, "the claimer's balance must be undone with the block");
+        assertEq(overture.balanceOf(address(distributor)), floatBefore, "and the distributor's balance restored");
+        assertEq(overture.totalSupply(), supplyBefore, "the supply never moved: claims mint nothing");
     }
 
     /// @dev The voucher is not consumed by a rolled-back claim, so the replay after a reorg
     ///      pays exactly the same amount — no double-pay, no lost entitlement.
     function test_Reorg_ReplayingAClaimAfterARollbackPaysTheSameAmountOnce() public {
-        bytes memory sig =
-            _signVoucher(voucherSignerPk, distributor.TOKENX_CLAIM_TYPEHASH(), alice, AWARD, FAR_DEADLINE);
+        address ovtr = address(overture);
+        bytes memory sig = _signVoucher(voucherSignerPk, ovtr, alice, AWARD, FAR_DEADLINE);
 
         uint256 snap = vm.snapshotState();
         vm.prank(alice);
-        uint256 firstPaid = distributor.claimTokenX(AWARD, FAR_DEADLINE, sig);
+        uint256 firstPaid = distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig);
         vm.revertToState(snap);
 
         vm.prank(alice);
-        uint256 replayPaid = distributor.claimTokenX(AWARD, FAR_DEADLINE, sig);
+        uint256 replayPaid = distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig);
 
         assertEq(replayPaid, firstPaid, "the replayed claim must pay exactly what the orphaned one did");
-        assertEq(tokenX.balanceOf(alice), AWARD, "and the user must end up paid once, not twice");
+        assertEq(overture.balanceOf(alice), AWARD, "and the user must end up paid once, not twice");
     }
 
     function test_Reorg_RollingBackAStakeRestoresCustodyToTheStaker() public {
@@ -93,13 +97,12 @@ contract ReorgRewardTest is ForkHarness {
         assertEq(vault.stakerOf(newTokenId), address(0), "the id the orphaned block minted must be unknown again");
     }
 
-    /// @dev The ASSET leg moves real tokens rather than minting, so the rollback has to undo a
-    ///      transfer out of the distributor's balance as well as the ledger write.
+    /// @dev The real $ASSET: once its claims are opened, the rollback has to undo a transfer out
+    ///      of the distributor's balance as well as the ledger write.
     function test_Reorg_RollingBackAnAssetClaimRestoresBothBalances() public {
-        _fund(profile.asset, address(distributor), 1_000_000e18);
         vm.prank(multisig);
-        distributor.setAssetClaimsEnabled(true);
-        bytes memory sig = _signVoucher(voucherSignerPk, distributor.ASSET_CLAIM_TYPEHASH(), alice, AWARD, FAR_DEADLINE);
+        distributor.setClaimsEnabled(profile.asset, true);
+        bytes memory sig = _signVoucher(voucherSignerPk, profile.asset, alice, AWARD, FAR_DEADLINE);
 
         uint256 aliceBefore = IERC20Like(profile.asset).balanceOf(alice);
         uint256 distributorBefore = IERC20Like(profile.asset).balanceOf(address(distributor));
@@ -107,7 +110,7 @@ contract ReorgRewardTest is ForkHarness {
         uint256 snap = vm.snapshotState();
 
         vm.prank(alice);
-        distributor.claimAsset(AWARD, FAR_DEADLINE, sig);
+        distributor.claim(profile.asset, AWARD, FAR_DEADLINE, sig);
         assertEq(
             IERC20Like(profile.asset).balanceOf(alice) - aliceBefore,
             AWARD,
@@ -122,11 +125,12 @@ contract ReorgRewardTest is ForkHarness {
             distributorBefore,
             "the distributor's balance must be restored"
         );
-        assertEq(distributor.claimedAsset(alice), 0, "and the ASSET ledger must be back to zero");
+        assertEq(distributor.claimed(profile.asset, alice), 0, "and the $ASSET ledger must be back to zero");
     }
 
-    /// @dev A rolled-back OWNER action is undone too: nothing in the stack latches a
-    ///      parameter change outside ordinary storage.
+    /// @dev A rolled-back ADMIN action is undone too: nothing in the stack latches a parameter
+    ///      change outside ordinary storage. (`setTwapParams` is operator tier; the multisig is
+    ///      the operator on the fork.)
     function test_Reorg_RollingBackAnOwnerActionRestoresTheParameters() public {
         uint32 windowBefore = vault.twapWindow();
         uint24 devBefore = vault.maxTwapDeviationTicks();

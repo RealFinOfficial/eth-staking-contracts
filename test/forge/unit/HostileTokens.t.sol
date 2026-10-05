@@ -5,26 +5,36 @@ import {LocalHarness} from "../utils/LocalHarness.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
 import {MockSwapRouter} from "../../../contracts/lp-staking/mocks/MockSwapRouter.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
-import {FeeOnTransferToken, ReturnsFalseToken, BlocklistUSDC} from "../utils/attackers/HostileTokens.sol";
+import {
+    FeeOnTransferToken,
+    ReturnsFalseToken,
+    BlocklistUSDC,
+    ClaimReentrantToken,
+    DecimalsRevertsToken,
+    Bytes32SymbolToken
+} from "../utils/attackers/HostileTokens.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @notice Why this file exists: the stack takes its two pool tokens as immutable constructor
- *         arguments and its ASSET as an immutable on the distributor, so "what if the token
- *         misbehaves" is a deployment-time question with a permanent answer. `LPZapper.sweep`
- *         and `RewardsDistributor.recoverExcessAsset` additionally touch tokens nobody chose
- *         in advance.
+ *         arguments, so for the vault and the zapper "what if the token misbehaves" is a
+ *         deployment-time question with a permanent answer. The distributor is different since
+ *         v1: its REWARD tokens are proxy storage, and the owner (the timelock) can add one at
+ *         any time with `addRewardToken`. `LPZapper.sweep` and `RewardsDistributor.recoverExcess`
+ *         additionally touch tokens nobody chose in advance.
  *
  *  Each token below models one real class. None of them can appear as the live pair on a
  *  correct deployment — the constructors check the pool triple and the deploy script checks
- *  decimals — so these are answers to a reviewer's question, recorded as measurements rather
- *  than as arguments.
+ *  decimals — and `addRewardToken`'s NatSpec restricts reward tokens to plain ERC-20s, so these
+ *  are answers to a reviewer's question, recorded as measurements rather than as arguments.
  */
 contract HostileTokensTest is LocalHarness {
     uint256 internal constant FEE_BPS = 100; // 1% skimmed on every transfer
@@ -101,32 +111,100 @@ contract HostileTokensTest is LocalHarness {
         zapper.sweep(address(liar), 1_000e18, carol);
     }
 
-    /// @dev ...and this is the reward leg, where a silent failure would mark a claim paid.
-    function test_ReturnsFalse_ClaimAssetRevertsAndLeavesTheLedgerUntouched() public {
+    /// @dev ...and this is the reward side, where a silent failure would mark a claim paid. The
+    ///      token is added as a reward token through the owner, funded, and claimed.
+    function test_ReturnsFalse_ARewardClaimRevertsAndLeavesTheLedgerUntouched() public {
         ReturnsFalseToken liar = new ReturnsFalseToken();
-        RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(liar), address(this), address(this), address(this), voucherSigner
-        );
-        d.setAssetClaimsEnabled(true);
-        liar.mint(address(d), 1_000_000e18);
+        distributor.addRewardToken(address(liar), false, true);
+        liar.mint(address(distributor), 1_000_000e18);
 
-        bytes memory sig = _signAssetVoucherFor(d, alice, 1_000e18);
+        bytes memory sig = _signVoucher(voucherSignerPk, address(liar), alice, 1_000e18, FAR_DEADLINE);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(liar)));
-        d.claimAsset(1_000e18, FAR_DEADLINE, sig);
+        distributor.claim(address(liar), 1_000e18, FAR_DEADLINE, sig);
 
-        assertEq(d.claimedAsset(alice), 0, "a failed payout must never leave the ledger marked paid");
+        assertEq(
+            distributor.claimed(address(liar), alice), 0, "a failed payout must never leave the ledger marked paid"
+        );
     }
 
-    function test_ReturnsFalse_RecoverExcessAssetRevertsThroughSafeErc20() public {
+    function test_ReturnsFalse_RecoverExcessRevertsThroughSafeErc20() public {
         ReturnsFalseToken liar = new ReturnsFalseToken();
-        RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(liar), address(this), address(this), address(this), voucherSigner
-        );
-        liar.mint(address(d), 1_000e18);
+        liar.mint(address(distributor), 1_000e18);
 
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(liar)));
-        d.recoverExcessAsset(1_000e18);
+        distributor.recoverExcess(address(liar), 1_000e18);
+    }
+
+    // ──────────────────────── Non-plain reward tokens ──────────
+
+    /**
+     * @dev Fee-on-transfer is NOT a supported reward token (`addRewardToken` NatSpec). Measured,
+     *      so the consequence is known if one is added anyway: the ledger and the `Claimed` event
+     *      record the voucher's amount, while the claimer receives that amount minus the token's
+     *      fee. The distributor's own accounting is still exact — it sent what the ledger says.
+     */
+    function test_FeeOnTransfer_ARewardTokenPaysLessThanTheLedgerRecords() public {
+        FeeOnTransferToken fee = new FeeOnTransferToken("Fee Reward", "FEER", 18, FEE_BPS);
+        distributor.addRewardToken(address(fee), false, true);
+        fee.mint(address(distributor), 1_000_000e18);
+
+        bytes memory sig = _signVoucher(voucherSignerPk, address(fee), alice, 1_000e18, FAR_DEADLINE);
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit IRewardsDistributor.Claimed(alice, address(fee), 1_000e18, 1_000e18, block.timestamp);
+        vm.prank(alice);
+        uint256 paid = distributor.claim(address(fee), 1_000e18, FAR_DEADLINE, sig);
+
+        assertEq(paid, 1_000e18, "the distributor reports the voucher's delta as paid");
+        assertEq(distributor.claimed(address(fee), alice), 1_000e18, "and records it on the ledger");
+        assertEq(fee.balanceOf(alice), 990e18, "but the claimer receives the amount minus the token's 1% fee");
+        assertEq(fee.balanceOf(address(distributor)), 1_000_000e18 - 1_000e18, "the distributor sent the full amount");
+    }
+
+    /**
+     * @dev A reward token whose own transfer re-enters `claim` while the distributor is paying out
+     *      of it. The guard rejects the reentrant call with its own error, the outer claim
+     *      completes, and the claimer is paid exactly once.
+     */
+    function test_ReentrantTransfer_ARewardTokenCannotReenterClaim() public {
+        ClaimReentrantToken evil = new ClaimReentrantToken();
+        distributor.addRewardToken(address(evil), false, true);
+        evil.mint(address(distributor), 1_000_000e18);
+
+        bytes memory sig = _signVoucher(voucherSignerPk, address(evil), alice, 1_000e18, FAR_DEADLINE);
+        evil.arm(
+            address(distributor), abi.encodeCall(RewardsDistributor.claim, (address(evil), 1_000e18, FAR_DEADLINE, sig))
+        );
+
+        vm.prank(alice);
+        uint256 paid = distributor.claim(address(evil), 1_000e18, FAR_DEADLINE, sig);
+
+        assertEq(evil.attempts(), 1, "the payout transfer must really have re-entered");
+        assertFalse(evil.lastReenterSucceeded(), "the reentrant claim must be rejected");
+        assertEq(
+            evil.lastReturnData(),
+            abi.encodeWithSelector(ReentrancyGuard.ReentrancyGuardReentrantCall.selector),
+            "by the reentrancy guard's own error"
+        );
+        assertEq(paid, 1_000e18, "the outer claim completes");
+        assertEq(evil.balanceOf(alice), 1_000e18, "and the claimer is paid exactly once");
+    }
+
+    /// @dev `addRewardToken` reads `decimals()` and `symbol()`; a token that cannot answer either
+    ///      as a plain ERC-20 does is refused, and nothing is registered.
+    function test_Metadata_ATokenWhoseDecimalsRevertIsRefused() public {
+        DecimalsRevertsToken noDecimals = new DecimalsRevertsToken();
+        vm.expectRevert(bytes("no decimals"));
+        distributor.addRewardToken(address(noDecimals), false, true);
+        assertFalse(distributor.rewardToken(address(noDecimals)).registered, "nothing registered");
+    }
+
+    function test_Metadata_ABytes32SymbolTokenIsRefused() public {
+        Bytes32SymbolToken mkrLike = new Bytes32SymbolToken();
+        vm.expectRevert();
+        distributor.addRewardToken(address(mkrLike), false, true);
+        assertFalse(distributor.rewardToken(address(mkrLike)).registered, "nothing registered");
+        assertEq(distributor.rewardTokens().length, 2, "the list does not grow");
     }
 
     /// @dev The control arm: the same token telling the truth is accepted, so the assertions
@@ -157,24 +235,27 @@ contract HostileTokensTest is LocalHarness {
     }
 
     /// @dev A frozen claimer cannot be paid, and the whole claim reverts rather than marking
-    ///      the entitlement spent.
+    ///      the entitlement spent. A 6-decimal blocklisting token added as a reward token.
     function test_Blocklist_AFrozenClaimerCannotBePaidAndKeepsTheEntitlement() public {
         BlocklistUSDC blocked = new BlocklistUSDC();
-        RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(blocked), address(this), address(this), address(this), voucherSigner
-        );
-        d.setAssetClaimsEnabled(true);
-        blocked.mint(address(d), 1_000_000e6);
+        distributor.addRewardToken(address(blocked), false, true);
+        assertEq(distributor.rewardToken(address(blocked)).decimals, 6, "stored with its own 6 decimals");
+        blocked.mint(address(distributor), 1_000_000e6);
         blocked.setBlocked(alice, true);
 
-        bytes memory sig = _signAssetVoucherFor(d, alice, 1_000e6);
+        bytes memory sig = _signVoucher(voucherSignerPk, address(blocked), alice, 1_000e6, FAR_DEADLINE);
         vm.prank(alice);
         vm.expectRevert(bytes("USDC: recipient blocklisted"));
-        d.claimAsset(1_000e6, FAR_DEADLINE, sig);
+        distributor.claim(address(blocked), 1_000e6, FAR_DEADLINE, sig);
+        assertEq(distributor.claimed(address(blocked), alice), 0, "the entitlement is not marked spent");
 
         blocked.setBlocked(alice, false);
         vm.prank(alice);
-        assertEq(d.claimAsset(1_000e6, FAR_DEADLINE, sig), 1_000e6, "unfreezing must restore the same entitlement");
+        assertEq(
+            distributor.claim(address(blocked), 1_000e6, FAR_DEADLINE, sig),
+            1_000e6,
+            "unfreezing must restore the same entitlement"
+        );
     }
 
     /// @dev Freezing the VAULT itself bricks the whole rebalance — the `collect` leg trips
@@ -314,21 +395,5 @@ contract HostileTokensTest is LocalHarness {
 
     function _setPrincipal(MockPositionManager npm2, uint256 tokenId, uint256 p0, uint256 p1) private {
         npm2.setPrincipal(tokenId, p0, p1);
-    }
-
-    function _signAssetVoucherFor(RewardsDistributor target, address user, uint256 cumulative)
-        private
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(target.ASSET_CLAIM_TYPEHASH(), user, cumulative, FAR_DEADLINE));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparatorOf(target), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(voucherSignerPk, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
-    function _domainSeparatorOf(RewardsDistributor target) private view returns (bytes32) {
-        (, string memory n, string memory ver, uint256 cid, address verifying,,) = target.eip712Domain();
-        return keccak256(abi.encode(EIP712_DOMAIN_TYPEHASH, keccak256(bytes(n)), keccak256(bytes(ver)), cid, verifying));
     }
 }

@@ -8,6 +8,7 @@ import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol"
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
 import {LPZapperSwapHarness} from "../../../contracts/lp-staking/mocks/LPZapperSwapHarness.sol";
+import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {MaliciousNPM} from "../utils/attackers/MaliciousNPM.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
@@ -33,6 +34,11 @@ contract ZapperBranchesTest is LocalHarness {
     }
 
     // ──────────────────────── Constructor ──────────────────────
+    //
+    // The zapper is a UUPS proxy now. Its nine fixed references are immutables of the
+    // IMPLEMENTATION, so every check below fires on the implementation deploy, before any
+    // proxy exists — `_deployZapper` deploys exactly that bare implementation. The proxy-side
+    // initialisation (owner, operator, TWAP bounds) is covered by `ZapperUpgrade.t.sol`.
 
     function test_Constructor_RejectsAZeroVault() public {
         vm.expectRevert(LPZapper.ZeroAddress.selector);
@@ -103,10 +109,7 @@ contract ZapperBranchesTest is LocalHarness {
             FEE,
             address(routerMock),
             address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            address(asset)
         );
     }
 
@@ -457,7 +460,11 @@ contract ZapperBranchesTest is LocalHarness {
         assertEq(evilVault.stakerOf(live), alice, "the existing staker's record must survive the attempt");
     }
 
-    // ──────────────────────── Owner surface ────────────────────
+    // ──────────────────────── Operator surface ─────────────────
+    //
+    // `sweep`, `rescuePosition` and `setTwapParams` are the OPERATOR's immediate levers since
+    // the zapper became a proxy owned by the timelock. The harness holds both tiers, so the
+    // calls below need no prank; `ZapperUpgrade.t.sol` and `AccessControl.t.sol` split them.
 
     function test_Sweep_MovesTheNamedAmountAndEmitsIt() public {
         vm.prank(alice);
@@ -495,23 +502,23 @@ contract ZapperBranchesTest is LocalHarness {
         zapper.sweep(address(usdcToken), 1, carol);
     }
 
-    function test_Sweep_IsOwnerOnly() public {
+    function test_Sweep_IsOperatorOnly() public {
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(LPZapper.NotOperator.selector, alice, address(this)));
         zapper.sweep(address(usdcToken), 0, carol);
     }
 
-    function test_RescuePosition_SendsAStrayNftToTheOwnerAndIsOwnerOnly() public {
+    function test_RescuePosition_SendsAStrayNftToTheOperatorAndIsOperatorOnly() public {
         uint256 tokenId = _createPosition(alice, TICK_LOWER, TICK_UPPER, LIQUIDITY);
         vm.prank(alice);
         npmMock.transferFrom(alice, address(zapper), tokenId);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(LPZapper.NotOperator.selector, alice, address(this)));
         zapper.rescuePosition(tokenId);
 
         zapper.rescuePosition(tokenId);
-        assertEq(npmMock.ownerOf(tokenId), address(this), "the rescue must land on owner()");
+        assertEq(npmMock.ownerOf(tokenId), zapper.operator(), "the rescue must land on operator()");
     }
 
     function test_RescuePosition_RevertsWhenTheZapperDoesNotOwnTheToken() public {
@@ -568,9 +575,9 @@ contract ZapperBranchesTest is LocalHarness {
 
     /**
      * @dev N-1: the zapper cannot be renounced at all. An ownerless zapper could never be
-     *      retuned or swept, and `rescuePosition` would aim a stray NFT at address(0), so the
-     *      call reverts for the owner instead of merely being discouraged in a runbook — and
-     *      it stays `onlyOwner`, so a stranger is turned away by the ownership check first.
+     *      upgraded nor have its operator moved, so the call reverts for the owner instead of
+     *      merely being discouraged in a runbook — and it stays `onlyOwner`, so a stranger is
+     *      turned away by the ownership check first.
      */
     function test_RenounceOwnership_IsDisabledOnTheZapper() public {
         vm.expectRevert(LPZapper.RenounceDisabled.selector);
@@ -581,9 +588,11 @@ contract ZapperBranchesTest is LocalHarness {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         zapper.renounceOwnership();
 
-        // And the whole admin surface still answers to that owner.
+        // And the whole admin surface still answers: the owner keeps its tier, and the
+        // operator (the same address in this harness) keeps the immediate levers.
+        zapper.setOperator(address(this));
         zapper.setTwapParams(600, 100);
-        assertEq(zapper.twapWindow(), 600, "the owner keeps its tier");
+        assertEq(zapper.twapWindow(), 600, "the operator keeps its levers");
         zapper.sweep(address(usdcToken), 0, carol);
     }
 
@@ -597,10 +606,13 @@ contract ZapperBranchesTest is LocalHarness {
     }
 
     /// @dev A `LPZapperSwapHarness` on the harness's own market, so `_executeSwap` can be
-    ///      called with no `_zapIn` around it. Bare, not proxied: the branch under test fires
-    ///      before any state is read.
+    ///      called with no `_zapIn` around it. Put behind an {LPProxy} and initialised, like the
+    ///      production zapper: the zero-amount arm fires before any state is read, but the
+    ///      positive arm consults the TWAP guard, whose window lives in proxy storage and is
+    ///      zero (a division by zero in the mean-tick math) on a bare, never-initialised
+    ///      implementation.
     function _deploySwapHarness() private returns (LPZapperSwapHarness) {
-        return new LPZapperSwapHarness(
+        LPZapperSwapHarness impl = new LPZapperSwapHarness(
             address(vault),
             address(npmMock),
             address(poolMock),
@@ -609,11 +621,12 @@ contract ZapperBranchesTest is LocalHarness {
             FEE,
             address(routerMock),
             address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            address(asset)
         );
+        LPProxy proxy = new LPProxy(
+            address(impl), abi.encodeCall(LPZapper.initialize, (address(this), address(this), MIN_TWAP_WINDOW, 500))
+        );
+        return LPZapperSwapHarness(address(proxy));
     }
 
     function _deployZapper(
@@ -625,9 +638,7 @@ contract ZapperBranchesTest is LocalHarness {
         address usdc_,
         address asset_
     ) private returns (LPZapper) {
-        return new LPZapper(
-            vault_, npm_, address(poolMock), t0, t1, FEE, router_, usdc_, asset_, address(this), MIN_TWAP_WINDOW, 500
-        );
+        return new LPZapper(vault_, npm_, address(poolMock), t0, t1, FEE, router_, usdc_, asset_);
     }
 
     /// @dev A parallel stack bound to a position manager that lies. Separate contracts,
@@ -639,19 +650,22 @@ contract ZapperBranchesTest is LocalHarness {
                 address(n), address(poolMock), token0, token1, address(routerMock), address(this), MIN_TWAP_WINDOW, 500
             )
         );
-        z = new LPZapper(
-            address(v),
-            address(n),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(routerMock),
-            address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+        z = _deployZapperProxy(
+            ZapperProxyParams({
+                vault: address(v),
+                positionManager: address(n),
+                pool: address(poolMock),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: address(routerMock),
+                usdc: address(usdcToken),
+                asset: address(asset),
+                owner: address(this),
+                operator: address(this),
+                twapWindow: MIN_TWAP_WINDOW,
+                maxDeviationTicks: 500
+            })
         );
         v.setZapper(address(z));
         asset.transfer(address(n), 1_000_000e18);

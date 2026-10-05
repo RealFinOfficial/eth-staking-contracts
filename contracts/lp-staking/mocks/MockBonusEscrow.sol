@@ -28,6 +28,12 @@ interface IVaultViewsForEscrowMock {
  *  the NFT owner of the ids it was given, so a test can assert the ORDER the vault promises:
  *  `onUnstake` after the record is deleted and before the NFT leaves; `onRebalance` after the
  *  record has moved to the new NFT.
+ *
+ *  Limit: Record mode stores an `onUnstake` in five slots. On a fresh mock those are five
+ *  zero-to-non-zero writes (about 90,000 gas), close to the vault's whole 100,000
+ *  `BONUS_HOOK_GAS`, and over it in the unoptimized coverage build. Use {MockLightBonusEscrow}
+ *  (bookkeeping by event) to record unstakes through the vault; use this mock for the revert,
+ *  burn and rebalance-recording cases.
  */
 contract MockBonusEscrow is IBonusEscrowHooks {
     enum Mode {

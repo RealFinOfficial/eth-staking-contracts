@@ -5,6 +5,7 @@ import {LocalHarness} from "../utils/LocalHarness.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
@@ -16,7 +17,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /**
  * @notice Why this file exists: the vault and the zapper both hand control to an external
  *         address in the middle of a state change — the router mid-rebalance, the token push
- *         during a refund, the payout inside `claimAsset` — and each of those windows is
+ *         during a refund, the payout inside `claim` — and each of those windows is
  *         defended by a `nonReentrant` the code never demonstrates. A guard that has never
  *         been attacked is an assumption.
  *
@@ -123,14 +124,13 @@ contract ReentrancyTest is LocalHarness {
 
     /// @dev Same argument as the vault's: from the `mint` until `vault.stakeFor`, the zapper
     ///      legitimately owns an unrecorded NFT. `rescuePosition` shares the guard. The router
-    ///      is made the zapper's OWNER, which since N-1 is a two-step handover: the test
-    ///      nominates and the router accepts, so that only the guard — not the access check —
-    ///      is left standing between it and the rescue.
+    ///      is made the zapper's OPERATOR — the tier `rescuePosition` answers to since the zapper
+    ///      became a proxy — so that only the guard, not the access check, is left standing
+    ///      between it and the rescue.
     function test_Reentrancy_RouterCannotReenterZapperRescuePositionMidZap() public {
         (, LPZapper z, ReentrantRouter r) = _reentrantStack();
-        z.transferOwnership(address(r));
-        r.acceptOwnership(address(z));
-        assertEq(z.owner(), address(r), "precondition: the router really is the zapper's owner");
+        z.setOperator(address(r));
+        assertEq(z.operator(), address(r), "precondition: the router really is the zapper's operator");
         r.configure(address(z), abi.encodeCall(LPZapper.rescuePosition, (1)));
 
         vm.startPrank(alice);
@@ -172,27 +172,32 @@ contract ReentrancyTest is LocalHarness {
     }
 
     /**
-     * @dev The same shape on the reward side: `claimAsset` pushes real ASSET to the claimer,
-     *      so an ASSET with a recipient hook lands inside the claim. The ledger write happens
-     *      before the transfer, so even without the guard the second claim would find nothing
-     *      owed — the guard makes that belt-and-braces rather than load-bearing, and this
-     *      test pins which of the two actually fires.
+     * @dev The same shape on the reward side: `claim` pushes the reward token to the claimer,
+     *      so a reward token with a recipient hook lands inside the claim. The ledger write
+     *      happens before the transfer, so even without the guard the second claim would find
+     *      nothing owed — the guard makes that belt-and-braces rather than load-bearing, and
+     *      this test pins which of the two actually fires. The hook token is registered on a
+     *      distributor of its own, conditional with claims open, as any reward token could be.
      */
-    function test_Reentrancy_AnAssetPayoutHookCannotReenterClaimAsset() public {
+    function test_Reentrancy_ARewardPayoutHookCannotReenterClaim() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
-        RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(hookAsset), address(this), address(this), address(this), voucherSigner
-        );
-        d.setAssetClaimsEnabled(true);
+        IRewardsDistributor.RewardTokenInit[] memory list = new IRewardsDistributor.RewardTokenInit[](1);
+        list[0] =
+            IRewardsDistributor.RewardTokenInit({token: address(hookAsset), conditional: true, claimsEnabled: true});
+        RewardsDistributor d = _deployDistributorProxy(address(this), address(this), address(this), voucherSigner, list);
         hookAsset.mint(address(d), 1_000_000e18);
 
         ReentrantReceiver claimer = new ReentrantReceiver();
         hookAsset.setHooked(address(claimer), true);
 
-        bytes memory sig = _signAssetVoucherFor(d, address(claimer), 1_000e18);
-        claimer.configure(address(d), abi.encodeCall(RewardsDistributor.claimAsset, (1_000e18, FAR_DEADLINE, sig)));
+        bytes32 digest = _rewardClaimDigest(d, address(hookAsset), address(claimer), 1_000e18, FAR_DEADLINE);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(voucherSignerPk, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+        bytes memory claimCall =
+            abi.encodeCall(RewardsDistributor.claim, (address(hookAsset), 1_000e18, FAR_DEADLINE, sig));
+        claimer.configure(address(d), claimCall);
 
-        claimer.execute(address(d), abi.encodeCall(RewardsDistributor.claimAsset, (1_000e18, FAR_DEADLINE, sig)));
+        claimer.execute(address(d), claimCall);
 
         assertEq(claimer.attempts(), 1, "the payout must really have called the hook");
         assertFalse(claimer.lastReenterSucceeded(), "and the distributor must have rejected the reentrant claim");
@@ -202,21 +207,20 @@ contract ReentrancyTest is LocalHarness {
 
     /**
      * @dev `LPZapper.sweep` carries `nonReentrant` since C-4, and this is what that claim is
-     *      worth: a hostile owner sweeping a hook-bearing token is called back mid-transfer,
+     *      worth: a hostile operator sweeping a hook-bearing token is called back mid-transfer,
      *      tries to sweep the rest in the same transaction, and the guard rejects the second
      *      call with its own error. The guard closes an asymmetry rather than a hole — it is
-     *      `onlyOwner`, and the same owner may take the whole balance in two transactions —
-     *      but the asymmetry is now measured instead of argued about.
+     *      `onlyOperator`, and the same operator may take the whole balance in two transactions
+     *      — but the asymmetry is now measured instead of argued about.
      *
-     *      The attacker has to complete the two-step handover (N-1) before it holds the
-     *      owner tier at all, which is itself part of what this test states.
+     *      `sweep` is OPERATOR tier since the zapper became a proxy; the owner (this contract,
+     *      standing in for the timelock) hands the operator seat to the attacker.
      */
     function test_Reentrancy_ZapperSweepIsGuarded() public {
         HookToken stray = new HookToken("Stray", "STR", 18);
         HostileOwner hostile = new HostileOwner();
-        zapper.transferOwnership(address(hostile));
-        hostile.execute(address(zapper), abi.encodeWithSignature("acceptOwnership()"));
-        assertEq(zapper.owner(), address(hostile), "precondition: the attacker really is the owner");
+        zapper.setOperator(address(hostile));
+        assertEq(zapper.operator(), address(hostile), "precondition: the attacker really is the operator");
 
         stray.mint(address(zapper), 200e18);
         stray.setHooked(address(hostile), true);
@@ -230,37 +234,43 @@ contract ReentrancyTest is LocalHarness {
         assertFalse(hostile.lastReenterSucceeded(), "the reentrant sweep must be rejected");
         assertEq(hostile.lastReturnData(), guardRejection, "and the rejection must be the guard's own");
         assertEq(stray.balanceOf(address(zapper)), 100e18, "only the first sweep landed");
-        assertEq(stray.balanceOf(address(hostile)), 100e18, "so the owner took one sweep's worth, not the balance");
+        assertEq(stray.balanceOf(address(hostile)), 100e18, "so the operator took one sweep's worth, not the balance");
     }
 
     /**
      * @dev FINDING (behaviour, not a vulnerability), the distributor's twin of the sweep
-     *      finding above: `recoverExcessAsset` also carries NO `nonReentrant`, and it now
-     *      pays the OPERATOR rather than the owner. A hostile operator holding a hook-bearing
-     *      ASSET therefore really can reenter it and recover twice in one transaction.
-     *      It is `onlyOperator` and the destination is the operator itself, so this is the
-     *      funding party acting against a balance it funded — recorded so the asymmetry with
-     *      every other entry point is a known decision rather than an oversight.
+     *      finding above: `recoverExcess` carries NO `nonReentrant`, and it pays the OPERATOR.
+     *      A hostile operator holding a hook-bearing token in the distributor therefore really
+     *      can reenter it and recover twice in one transaction. It is `onlyOperator` and the
+     *      destination is the operator itself, so this is the funding party acting against a
+     *      balance it funded — recorded so the asymmetry with every other entry point is a known
+     *      decision rather than an oversight.
      *
-     *      The OPERATOR is the tier that matters here, not the owner: `recoverExcessAsset` is
-     *      `onlyOperator`, and the operator seat is set outright by `initialize` with no
-     *      handshake, so the attacker holds it from the proxy's first block.
+     *      The OPERATOR is the tier that matters here: `recoverExcess` is `onlyOperator`, and the
+     *      operator seat is set outright by `initialize` with no handshake, so the attacker holds
+     *      it from the proxy's first block. `recoverExcess` takes ANY token, registered or not,
+     *      so the distributor needs no reward token at all for this.
      */
-    function test_Reentrancy_RecoverExcessAssetIsUnguardedAndReallyDoesReenter() public {
+    function test_Reentrancy_RecoverExcessIsUnguardedAndReallyDoesReenter() public {
         HookToken hookAsset = new HookToken("Hook Asset", "hASSET", 18);
         HostileOwner hostileOperator = new HostileOwner();
         RewardsDistributor d = _deployDistributorProxy(
-            address(tokenX), address(hookAsset), address(this), address(this), address(hostileOperator), voucherSigner
+            address(this),
+            address(this),
+            address(hostileOperator),
+            voucherSigner,
+            new IRewardsDistributor.RewardTokenInit[](0)
         );
 
         hookAsset.mint(address(d), 200e18);
         hookAsset.setHooked(address(hostileOperator), true);
-        hostileOperator.configure(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+        bytes memory recoverCall = abi.encodeCall(RewardsDistributor.recoverExcess, (address(hookAsset), 100e18));
+        hostileOperator.configure(address(d), recoverCall);
 
-        hostileOperator.execute(address(d), abi.encodeCall(RewardsDistributor.recoverExcessAsset, (100e18)));
+        hostileOperator.execute(address(d), recoverCall);
 
         assertEq(hostileOperator.attempts(), 2, "the payout push must have reached the hook, recursively");
-        assertTrue(hostileOperator.lastReenterSucceeded(), "recoverExcessAsset really is reentrant: no guard stops it");
+        assertTrue(hostileOperator.lastReenterSucceeded(), "recoverExcess really is reentrant: no guard stops it");
         assertEq(hookAsset.balanceOf(address(d)), 0, "both recoveries landed in one transaction");
         assertEq(hookAsset.balanceOf(address(hostileOperator)), 200e18, "and the operator took the whole balance");
     }
@@ -317,8 +327,8 @@ contract ReentrancyTest is LocalHarness {
     }
 
     /// @dev A parallel stack whose ROUTER is the attacker. The router address is an immutable
-    ///      constructor argument on both contracts, so it cannot be swapped into the harness
-    ///      stack after the fact.
+    ///      of both implementations, so it cannot be swapped into the harness stack after the
+    ///      fact short of an upgrade.
     function _reentrantStack() private returns (LPStakingVault v, LPZapper z, ReentrantRouter r) {
         r = new ReentrantRouter();
         r.setRate(1e6, 2e18); // 18-decimal in, 6-decimal out, at the harness price
@@ -330,19 +340,22 @@ contract ReentrancyTest is LocalHarness {
                 address(npmMock), address(poolMock), token0, token1, address(r), address(this), MIN_TWAP_WINDOW, 500
             )
         );
-        z = new LPZapper(
-            address(v),
-            address(npmMock),
-            address(poolMock),
-            token0,
-            token1,
-            FEE,
-            address(r),
-            address(usdcToken),
-            address(asset),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+        z = _deployZapperProxy(
+            ZapperProxyParams({
+                vault: address(v),
+                positionManager: address(npmMock),
+                pool: address(poolMock),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: address(r),
+                usdc: address(usdcToken),
+                asset: address(asset),
+                owner: address(this),
+                operator: address(this),
+                twapWindow: MIN_TWAP_WINDOW,
+                maxDeviationTicks: 500
+            })
         );
         v.setZapper(address(z));
     }
@@ -394,22 +407,5 @@ contract ReentrancyTest is LocalHarness {
         npm2.mintFake(holder, address(t0), address(t1), FEE, TICK_LOWER, TICK_UPPER, LIQUIDITY, P_ASSET, 0);
         tokenId = npm2.lastMintedId();
         t0.mint(address(npm2), P_ASSET);
-    }
-
-    /// @dev An ASSET-leg voucher bound to a distributor other than the harness's own.
-    function _signAssetVoucherFor(RewardsDistributor target, address user, uint256 cumulative)
-        private
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(target.ASSET_CLAIM_TYPEHASH(), user, cumulative, FAR_DEADLINE));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparatorOf(target), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(voucherSignerPk, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
-    function _domainSeparatorOf(RewardsDistributor target) private view returns (bytes32) {
-        (, string memory n, string memory ver, uint256 cid, address verifying,,) = target.eip712Domain();
-        return keccak256(abi.encode(EIP712_DOMAIN_TYPEHASH, keccak256(bytes(n)), keccak256(bytes(ver)), cid, verifying));
     }
 }

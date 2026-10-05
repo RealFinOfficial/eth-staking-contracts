@@ -5,8 +5,9 @@ import {BaseForge} from "./BaseForge.sol";
 import {Profiles} from "./Profiles.sol";
 import {IUniswapV3FactoryLike, IUniswapV3PoolLike, INpmExtras, IERC20Like} from "./Interfaces.sol";
 
-import {TokenX} from "../../../contracts/lp-staking/TokenX.sol";
+import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
+import {LPEpochRegistry} from "../../../contracts/lp-staking/LPEpochRegistry.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
@@ -15,7 +16,7 @@ import {ISwapRouter02} from "../../../contracts/lp-staking/interfaces/ISwapRoute
 
 /**
  * @title ForkHarness
- * @notice Realism rung: the four production contracts, deployed by this test contract in
+ * @notice Realism rung: the five production contracts, deployed by this test contract in
  *         the deploy script's own order and wiring, against REAL Uniswap V3 on a pinned
  *         fork of the active {Profiles.Profile}.
  *
@@ -38,7 +39,8 @@ import {ISwapRouter02} from "../../../contracts/lp-staking/interfaces/ISwapRoute
 abstract contract ForkHarness is BaseForge {
     // ──────────────────────── Actors ───────────────────────────
 
-    /// @notice Final owner of all four contracts, as in the deploy script (LP_MULTISIG).
+    /// @notice Final owner of all five proxies (standing in for the timelock), their guardian
+    ///         and their operator, and the Overture token's minter.
     address internal multisig;
     /// @notice Backend voucher signer (LP_SIGNER) and its key, so tests can sign real vouchers.
     address internal voucherSigner;
@@ -59,8 +61,9 @@ abstract contract ForkHarness is BaseForge {
 
     // ──────────────────────── The stack ────────────────────────
 
-    TokenX internal tokenX;
+    TokenOverture internal overture;
     RewardsDistributor internal distributor;
+    LPEpochRegistry internal registry;
     LPStakingVault internal vault;
     LPZapper internal zapper;
 
@@ -241,11 +244,22 @@ abstract contract ForkHarness is BaseForge {
         assertGt(poolRef.liquidity(), 0, "pool must hold in-range liquidity after seeding");
     }
 
-    /// @dev Deploy + wiring + ownership, in exactly the order of scripts/deploy-lp-staking.js.
+    /// @dev Deploy + wiring + ownership, in the order of scripts/deploy-lp-staking.js:
+    ///      Overture token -> distributor (launch tokens) -> registry -> vault -> zapper, then the
+    ///      funding the operator does (mint $OVTR into the distributor, transfer $ASSET into it),
+    ///      then ownership of all five proxies to the multisig. The script names the timelock as
+    ///      owner inside each proxy's own deployment transaction; here the deployer (this
+    ///      contract) owns them first so it can wire `setZapper`, and then hands them over.
     function _deployStack() private {
-        tokenX = new TokenX(TOKENX_NAME, TOKENX_SYMBOL, address(this));
-        distributor =
-            _deployDistributorProxy(address(tokenX), profile.asset, address(this), multisig, multisig, voucherSigner);
+        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), multisig);
+        distributor = _deployDistributorProxy(
+            address(this),
+            multisig,
+            multisig,
+            voucherSigner,
+            _launchRewardTokens(profile.asset, false, address(overture))
+        );
+        registry = _deployRegistryProxy(address(distributor), address(this), multisig);
         // Owner = the deployer (this contract) so the wiring below can run; guardian AND
         // operator = the multisig, which is what makes the fork tier's admin calls
         // (`setDepositsPaused`, `rescuePosition`, `setSigner`) reach their real tier.
@@ -265,49 +279,49 @@ abstract contract ForkHarness is BaseForge {
                 maxDeviationTicks: profile.maxDevTicks
             })
         );
-        zapper = new LPZapper(
-            address(vault),
-            profile.npm,
-            address(poolRef),
-            token0,
-            token1,
-            FEE,
-            profile.router,
-            profile.usdc,
-            profile.asset,
-            address(this),
-            profile.twapWindow,
-            profile.maxDevTicks
+        zapper = _deployZapperProxy(
+            ZapperProxyParams({
+                vault: address(vault),
+                positionManager: profile.npm,
+                pool: address(poolRef),
+                token0: token0,
+                token1: token1,
+                fee: FEE,
+                swapRouter: profile.router,
+                usdc: profile.usdc,
+                asset: profile.asset,
+                owner: address(this),
+                operator: multisig,
+                twapWindow: profile.twapWindow,
+                maxDeviationTicks: profile.maxDevTicks
+            })
         );
 
-        // Wiring, while the deployer still owns everything.
-        tokenX.setMinter(address(distributor));
+        // Wiring, while the deployer still owns the vault.
         vault.setZapper(address(zapper));
-        tokenX.setEpochCap(EPOCH_ONE, EPOCH_ONE_CAP);
 
-        // Ownership to the multisig, as the script does before the oracle warm-up. Since N-1
-        // all four contracts are Ownable2Step, so each transfer is only a NOMINATION and the
-        // multisig has to accept it; on the two plain contracts the deploy script leaves
-        // exactly this state behind for the operator Safe to complete.
-        tokenX.transferOwnership(multisig);
+        // Funding, as the operator does it before claims open: $OVTR minted INTO the
+        // distributor by the minter, $ASSET transferred into it. Claims pay out of these
+        // balances and revert with InsufficientFunds when one runs short.
+        vm.prank(multisig);
+        overture.mint(address(distributor), DISTRIBUTOR_FUNDING);
+        _fund(profile.asset, address(distributor), DISTRIBUTOR_FUNDING);
+
+        // Ownership of all five to the multisig: Ownable2Step, so each transfer is only a
+        // NOMINATION the multisig accepts. Production makes the timelock the owner from the
+        // proxies' own deployment transactions; the multisig stands in for it here.
+        overture.transferOwnership(multisig);
+        distributor.transferOwnership(multisig);
+        registry.transferOwnership(multisig);
+        vault.transferOwnership(multisig);
         zapper.transferOwnership(multisig);
         vm.startPrank(multisig);
-        tokenX.acceptOwnership();
+        overture.acceptOwnership();
+        distributor.acceptOwnership();
+        registry.acceptOwnership();
+        vault.acceptOwnership();
         zapper.acceptOwnership();
         vm.stopPrank();
-
-        // The two proxies take the same two steps. Production makes their acceptance the
-        // timelock's first scheduled operation; here the multisig accepts directly, which is
-        // the same two transactions with a shorter path. The multisig is also each proxy's guardian and operator, so
-        // the undelayed calls the fork tests make (`setDepositsPaused`, `rescuePosition`,
-        // `setSigner`) reach the tier they are meant to.
-        vault.transferOwnership(multisig);
-        vm.prank(multisig);
-        vault.acceptOwnership();
-
-        distributor.transferOwnership(multisig);
-        vm.prank(multisig);
-        distributor.acceptOwnership();
     }
 
     /**
@@ -454,29 +468,22 @@ abstract contract ForkHarness is BaseForge {
     /// @dev The distributor's live EIP-712 domain separator, rebuilt from what it reports
     ///      about itself (ERC-5267) rather than from constants this file assumes.
     function _distributorDomainSeparator() internal view returns (bytes32) {
-        (, string memory name_, string memory version_, uint256 chainId_, address verifying_,,) =
-            distributor.eip712Domain();
-        return keccak256(
-            abi.encode(
-                EIP712_DOMAIN_TYPEHASH, keccak256(bytes(name_)), keccak256(bytes(version_)), chainId_, verifying_
-            )
-        );
+        return _domainSeparatorOf(distributor);
     }
 
     /**
-     * @notice Signs a claim voucher for `user` with an arbitrary key.
+     * @notice Signs a `RewardClaim` voucher for `user` with an arbitrary key.
      * @param pk Signing key — {voucherSignerPk} for a valid voucher, anything else to prove
      *           the rejection path.
-     * @param typehash `TOKENX_CLAIM_TYPEHASH` or `ASSET_CLAIM_TYPEHASH`; passing the wrong
-     *                 one is exactly the cross-leg replay test.
+     * @param token The reward token the voucher names; signing for one token and claiming
+     *              another is exactly the cross-token replay test.
      */
-    function _signVoucher(uint256 pk, bytes32 typehash, address user, uint256 cumulativeAmount, uint256 deadline)
+    function _signVoucher(uint256 pk, address token, address user, uint256 cumulativeAmount, uint256 deadline)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(typehash, user, cumulativeAmount, deadline));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _distributorDomainSeparator(), structHash));
+        bytes32 digest = _rewardClaimDigest(distributor, token, user, cumulativeAmount, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
