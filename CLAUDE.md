@@ -258,7 +258,7 @@ contracts/           — Solidity source files
                                 and the two swap harnesses LPStakingVaultSwapHarness.sol /
                                 LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached
-test/                — Hardhat test files (Mocha + Chai). 714 tests, 0 pending
+test/                — Hardhat test files (Mocha + Chai). 942 tests, 0 pending (2026-10-05, lane 2)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
@@ -267,25 +267,31 @@ test/                — Hardhat test files (Mocha + Chai). 714 tests, 0 pending
     LPEpochRegistry.test.js     — 50 tests
     TokenOverture.test.js       — 41 tests, through the proxy
     LPZapper.test.js            — 63 tests, through the proxy, incl. the operator tier
-    DeployImplementation.test.js — 16 tests, the five implementation kinds
+    DeployImplementation.test.js — 16 tests, the six implementation kinds
+    BonusEscrow.test.js, ApeBondPositionAdapter.test.js — the ApeBond pair against the mocks
+    DeployApeBond.test.js, ApeBondOperatorScripts.test.js, LPTimelockBatch.test.js
+                                — the ApeBond scripts and the batch builders, as child processes
+    integration/ApeBondUpgradeInPlace.test.js — activating ApeBond on a lane-1 vault in place
     fork/LPStakingFork.test.js  — 21 mainnet-fork tests; skip themselves without MAINNET_RPC_URL
     helpers/                    — fork harness: fork-node, chain, rpc, uniswap, signing
                                   (`signRewardClaim`), scripts, ledger, constants, profiles
     helpers/profiles.js         — the network profile (sepolia default, mainnet phase 2)
     integration/LPStakingLocalFork.test.js
-                                — 95 tests on a spawned `hardhat node --fork`, mainnet-pinned;
+                                — 102 tests on a spawned `hardhat node --fork`, mainnet-pinned;
                                   deploys via the repo's own scripts and ends with the planned
                                   timelock switch. Same skip rule as fork/
     integration/LPStakingSepoliaFork.test.js
-                                — 94 tests, the same scenario driven through the profile
+                                — 101 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 546 tests in 28 suites: 102 fork, 401 unit, 21 fuzz,
-                       22 invariant
+test/forge/          — Foundry tier. 721 tests in 34 suites: 104 fork, 564 unit, 21 fuzz,
+                       32 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
     LocalHarness.sol            — the stack against the repo's own mocks, deterministic
+    ApeBondHarness.sol          — LocalHarness plus the ApeBond pair, and a second vault on real
+                                  liquidity math at $0.25 for the B.3 vector
     Profiles.sol                — the same network facts as helpers/profiles.js
     RawTickPool.sol             — a pool whose `observe` returns raw, caller-chosen cumulatives
     attackers/                  — hostile tokens, malicious NPM, reentrant router, receivers,
