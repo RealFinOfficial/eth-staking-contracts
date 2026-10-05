@@ -205,6 +205,46 @@ function readAddress(name, fallback) {
   }
 }
 
+/**
+ * Reads a comma-separated address list. Unset and empty both mean the EMPTY list — never a
+ * list holding one empty entry, which is the classic way a trailing comma turns into a call
+ * against address(0). Every entry is checksummed here, and a repeat is refused rather than
+ * sent twice.
+ */
+function readAddressList(name) {
+  const raw = process.env[name];
+  if (!raw || raw.trim() === "") return [];
+
+  const seen = new Set();
+  return raw.split(",").map((entry, index) => {
+    const value = entry.trim();
+    if (!value) throw new Error(`${name} has an empty entry at position ${index}`);
+    let address;
+    try {
+      address = hre.ethers.getAddress(value);
+    } catch {
+      throw new Error(`${name} entry ${index} is not a valid address: ${value}`);
+    }
+    if (seen.has(address)) throw new Error(`${name} lists ${address} twice`);
+    seen.add(address);
+    return address;
+  });
+}
+
+/**
+ * The ApeBond section's master switch, read strictly.
+ *
+ * Only "1" turns it on and only "0" or an absent value turn it off; anything else throws.
+ * A typo (`LP_APEBOND_ENABLED=true`) must not silently deploy half a campaign — or, worse,
+ * silently skip the escrow on the run that was supposed to carry it.
+ */
+function readApeBondFlag() {
+  const raw = process.env.LP_APEBOND_ENABLED;
+  if (raw === undefined || raw.trim() === "" || raw === "0") return false;
+  if (raw === "1") return true;
+  throw new Error(`LP_APEBOND_ENABLED must be 1, 0 or unset — got ${raw}`);
+}
+
 async function main() {
   const chainId = await pools.chainId();
   const mainnet = pools.isMainnet(chainId);
@@ -905,7 +945,24 @@ async function main() {
   console.log("\nAll post-deploy checks passed.");
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+// The bootstrap primitives, shared with `scripts/deploy-apebond.js`, which adds the ApeBond
+// contracts to a stack that is ALREADY live. Both deploys produce byte-identical shapes through
+// `lib/proxies.js`, so the two scripts run the same code rather than two copies that can drift.
+module.exports = {
+  ERC1967_IMPLEMENTATION_SLOT,
+  readAddress,
+  readAddressList,
+  readApeBondFlag,
+  implementationOf,
+  deployContract,
+  deployProxyPair,
+};
+
+// `hardhat run` executes this file as the entry point; a `require` from another script or from
+// the suites must only pick up the exports above, and must NOT deploy a stack.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}

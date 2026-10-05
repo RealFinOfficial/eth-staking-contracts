@@ -5,7 +5,7 @@
  * wallet behind `PRIVATE_KEY`, spends real SepoliaETH and leaves permanent state on a public
  * chain. That is the point — a fork cannot prove that the RPC, the explorer, the funded
  * wallet, the gas market and the deployed stack all work together, and the spec's Sepolia
- * staging deployment is exactly that rehearsal.
+ * test stack #5 deployment is exactly that rehearsal.
  *
  * ── Why it lives outside test/ ────────────────────────────────────────────────────────
  *
@@ -318,8 +318,8 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
         const absent = kinds.filter((k) => !recorded[k]).join(", ");
         throw new Error(
           `deployments.json has no ${absent} for chain ${CHAIN_ID}. Deploying is the spec's ` +
-            "Sepolia staging deployment and records itself in the tracked registry, so it needs " +
-            "an explicit go: re-run with SEPOLIA_LIVE_DEPLOY=1."
+            "Sepolia test stack #5 deployment and records itself in the tracked registry, so it " +
+            "needs an explicit go: re-run with SEPOLIA_LIVE_DEPLOY=1."
         );
       }
       // `LP_TIMELOCK_MIN_DELAY` is forwarded by liveScriptEnv along with every other LP_*
@@ -625,7 +625,7 @@ suite("LP staking — LIVE Sepolia smoke (real transactions, real gas)", functio
 
   it("10. left the deployments registry consistent with what is on chain", async function () {
     // The live run is the ONE case where writing the tracked registry is correct: this is
-    // the spec's Sepolia staging deployment, and the recorded addresses are the fact the
+    // the spec's Sepolia test stack #5 deployment, and the recorded addresses are the fact the
     // frontend, the backend and the indexer all read.
     for (const [kind, address] of [
       ["UniswapV3Pool", poolAddr],

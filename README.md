@@ -344,12 +344,12 @@ npm install                      # Install dependencies
 npx hardhat compile              # Compile contracts
 
 npm run validate:upgrades        # UUPS implementation safety + layout vs the manifest
-npx hardhat test                 # 605 tests: unit suites + three fork suites
+npx hardhat test                 # 818 passing, 31 pending (opt-in dry-run): unit + three fork suites
 npm run test:integration         # Just the mainnet-pinned local-fork integration suite
 npm run test:integration:sepolia # Just the profile-driven fork integration suite
 npm run test:sepolia:live        # Gated live-Sepolia smoke; REAL transactions, never CI
 
-npm run test:forge               # 408 Foundry tests: fork, unit, fuzz, invariant
+npm run test:forge               # 498 Foundry tests: fork, unit, fuzz, invariant
 npm run test:forge:ci            # Same, ci profile (fuzz 1024, invariants 512 sequences)
 npm run coverage:forge:check     # forge coverage + the blocking per-file floors gate
 
@@ -468,8 +468,8 @@ SEPOLIA_RPC_URL=http://127.0.0.1:9 npm run test:forge
 
 ### Live Sepolia smoke
 
-The spec's Sepolia staging rehearsal. It sends REAL transactions with real SepoliaETH and, on
-a first run, records the deployment in the **tracked** `deployments.json` under chain
+The spec's Sepolia test stack #5 rehearsal. It sends REAL transactions with real SepoliaETH
+and, on a first run, records the deployment in the **tracked** `deployments.json` under chain
 `11155111`.
 
 | gate | effect |

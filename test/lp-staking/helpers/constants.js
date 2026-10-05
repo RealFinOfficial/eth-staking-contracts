@@ -7,7 +7,7 @@
  *
  * The minimal ABI fragments below are the same ones test/lp-staking/fork/LPStakingFork.test.js
  * declares (L159–197). Keep the two in sync — they describe the same real contracts.
- * The four LP-staking contracts are NOT listed here: their ABIs are read from the
+ * The repo's own LP-staking contracts are NOT listed here: their ABIs are read from the
  * compiled artifacts at runtime, so a Solidity change can never drift past this file.
  */
 
@@ -57,9 +57,16 @@ const ROLES = {
   signer2: 7, // rotation target for setSigner / setMinter
   // The 2026-09-09 role split, kept on three DIFFERENT keys here: the deploy script refuses
   // to run with `guardian == operator`, and collapsing either onto the multisig is the
-  // staging shortcut the script warns about. The fork suites deploy the production shape.
+  // test-stack shortcut the script warns about. The fork suites deploy the production shape.
   guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
   operator: 9, // LP_OPERATOR — operator of all five proxies, Overture minter, funds the distributor
+  // The ApeBond route's two keys, appended AFTER the role split's pair so neither moves. The
+  // purchase signer is deliberately NOT `backOffice`: integration spec §6.4 keeps the
+  // purchase-authorization signer and its configuration separate from the rewards voucher
+  // signer, and the suite must not be able to pass by accidentally signing one with the
+  // other's key.
+  apeBondSigner: 10, // LP_APEBOND_PURCHASE_SIGNER — signs PurchaseAuthorizations
+  soulZapCaller: 11, // stands in for the SoulZap router that presents them
 };
 
 // ─────────────────────────── Pool and stack parameters ───────────────────────────
@@ -106,10 +113,11 @@ const OBSERVATION_CARDINALITY = 150;
 /**
  * The timelock's `minDelay` for the fork suites, in seconds.
  *
- * Mainnet runs 48 h and Sepolia staging 300 s; a fork run wants the flow, not the wait. 60 s
- * is short enough that `evm_increaseTime(61)` between schedule and execute costs nothing, and
- * long enough that the two are genuinely different blocks with a real ready-at between them.
- * It must stay well below the TWAP window's warm-up history, which the same clock consumes.
+ * Mainnet runs 48 h and Sepolia test stack #5 runs 300 s; a fork run wants the flow, not the
+ * wait. 60 s is short enough that `evm_increaseTime(61)` between schedule and execute costs
+ * nothing, and long enough that the two are genuinely different blocks with a real ready-at
+ * between them. It must stay well below the TWAP window's warm-up history, which the same
+ * clock consumes.
  */
 const TIMELOCK_MIN_DELAY = 60;
 
@@ -167,6 +175,36 @@ const REWARD_CLAIM_TYPEHASH =
 const ERC1967_IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 const ERC1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
+
+// ─────────────────────────── The ApeBond sample campaign ───────────────────────────
+//
+// SAMPLE figures, not committed campaign terms: what the rehearsal buys, what SoulZap's fee
+// takes off it, and the 5% guaranteed bonus REAL owes on the remainder. The input is stated
+// in tASSET so the bonus arithmetic stays visible — 9,900 * 500 / 10,000 = 495 — rather than
+// crossing an 18/6 decimal gap and a price on the way. `inputToken` is audit trail on the
+// authorization and is never moved by the adapter, so which token it names costs nothing.
+
+/** What the buyer paid, before SoulZap's fee. */
+const APEBOND_GROSS_INPUT = ASSET(10_000);
+/** What reached the liquidity, after a 1% fee. */
+const APEBOND_NET_INPUT = ASSET(9_900);
+/** The campaign's guaranteed bonus, in basis points of the net input. */
+const APEBOND_BONUS_BPS = 500n;
+/** 5% of the net input, in the bonus token's own units. */
+const APEBOND_BONUS = (APEBOND_NET_INPUT * APEBOND_BONUS_BPS) / 10_000n;
+/** The campaign's funding of the escrow. Deliberately more than one bonus, so a surplus exists. */
+const APEBOND_ESCROW_FUNDING = ASSET(1_000);
+/**
+ * The cliff every bonus is locked behind on Sepolia test stack #5: 300 seconds from the
+ * purchase. Production is TBD with ApeBond (expected 2–3 months). Full cliff, no vesting —
+ * the position is an NFT and cannot be split into time-released parts (vikinatora, 2026-09-15).
+ */
+const APEBOND_CLIFF_SECONDS = 300;
+/** Half-width of the campaign's approved range, in ticks. The authorization matches it exactly. */
+const APEBOND_HALF_WIDTH_TICKS = 1200;
+/** The position the SoulZap caller mints for the buyer, in the same shape mintFor takes. */
+const APEBOND_MINT_ASSET = ASSET(4_000);
+const APEBOND_MINT_USDC = USDC(2_000);
 
 const FAR_DEADLINE = 10n ** 12n;
 const MAX_UINT128 = (1n << 128n) - 1n;
@@ -298,6 +336,15 @@ module.exports = {
   REWARD_CLAIM_TYPEHASH,
   ERC1967_IMPLEMENTATION_SLOT,
   ERC1967_ADMIN_SLOT,
+  APEBOND_GROSS_INPUT,
+  APEBOND_NET_INPUT,
+  APEBOND_BONUS_BPS,
+  APEBOND_BONUS,
+  APEBOND_ESCROW_FUNDING,
+  APEBOND_CLIFF_SECONDS,
+  APEBOND_HALF_WIDTH_TICKS,
+  APEBOND_MINT_ASSET,
+  APEBOND_MINT_USDC,
   FAR_DEADLINE,
   MAX_UINT128,
   ZERO_ADDRESS,

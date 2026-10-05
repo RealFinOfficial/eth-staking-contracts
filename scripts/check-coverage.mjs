@@ -103,6 +103,14 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // They are named here, and in `docs/lp-staking-audit-notes.md`, instead of being chased with
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
+  "contracts/lp-staking/ApeBondPositionAdapter.sol": {
+    lines: {found: 97, minHit: 97},
+    branches: {found: 25, minHit: 25},
+  },
+  "contracts/lp-staking/BonusEscrow.sol": {
+    lines: {found: 66, minHit: 63},
+    branches: {found: 12, minHit: 12},
+  },
   "contracts/lp-staking/LPStakingVault.sol": {
     lines: {found: 191, minHit: 187},
     branches: {found: 34, minHit: 34},

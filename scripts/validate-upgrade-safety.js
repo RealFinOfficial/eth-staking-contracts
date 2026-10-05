@@ -78,6 +78,11 @@ const CONTRACTS = [
     ],
   },
   {
+    name: "BonusEscrow",
+    // (bonusToken)
+    constructorArgs: [DUMMY.address],
+  },
+  {
     name: "LPZapper",
     // (vault, positionManager, pool, token0, token1, fee, swapRouter, usdc, asset). The
     // constructor reads the pool triple from chain, so `validateImplementation` (which never
