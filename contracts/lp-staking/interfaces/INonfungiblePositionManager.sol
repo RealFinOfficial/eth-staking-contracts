@@ -150,4 +150,15 @@ interface INonfungiblePositionManager {
     /// @param to Address to approve.
     /// @param tokenId The position NFT.
     function approve(address to, uint256 tokenId) external;
+
+    /// @notice The single address approved for one position NFT, or zero.
+    /// @param tokenId The position NFT.
+    /// @return operator The approved address.
+    function getApproved(uint256 tokenId) external view returns (address operator);
+
+    /// @notice Whether `operator` may move every position NFT `owner` holds.
+    /// @param owner The NFT owner.
+    /// @param operator The address to test.
+    /// @return True when the blanket approval is in place.
+    function isApprovedForAll(address owner, address operator) external view returns (bool);
 }

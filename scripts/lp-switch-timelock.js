@@ -143,10 +143,10 @@ async function main() {
   const newAddress = await newTimelock.getAddress();
 
   // The one batch on the OLD timelock: five nominations, executed atomically.
-  const transferBatch = buildBatch({
-    calls: proxies.map((p) => ({ target: p.address, fn: "transferOwnership", args: [newAddress] })),
-    tag,
-  });
+  const transferBatch = buildBatch(
+    proxies.map((p) => ({ target: p.address, fn: "transferOwnership", args: [newAddress] })),
+    tag
+  );
 
   if (action === "schedule" || action === "execute") {
     const [PROPOSER, EXECUTOR] = await Promise.all([oldTimelock.PROPOSER_ROLE(), oldTimelock.EXECUTOR_ROLE()]);
@@ -165,7 +165,7 @@ async function main() {
   }
 
   if (action === "accept") {
-    const acceptBatch = buildBatch({ calls: proxies.map((p) => ({ target: p.address, fn: "acceptOwnership" })), tag });
+    const acceptBatch = buildBatch(proxies.map((p) => ({ target: p.address, fn: "acceptOwnership" })), tag);
     return scheduleThenExecute({ chainId, timelock: newTimelock, signer, batch: acceptBatch, label: "acceptOwnership x5 on the NEW timelock" });
   }
 
@@ -173,7 +173,7 @@ async function main() {
     const finalDelay = BigInt(process.env.NEW_TIMELOCK_FINAL_DELAY || 172800);
     const op = buildOperation({ target: newAddress, fn: "updateDelay", args: [finalDelay], tag });
     // A single call, wrapped as a one-call batch so `scheduleThenExecute` serves both steps.
-    const batch = buildBatch({ calls: [{ target: newAddress, fn: "updateDelay", args: [finalDelay] }], tag });
+    const batch = buildBatch([{ target: newAddress, fn: "updateDelay", args: [finalDelay] }], tag);
     console.log(`(single-call form for a Safe: schedule ${encodeSchedule(op, await newTimelock.getMinDelay())}, execute ${encodeExecute(op)})`);
     return scheduleThenExecute({ chainId, timelock: newTimelock, signer, batch, label: `updateDelay(${finalDelay}) on the NEW timelock` });
   }
