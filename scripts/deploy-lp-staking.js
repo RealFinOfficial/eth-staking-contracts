@@ -1,10 +1,14 @@
+const fs = require("fs");
+const path = require("path");
+
 const hre = require("hardhat");
 const pools = require("./lib/pools");
 const uniswapByChain = require("./lib/uniswap");
 const { deployContract, deployProxyPair } = require("./lib/proxies");
-// Only the registry kind of the timelock is needed here. Since the bootstrap stopped
-// routing anything through the timelock (N-7), this script builds no timelock operation.
-const { TIMELOCK_KIND } = require("./lp-timelock");
+const apebond = require("./lib/apebond");
+// The core bootstrap routes nothing through the timelock (N-7). The optional ApeBond route
+// builds ONE batch — the vault-escrow link — and only prints and files it.
+const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, describeCall } = require("./lp-timelock");
 
 // Deploy the full LP staking stack and record every address in deployments.json.
 //
@@ -43,9 +47,17 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //      `bonusEscrow` stays zero (the ApeBond escrow is not part of this stack)
 //   8. LPZapper implementation + LPProxy, `initialize(owner = timelock, operator, window, ticks)`;
 //      record it, then assert the proxy address matches the prediction
-//   9. `increaseObservationCardinalityNext` on the pool (permissionless)
-//  10. post-deploy verification of all five proxies + the timelock, the address summary, the
-//      verify commands, and the operator's next steps (fund the distributor, schedule epoch 1)
+//   9. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6; mainnet deploys without it):
+//      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
+//      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
+//      guardian)`; its callers and campaign written by the deployer, then
+//      `transferOwnership(timelock)`; and the ONE timelock batch that activates the route —
+//      `vault.setBonusEscrow(escrow)`, `vault.setStakeOperator(adapter, true)`,
+//      `escrow.setAdapter(adapter)` — PRINTED and FILED, not sent (see the route's note below)
+//  10. `increaseObservationCardinalityNext` on the pool (permissionless)
+//  11. post-deploy verification of all five proxies + the timelock (and the ApeBond pair), the
+//      address summary, the verify commands, and the operator's next steps (fund the
+//      distributor, schedule epoch 1, run the ApeBond link batch)
 //
 // Every proxy goes through `deployProxyPair`: `validateImplementation`, the implementation
 // deploy, the `LPProxy` deploy with the `initialize` calldata, and `forceImport` into the
@@ -105,6 +117,30 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //                               2 * ceil(LP_TWAP_WINDOW / 12): one slot per block in the
 //                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
 //                               needs >= 600
+//
+// Optional env — the ApeBond route (B.3 decision document; Sepolia only until ApeBond goes to
+// mainnet). OFF unless LP_APEBOND_ENABLED=1; with it off nothing below is read and the run is
+// exactly the stack above. There is no purchase signer: the adapter computes every bonus.
+//   LP_APEBOND_ENABLED          — 1 deploys BonusEscrow + ApeBondPositionAdapter; 0 or unset not
+//   LP_APEBOND_BONUS_TOKEN      — the escrow's immutable bonus token; must be one of the pool's
+//                                 two tokens (LP_ASSET)
+//   LP_APEBOND_GUARDIAN         — the adapter's pause key, setDepositsPaused only (LP_GUARDIAN)
+//   LP_APEBOND_SOULZAP_CALLERS  — comma-separated SoulZap contracts: the global allowlist, and
+//                                 the callers permitted for the campaign below (none)
+//   LP_APEBOND_CAMPAIGN_ID and the campaign's four numbers — see `readCampaign` in
+//                                 scripts/lib/apebond.js (none: no campaign is configured)
+//   LP_APEBOND_BATCH_FILE       — where the link batch is filed (apebond-link-batch.json beside
+//                                 the registry)
+//
+// ──────────────────────── the ApeBond route, and why its last step is printed ────────────────
+//
+// Every proxy here is born owned by the timelock, so the three owner-tier calls that activate
+// the route cannot be sent by this run. They are ONE batch, atomic, and this run prints its
+// `scheduleBatch` / `executeBatch` calldata and writes it as a `TIMELOCK_BATCH` file. Until it
+// executes, nothing can be bought: the vault refuses the adapter's `stakeFor` and the escrow
+// refuses its `reserve`. Drive it with `scripts/deploy-apebond.js` (default mode: it finds the
+// pair already deployed, builds the same batch, schedules, waits, executes on a test chain, and
+// asserts the link) or with `lp-timelock.js schedule-batch` / `execute-batch` from the multisig.
 //
 // Funding and the emission schedule are NOT part of this script: the operator funds the
 // distributor with `scripts/lp-fund-rewards.js` and schedules epochs with `scripts/lp-epoch.js`.
@@ -194,6 +230,18 @@ async function implementationOf(proxy) {
   return hre.ethers.getAddress("0x" + raw.slice(-40));
 }
 
+/**
+ * Where the ApeBond link batch is filed: `LP_APEBOND_BATCH_FILE`, else beside the registry this
+ * run writes (so a run on a scratch `DEPLOYMENTS_FILE` leaves the file in the scratch directory).
+ */
+function resolveApeBondBatchFile() {
+  if (process.env.LP_APEBOND_BATCH_FILE) return path.resolve(process.env.LP_APEBOND_BATCH_FILE);
+  const registryPath = process.env.DEPLOYMENTS_FILE
+    ? path.resolve(process.env.DEPLOYMENTS_FILE)
+    : path.join(__dirname, "..", "deployments.json");
+  return path.join(path.dirname(registryPath), "apebond-link-batch.json");
+}
+
 /** Reads an address env var, applies a default and normalises the checksum. */
 function readAddress(name, fallback) {
   const raw = process.env[name] || fallback;
@@ -203,46 +251,6 @@ function readAddress(name, fallback) {
   } catch {
     throw new Error(`${name} is not a valid address: ${raw}`);
   }
-}
-
-/**
- * Reads a comma-separated address list. Unset and empty both mean the EMPTY list — never a
- * list holding one empty entry, which is the classic way a trailing comma turns into a call
- * against address(0). Every entry is checksummed here, and a repeat is refused rather than
- * sent twice.
- */
-function readAddressList(name) {
-  const raw = process.env[name];
-  if (!raw || raw.trim() === "") return [];
-
-  const seen = new Set();
-  return raw.split(",").map((entry, index) => {
-    const value = entry.trim();
-    if (!value) throw new Error(`${name} has an empty entry at position ${index}`);
-    let address;
-    try {
-      address = hre.ethers.getAddress(value);
-    } catch {
-      throw new Error(`${name} entry ${index} is not a valid address: ${value}`);
-    }
-    if (seen.has(address)) throw new Error(`${name} lists ${address} twice`);
-    seen.add(address);
-    return address;
-  });
-}
-
-/**
- * The ApeBond section's master switch, read strictly.
- *
- * Only "1" turns it on and only "0" or an absent value turn it off; anything else throws.
- * A typo (`LP_APEBOND_ENABLED=true`) must not silently deploy half a campaign — or, worse,
- * silently skip the escrow on the run that was supposed to carry it.
- */
-function readApeBondFlag() {
-  const raw = process.env.LP_APEBOND_ENABLED;
-  if (raw === undefined || raw.trim() === "" || raw === "0") return false;
-  if (raw === "1") return true;
-  throw new Error(`LP_APEBOND_ENABLED must be 1, 0 or unset — got ${raw}`);
 }
 
 async function main() {
@@ -294,6 +302,14 @@ async function main() {
   // $ASSET claims are CLOSED at launch (Q-e): they open later, after maturity, through a
   // timelock `setClaimsEnabled(ASSET, true)`. The flag exists for rehearsals that need them open.
   const assetClaimsEnabled = readFlag("LP_ASSET_CLAIMS_ENABLED", false);
+
+  // ──── the ApeBond route, off unless asked for ────
+  // Every value below is read only when the flag is on, so a stale LP_APEBOND_* left in a shell
+  // changes nothing on a run that does not deploy the route.
+  const apeBond = apebond.readApeBondFlag();
+  const bonusToken = apeBond ? readAddress("LP_APEBOND_BONUS_TOKEN", asset) : null;
+  const apeBondGuardian = apeBond ? readAddress("LP_APEBOND_GUARDIAN", guardian) : null;
+  const soulZapCallers = apeBond ? apebond.readAddressList("LP_APEBOND_SOULZAP_CALLERS") : [];
 
   // ──────────────────────── local validation ────────────────────────
 
@@ -392,6 +408,7 @@ async function main() {
   console.log(
     `Observation target: ${observationCardinality} (>= ${minimumCardinality} for a ${twapWindow}s window)`
   );
+  if (!apeBond) console.log(`ApeBond route:      not deployed (set LP_APEBOND_ENABLED=1 to add it)`);
 
   // ──────────────────────── on-chain safety checks ────────────────────────
 
@@ -469,6 +486,34 @@ async function main() {
   const cardinality = Number(slot0.observationCardinality);
   const cardinalityNext = Number(slot0.observationCardinalityNext);
   console.log(`  oracle: cardinality ${cardinality}, next ${cardinalityNext}`);
+
+  // The ApeBond route's inputs, checked before a single byte is deployed: the bonus token must
+  // be one of the pool's two tokens (the escrow's constructor enforces it too), and the campaign
+  // must be a range a position on this pool can have.
+  let apeBondCampaign = null;
+  let apeBondFacts = null;
+  if (apeBond) {
+    if (bonusToken !== token0 && bonusToken !== token1) {
+      throw new Error(`LP_APEBOND_BONUS_TOKEN ${bonusToken} is neither pool token (${token0}, ${token1})`);
+    }
+    const poolSpacing = await hre.ethers.getContractAt(
+      ["function tickSpacing() view returns (int24)"],
+      poolAddress
+    );
+    const bonusErc20 = await pools.getErc20(bonusToken);
+    apeBondFacts = {
+      currentTick: Number(slot0.tick),
+      tickSpacing: Number(await poolSpacing.tickSpacing()),
+      bonusDecimals: Number(await bonusErc20.decimals()),
+      bonusSymbol: await bonusErc20.symbol(),
+    };
+    apeBondCampaign = apebond.readCampaign(apeBondFacts);
+    console.log(`ApeBond route:      ENABLED (LP_APEBOND_ENABLED=1)`);
+    console.log(`  bonus token:      ${bonusToken}${bonusToken === asset ? " (= ASSET)" : ""}`);
+    console.log(`  guardian:         ${apeBondGuardian}${apeBondGuardian === guardian ? " (= LP_GUARDIAN)" : ""}`);
+    console.log(`  SoulZap callers:  ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`);
+    console.log(`  campaign:         ${apebond.describeCampaign(apeBondCampaign, apeBondFacts)}`);
+  }
 
   if (signer === deployer.address || signer === multisig) {
     console.log(
@@ -684,6 +729,43 @@ async function main() {
   }
   console.log(`  LPZapper's proxy landed on the predicted address; the vault was born pointing at it`);
 
+  // ──────────────────────── the ApeBond route (optional) ────────────────────────
+  let apeBondDeploy = null;
+  let apeBondBatch = null;
+  let apeBondBatchFile = null;
+  if (apeBond) {
+    apeBondDeploy = await apebond.deployEscrowAndAdapter({
+      chainId,
+      deployer,
+      vaultAddress: vaultDeploy.address,
+      timelockAddress: timelockDeploy.address,
+      positionManager,
+      bonusToken,
+      guardian: apeBondGuardian,
+    });
+    await apebond.wireAdapter({
+      chainId,
+      deployer,
+      adapterAddress: apeBondDeploy.adapterDeploy.address,
+      timelockAddress: timelockDeploy.address,
+      soulZapCallers,
+      campaign: apeBondCampaign,
+    });
+    const ops = await apebond.linkOps({
+      vaultAddress: vaultDeploy.address,
+      escrowAddress: apeBondDeploy.escrowDeploy.address,
+      adapterAddress: apeBondDeploy.adapterDeploy.address,
+      upgradeTo: null,
+      vaultHasRoute: true,
+    });
+    apeBondBatch = buildBatch(ops, process.env.TIMELOCK_SALT_TAG || "");
+    apeBondBatchFile = resolveApeBondBatchFile();
+    fs.writeFileSync(
+      apeBondBatchFile,
+      JSON.stringify(apebond.batchFileContents(apeBondBatch.calls), null, 2) + "\n"
+    );
+  }
+
   const overture = overtureDeploy.contract;
   const distributor = distributorDeploy.contract;
   const registry = registryDeploy.contract;
@@ -888,6 +970,31 @@ async function main() {
     );
   }
 
+  if (apeBond) {
+    // Everything the route needs except the link, which is the batch this run does not send.
+    await apebond.checkRoute(check, {
+      vaultAddress: vaultDeploy.address,
+      escrowAddress: apeBondDeploy.escrowDeploy.address,
+      adapterAddress: apeBondDeploy.adapterDeploy.address,
+      timelockAddress: timelockDeploy.address,
+      bonusToken,
+      guardian: apeBondGuardian,
+      soulZapCallers,
+      campaign: apeBondCampaign,
+      expectLinked: false,
+    });
+    check(
+      "BonusEscrow.implementation (ERC-1967 slot)",
+      await implementationOf(apeBondDeploy.escrowDeploy.address),
+      apeBondDeploy.escrowDeploy.impl.address
+    );
+    console.log(
+      "WARN  the route is NOT linked yet — PENDING TIMELOCK BATCH (below). Until it executes:\n" +
+        "      LPStakingVault.bonusEscrow() == 0, the adapter is not a stake operator, and the escrow's\n" +
+        "      adapter is 0, so no ApeBond purchase can be made. Everything else is live."
+    );
+  }
+
   // ──────────────────────── summary ────────────────────────
 
   console.log("\n──────── deployed addresses ────────");
@@ -900,6 +1007,11 @@ async function main() {
   ]) {
     console.log(`${label.padEnd(20)}${d.address} (proxy)`);
     console.log(`  implementation:   ${d.impl.address}`);
+  }
+  if (apeBond) {
+    console.log(`BonusEscrow         ${apeBondDeploy.escrowDeploy.address} (proxy)`);
+    console.log(`  implementation:   ${apeBondDeploy.escrowDeploy.impl.address}`);
+    console.log(`ApeBondAdapter:     ${apeBondDeploy.adapterDeploy.address}`);
   }
   console.log(`LPTimelock:         ${timelockDeploy.address} (minDelay ${timelockMinDelay}s)`);
 
@@ -919,6 +1031,14 @@ async function main() {
     zapperDeploy,
     `${vaultDeploy.address} ${positionManager} ${poolAddress} ${token0} ${token1} ${fee} ${swapRouter} ${usdc} ${asset}`
   );
+  if (apeBond) {
+    verifyPair(apeBondDeploy.escrowDeploy, `${bonusToken} ${vaultDeploy.address}`);
+    console.log(
+      `npx hardhat verify --network ${network} ${apeBondDeploy.adapterDeploy.address} ` +
+        `${positionManager} ${vaultDeploy.address} ${apeBondDeploy.escrowDeploy.address} ` +
+        `${deployer.address} ${apeBondGuardian}`
+    );
+  }
   // The timelock's proposer/executor arrays are address[]; hardhat-verify wants them as JSON.
   console.log(
     `npx hardhat verify --network ${network} ${timelockDeploy.address} ` +
@@ -934,6 +1054,27 @@ async function main() {
       `   EPOCH_ACTION=schedule EPOCH_ID=1 EPOCH_STARTS_AT=… EPOCH_ENDS_AT=… npx hardhat run scripts/lp-epoch.js --network ${network}\n` +
       "3. Register the five proxies with the indexer module and the backend (scripts/README.md)."
   );
+
+  if (apeBond) {
+    console.log(
+      `\n──────── the ApeBond link: ONE timelock batch this run does NOT send ────────\n` +
+        `Send it from the multisig (${multisig}), the timelock's proposer and executor, to the\n` +
+        `timelock at ${timelockDeploy.address}, value 0. Batch id ${apeBondBatch.id}:`
+    );
+    apeBondBatch.calls.forEach((call, index) => console.log(`  ${index}. ${describeCall(call)}`));
+    console.log(`\n  scheduleBatch calldata (delay ${timelockMinDelay}s):`);
+    console.log(`  ${encodeScheduleBatch(apeBondBatch, timelockMinDelay)}`);
+    console.log(`\n  ...wait out ${timelockMinDelay}s, then executeBatch calldata:`);
+    console.log(`  ${encodeExecuteBatch(apeBondBatch)}`);
+    console.log(
+      `\nThe same batch as a file: ${apeBondBatchFile}\n` +
+        `  TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=${apeBondBatchFile} \\\n` +
+        `    npx hardhat run scripts/lp-timelock.js --network ${network}\n` +
+        `or, where the deploying key holds both timelock roles (a test stack), one command that\n` +
+        `schedules, waits, executes and asserts the link:\n` +
+        `  npx hardhat run scripts/deploy-apebond.js --network ${network}`
+    );
+  }
 
   if (failures.length > 0) {
     throw new Error(
@@ -951,8 +1092,8 @@ async function main() {
 module.exports = {
   ERC1967_IMPLEMENTATION_SLOT,
   readAddress,
-  readAddressList,
-  readApeBondFlag,
+  readAddressList: apebond.readAddressList,
+  readApeBondFlag: apebond.readApeBondFlag,
   implementationOf,
   deployContract,
   deployProxyPair,
