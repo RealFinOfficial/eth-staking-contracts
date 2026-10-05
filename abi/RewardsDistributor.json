@@ -1,17 +1,6 @@
 [
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "_tokenX",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "_asset",
-        "type": "address"
-      }
-    ],
+    "inputs": [],
     "stateMutability": "nonpayable",
     "type": "constructor"
   },
@@ -24,11 +13,6 @@
       }
     ],
     "name": "AddressEmptyCode",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "AssetClaimsDisabled",
     "type": "error"
   },
   {
@@ -98,6 +82,27 @@
   {
     "inputs": [],
     "name": "FailedCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "needed",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "balance",
+        "type": "uint256"
+      }
+    ],
+    "name": "InsufficientFunds",
     "type": "error"
   },
   {
@@ -240,7 +245,29 @@
         "type": "address"
       }
     ],
+    "name": "RewardTokenAlreadyAdded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
     "name": "SafeERC20FailedOperation",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "TokenClaimsDisabled",
     "type": "error"
   },
   {
@@ -260,6 +287,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "UnknownRewardToken",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddress",
     "type": "error"
@@ -268,19 +306,6 @@
     "inputs": [],
     "name": "ZeroAmount",
     "type": "error"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "enabled",
-        "type": "bool"
-      }
-    ],
-    "name": "AssetClaimsEnabled",
-    "type": "event"
   },
   {
     "anonymous": false,
@@ -329,6 +354,12 @@
     "anonymous": false,
     "inputs": [
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
         "indexed": false,
         "internalType": "address",
         "name": "to",
@@ -347,7 +378,7 @@
         "type": "uint256"
       }
     ],
-    "name": "ExcessAssetRecovered",
+    "name": "ExcessRecovered",
     "type": "event"
   },
   {
@@ -456,6 +487,68 @@
     "anonymous": false,
     "inputs": [
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "conditional",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "claimsEnabled",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "decimals",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "symbol",
+        "type": "string"
+      }
+    ],
+    "name": "RewardTokenAdded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "claimsEnabled",
+        "type": "bool"
+      }
+    ],
+    "name": "RewardTokenUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": false,
         "internalType": "address",
         "name": "previousSigner",
@@ -486,20 +579,7 @@
   },
   {
     "inputs": [],
-    "name": "ASSET_CLAIM_TYPEHASH",
-    "outputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "TOKENX_CLAIM_TYPEHASH",
+    "name": "REWARD_CLAIM_TYPEHASH",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -531,33 +611,35 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "asset",
-    "outputs": [
+    "inputs": [
       {
-        "internalType": "contract IERC20",
-        "name": "",
+        "internalType": "address",
+        "name": "token",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "assetClaimsEnabled",
-    "outputs": [
+      },
       {
         "internalType": "bool",
-        "name": "",
+        "name": "conditional",
+        "type": "bool"
+      },
+      {
+        "internalType": "bool",
+        "name": "claimsEnabled",
         "type": "bool"
       }
     ],
-    "stateMutability": "view",
+    "name": "addRewardToken",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
     "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
       {
         "internalType": "uint256",
         "name": "cumulativeAmount",
@@ -574,36 +656,7 @@
         "type": "bytes"
       }
     ],
-    "name": "claimAsset",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "paidAmount",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "cumulativeAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "deadline",
-        "type": "uint256"
-      },
-      {
-        "internalType": "bytes",
-        "name": "signature",
-        "type": "bytes"
-      }
-    ],
-    "name": "claimTokenX",
+    "name": "claim",
     "outputs": [
       {
         "internalType": "uint256",
@@ -618,30 +671,16 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "user",
+        "name": "token",
         "type": "address"
-      }
-    ],
-    "name": "claimedAsset",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
+      },
       {
         "internalType": "address",
         "name": "user",
         "type": "address"
       }
     ],
-    "name": "claimedTokenX",
+    "name": "claimed",
     "outputs": [
       {
         "internalType": "uint256",
@@ -729,11 +768,52 @@
         "internalType": "address",
         "name": "signer_",
         "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          },
+          {
+            "internalType": "bool",
+            "name": "conditional",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "claimsEnabled",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct IRewardsDistributor.RewardTokenInit[]",
+        "name": "tokens_",
+        "type": "tuple[]"
       }
     ],
     "name": "initialize",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "isRewardToken",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -804,12 +884,17 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
         "internalType": "uint256",
         "name": "amount",
         "type": "uint256"
       }
     ],
-    "name": "recoverExcessAsset",
+    "name": "recoverExcess",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -824,12 +909,76 @@
   {
     "inputs": [
       {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "rewardToken",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bool",
+            "name": "registered",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "conditional",
+            "type": "bool"
+          },
+          {
+            "internalType": "bool",
+            "name": "claimsEnabled",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint8",
+            "name": "decimals",
+            "type": "uint8"
+          }
+        ],
+        "internalType": "struct IRewardsDistributor.RewardToken",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "rewardTokens",
+    "outputs": [
+      {
+        "internalType": "address[]",
+        "name": "",
+        "type": "address[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
         "internalType": "bool",
-        "name": "_enabled",
+        "name": "enabled",
         "type": "bool"
       }
     ],
-    "name": "setAssetClaimsEnabled",
+    "name": "setClaimsEnabled",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -838,7 +987,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_guardian",
+        "name": "newGuardian",
         "type": "address"
       }
     ],
@@ -851,7 +1000,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_operator",
+        "name": "newOperator",
         "type": "address"
       }
     ],
@@ -864,7 +1013,7 @@
     "inputs": [
       {
         "internalType": "bool",
-        "name": "_paused",
+        "name": "paused_",
         "type": "bool"
       }
     ],
@@ -877,7 +1026,25 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "_signer",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      }
+    ],
+    "name": "setRewardTokenEnabled",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newSigner",
         "type": "address"
       }
     ],
@@ -892,19 +1059,6 @@
     "outputs": [
       {
         "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "tokenX",
-    "outputs": [
-      {
-        "internalType": "contract TokenX",
         "name": "",
         "type": "address"
       }

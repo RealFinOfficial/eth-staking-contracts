@@ -1,39 +1,18 @@
 [
   {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "_name",
-        "type": "string"
-      },
-      {
-        "internalType": "string",
-        "name": "_symbol",
-        "type": "string"
-      },
-      {
-        "internalType": "address",
-        "name": "_initialOwner",
-        "type": "address"
-      }
-    ],
+    "inputs": [],
     "stateMutability": "nonpayable",
     "type": "constructor"
   },
   {
     "inputs": [
       {
-        "internalType": "uint64",
-        "name": "activatesAt",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint256",
-        "name": "blockTimestamp",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "target",
+        "type": "address"
       }
     ],
-    "name": "ActivationNotInFuture",
+    "name": "AddressEmptyCode",
     "type": "error"
   },
   {
@@ -61,6 +40,22 @@
       }
     ],
     "name": "ECDSAInvalidSignatureS",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "ERC1967InvalidImplementation",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ERC1967NonPayable",
     "type": "error"
   },
   {
@@ -177,29 +172,8 @@
     "type": "error"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "alreadyMinted",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "requested",
-        "type": "uint256"
-      }
-    ],
-    "name": "EpochMintCapExceeded",
+    "inputs": [],
+    "name": "FailedCall",
     "type": "error"
   },
   {
@@ -220,12 +194,12 @@
   },
   {
     "inputs": [],
-    "name": "InvalidShortString",
+    "name": "InvalidInitialization",
     "type": "error"
   },
   {
     "inputs": [],
-    "name": "NoPendingEpoch",
+    "name": "NotInitializing",
     "type": "error"
   },
   {
@@ -267,14 +241,19 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "UUPSUnauthorizedCallContext",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
-        "internalType": "string",
-        "name": "str",
-        "type": "string"
+        "internalType": "bytes32",
+        "name": "slot",
+        "type": "bytes32"
       }
     ],
-    "name": "StringTooLong",
+    "name": "UUPSUnsupportedProxiableUUID",
     "type": "error"
   },
   {
@@ -318,49 +297,12 @@
     "inputs": [
       {
         "indexed": false,
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
         "internalType": "uint64",
-        "name": "scheduledFor",
+        "name": "version",
         "type": "uint64"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "activatedAt",
-        "type": "uint256"
       }
     ],
-    "name": "EpochActivated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      }
-    ],
-    "name": "EpochCapSet",
+    "name": "Initialized",
     "type": "event"
   },
   {
@@ -380,56 +322,6 @@
       }
     ],
     "name": "MinterChanged",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "activatesAt",
-        "type": "uint64"
-      }
-    ],
-    "name": "NextEpochArmed",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "activatesAt",
-        "type": "uint64"
-      }
-    ],
-    "name": "NextEpochCancelled",
     "type": "event"
   },
   {
@@ -496,6 +388,19 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "implementation",
+        "type": "address"
+      }
+    ],
+    "name": "Upgraded",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "DOMAIN_SEPARATOR",
     "outputs": [
@@ -503,6 +408,19 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "UPGRADE_INTERFACE_VERSION",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
       }
     ],
     "stateMutability": "view",
@@ -566,29 +484,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "activatesAt",
-        "type": "uint64"
-      }
-    ],
-    "name": "armNextEpoch",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "account",
         "type": "address"
@@ -638,50 +533,12 @@
   },
   {
     "inputs": [],
-    "name": "cancelNextEpoch",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "currentEpochId",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "decimals",
     "outputs": [
       {
         "internalType": "uint8",
         "name": "",
         "type": "uint8"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "effectiveEpoch",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -733,20 +590,29 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "epochCap",
-    "outputs": [
+        "internalType": "string",
+        "name": "name_",
+        "type": "string"
+      },
       {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
+        "internalType": "string",
+        "name": "symbol_",
+        "type": "string"
+      },
+      {
+        "internalType": "address",
+        "name": "owner_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "minter_",
+        "type": "address"
       }
     ],
-    "stateMutability": "view",
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -765,25 +631,6 @@
     "name": "mint",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "mintedInEpoch",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -839,29 +686,6 @@
         "internalType": "address",
         "name": "",
         "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "pendingEpoch",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "activatesAt",
-        "type": "uint64"
       }
     ],
     "stateMutability": "view",
@@ -925,6 +749,19 @@
   },
   {
     "inputs": [],
+    "name": "proxiableUUID",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "renounceOwnership",
     "outputs": [],
     "stateMutability": "nonpayable",
@@ -933,26 +770,8 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "epochId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "cap",
-        "type": "uint256"
-      }
-    ],
-    "name": "setEpochCap",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
-        "name": "_minter",
+        "name": "newMinter",
         "type": "address"
       }
     ],
@@ -1051,6 +870,24 @@
     "name": "transferOwnership",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newImplementation",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes",
+        "name": "data",
+        "type": "bytes"
+      }
+    ],
+    "name": "upgradeToAndCall",
+    "outputs": [],
+    "stateMutability": "payable",
     "type": "function"
   }
 ]

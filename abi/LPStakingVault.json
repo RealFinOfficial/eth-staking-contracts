@@ -101,6 +101,11 @@
   },
   {
     "inputs": [],
+    "name": "InsufficientGasForBonusHook",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidInitialization",
     "type": "error"
   },
@@ -144,6 +149,17 @@
       }
     ],
     "name": "InvalidTwapWindow",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      }
+    ],
+    "name": "NotAContract",
     "type": "error"
   },
   {
@@ -489,6 +505,38 @@
     "inputs": [
       {
         "indexed": false,
+        "internalType": "address",
+        "name": "previousEscrow",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "newEscrow",
+        "type": "address"
+      }
+    ],
+    "name": "BonusEscrowSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusHookFailed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
         "internalType": "bool",
         "name": "depositsPaused",
         "type": "bool"
@@ -806,6 +854,32 @@
   },
   {
     "inputs": [],
+    "name": "BONUS_HOOK_GAS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "BONUS_HOOK_GAS_FLOOR",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "MAX_TWAP_DEVIATION_TICKS",
     "outputs": [
       {
@@ -861,6 +935,19 @@
     "name": "acceptOwnership",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusEscrow",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1188,6 +1275,19 @@
       }
     ],
     "name": "rescuePosition",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newEscrow",
+        "type": "address"
+      }
+    ],
+    "name": "setBonusEscrow",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
