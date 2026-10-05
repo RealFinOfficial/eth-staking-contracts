@@ -457,24 +457,38 @@ async function runClaim({ signer, stack, record, recordFile }) {
       console.log(`token ${p.tokenId}: ${claimed ? "already claimed" : forfeited ? "FORFEITED" : `locked until ${unlockAt} (now ${now})`}`);
       continue;
     }
+    // Preflight with a static call: the escrow's custom errors decode there, while a reverted
+    // SEND on a JSON-RPC node only carries the node's message. An unfunded escrow is the normal
+    // state of a fresh test stack (reserve now, fund later), so it is reported, not thrown.
     try {
-      const receipt = await pools.send(`Claiming ${units(stack, amount)} for token ${p.tokenId}`, signer, (o) => stack.escrow.claim(p.tokenId, o));
-      p.claimTx = receipt.hash;
-      writeRecord(recordFile, record);
+      await stack.escrow.claim.staticCall(p.tokenId);
     } catch (error) {
-      const data = error.data || (error.error && error.error.data);
-      let reason = error.shortMessage || error.message;
-      try {
-        const parsed = stack.escrow.interface.parseError(data);
-        if (parsed && parsed.name === "InsufficientFunds") {
-          reason = `InsufficientFunds: needs ${units(stack, parsed.args.needed)}, the escrow holds ${units(stack, parsed.args.balance)} — fund it with scripts/fund-escrow.js`;
-        } else if (parsed) reason = parsed.name;
-      } catch {
-        /* not an escrow error */
-      }
-      console.log(`token ${p.tokenId}: claim reverted — ${reason}`);
+      console.log(`token ${p.tokenId}: claim reverts — ${describeRevert(stack, error)}`);
+      continue;
     }
+    const receipt = await pools.send(`Claiming ${units(stack, amount)} for token ${p.tokenId}`, signer, (o) =>
+      stack.escrow.claim(p.tokenId, o)
+    );
+    p.claimTx = receipt.hash;
+    writeRecord(recordFile, record);
   }
+}
+
+/** One line for an escrow revert: the decoded custom error, or the provider's message. */
+function describeRevert(stack, error) {
+  let name = error.revert && error.revert.name;
+  let args = error.revert && error.revert.args;
+  if (!name) {
+    const match = /InsufficientFunds\((\d+), (\d+)\)/.exec(String(error.message || ""));
+    if (match) [name, args] = ["InsufficientFunds", [BigInt(match[1]), BigInt(match[2])]];
+  }
+  if (name === "InsufficientFunds") {
+    return (
+      `InsufficientFunds: needs ${units(stack, args[0])}, the escrow holds ${units(stack, args[1])} — ` +
+      `fund it with scripts/fund-escrow.js (LP_APEBOND_FUND_TARGET=0 covers what is owed)`
+    );
+  }
+  return name || error.shortMessage || error.message;
 }
 
 async function runStatus({ stack, record }) {
