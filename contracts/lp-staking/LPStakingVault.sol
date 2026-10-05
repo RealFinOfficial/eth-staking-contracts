@@ -10,6 +10,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 
+import "./interfaces/IBonusEscrowHooks.sol";
 import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/ISwapRouter02.sol";
 import "./libraries/TwapGuard.sol";
@@ -35,7 +36,35 @@ import "./libraries/TwapGuard.sol";
  *  Exits are unconditional: `unstake` is never gated by a pause switch, by a signature, or
  *  by backend liveness. Deposits and `rebalance` are each pausable behind their own switch,
  *  which the guardian or the operator can throw. Zaps stop with the deposit pause, because
- *  `zapIn` finishes through `stakeFor`.
+ *  `zapIn` finishes through `stakeFor`. An exit notifies the bonus escrow (when one is linked)
+ *  and proceeds whatever the escrow answers.
+ *
+ *  Bonus escrow notifications (`bonusEscrow`, owner-set, zero = off; mainnet launches with it
+ *  unset). The vault reports every `unstake` and every `rebalance` to the escrow AT THE MOMENT
+ *  IT HAPPENS, through {IBonusEscrowHooks}, and knows nothing else about bonuses:
+ *    - `unstake` -> `onUnstake(tokenId)`, after the staker record is deleted and before the NFT
+ *      leaves. FAIL OPEN: called inside `try` with a fixed allowance of {BONUS_HOOK_GAS}; a
+ *      reverting escrow never blocks an exit, and the vault emits {BonusHookFailed} instead —
+ *      which must be monitored, because it means a bonus that should have been forfeited was
+ *      not. Before the call the vault requires `gasleft() >= BONUS_HOOK_GAS_FLOOR`
+ *      ({InsufficientGasForBonusHook} otherwise), so a caller cannot starve the hook of gas on
+ *      purpose and have the exit complete while the hook fails.
+ *    - `rebalance` -> `onRebalance(oldTokenId, newTokenId, old, new)`, after the staker record
+ *      has moved, with the old position's range and liquidity read BEFORE its liquidity was
+ *      withdrawn. FAIL CLOSED: no `try`; a reverting escrow reverts the rebalance. `rebalance`
+ *      is not the exit — failing open there would let a rebalance that takes value out of the
+ *      position escape the escrow's scaling — and `unstake` stays available whatever happens.
+ *
+ *  Two design rules the bonus model rests on (B.3 decision document, P5 and P6), stated here so
+ *  the design is not simplified back into what they rule out:
+ *    - P5. No bonus check is made at claim time or by timestamp. "The position is staked when
+ *      the bonus is claimed" is bypassed with a flash loan inside the claim transaction, and
+ *      "staked since time T" by a stake, unstake and stake inside one block (one timestamp).
+ *      The vault therefore pushes each `unstake` and `rebalance` to the escrow as it happens.
+ *    - P6. What still rests on trust: the adapter's router allowlist decides who can earn a
+ *      bonus; the beneficiary is the router's word; and this vault's TWAP parameters, which
+ *      the escrow reads to value a rebalanced position, are operator-tier with no delay —
+ *      bounded to a 300..3600 second window and at most 1823 ticks of deviation.
  *
  *  The vault holds no fungible tokens between transactions. Any token0/token1 balance left
  *  at the end of a `rebalance` is refunded to the staker in the same transaction.
@@ -68,7 +97,7 @@ import "./libraries/TwapGuard.sol";
  *
  *    | tier               | functions                                                 |
  *    |--------------------|-----------------------------------------------------------|
- *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setGuardian`, `setOperator` |
+ *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setBonusEscrow`, `setGuardian`, `setOperator` |
  *    | guardian (hot key) | `setDepositsPaused`, `setRebalancePaused`                 |
  *    | operator (multisig)| `setTwapParams`, `rescuePosition`, `setGuardian`, and both pause switches |
  *
@@ -101,6 +130,24 @@ contract LPStakingVault is
     ///      compiling under its declared `pragma ^0.8.20`.
     uint256 private constant NOT_RECEIVING = 1;
     uint256 private constant RECEIVING = 2;
+
+    /// @notice Gas forwarded to `IBonusEscrowHooks.onUnstake`. Sized from a measurement: a
+    ///         realistic escrow `onUnstake` behind an ERC-1967 proxy
+    ///         (`mocks/MockForfeitingBonusEscrow.sol`: vault check from storage, two cold
+    ///         reservation slots, `totalReserved` read and write, the forfeiture writes, the
+    ///         `BonusForfeited` event) forfeiting a live reservation measured 29,952 gas from the
+    ///         caller, the 2,600 cold-account charge included; a position with no reservation
+    ///         measured 14,606 (`test/forge/unit/VaultBonusHooks.t.sol`, `test_HookGas_*`).
+    ///         100,000 is 3.3 times the larger figure, room for the real escrow's code to differ.
+    uint256 public constant BONUS_HOOK_GAS = 100_000;
+
+    /// @notice Minimum `gasleft()` at the moment the vault is about to call `onUnstake`.
+    ///         EIP-150 forwards at most 63/64 of the remaining gas to a callee, so the hook is
+    ///         guaranteed its full {BONUS_HOOK_GAS} only when `gasleft() >= BONUS_HOOK_GAS * 64 / 63`
+    ///         plus the cost of the call itself (cold account access 2,600 + call setup); 5,000
+    ///         covers that overhead. Below the floor the unstake reverts instead of letting the
+    ///         hook run short and fail silently.
+    uint256 public constant BONUS_HOOK_GAS_FLOOR = (BONUS_HOOK_GAS * 64) / 63 + 5_000;
 
     // ──────────────────────── Immutables ───────────────────────
 
@@ -139,6 +186,9 @@ contract LPStakingVault is
         /// Routine-operations tier (multisig, no delay): TWAP calibration and NFT rescue.
         /// Appended after `stakers` so the layout stays a strict extension of revision d852f44.
         address operator;
+        /// Bonus escrow notified on `unstake` and `rebalance` (see the header). Zero switches
+        /// the notifications off; mainnet launches with zero. Appended at the end.
+        address bonusEscrow;
     }
 
     /**
@@ -206,6 +256,13 @@ contract LPStakingVault is
     /// @notice The routine-operations tier changed. Carries both sides for auditability.
     event OperatorSet(address previousOperator, address newOperator);
 
+    /// @notice The bonus escrow link changed. Carries both sides; zero means notifications off.
+    event BonusEscrowSet(address previousEscrow, address newEscrow);
+
+    /// @notice `onUnstake(tokenId)` reverted inside its gas allowance and the exit completed
+    ///         anyway (fail open). A bonus that should have been forfeited was not: alert on it.
+    event BonusHookFailed(uint256 indexed tokenId);
+
     // ──────────────────────── Errors ───────────────────────────
 
     error ZeroAddress();
@@ -237,6 +294,11 @@ contract LPStakingVault is
     error NotOwnerOrOperator(address caller, address owner, address operator);
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
+    /// @dev `unstake` reached the escrow notification with less than {BONUS_HOOK_GAS_FLOOR} gas
+    ///      left. Retry with a higher gas limit.
+    error InsufficientGasForBonusHook();
+    /// @dev `setBonusEscrow` was given a non-zero address with no code.
+    error NotAContract(address account);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -452,6 +514,9 @@ contract LPStakingVault is
      *      deposit (the receipt check on the deposit leg is on the vault, not on the
      *      depositor) but could never withdraw, and its position would be locked here
      *      forever. A plain transfer keeps the exit unconditional, as the header claims.
+     *
+     *      With a bonus escrow linked, the exit notifies it between the record deletion and
+     *      the transfer — fail open, with a gas floor (see the header and {_notifyUnstake}).
      * @param tokenId The staked position NFT to withdraw.
      */
     function unstake(uint256 tokenId) external nonReentrant {
@@ -461,6 +526,8 @@ contract LPStakingVault is
         if (staker != msg.sender) revert NotStaker(tokenId, msg.sender, staker);
 
         delete $.stakers[tokenId];
+
+        _notifyUnstake($.bonusEscrow, tokenId);
 
         positionManager.transferFrom(address(this), msg.sender, tokenId);
 
@@ -481,6 +548,8 @@ contract LPStakingVault is
      *      4. Refund every remaining token0/token1 wei to the staker.
      *      5. Burn the emptied old NFT.
      *      6. Move the staker record from the old tokenId to the new one.
+     *      7. With a bonus escrow linked, report the move to it — fail closed (see the header).
+     *         The old position's range and liquidity are read before step 1.
      *
      *      Slippage: step 1 deliberately passes `amount0Min = amount1Min = 0`. Withdrawing
      *      the caller's own liquidity at spot cannot be sandwiched for profit in isolation,
@@ -519,7 +588,10 @@ contract LPStakingVault is
         address staker = $.stakers[tokenId];
         if (staker != msg.sender) revert NotStaker(tokenId, msg.sender, staker);
 
-        _withdrawAll(tokenId, deadline);
+        // The old position as it stands BEFORE its liquidity leaves; the escrow values it.
+        IBonusEscrowHooks.Snapshot memory oldPosition = _snapshot(tokenId);
+
+        _withdrawAll(tokenId, oldPosition.liquidity, deadline);
 
         if (swap.amountIn > 0) {
             _executeSwap(swap);
@@ -532,6 +604,14 @@ contract LPStakingVault is
         // the old id becomes unstakeable in the same breath.
         delete $.stakers[tokenId];
         $.stakers[newTokenId] = staker;
+
+        _notifyRebalance(
+            $.bonusEscrow,
+            tokenId,
+            newTokenId,
+            oldPosition,
+            IBonusEscrowHooks.Snapshot({tickLower: newTickLower, tickUpper: newTickUpper, liquidity: newLiquidity})
+        );
 
         (uint256 refund0, uint256 refund1) = _refundDust(staker);
 
@@ -594,6 +674,22 @@ contract LPStakingVault is
         LPStakingVaultStorage storage $ = _vaultStorage();
         emit ZapperSet($.zapper, newZapper);
         $.zapper = newZapper;
+    }
+
+    /**
+     * @notice Links the bonus escrow notified on `unstake` and `rebalance`, or unlinks it.
+     * @dev Owner tier: the link decides what every exit and every rebalance calls, which is a
+     *      code change in all but name. Zero switches the notifications off. A non-zero address
+     *      must carry code: a call to an address without code reverts in the vault itself, before
+     *      `try` could catch it, and would block every `unstake` — the one thing that must never
+     *      happen.
+     * @param newEscrow The escrow (a contract implementing {IBonusEscrowHooks}), or zero.
+     */
+    function setBonusEscrow(address newEscrow) external onlyOwner {
+        if (newEscrow != address(0) && newEscrow.code.length == 0) revert NotAContract(newEscrow);
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        emit BonusEscrowSet($.bonusEscrow, newEscrow);
+        $.bonusEscrow = newEscrow;
     }
 
     /**
@@ -809,6 +905,11 @@ contract LPStakingVault is
         return _vaultStorage().rebalancePaused;
     }
 
+    /// @notice The escrow notified on `unstake` and `rebalance`. Zero means notifications off.
+    function bonusEscrow() external view returns (address) {
+        return _vaultStorage().bonusEscrow;
+    }
+
     // ──────────────────────── Internal helpers ─────────────────
 
     /// @dev Shared body of every stake path. Validates the position, records the staker,
@@ -850,11 +951,15 @@ contract LPStakingVault is
         if (liquidity == 0) revert EmptyPosition(tokenId);
     }
 
+    /// @dev The range and liquidity of `tokenId`, read from the position manager.
+    function _snapshot(uint256 tokenId) internal view returns (IBonusEscrowHooks.Snapshot memory snap) {
+        (, , , , , snap.tickLower, snap.tickUpper, snap.liquidity, , , , ) = positionManager.positions(tokenId);
+    }
+
     /// @dev Empties a position: burns all its liquidity, then collects principal + fees
     ///      into the vault. Leaves the NFT alive but with zero liquidity and zero owed.
-    function _withdrawAll(uint256 tokenId, uint256 deadline) internal {
-        (, , , , , , , uint128 liquidity, , , , ) = positionManager.positions(tokenId);
-
+    ///      `liquidity` is the position's liquidity as just read by {_snapshot}.
+    function _withdrawAll(uint256 tokenId, uint128 liquidity, uint256 deadline) internal {
         if (liquidity > 0) {
             positionManager.decreaseLiquidity(
                 INonfungiblePositionManager.DecreaseLiquidityParams({
@@ -959,6 +1064,29 @@ contract LPStakingVault is
 
         IERC20(token0).forceApprove(address(positionManager), 0);
         IERC20(token1).forceApprove(address(positionManager), 0);
+    }
+
+    /// @dev The `unstake` notification: fail open, with a gas floor. See the header.
+    ///      `catch` without a payload on purpose — a return-data copy is a gas sink an escrow
+    ///      could use against the exit, and the event names the position, which is enough.
+    function _notifyUnstake(address escrow, uint256 tokenId) private {
+        if (escrow == address(0)) return;
+        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(escrow).onUnstake{gas: BONUS_HOOK_GAS}(tokenId) {} catch {
+            emit BonusHookFailed(tokenId);
+        }
+    }
+
+    /// @dev The `rebalance` notification: fail closed, no `try`, all remaining gas. See the header.
+    function _notifyRebalance(
+        address escrow,
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        IBonusEscrowHooks.Snapshot memory oldPosition,
+        IBonusEscrowHooks.Snapshot memory newPosition
+    ) private {
+        if (escrow == address(0)) return;
+        IBonusEscrowHooks(escrow).onRebalance(oldTokenId, newTokenId, oldPosition, newPosition);
     }
 
     /// @dev Sends every remaining token0/token1 wei to `to`. The vault is designed to hold
