@@ -5,7 +5,10 @@ const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 describe("LPZapper", function () {
   let zap, vault, pool, nfpm, router;
   let usdc, asset, token0, token1;
-  let owner, alice, bob, stranger;
+  let owner, alice, bob, stranger, operatorSafe;
+  /// The proxy deployment transaction of the zapper `deployZapper` built last: `initialize`
+  /// runs inside it, so its logs are the zapper's initial state.
+  let zapperDeployTx;
 
   let zapAddr, vaultAddr, poolAddr, nfpmAddr, routerAddr;
   let usdcAddr, assetAddr, token0Addr, token1Addr;
@@ -39,6 +42,13 @@ describe("LPZapper", function () {
     return (await ethers.provider.getBlock(receipt.blockNumber)).timestamp;
   }
 
+  /// The zapper the way production deploys it since it became a UUPS proxy: an implementation
+  /// carrying the nine immutables (and running the live pool triple check in its constructor),
+  /// then an `LPProxy` whose constructor delegatecalls `initialize(owner, operator, window,
+  /// ticks)`. A constructor check therefore reverts the IMPLEMENTATION deploy; an `initialize`
+  /// check (the TWAP bounds, a zero owner or operator) reverts the PROXY deploy. `owner` is the
+  /// zapper's owner (the timelock in production) and `operatorSafe` its operator (the multisig),
+  /// two different accounts so a tier is never satisfied by accident.
   async function deployZapper(overrides = {}) {
     const args = {
       vault: vaultAddr,
@@ -50,13 +60,15 @@ describe("LPZapper", function () {
       swapRouter: routerAddr,
       usdc: usdcAddr,
       asset: assetAddr,
-      initialOwner: owner.address,
+      owner: owner.address,
+      operator: operatorSafe.address,
       twapWindow: TWAP_WINDOW,
       maxDeviationTicks: MAX_DEVIATION_TICKS,
+      implementation: "LPZapper",
       ...overrides,
     };
-    const Zapper = await ethers.getContractFactory("LPZapper");
-    return Zapper.deploy(
+    const Zapper = await ethers.getContractFactory(args.implementation);
+    const impl = await Zapper.deploy(
       args.vault,
       args.positionManager,
       args.pool,
@@ -65,12 +77,24 @@ describe("LPZapper", function () {
       args.fee,
       args.swapRouter,
       args.usdc,
-      args.asset,
-      args.initialOwner,
-      args.twapWindow,
-      args.maxDeviationTicks
+      args.asset
     );
+    await impl.waitForDeployment();
+
+    const initData = Zapper.interface.encodeFunctionData("initialize", [
+      args.owner,
+      args.operator,
+      args.twapWindow,
+      args.maxDeviationTicks,
+    ]);
+    const Proxy = await ethers.getContractFactory("LPProxy");
+    const proxy = await Proxy.deploy(await impl.getAddress(), initData);
+    await proxy.waitForDeployment();
+    zapperDeployTx = proxy.deploymentTransaction();
+    return ethers.getContractAt(args.implementation, await proxy.getAddress());
   }
+
+  const asOperator = () => zap.connect(operatorSafe);
 
   /// Swap leg that agrees with the pool's token ordering, i.e. the only legal direction.
   function swapParams(overrides = {}) {
@@ -123,7 +147,7 @@ describe("LPZapper", function () {
   }
 
   beforeEach(async function () {
-    [owner, alice, bob, stranger] = await ethers.getSigners();
+    [owner, alice, bob, stranger, operatorSafe] = await ethers.getSigners();
 
     // USDC carries a real EIP-2612 permit so `zapInWithPermit` can be driven end to end.
     const Permit = await ethers.getContractFactory("MockERC20Permit");
@@ -158,12 +182,13 @@ describe("LPZapper", function () {
     await asset.transfer(routerAddr, ASSET(1_000_000));
     await usdc.transfer(routerAddr, USDC(1_000_000));
 
-    // The vault is a UUPS proxy (spec 01 revision 2026-08-26); the zapper is not. `owner` is
-    // its owner, its guardian AND its operator here — this suite is about the zapper, and the
-    // three tiers are split where that is the subject ({LPStakingVault.test.js}). The zapper
-    // is wired with `setZapper` below rather than through `initialize`, because this fixture
-    // owns the proxy and can; the pre-computed path the deploy script uses is covered in
-    // {LPStakingVault.test.js}.
+    // Both the vault and the zapper are UUPS proxies. `owner` is the vault's owner, guardian
+    // AND operator here — this suite is about the zapper, and the vault's three tiers are split
+    // where that is the subject ({LPStakingVault.test.js}). The zapper's own two tiers ARE
+    // split: `owner` upgrades and moves the operator, `operatorSafe` holds the immediate levers.
+    // The zapper is wired with `setZapper` below rather than through the vault's `initialize`,
+    // because this fixture owns the vault proxy and can; the pre-computed path the deploy
+    // script uses is covered in {LPStakingVault.test.js}.
     const Vault = await ethers.getContractFactory("LPStakingVault");
     vault = await upgrades.deployProxy(
       Vault,
@@ -207,10 +232,61 @@ describe("LPZapper", function () {
       expect(await zap.asset()).to.equal(assetAddr);
       expect(await zap.usdcIsToken0()).to.equal(usdcIsToken0);
       expect(await zap.owner()).to.equal(owner.address);
+      expect(await zap.pendingOwner()).to.equal(ZERO);
+      expect(await zap.operator()).to.equal(operatorSafe.address);
 
-      await expect(zap.deploymentTransaction())
+      await expect(zapperDeployTx)
         .to.emit(zap, "TwapParamsSet")
         .withArgs(TWAP_WINDOW, MAX_DEVIATION_TICKS);
+    });
+
+    it("announces its whole initial state in the proxy's own deploy tx, in order", async function () {
+      const fresh = await deployZapper();
+      const freshAddr = await fresh.getAddress();
+      const receipt = await zapperDeployTx.wait();
+
+      const ours = receipt.logs
+        .filter((log) => log.address === freshAddr)
+        .map((log) => fresh.interface.parseLog(log))
+        .filter((parsed) => parsed !== null)
+        .map((parsed) => parsed.name);
+
+      expect(ours).to.deep.equal([
+        "Upgraded", // ERC-1967, naming the implementation the proxy's constructor installed
+        "OwnershipTransferred", // OZ, from __Ownable_init(owner)
+        "OperatorSet",
+        "TwapParamsSet",
+        "Initialized", // OZ, closing the initializer
+      ]);
+      await expect(zapperDeployTx)
+        .to.emit(fresh, "OperatorSet")
+        .withArgs(ZERO, operatorSafe.address);
+    });
+
+    it("rejects a zero owner or a zero operator in initialize, through the proxy", async function () {
+      await expect(deployZapper({ owner: ZERO }))
+        .to.be.revertedWithCustomError(zap, "OwnableInvalidOwner")
+        .withArgs(ZERO);
+      await expect(deployZapper({ operator: ZERO })).to.be.revertedWithCustomError(zap, "ZeroAddress");
+    });
+
+    it("burns the implementation's initializers, and initializes the proxy exactly once", async function () {
+      const implAddr = await upgrades.erc1967.getImplementationAddress(zapAddr);
+      const impl = await ethers.getContractAt("LPZapper", implAddr);
+
+      // The bare implementation holds no state and can never be claimed by whoever calls
+      // `initialize` on it first.
+      await expect(
+        impl.initialize(alice.address, alice.address, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+      ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
+      expect(await impl.owner()).to.equal(ZERO);
+
+      await expect(
+        zap.initialize(alice.address, alice.address, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+      ).to.be.revertedWithCustomError(zap, "InvalidInitialization");
+
+      // The ERC-1967 admin slot stays empty: the upgrade authority lives in the implementation.
+      expect(await upgrades.erc1967.getAdminAddress(zapAddr)).to.equal(ZERO);
     });
 
     it("rejects a zero vault, position manager, swap router or pool token", async function () {
@@ -578,7 +654,7 @@ describe("LPZapper", function () {
       // -301 tick-seconds over a 300 s window is a true mean of -1.0033: floored it is -2,
       // truncated it is -1. At spot 499 the two readings give opposite verdicts, so this
       // pins which one the guard actually used.
-      await zap.setTwapParams(300, MAX_DEVIATION_TICKS);
+      await asOperator().setTwapParams(300, MAX_DEVIATION_TICKS);
       await pool.setTickCumulatives([0, -301]);
 
       await pool.setCurrentTick(499);
@@ -772,44 +848,54 @@ describe("LPZapper", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Admin", function () {
-    it("retunes the TWAP parameters, owner only and within bounds", async function () {
-      await expect(zap.connect(alice).setTwapParams(1200, 100)).to.be.revertedWithCustomError(
-        zap,
-        "OwnableUnauthorizedAccount"
-      );
+    it("retunes the TWAP parameters, operator only — the owner is rejected — and within bounds", async function () {
+      await expect(zap.connect(alice).setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(alice.address, operatorSafe.address);
 
-      await expect(zap.setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet").withArgs(1200, 100);
+      // A bounded calibration needed without a delay: the OWNER (the timelock in production)
+      // does not hold it.
+      await expect(zap.setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(owner.address, operatorSafe.address);
+
+      await expect(asOperator().setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet").withArgs(1200, 100);
       expect(await zap.twapWindow()).to.equal(1200);
       expect(await zap.maxTwapDeviationTicks()).to.equal(100);
 
-      await expect(zap.setTwapParams(299, 100))
+      await expect(asOperator().setTwapParams(299, 100))
         .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
         .withArgs(299, 300, 3600);
-      await expect(zap.setTwapParams(1200, 1824))
+      await expect(asOperator().setTwapParams(1200, 1824))
         .to.be.revertedWithCustomError(zap, "InvalidTwapDeviation")
         .withArgs(1824, 1823);
     });
 
     it("rejects a window one second above the maximum", async function () {
-      await expect(zap.setTwapParams(3601, 100))
+      await expect(asOperator().setTwapParams(3601, 100))
         .to.be.revertedWithCustomError(zap, "InvalidTwapWindow")
         .withArgs(3601, 300, 3600);
 
-      await expect(zap.setTwapParams(3600, 100)).to.emit(zap, "TwapParamsSet").withArgs(3600, 100);
+      await expect(asOperator().setTwapParams(3600, 100)).to.emit(zap, "TwapParamsSet").withArgs(3600, 100);
       expect(await zap.twapWindow()).to.equal(3600);
     });
 
-    it("sweeps stranded dust, owner only and never to the zero address", async function () {
+    it("sweeps stranded dust, operator only and never to the zero address", async function () {
       await usdc.transfer(zapAddr, USDC(5));
 
-      await expect(zap.connect(alice).sweep(usdcAddr, USDC(5), alice.address)).to.be.revertedWithCustomError(
+      await expect(zap.connect(alice).sweep(usdcAddr, USDC(5), alice.address))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(alice.address, operatorSafe.address);
+      await expect(zap.sweep(usdcAddr, USDC(5), alice.address))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(owner.address, operatorSafe.address);
+      await expect(asOperator().sweep(usdcAddr, USDC(5), ZERO)).to.be.revertedWithCustomError(
         zap,
-        "OwnableUnauthorizedAccount"
+        "ZeroAddress"
       );
-      await expect(zap.sweep(usdcAddr, USDC(5), ZERO)).to.be.revertedWithCustomError(zap, "ZeroAddress");
 
       const before = await usdc.balanceOf(bob.address);
-      await expect(zap.sweep(usdcAddr, USDC(5), bob.address))
+      await expect(asOperator().sweep(usdcAddr, USDC(5), bob.address))
         .to.emit(zap, "Swept")
         .withArgs(usdcAddr, bob.address, USDC(5));
 
@@ -819,10 +905,10 @@ describe("LPZapper", function () {
 
     it("sweeps a zero amount and logs it, because sweep guards only the recipient", async function () {
       // The only stated guard is `to == address(0)`; a zero amount is a no-op transfer that
-      // still emits, unlike `RewardsDistributor.recoverExcessAsset`, which rejects zero.
+      // still emits, unlike `RewardsDistributor.recoverExcess`, which rejects zero.
       const before = await usdc.balanceOf(bob.address);
 
-      await expect(zap.sweep(usdcAddr, 0n, bob.address))
+      await expect(asOperator().sweep(usdcAddr, 0n, bob.address))
         .to.emit(zap, "Swept")
         .withArgs(usdcAddr, bob.address, 0n);
 
@@ -831,7 +917,7 @@ describe("LPZapper", function () {
 
     it("refuses to sweep an address with no code, or a token whose transfer returns false", async function () {
       // `sweep` takes any address, so SafeERC20 is the whole defence here.
-      await expect(zap.sweep(ZERO, USDC(1), bob.address))
+      await expect(asOperator().sweep(ZERO, USDC(1), bob.address))
         .to.be.revertedWithCustomError(zap, "SafeERC20FailedOperation")
         .withArgs(ZERO);
 
@@ -839,13 +925,13 @@ describe("LPZapper", function () {
       const silent = await Silent.deploy("Silent", "SILENT", USDC(1000), 6);
       const silentAddr = await silent.getAddress();
 
-      await expect(zap.sweep(silentAddr, USDC(1), bob.address))
+      await expect(asOperator().sweep(silentAddr, USDC(1), bob.address))
         .to.be.revertedWithCustomError(zap, "SafeERC20FailedOperation")
         .withArgs(silentAddr);
     });
 
     it("cannot sweep more than the contract holds", async function () {
-      await expect(zap.sweep(usdcAddr, USDC(1), stranger.address)).to.be.revertedWithCustomError(
+      await expect(asOperator().sweep(usdcAddr, USDC(1), stranger.address)).to.be.revertedWithCustomError(
         usdc,
         "ERC20InsufficientBalance"
       );
@@ -859,20 +945,13 @@ describe("LPZapper", function () {
       const hookAddr = await hookToken.getAddress();
       await hookToken.transfer(zapAddr, ASSET(200));
 
-      // The TOKEN is made the zapper's owner, so the re-entrant sweep clears `onlyOwner` —
-      // which runs before `nonReentrant` — and the guard is all that is left to stop it.
-      // Ownership is two-step (N-1), so the token has to call `acceptOwnership` itself, and
-      // firing a hook is how this mock makes a call of its own.
-      await zap.transferOwnership(hookAddr);
-      await hookToken.setRecipientHook(
-        stranger.address,
-        zapAddr,
-        zap.interface.encodeFunctionData("acceptOwnership")
-      );
-      await hookToken.fireRecipientHook(stranger.address);
-      expect(await zap.owner()).to.equal(hookAddr);
+      // The TOKEN is made the zapper's operator (by the owner, which holds `setOperator`), so
+      // the re-entrant sweep clears `onlyOperator` — which runs before `nonReentrant` — and the
+      // guard is all that is left to stop it.
+      await zap.setOperator(hookAddr);
+      expect(await zap.operator()).to.equal(hookAddr);
 
-      // Both hooks now sweep. The outer one comes from the owner; its push to bob fires the
+      // Both hooks now sweep. The outer one comes from the operator; its push to bob fires the
       // inner one, which is the call the guard has to reject.
       const sweepPayload = zap.interface.encodeFunctionData("sweep", [hookAddr, ASSET(100), bob.address]);
       await hookToken.setRecipientHook(bob.address, zapAddr, sweepPayload);
@@ -904,12 +983,12 @@ describe("LPZapper", function () {
       expect(await zap.owner()).to.equal(owner.address);
       expect(await zap.pendingOwner()).to.equal(bob.address);
 
-      await expect(zap.connect(bob).setTwapParams(1200, 100))
+      await expect(zap.connect(bob).setOperator(bob.address))
         .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
         .withArgs(bob.address);
 
-      // ...and the standing owner still holds the whole admin surface.
-      await expect(zap.setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet");
+      // ...and the standing owner still holds the whole owner surface.
+      await expect(zap.setOperator(bob.address)).to.emit(zap, "OperatorSet");
     });
 
     it("moves the owner only when the nominee accepts", async function () {
@@ -922,10 +1001,10 @@ describe("LPZapper", function () {
       expect(await zap.owner()).to.equal(bob.address);
       expect(await zap.pendingOwner()).to.equal(ZERO);
 
-      await expect(zap.setTwapParams(1200, 100))
+      await expect(zap.setOperator(alice.address))
         .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
         .withArgs(owner.address);
-      await expect(zap.connect(bob).setTwapParams(1200, 100)).to.emit(zap, "TwapParamsSet");
+      await expect(zap.connect(bob).setOperator(alice.address)).to.emit(zap, "OperatorSet");
     });
 
     it("lets nobody but the nominee accept, the standing owner included", async function () {
@@ -975,41 +1054,41 @@ describe("LPZapper", function () {
       return tokenId;
     }
 
-    it("sends a stray position NFT to the owner and logs it", async function () {
+    it("sends a stray position NFT to the operator and logs it", async function () {
       const tokenId = await pushStrayPosition(alice);
 
-      const tx = await zap.rescuePosition(tokenId);
+      const tx = await asOperator().rescuePosition(tokenId);
       const ts = await txTimestamp(tx);
 
-      await expect(tx).to.emit(zap, "PositionRescued").withArgs(tokenId, owner.address, ts);
-      expect(await nfpm.ownerOf(tokenId)).to.equal(owner.address);
+      await expect(tx).to.emit(zap, "PositionRescued").withArgs(tokenId, operatorSafe.address, ts);
+      expect(await nfpm.ownerOf(tokenId)).to.equal(operatorSafe.address);
       expect(await nfpm.balanceOf(zapAddr)).to.equal(0n);
     });
 
-    it("goes to the owner and nowhere else, even after ownership moves", async function () {
+    it("goes to the operator and nowhere else, even after the operator moves", async function () {
       const tokenId = await pushStrayPosition(alice);
-      // Ownable2Step: the nomination alone changes nothing, so bob has to accept before the
-      // rescue can follow the owner.
-      await zap.transferOwnership(bob.address);
-      await zap.connect(bob).acceptOwnership();
+      // The owner (the timelock in production) moves the operator; the rescue follows it.
+      await zap.setOperator(bob.address);
 
-      await expect(zap.rescuePosition(tokenId)).to.be.revertedWithCustomError(
-        zap,
-        "OwnableUnauthorizedAccount"
-      );
+      await expect(asOperator().rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(operatorSafe.address, bob.address);
 
       const tx = await zap.connect(bob).rescuePosition(tokenId);
       await expect(tx).to.emit(zap, "PositionRescued").withArgs(tokenId, bob.address, await txTimestamp(tx));
       expect(await nfpm.ownerOf(tokenId)).to.equal(bob.address);
     });
 
-    it("is owner only", async function () {
+    it("is operator only — the owner is rejected too", async function () {
       const tokenId = await pushStrayPosition(alice);
 
-      await expect(zap.connect(alice).rescuePosition(tokenId)).to.be.revertedWithCustomError(
-        zap,
-        "OwnableUnauthorizedAccount"
-      );
+      await expect(zap.connect(alice).rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(alice.address, operatorSafe.address);
+      // The owner is a timelock in production, with no way to forward an ERC-721.
+      await expect(zap.rescuePosition(tokenId))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(owner.address, operatorSafe.address);
       expect(await nfpm.ownerOf(tokenId)).to.equal(zapAddr);
     });
 
@@ -1017,7 +1096,7 @@ describe("LPZapper", function () {
       // the zapper holds no position between transactions, so this is the normal state
       const tokenId = await createPosition(alice);
 
-      await expect(zap.rescuePosition(tokenId))
+      await expect(asOperator().rescuePosition(tokenId))
         .to.be.revertedWithCustomError(nfpm, "ERC721InsufficientApproval")
         .withArgs(zapAddr, tokenId);
     });
@@ -1029,10 +1108,139 @@ describe("LPZapper", function () {
       await zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE);
 
       expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
-      await expect(zap.rescuePosition(tokenId)).to.be.revertedWithCustomError(
+      await expect(asOperator().rescuePosition(tokenId)).to.be.revertedWithCustomError(
         nfpm,
         "ERC721InsufficientApproval"
       );
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("setOperator", function () {
+    it("is owner only — the operator cannot move itself — rejects address(0) and emits OperatorSet", async function () {
+      await expect(asOperator().setOperator(alice.address))
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(operatorSafe.address);
+      await expect(zap.connect(stranger).setOperator(alice.address))
+        .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+        .withArgs(stranger.address);
+      await expect(zap.setOperator(ZERO)).to.be.revertedWithCustomError(zap, "ZeroAddress");
+
+      await expect(zap.setOperator(bob.address))
+        .to.emit(zap, "OperatorSet")
+        .withArgs(operatorSafe.address, bob.address);
+      expect(await zap.operator()).to.equal(bob.address);
+    });
+
+    it("moves all three immediate levers in one call", async function () {
+      await usdc.transfer(zapAddr, USDC(5));
+      await zap.setOperator(bob.address);
+
+      await expect(asOperator().setTwapParams(1200, 100))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(operatorSafe.address, bob.address);
+      await expect(asOperator().sweep(usdcAddr, USDC(5), operatorSafe.address))
+        .to.be.revertedWithCustomError(zap, "NotOperator")
+        .withArgs(operatorSafe.address, bob.address);
+
+      await zap.connect(bob).setTwapParams(1200, 100);
+      await zap.connect(bob).sweep(usdcAddr, USDC(5), bob.address);
+      expect(await zap.twapWindow()).to.equal(1200);
+      await expectZapperDrained();
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Upgradeability", function () {
+    // `missing-initializer`: V2 upgrades an ALREADY-initialized proxy, so it declares no
+    // `initializer` of its own — its `initializeV2` is a `reinitializer(2)`.
+    const V2_UNSAFE_ALLOW = ["constructor", "state-variable-immutable", "missing-initializer"];
+
+    function immutableArgs() {
+      return [vaultAddr, nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr, usdcAddr, assetAddr];
+    }
+
+    async function deployV2Impl() {
+      const V2 = await ethers.getContractFactory("LPZapperV2Mock");
+      const impl = await V2.deploy(...immutableArgs());
+      await impl.waitForDeployment();
+      return impl;
+    }
+
+    it("passes the plugin's implementation-safety check, V1 and V2", async function () {
+      await upgrades.validateImplementation(await ethers.getContractFactory("LPZapper"), {
+        kind: "uups",
+        constructorArgs: immutableArgs(),
+        unsafeAllow: ["constructor", "state-variable-immutable"],
+      });
+      await upgrades.validateImplementation(await ethers.getContractFactory("LPZapperV2Mock"), {
+        kind: "uups",
+        constructorArgs: immutableArgs(),
+        unsafeAllow: V2_UNSAFE_ALLOW,
+      });
+    });
+
+    it("upgrades only through the owner — the operator and a stranger are rejected", async function () {
+      const implAddr = await (await deployV2Impl()).getAddress();
+
+      for (const caller of [operatorSafe, stranger, alice]) {
+        await expect(zap.connect(caller).upgradeToAndCall(implAddr, "0x"))
+          .to.be.revertedWithCustomError(zap, "OwnableUnauthorizedAccount")
+          .withArgs(caller.address);
+      }
+
+      await expect(zap.upgradeToAndCall(implAddr, "0x")).to.emit(zap, "Upgraded").withArgs(implAddr);
+      expect(await upgrades.erc1967.getImplementationAddress(zapAddr)).to.equal(implAddr);
+    });
+
+    it("keeps the owner, the operator, the TWAP parameters and the zap path across an upgrade", async function () {
+      await asOperator().setTwapParams(900, 321);
+      const impl = await deployV2Impl();
+      const data = impl.interface.encodeFunctionData("initializeV2", [42n]);
+
+      await zap.upgradeToAndCall(await impl.getAddress(), data);
+      const v2 = await ethers.getContractAt("LPZapperV2Mock", zapAddr);
+
+      expect(await v2.version()).to.equal(2n);
+      expect(await v2.upgradeMarker()).to.equal(42n);
+      expect(await v2.owner()).to.equal(owner.address);
+      expect(await v2.operator()).to.equal(operatorSafe.address);
+      expect(await v2.twapWindow()).to.equal(900);
+      expect(await v2.maxTwapDeviationTicks()).to.equal(321);
+      expect(await v2.vault()).to.equal(vaultAddr);
+      expect(await v2.usdcIsToken0()).to.equal(usdcIsToken0);
+
+      // The reinitializer runs once.
+      await expect(v2.initializeV2(7n)).to.be.revertedWithCustomError(v2, "InvalidInitialization");
+
+      // The vault still whitelists the PROXY address, so zapping keeps working unchanged —
+      // which also proves the receive guard in the namespace survived (the mint path reads it).
+      await asOperator().setTwapParams(TWAP_WINDOW, MAX_DEVIATION_TICKS);
+      await expect(
+        zap.connect(alice).zapIn(USDC_IN, TICK_LOWER, TICK_UPPER, swapParams(), FAR_DEADLINE)
+      ).to.emit(zap, "ZappedIn");
+      await expectZapperDrained();
+    });
+
+    it("keeps the operator and the receive guard in the pinned ERC-7201 namespace", async function () {
+      // keccak256(abi.encode(uint256(keccak256("real.lp.storage.LPZapper")) - 1)) & ~0xff
+      const namespace = ethers.toBigInt(
+        ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            ["uint256"],
+            [ethers.toBigInt(ethers.keccak256(ethers.toUtf8Bytes("real.lp.storage.LPZapper"))) - 1n]
+          )
+        )
+      ) & ~0xffn;
+      expect(ethers.toBeHex(namespace, 32)).to.equal(
+        "0x3f321486c4e46b59498f8814639a355cef7759e294075873ae5431d3955f3000"
+      );
+
+      const slot0 = await ethers.provider.getStorage(zapAddr, namespace);
+      expect(ethers.getAddress(ethers.dataSlice(slot0, 12))).to.equal(operatorSafe.address);
+      // receiveGuard = NOT_RECEIVING (1), seeded by initialize.
+      const slot1 = await ethers.provider.getStorage(zapAddr, namespace + 1n);
+      expect(ethers.toBigInt(slot1)).to.equal(1n);
     });
   });
 });

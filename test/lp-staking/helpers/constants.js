@@ -59,7 +59,7 @@ const ROLES = {
   // to run with `guardian == operator`, and collapsing either onto the multisig is the
   // staging shortcut the script warns about. The fork suites deploy the production shape.
   guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
-  operator: 9, // LP_OPERATOR — calibration, rescue, key rotation; owner of TokenX and LPZapper
+  operator: 9, // LP_OPERATOR — operator of all five proxies, Overture minter, funds the distributor
 };
 
 // ─────────────────────────── Pool and stack parameters ───────────────────────────
@@ -74,8 +74,9 @@ const PRICE_USDC_PER_ASSET_DEN = 2n;
 const ASSET_DECIMALS = 18n;
 const USDC_DECIMALS = 6n;
 
-const TOKENX_NAME = "Real LP Rewards";
-const TOKENX_SYMBOL = "RLP";
+/** The Overture token's launch branding (LP_OVERTURE_NAME / LP_OVERTURE_SYMBOL defaults). */
+const OVERTURE_NAME = "Overture";
+const OVERTURE_SYMBOL = "OVTR";
 
 const ASSET_NAME = "Test ASSET";
 const ASSET_SYMBOL = "tASSET";
@@ -114,7 +115,7 @@ const TIMELOCK_MIN_DELAY = 60;
 
 const ASSET = (n) => BigInt(n) * 10n ** ASSET_DECIMALS;
 const USDC = (n) => BigInt(n) * 10n ** USDC_DECIMALS;
-const TOKENS = (n) => BigInt(n) * 10n ** 18n; // TokenX, 18 decimals like ASSET
+const TOKENS = (n) => BigInt(n) * 10n ** 18n; // $OVTR, 18 decimals like ASSET
 
 /** Mock supplies. Everything the scenario spends comes out of the deployer's balance. */
 const ASSET_SUPPLY = 10n ** 25n; // 10,000,000 tASSET
@@ -139,12 +140,28 @@ const FEE_ROUNDS = 3;
 const FEE_SWAP_USDC = USDC(2_000);
 const FEE_STEP_SECONDS = 30;
 
+// ─────────────────────────── Emission schedule (LPEpochRegistry) ───────────────────────────
+// The registry's own constants, re-declared so a change to the contract fails a suite.
+const REGISTRY_INTERVAL = 900; // LPEpochRegistry.INTERVAL — every bound sits on this grid
+const REGISTRY_SCHEDULE_MARGIN = 1800; // LPEpochRegistry.SCHEDULE_MARGIN — 30 minutes
+/** Epoch length decided for the program (Brandon, 1 Oct): 7 days. */
+const EPOCH_LENGTH = 7 * 24 * 3600;
 const EPOCH_ONE = 1n;
 const EPOCH_TWO = 2n;
-const EPOCH_ONE_CAP = 10n ** 24n; // 1,000,000 TokenX — armed by the deploy script
-const EPOCH_TWO_CAP = 5n * 10n ** 23n; // 500,000 TokenX
-const EPOCH_ROLLOVER_DELAY = 3600;
-const EPOCH_ROLLOVER_OVERSHOOT = 3660;
+/** Suite quantities only. Production quantities are LP_EPOCH1_* placeholders (Brandon). */
+const EPOCH_ONE_OVTR = TOKENS(1_000_000);
+const EPOCH_ONE_ASSET = ASSET(3_000);
+const EPOCH_TWO_OVTR = TOKENS(500_000);
+const EPOCH_TWO_ASSET = ASSET(3_000);
+/** What the operator funds the distributor with in the suites (LP_FUND_* in production). */
+const FUND_OVTR = TOKENS(2_000_000);
+const FUND_ASSET = ASSET(10_000);
+
+/** keccak256 of the one voucher type, for every reward token. */
+const REWARD_CLAIM_TYPE =
+  "RewardClaim(address token,address user,uint256 cumulativeAmount,uint256 deadline)";
+const REWARD_CLAIM_TYPEHASH =
+  "0x746a03cb3aaddb17f8408279b7ff5133a65d78143d19fbd50c05d05bca850c63";
 
 const FAR_DEADLINE = 10n ** 12n;
 const MAX_UINT128 = (1n << 128n) - 1n;
@@ -229,8 +246,8 @@ module.exports = {
   PRICE_USDC_PER_ASSET_DEN,
   ASSET_DECIMALS,
   USDC_DECIMALS,
-  TOKENX_NAME,
-  TOKENX_SYMBOL,
+  OVERTURE_NAME,
+  OVERTURE_SYMBOL,
   ASSET_NAME,
   ASSET_SYMBOL,
   USDC_NAME,
@@ -261,12 +278,19 @@ module.exports = {
   FEE_ROUNDS,
   FEE_SWAP_USDC,
   FEE_STEP_SECONDS,
+  REGISTRY_INTERVAL,
+  REGISTRY_SCHEDULE_MARGIN,
+  EPOCH_LENGTH,
   EPOCH_ONE,
   EPOCH_TWO,
-  EPOCH_ONE_CAP,
-  EPOCH_TWO_CAP,
-  EPOCH_ROLLOVER_DELAY,
-  EPOCH_ROLLOVER_OVERSHOOT,
+  EPOCH_ONE_OVTR,
+  EPOCH_ONE_ASSET,
+  EPOCH_TWO_OVTR,
+  EPOCH_TWO_ASSET,
+  FUND_OVTR,
+  FUND_ASSET,
+  REWARD_CLAIM_TYPE,
+  REWARD_CLAIM_TYPEHASH,
   FAR_DEADLINE,
   MAX_UINT128,
   ZERO_ADDRESS,

@@ -1,6 +1,6 @@
 /**
  * EIP-712 signing for the local-fork suite: ERC-2612 token permits, the position
- * manager's ERC-721 permit, and the back office's claim vouchers.
+ * manager's ERC-721 permit, and the back office's `RewardClaim` vouchers.
  *
  * Copied from test/lp-staking/fork/LPStakingFork.test.js L439–518 — keep in sync — with
  * the provider passed in instead of read off the Hardhat Runtime Environment.
@@ -15,14 +15,22 @@ const {
   NFT_PERMIT_NAME,
   NFT_PERMIT_VERSION,
   FAR_DEADLINE,
+  REWARD_CLAIM_TYPE,
 } = require("./constants");
 
-/** Field list of both claim legs; order and names must match the on-chain type strings. */
-const CLAIM_FIELDS = [
-  { name: "user", type: "address" },
-  { name: "cumulativeAmount", type: "uint256" },
-  { name: "deadline", type: "uint256" },
-];
+/**
+ * The one voucher type, for every reward token. Field order and names must match the on-chain
+ * type string `RewardClaim(address token,address user,uint256 cumulativeAmount,uint256 deadline)`
+ * exactly; `token` first is what makes a voucher for one token worthless for another.
+ */
+const REWARD_CLAIM_TYPES = {
+  RewardClaim: [
+    { name: "token", type: "address" },
+    { name: "user", type: "address" },
+    { name: "cumulativeAmount", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+};
 
 const ERC2612_TYPES = {
   Permit: [
@@ -146,27 +154,24 @@ async function readEip712Domain(contract) {
 }
 
 /**
- * The back office attesting a lifetime entitlement, as it would in production.
+ * The back office attesting a lifetime entitlement in one reward token, as it would in
+ * production. `user` is the address that will send `claim`; the contract hashes `msg.sender`.
  *
- * @param {"TokenXClaim"|"AssetClaim"} leg Struct name of the reward leg. The two type
- *   strings differ by exactly this name, which is what stops a voucher for one leg from
- *   being spent on the other — see RewardsDistributor.TOKENX_CLAIM_TYPEHASH /
- *   ASSET_CLAIM_TYPEHASH.
+ * @param {object} args
+ * @param {object} args.signer      ethers signer holding the distributor's `signer()` key
+ * @param {object} args.domain      the distributor's EIP-712 domain (see readEip712Domain)
+ * @param {string} args.token       the reward token's address
+ * @param {string} args.user        the claimant
+ * @param {bigint} args.cumulativeAmount lifetime entitlement in the token's smallest unit
+ * @param {bigint} [args.deadline]  voucher expiry, unix seconds
  */
-async function signVoucher({ signer, domain, leg, user, cumulativeAmount, deadline = FAR_DEADLINE }) {
-  if (leg !== "TokenXClaim" && leg !== "AssetClaim") {
-    throw new Error(`unknown voucher leg ${leg}`);
-  }
-  return signer.signTypedData(
-    domain,
-    { [leg]: CLAIM_FIELDS },
-    { user, cumulativeAmount, deadline }
-  );
+async function signRewardClaim({ signer, domain, token, user, cumulativeAmount, deadline = FAR_DEADLINE }) {
+  return signer.signTypedData(domain, REWARD_CLAIM_TYPES, { token, user, cumulativeAmount, deadline });
 }
 
 /** The type hash the contract must be using, recomputed from the struct definition. */
-function claimTypeHash(leg) {
-  return ethers.id(`${leg}(address user,uint256 cumulativeAmount,uint256 deadline)`);
+function rewardClaimTypeHash() {
+  return ethers.id(REWARD_CLAIM_TYPE);
 }
 
 module.exports = {
@@ -174,6 +179,7 @@ module.exports = {
   signErc2612,
   signNftPermit,
   readEip712Domain,
-  signVoucher,
-  claimTypeHash,
+  REWARD_CLAIM_TYPES,
+  signRewardClaim,
+  rewardClaimTypeHash,
 };

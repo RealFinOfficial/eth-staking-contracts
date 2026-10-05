@@ -1,6 +1,11 @@
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  time,
+  impersonateAccount,
+  setBalance,
+  stopImpersonatingAccount,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("LPStakingVault", function () {
   let vault, pool, nfpm, router;
@@ -252,6 +257,7 @@ describe("LPStakingVault", function () {
         "GuardianSet",
         "OperatorSet",
         "ZapperSet",
+        "BonusEscrowSet", // zero: the escrow notifications start switched off
         "DepositsPausedSet",
         "RebalancePausedSet",
         "TwapParamsSet",
@@ -264,11 +270,13 @@ describe("LPStakingVault", function () {
       await expect(born.deploymentTransaction())
         .to.emit(born, "ZapperSet")
         .withArgs(ZERO, preComputedZapper);
+      await expect(born.deploymentTransaction()).to.emit(born, "BonusEscrowSet").withArgs(ZERO, ZERO);
       await expect(born.deploymentTransaction()).to.emit(born, "DepositsPausedSet").withArgs(false);
       await expect(born.deploymentTransaction()).to.emit(born, "RebalancePausedSet").withArgs(false);
 
       // The events are the whole state, so the state has to agree with them.
       expect(await born.zapper()).to.equal(preComputedZapper);
+      expect(await born.bonusEscrow()).to.equal(ZERO);
       expect(await born.operator()).to.equal(operatorSafe.address);
       expect(await born.depositsPaused()).to.equal(false);
       expect(await born.rebalancePaused()).to.equal(false);
@@ -281,14 +289,16 @@ describe("LPStakingVault", function () {
       // explicit nonce, so the zapper's address is known before the zapper exists.
       //
       // The raw implementation + LPProxy shape is used here rather than `deployProxy`,
-      // because that is the shape the script deploys and the only one whose nonces are three
-      // in a row: implementation N, proxy N+1, zapper N+2.
+      // because that is the shape the script deploys and the only one whose nonces are four
+      // in a row: vault implementation N, vault proxy N+1, zapper implementation N+2, zapper
+      // proxy N+3. The zapper is a UUPS proxy too, so the address the vault must whitelist is
+      // the ZAPPER PROXY's — two nonces after the vault proxy, not one.
       const Vault = await ethers.getContractFactory("LPStakingVault");
       const impl = await Vault.deploy(nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr);
       await impl.waitForDeployment();
 
       const proxyNonce = await ethers.provider.getTransactionCount(owner.address);
-      const predicted = ethers.getCreateAddress({ from: owner.address, nonce: proxyNonce + 1 });
+      const predicted = ethers.getCreateAddress({ from: owner.address, nonce: proxyNonce + 2 });
 
       const Proxy = await ethers.getContractFactory("LPProxy");
       const proxy = await Proxy.deploy(
@@ -308,7 +318,7 @@ describe("LPStakingVault", function () {
       expect(await born.zapper()).to.equal(predicted);
 
       const Zapper = await ethers.getContractFactory("LPZapper");
-      const zap = await Zapper.deploy(
+      const zapImpl = await Zapper.deploy(
         bornAddr,
         nfpmAddr,
         poolAddr,
@@ -317,12 +327,20 @@ describe("LPStakingVault", function () {
         FEE,
         routerAddr,
         token1Addr,
-        token0Addr,
-        owner.address,
-        TWAP_WINDOW,
-        MAX_DEVIATION_TICKS
+        token0Addr
       );
-      await zap.waitForDeployment();
+      await zapImpl.waitForDeployment();
+      const zapProxy = await Proxy.deploy(
+        await zapImpl.getAddress(),
+        Zapper.interface.encodeFunctionData("initialize", [
+          owner.address,
+          operatorSafe.address,
+          TWAP_WINDOW,
+          MAX_DEVIATION_TICKS,
+        ])
+      );
+      await zapProxy.waitForDeployment();
+      const zap = await ethers.getContractAt("LPZapper", await zapProxy.getAddress());
 
       expect(await zap.getAddress()).to.equal(predicted);
       expect(await born.zapper()).to.equal(await zap.getAddress());
@@ -1892,6 +1910,255 @@ describe("LPStakingVault", function () {
       // ...and the pause tier follows the operator too, because the operator holds it.
       await vault.connect(stranger).setDepositsPaused(true);
       expect(await vault.depositsPaused()).to.equal(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Bonus escrow hooks", function () {
+    // MockBonusEscrow.Mode
+    const RECORD = 0;
+    const REVERT_ON_UNSTAKE = 1;
+    const REVERT_ON_REBALANCE = 2;
+    const BURN_GAS_ON_UNSTAKE = 3;
+
+    let escrow, escrowAddr;
+
+    beforeEach(async function () {
+      const Escrow = await ethers.getContractFactory("MockBonusEscrow");
+      escrow = await Escrow.deploy(vaultAddr);
+      escrowAddr = await escrow.getAddress();
+    });
+
+    async function linkEscrow(mode = RECORD) {
+      await escrow.setMode(mode);
+      await vault.setBonusEscrow(escrowAddr);
+    }
+
+    /**
+     * Writes MockBonusEscrow's recording slots once, from the vault's own address.
+     *
+     * The mock records five fields on every `onUnstake`. On a fresh mock four of them are
+     * zero -> non-zero SSTOREs at ~22,100 gas each, which with its two external reads use more
+     * than the whole BONUS_HOOK_GAS (100,000) the vault forwards — so through the vault the
+     * Record mode would itself run out of gas and be caught as a failed hook. One priming call
+     * pays the zero -> non-zero price outside the measured path, leaving the slots warm-priced
+     * as a real escrow's long-lived storage is. Returns the call count after priming (1).
+     */
+    async function primeEscrowStorage() {
+      const primeId = await createPosition(bob, { approve: false });
+      await impersonateAccount(vaultAddr);
+      await setBalance(vaultAddr, 10n ** 18n);
+      const asVaultAddress = await ethers.getSigner(vaultAddr);
+      await escrow.connect(asVaultAddress).onUnstake(primeId);
+      await stopImpersonatingAccount(vaultAddr);
+      return escrow.unstakeCalls();
+    }
+
+    function noSwapRebalance(signer, tokenId) {
+      return vault.connect(signer).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+    }
+
+    describe("setBonusEscrow", function () {
+      it("starts unset: mainnet launches with no escrow linked", async function () {
+        expect(await vault.bonusEscrow()).to.equal(ZERO);
+      });
+
+      it("is owner only — the operator and the guardian are rejected — and emits BonusEscrowSet", async function () {
+        for (const caller of [operatorSafe, guardian, stranger]) {
+          await expect(vault.connect(caller).setBonusEscrow(escrowAddr))
+            .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+            .withArgs(caller.address);
+        }
+
+        await expect(vault.setBonusEscrow(escrowAddr))
+          .to.emit(vault, "BonusEscrowSet")
+          .withArgs(ZERO, escrowAddr);
+        expect(await vault.bonusEscrow()).to.equal(escrowAddr);
+
+        // Zero is the "notifications off" state and is accepted.
+        await expect(vault.setBonusEscrow(ZERO))
+          .to.emit(vault, "BonusEscrowSet")
+          .withArgs(escrowAddr, ZERO);
+        expect(await vault.bonusEscrow()).to.equal(ZERO);
+      });
+
+      it("rejects an address with no code, which would make every unstake revert outside the try", async function () {
+        await expect(vault.setBonusEscrow(stranger.address))
+          .to.be.revertedWithCustomError(vault, "NotAContract")
+          .withArgs(stranger.address);
+        expect(await vault.bonusEscrow()).to.equal(ZERO);
+      });
+
+      it("exposes the hook gas and its floor, floor >= gas * 64 / 63", async function () {
+        const gas = await vault.BONUS_HOOK_GAS();
+        const floor = await vault.BONUS_HOOK_GAS_FLOOR();
+        expect(gas).to.equal(100_000n);
+        expect(floor).to.equal((gas * 64n) / 63n + 5_000n);
+        expect(floor).to.be.gte((gas * 64n) / 63n);
+      });
+    });
+
+    describe("onUnstake (fail open)", function () {
+      it("with no escrow linked, unstake calls nothing", async function () {
+        const tokenId = await stakePosition(alice);
+        await vault.connect(alice).unstake(tokenId);
+        expect(await escrow.unstakeCalls()).to.equal(0n);
+      });
+
+      it("reports the tokenId after the record is deleted and before the NFT leaves", async function () {
+        await linkEscrow();
+        const callsBefore = await primeEscrowStorage();
+        const tokenId = await stakePosition(alice);
+
+        await expect(vault.connect(alice).unstake(tokenId))
+          .to.emit(vault, "Unstaked")
+          .and.not.to.emit(vault, "BonusHookFailed");
+
+        expect(await escrow.unstakeCalls()).to.equal(callsBefore + 1n);
+        expect(await escrow.lastUnstakeTokenId()).to.equal(tokenId);
+        // At hook time: the staker record is already gone, the NFT is still in the vault.
+        expect(await escrow.stakerAtUnstake()).to.equal(ZERO);
+        expect(await escrow.nftOwnerAtUnstake()).to.equal(vaultAddr);
+        // ...and after it, the exit completed as usual.
+        expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+      });
+
+      it("hands the hook its whole allowance, at most BONUS_HOOK_GAS", async function () {
+        await linkEscrow();
+        await primeEscrowStorage();
+        const tokenId = await stakePosition(alice);
+        await expect(vault.connect(alice).unstake(tokenId)).to.not.emit(vault, "BonusHookFailed");
+
+        const seen = await escrow.lastUnstakeGasLeft();
+        const allowance = await vault.BONUS_HOOK_GAS();
+        expect(seen).to.be.lte(allowance);
+        // The callee's first instruction runs a few hundred gas into the frame.
+        expect(seen).to.be.gt(allowance - 5_000n);
+      });
+
+      it("a reverting escrow never blocks the exit: unstake succeeds and emits BonusHookFailed", async function () {
+        await linkEscrow(REVERT_ON_UNSTAKE);
+        const tokenId = await stakePosition(alice);
+
+        const tx = await vault.connect(alice).unstake(tokenId);
+        await expect(tx).to.emit(vault, "BonusHookFailed").withArgs(tokenId);
+        await expect(tx).to.emit(vault, "Unstaked").withArgs(alice.address, tokenId, await txTimestamp(tx));
+
+        expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+        expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
+      });
+
+      it("an escrow that burns its whole allowance is cut off at BONUS_HOOK_GAS and the exit still completes", async function () {
+        await linkEscrow(BURN_GAS_ON_UNSTAKE);
+        const tokenId = await stakePosition(alice);
+
+        const tx = await vault.connect(alice).unstake(tokenId, { gasLimit: 2_000_000 });
+        await expect(tx).to.emit(vault, "BonusHookFailed").withArgs(tokenId);
+        expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+      });
+
+      it("reverts InsufficientGasForBonusHook when the caller leaves less than the floor", async function () {
+        await linkEscrow();
+        const tokenId = await stakePosition(alice);
+
+        // Enough gas for an unstake with no escrow, not enough to guarantee the hook its
+        // allowance: the vault refuses rather than let the hook run short and fail silently.
+        await expect(
+          vault.connect(alice).unstake(tokenId, { gasLimit: 120_000 })
+        ).to.be.revertedWithCustomError(vault, "InsufficientGasForBonusHook");
+
+        expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+        expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+        expect(await escrow.unstakeCalls()).to.equal(0n);
+
+        // With a normal gas limit the same exit goes through (the cold mock fails its own
+        // recording inside the allowance, which is the fail-open path, not this test's subject).
+        await vault.connect(alice).unstake(tokenId);
+        expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+      });
+
+      it("unlinking the escrow switches the notification off again", async function () {
+        await linkEscrow(REVERT_ON_UNSTAKE);
+        await vault.setBonusEscrow(ZERO);
+        const tokenId = await stakePosition(alice);
+
+        await expect(vault.connect(alice).unstake(tokenId)).to.not.emit(vault, "BonusHookFailed");
+        expect(await escrow.unstakeCalls()).to.equal(0n);
+      });
+    });
+
+    describe("onRebalance (fail closed)", function () {
+      it("with no escrow linked, rebalance calls nothing", async function () {
+        const tokenId = await stakePosition(alice);
+        await nfpm.setMintConsumeBps(9000n);
+        await noSwapRebalance(alice, tokenId);
+        expect(await escrow.rebalanceCalls()).to.equal(0n);
+      });
+
+      it("reports the old and new ids with the old position read before its withdrawal", async function () {
+        await linkEscrow();
+        const tokenId = await stakePosition(alice);
+        await nfpm.setMintConsumeBps(9000n);
+
+        const newTokenId = await vault
+          .connect(alice)
+          .rebalance.staticCall(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+        const tx = await noSwapRebalance(alice, tokenId);
+        const receipt = await tx.wait();
+        const rebalanced = receipt.logs
+          .map((log) => {
+            try {
+              return vault.interface.parseLog(log);
+            } catch {
+              return null;
+            }
+          })
+          .find((parsed) => parsed && parsed.name === "Rebalanced");
+
+        expect(await escrow.rebalanceCalls()).to.equal(1n);
+        expect(await escrow.lastOldTokenId()).to.equal(tokenId);
+        expect(await escrow.lastNewTokenId()).to.equal(newTokenId);
+
+        // The OLD snapshot is the position before `_withdrawAll`: its range and its full
+        // liquidity, not the zero the NFT holds after the withdrawal.
+        const old_ = await escrow.lastOld();
+        expect(old_.tickLower).to.equal(TICK_LOWER);
+        expect(old_.tickUpper).to.equal(TICK_UPPER);
+        expect(old_.liquidity).to.equal(LIQUIDITY);
+
+        // The NEW snapshot is the position as minted, matching the Rebalanced event.
+        const new_ = await escrow.lastNew();
+        expect(new_.tickLower).to.equal(NEW_TICK_LOWER);
+        expect(new_.tickUpper).to.equal(NEW_TICK_UPPER);
+        expect(new_.liquidity).to.equal(rebalanced.args.liquidity);
+
+        // At hook time the record has already moved to the new NFT.
+        expect(await escrow.oldStakerAtRebalance()).to.equal(ZERO);
+        expect(await escrow.newStakerAtRebalance()).to.equal(alice.address);
+      });
+
+      it("a reverting escrow reverts the rebalance, and unstake stays open", async function () {
+        await linkEscrow(REVERT_ON_REBALANCE);
+        const tokenId = await stakePosition(alice);
+        await nfpm.setMintConsumeBps(9000n);
+
+        await expect(noSwapRebalance(alice, tokenId)).to.be.revertedWithCustomError(escrow, "EscrowRejects");
+
+        // Nothing moved: the old NFT is still staked under alice, with its liquidity.
+        expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+        expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
+
+        // The exit does not depend on the escrow: the same position leaves through unstake.
+        await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
+        expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+      });
+
+      it("only the vault may call the escrow's hooks", async function () {
+        await linkEscrow();
+        await expect(escrow.connect(alice).onUnstake(1n))
+          .to.be.revertedWithCustomError(escrow, "NotVault")
+          .withArgs(alice.address);
+      });
     });
   });
 
