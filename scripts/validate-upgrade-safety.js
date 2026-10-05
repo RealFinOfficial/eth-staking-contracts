@@ -3,7 +3,8 @@ const path = require("path");
 
 const hre = require("hardhat");
 
-// Upgrade-safety gate for the two UUPS proxies. Runs in CI on every push, with no secrets and
+// Upgrade-safety gate for the five UUPS proxies (LPStakingVault, RewardsDistributor,
+// LPEpochRegistry, TokenOverture, LPZapper). Runs in CI on every push, with no secrets and
 // no network access of its own.
 //
 // Two questions, and they are not the same question:
@@ -18,20 +19,23 @@ const hre = require("hardhat");
 //      `upgrades.validateUpgrade` answers it by comparing storage layouts against the
 //      committed `.openzeppelin/<network>.json` manifest — the file the deploy script wrote
 //      with `forceImport`. It catches a reordered field, a changed type, a deleted variable:
-//      the mistakes that make `claimedTokenX[user]` or `stakers[tokenId]` read as something
+//      the mistakes that make `claimed[token][user]` or `stakers[tokenId]` read as something
 //      else after an upgrade. This half runs only for networks whose manifest is checked in,
 //      because that manifest IS the baseline.
 //
-// Both contracts carry `immutable` protocol references set in the implementation constructor,
-// which the plugin flags by default — `unsafeAllow: ['constructor', 'state-variable-immutable']`
-// is the spec's own deliberate exception (`docs/specs/01-contracts.md` §1), not a silencer.
+// Three of the five carry `immutable` protocol references set in the implementation
+// constructor (the vault's market, the registry's distributor, the zapper's market), which the
+// plugin flags by default — `unsafeAllow: ['constructor', 'state-variable-immutable']` is the
+// spec's own deliberate exception (`docs/specs/01-contracts.md` §1), not a silencer. The same
+// list is used by `lib/proxies.js` (the deploy path) and `deploy-implementation.js`; the three
+// must never drift apart.
 //
 //     npx hardhat run scripts/validate-upgrade-safety.js
 //     npx hardhat run scripts/validate-upgrade-safety.js --network sepolia
 //     npm run validate:upgrades
 //
-// The default (in-process `hardhat` network) does half 1 for both contracts and reports which
-// manifests exist. Naming a network adds half 2 against that network's manifest.
+// The default (in-process `hardhat` network) does half 1 for all five contracts and reports
+// which manifests exist. Naming a network adds half 2 against that network's manifest.
 
 const UNSAFE_ALLOW = ["constructor", "state-variable-immutable"];
 
@@ -48,8 +52,18 @@ const DUMMY = {
 const CONTRACTS = [
   {
     name: "RewardsDistributor",
-    // (tokenX, asset)
-    constructorArgs: [DUMMY.address, DUMMY.address],
+    // no constructor arguments: every reward token is proxy storage
+    constructorArgs: [],
+  },
+  {
+    name: "LPEpochRegistry",
+    // (distributor)
+    constructorArgs: [DUMMY.address],
+  },
+  {
+    name: "TokenOverture",
+    // no constructor arguments
+    constructorArgs: [],
   },
   {
     name: "LPStakingVault",
@@ -61,6 +75,23 @@ const CONTRACTS = [
       "0x0000000000000000000000000000000000000002",
       DUMMY.fee,
       DUMMY.address,
+    ],
+  },
+  {
+    name: "LPZapper",
+    // (vault, positionManager, pool, token0, token1, fee, swapRouter, usdc, asset). The
+    // constructor reads the pool triple from chain, so `validateImplementation` (which never
+    // deploys) is the only half that can use dummies — it does not run the constructor.
+    constructorArgs: [
+      DUMMY.address,
+      DUMMY.address,
+      DUMMY.address,
+      DUMMY.address,
+      "0x0000000000000000000000000000000000000002",
+      DUMMY.fee,
+      DUMMY.address,
+      DUMMY.address,
+      "0x0000000000000000000000000000000000000002",
     ],
   },
 ];
@@ -84,7 +115,7 @@ async function main() {
   const networkName = hre.network.name;
   const chainId = Number((await hre.ethers.provider.getNetwork()).chainId);
 
-  console.log("Validating the two UUPS implementations...");
+  console.log(`Validating the ${CONTRACTS.length} UUPS implementations...`);
   console.log(`Network:  ${networkName} (chain ${chainId})`);
   console.log(`unsafeAllow: ${UNSAFE_ALLOW.join(", ")} — the spec's deliberate exception`);
 

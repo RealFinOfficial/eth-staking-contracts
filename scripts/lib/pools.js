@@ -67,6 +67,16 @@ function recordDeployment(id, kind, address, extra = {}) {
   console.log(`Recorded in ${path.basename(REGISTRY_PATH)} under chain ${key}.`);
 }
 
+/** Deletes one entry; a missing entry is a no-op. Honors DEPLOYMENTS_FILE like the writer. */
+function removeDeployment(id, kind) {
+  const registry = readRegistry();
+  const key = String(id);
+  if (!registry[key] || !registry[key][kind]) return;
+  delete registry[key][kind];
+  fs.writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2) + "\n");
+  console.log(`Removed ${kind} from ${path.basename(REGISTRY_PATH)} under chain ${key}.`);
+}
+
 function registryAddress(id, kind) {
   const entry = readRegistry()[String(id)];
   return entry && entry[kind] ? entry[kind].address : undefined;
@@ -295,6 +305,7 @@ function epochToIso(seconds) {
 }
 
 module.exports = {
+  removeDeployment,
   KINDS,
   chainId,
   isMainnet,

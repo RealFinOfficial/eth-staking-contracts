@@ -15,10 +15,10 @@ const pools = require("./lib/pools");
 //   2. schedule `upgradeToAndCall(newImplementation, 0x)` on the proxy through the
 //      `LPTimelock`, wait out `getMinDelay()`, then execute it — `lp-timelock.js`.
 //   3. record the new implementation address in `deployments.json` and hand it to whoever
-//      pins it (the backend pins both, see scripts/README.md).
+//      pins it (the backend pins the implementations, see scripts/README.md).
 //
 // Until this script existed the repo could do step 2 and not step 1: `deploy-lp-staking.js`
-// deploys implementations, but only as half of a full stack bootstrap, and it writes six new
+// deploys implementations, but only as half of a full stack bootstrap, and it writes seven new
 // registry entries while doing it. There was no way to put a SECOND implementation of an
 // existing proxy on chain.
 //
@@ -44,23 +44,27 @@ const pools = require("./lib/pools");
 //
 // ──────────────────────── where the constructor arguments come from ────────────────────────
 //
-// Both implementations carry `immutable` protocol references set in their constructor, and
-// the new implementation must carry EXACTLY the values the deployed one carries: they are
-// bytecode, not proxy storage, so an upgrade replaces them wholesale. A vault implementation
-// built with the wrong `pool` would silently repoint the TWAP guard at another market for
-// every position already in custody.
+// Three of the five implementations carry `immutable` protocol references set in their
+// constructor — the vault (its market), the registry (its distributor) and the zapper (its
+// vault and market) — and the new implementation must carry EXACTLY the values the deployed one
+// carries: they are bytecode, not proxy storage, so an upgrade replaces them wholesale. A vault
+// implementation built with the wrong `pool` would silently repoint the TWAP guard at another
+// market for every position already in custody. `RewardsDistributor` and `TokenOverture` have
+// no constructor arguments at all.
 //
 // The authority for those values is therefore the LIVE PROXY, read through its own public
 // getters — `positionManager()`, `pool()`, `token0()`, `token1()`, `fee()`, `swapRouter()` on
-// the vault, `tokenX()` and `asset()` on the distributor. Each one is a view call that
-// delegates into the current implementation and returns the immutable out of its bytecode, so
-// what comes back IS what the deployed implementation was built with.
+// the vault, `distributor()` on the registry, `vault()`, `positionManager()`, `pool()`,
+// `token0()`, `token1()`, `fee()`, `swapRouter()`, `usdc()`, `asset()` on the zapper. Each one
+// is a view call that delegates into the current implementation and returns the immutable out
+// of its bytecode, so what comes back IS what the deployed implementation was built with.
 //
 // `deployments.json` is then used as the CROSS-CHECK rather than as the source: the registry
-// records four of the vault's six values (pool, token0, token1, fee) and both of the
-// distributor's, and a disagreement between the registry and the chain means the registry
-// entry describes a different deployment than the one about to be upgraded. That is fatal
-// here, because every other number in this run would be read off the wrong stack.
+// records some of those values (the vault's pool, token0, token1 and fee; the registry's
+// distributor; the zapper's vault, usdc and asset), and a disagreement between the registry
+// and the chain means the registry entry describes a different deployment than the one about
+// to be upgraded. That is fatal here, because every other number in this run would be read
+// off the wrong stack.
 //
 // The registry is not the source because it does not hold `positionManager` or `swapRouter`
 // at all, and an env var is not the source because a typo in one would be indistinguishable
@@ -68,9 +72,10 @@ const pools = require("./lib/pools");
 //
 // ──────────────────────── environment ────────────────────────
 //
-//   IMPL_TARGET              LPStakingVault | RewardsDistributor. One kind per run, because
-//                            each is a separate implementation, a separate deploy and a
-//                            separate timelock operation
+//   IMPL_TARGET              LPStakingVault | RewardsDistributor | LPEpochRegistry |
+//                            TokenOverture | LPZapper. One kind per run, because each is a
+//                            separate implementation, a separate deploy and a separate
+//                            timelock operation
 //   IMPL_PROXY_ADDRESS       overrides the registry lookup of the proxy
 //   IMPL_CONTRACT            artifact name to compile and deploy; defaults to IMPL_TARGET.
 //                            Only for a next revision that lives under a different contract
@@ -91,14 +96,14 @@ const pools = require("./lib/pools");
 // The full runbook — validate, schedule, wait, execute, post-check, record, hand over — is in
 // scripts/README.md under "Activating a new implementation (Sepolia test stack #5)".
 
-/** The two UUPS proxies. Each name is both a registry kind and an artifact name. */
-const IMPL_KINDS = ["LPStakingVault", "RewardsDistributor"];
+/** The five UUPS proxies. Each name is both a registry kind and an artifact name. */
+const IMPL_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper"];
 
 /**
- * The two exceptions the spec grants the proxies (`docs/specs/01-contracts.md` §1): both
+ * The two exceptions the spec grants the proxies (`docs/specs/01-contracts.md` §1): the
  * implementations keep their fixed protocol references `immutable`, set in a constructor that
- * ends with `_disableInitializers()`. Identical to the list `deploy-lp-staking.js` and
- * `validate-upgrade-safety.js` use — the three must never drift apart, or a contract one of
+ * ends with `_disableInitializers()`. Identical to the list `lib/proxies.js` (the deploy path)
+ * and `validate-upgrade-safety.js` use — the three must never drift apart, or a contract one of
  * them accepts is rejected by the next.
  */
 const UUPS_UNSAFE_ALLOW = ["constructor", "state-variable-immutable"];
@@ -121,9 +126,24 @@ const CONSTRUCTOR_SOURCES = {
     registryKeys: [null, "pool", "token0", "token1", "fee", null],
   },
   RewardsDistributor: {
-    // constructor(tokenX, asset)
-    getters: ["tokenX", "asset"],
-    registryKeys: ["tokenX", "asset"],
+    // constructor() — every reward token is proxy storage
+    getters: [],
+    registryKeys: [],
+  },
+  LPEpochRegistry: {
+    // constructor(distributor)
+    getters: ["distributor"],
+    registryKeys: ["distributor"],
+  },
+  TokenOverture: {
+    // constructor()
+    getters: [],
+    registryKeys: [],
+  },
+  LPZapper: {
+    // constructor(vault, positionManager, pool, token0, token1, fee, swapRouter, usdc, asset)
+    getters: ["vault", "positionManager", "pool", "token0", "token1", "fee", "swapRouter", "usdc", "asset"],
+    registryKeys: ["vault", null, null, null, null, null, null, "usdc", "asset"],
   },
 };
 
@@ -137,8 +157,18 @@ const IMMUTABLE_ABI = {
     "function fee() view returns (uint24)",
     "function swapRouter() view returns (address)",
   ],
-  RewardsDistributor: [
-    "function tokenX() view returns (address)",
+  RewardsDistributor: [],
+  LPEpochRegistry: ["function distributor() view returns (address)"],
+  TokenOverture: [],
+  LPZapper: [
+    "function vault() view returns (address)",
+    "function positionManager() view returns (address)",
+    "function pool() view returns (address)",
+    "function token0() view returns (address)",
+    "function token1() view returns (address)",
+    "function fee() view returns (uint24)",
+    "function swapRouter() view returns (address)",
+    "function usdc() view returns (address)",
     "function asset() view returns (address)",
   ],
 };
@@ -294,7 +324,7 @@ async function stripImplTxHash(implementation) {
  * parsing and the printing; the suites call this directly.
  *
  * @param {object} options
- * @param {string} options.kind                 registry kind: LPStakingVault | RewardsDistributor
+ * @param {string} options.kind                 registry kind: one of IMPL_KINDS
  * @param {string} [options.proxyAddress]       overrides the registry lookup
  * @param {string} [options.contractName]       artifact to deploy; defaults to `kind`
  * @param {string[]} [options.unsafeAllowExtra] extra plugin flags on top of the spec's two
@@ -568,7 +598,7 @@ async function main() {
   // best, so it is recorded under its own key and the live one is left alone. Moving it into
   // `implementation` after the execute is a manual edit — the only writer of that field is
   // `deploy-lp-staking.js`, which writes it as part of a full stack bootstrap and would
-  // create six new entries if it were run for this.
+  // create seven new entries if it were run for this.
   const entry = (pools.readRegistry()[String(result.chainId)] || {})[kind];
   if (!entry) {
     throw new Error(

@@ -1,12 +1,15 @@
-// Operator front end for the `LPTimelock` that owns the two UUPS proxies.
+// Operator front end for the `LPTimelock` that owns the five UUPS proxies: `LPStakingVault`,
+// `RewardsDistributor`, `LPEpochRegistry`, `TokenOverture` and `LPZapper`.
 //
-// Every owner-tier call on `LPStakingVault` and `RewardsDistributor` — an upgrade, the zapper
-// wiring, the guardian, the operator, the ASSET leg, and the timelock's own delay — has to go
-// through this contract: schedule it, wait out `minDelay`, execute it. The TWAP calibration is
-// NOT here: since the 2026-09-09 role split `setTwapParams` is operator-tier, sent directly by
-// the multisig with no delay. This script
-// is the one place that builds those three transactions, so the calldata a Safe signs and the
-// calldata the fork suites send are produced by the same code.
+// Every owner-tier call on them — an upgrade, the zapper wiring, the bonus-escrow link, the
+// guardian, the operator, a new reward token, a reward token's switches, the Overture minter,
+// an ownership move, and the timelock's own delay — has to go through this contract: schedule
+// it, wait out `minDelay`, execute it. The operator tier is NOT here (`setTwapParams`,
+// `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the epoch schedule, the pauses):
+// those are sent directly by the multisig with no delay. This script is the one place that
+// builds the timelock transactions, so the calldata a Safe signs and the calldata the fork
+// suites send are produced by the same code. `lp-switch-timelock.js` and `add-reward-token.js`
+// build theirs with the builders exported below.
 //
 // ──────────────────────── how to run it ────────────────────────
 //
@@ -33,7 +36,8 @@
 //
 //   TIMELOCK_ACTION           schedule | execute | cancel | status | pending
 //   TIMELOCK_TARGET           registry kind (LPStakingVault, RewardsDistributor,
-//                             TimelockController) or a raw address
+//                             LPEpochRegistry, TokenOverture, LPZapper, TimelockController)
+//                             or a raw address
 //   TIMELOCK_TARGET_ADDRESS   overrides the registry lookup for the target
 //   TIMELOCK_FN               one of the owner-tier functions listed in OWNER_TIER below
 //   TIMELOCK_ARGS             comma-separated arguments, in the function's own order
@@ -67,25 +71,38 @@ const ethers = require("ethers");
 
 /**
  * The owner tier, in full. Everything here is `onlyOwner` on a contract the timelock owns, so
- * everything here can ONLY be reached through a scheduled operation. The guardian tier (both
- * vault pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
- * `rescuePosition`, `setSigner`, `recoverExcessAsset`, and those same pauses) are deliberately
- * absent: those are one-transaction calls the hot key and the multisig send directly, and
- * routing them through here would defeat the reason they exist.
+ * everything here can ONLY be reached through a scheduled operation. The guardian tier (the
+ * vault's two pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
+ * `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the registry's epoch functions, the
+ * Overture `mint`, and those same pauses) are deliberately absent: those are one-transaction
+ * calls the hot key and the multisig send directly, and routing them through here would defeat
+ * the reason they exist.
  *
  * `kinds` is the set of registry entries the function is legal on, which is what turns a
  * mistyped target into an error rather than a transaction that reverts after the delay.
  */
+const PROXY_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper"];
+
 const OWNER_TIER = {
   acceptOwnership: {
     signature: "function acceptOwnership()",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
-    note: "the second half of the Ownable2Step handover; the timelock's first operation",
+    kinds: PROXY_KINDS,
+    note: "the second half of the Ownable2Step handover; the NEW owner (a timelock) sends it",
+  },
+  transferOwnership: {
+    signature: "function transferOwnership(address newOwner)",
+    kinds: PROXY_KINDS,
+    note: "nominates a new owner (Ownable2Step); used to move all five proxies to a new timelock",
   },
   setZapper: {
     signature: "function setZapper(address newZapper)",
     kinds: ["LPStakingVault"],
     note: "points the deposit path at a new periphery contract, or at address(0) to close it",
+  },
+  setBonusEscrow: {
+    signature: "function setBonusEscrow(address newEscrow)",
+    kinds: ["LPStakingVault"],
+    note: "links the bonus escrow notified on unstake and rebalance, or address(0) to unlink it",
   },
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
@@ -95,23 +112,38 @@ const OWNER_TIER = {
   },
   setOperator: {
     signature: "function setOperator(address newOperator)",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
+    kinds: ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "LPZapper"],
     note: "moves the undelayed routine-operations tier to another multisig",
   },
-  setAssetClaimsEnabled: {
-    signature: "function setAssetClaimsEnabled(bool enabled)",
+  addRewardToken: {
+    signature: "function addRewardToken(address token, bool conditional, bool claimsEnabled)",
     kinds: ["RewardsDistributor"],
-    note: "switches the whole ASSET reward leg on or off",
+    note: "adds a pre-funded reward token; claims of it revert with InsufficientFunds until it is funded",
+  },
+  setRewardTokenEnabled: {
+    signature: "function setRewardTokenEnabled(address token, bool enabled)",
+    kinds: ["RewardsDistributor"],
+    note: "puts a reward token on, or takes it off, the emission schedule (does not touch claims)",
+  },
+  setClaimsEnabled: {
+    signature: "function setClaimsEnabled(address token, bool enabled)",
+    kinds: ["RewardsDistributor"],
+    note: "opens or closes the claims of one reward token (e.g. $ASSET after maturity)",
+  },
+  setMinter: {
+    signature: "function setMinter(address newMinter)",
+    kinds: ["TokenOverture"],
+    note: "moves the Overture token's minter role, or address(0) to stop minting",
   },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",
-    kinds: ["LPStakingVault", "RewardsDistributor"],
+    kinds: PROXY_KINDS,
     note: "the upgrade itself; `data` is the reinitializer call, or 0x for none",
   },
   updateDelay: {
     signature: "function updateDelay(uint256 newDelay)",
     kinds: ["TimelockController"],
-    note: "shortening the delay is itself a delayed, publicly visible operation",
+    note: "changing the delay is itself a delayed, publicly visible operation",
   },
 };
 
@@ -123,6 +155,9 @@ const OWNER_TIER_INTERFACE = new ethers.Interface(
 const TIMELOCK_INTERFACE = new ethers.Interface([
   "function schedule(address target, uint256 value, bytes data, bytes32 predecessor, bytes32 salt, uint256 delay)",
   "function execute(address target, uint256 value, bytes payload, bytes32 predecessor, bytes32 salt) payable",
+  "function scheduleBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt, uint256 delay)",
+  "function executeBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt) payable",
+  "function hashOperationBatch(address[] targets, uint256[] values, bytes[] payloads, bytes32 predecessor, bytes32 salt) view returns (bytes32)",
   "function cancel(bytes32 id)",
   "function getMinDelay() view returns (uint256)",
   "function getTimestamp(bytes32 id) view returns (uint256)",
@@ -261,6 +296,58 @@ function encodeExecute(op) {
   ]);
 }
 
+/**
+ * One BATCH operation: several owner-tier calls the timelock executes atomically, in order,
+ * under one id. The salt is derived from the whole batch, the same way {deriveSalt} derives one
+ * for a single call, so schedule and execute agree without carrying a value between them.
+ *
+ * OZ's id for a batch: `keccak256(abi.encode(targets, values, payloads, predecessor, salt))`.
+ *
+ * @param {{calls: Array<{target: string, fn: string, args?: Array<unknown>}>, tag?: string}} spec
+ */
+function buildBatch({ calls, tag = "" }) {
+  if (!Array.isArray(calls) || calls.length === 0) throw new Error("a batch needs at least one call");
+  const targets = calls.map((call) => ethers.getAddress(call.target));
+  const payloads = calls.map((call) => encodeOwnerCall(call.fn, call.args || []));
+  const values = calls.map(() => 0n);
+  const salt = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["string", "address[]", "bytes32[]", "string"],
+      [SALT_NAMESPACE + ".batch", targets, payloads.map((data) => ethers.keccak256(data)), tag]
+    )
+  );
+  const id = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address[]", "uint256[]", "bytes[]", "bytes32", "bytes32"],
+      [targets, values, payloads, PREDECESSOR, salt]
+    )
+  );
+  return { calls, tag, targets, values, payloads, predecessor: PREDECESSOR, salt, id };
+}
+
+/** The `scheduleBatch(...)` calldata a Safe signs. */
+function encodeScheduleBatch(batch, delay) {
+  return TIMELOCK_INTERFACE.encodeFunctionData("scheduleBatch", [
+    batch.targets,
+    batch.values,
+    batch.payloads,
+    batch.predecessor,
+    batch.salt,
+    delay,
+  ]);
+}
+
+/** The `executeBatch(...)` calldata a Safe signs once the delay has elapsed. */
+function encodeExecuteBatch(batch) {
+  return TIMELOCK_INTERFACE.encodeFunctionData("executeBatch", [
+    batch.targets,
+    batch.values,
+    batch.payloads,
+    batch.predecessor,
+    batch.salt,
+  ]);
+}
+
 /** The `cancel(id)` calldata. Any canceller — here, the multisig — may send it. */
 function encodeCancel(id) {
   return TIMELOCK_INTERFACE.encodeFunctionData("cancel", [id]);
@@ -383,8 +470,8 @@ function splitArgs(raw) {
 
 /**
  * The target, by registry kind or by address. The kind is checked against the function's own
- * `kinds` list, so `setAssetClaimsEnabled` aimed at the vault fails here rather than after
- * the delay.
+ * `kinds` list, so `setClaimsEnabled` aimed at the vault fails here rather than after the
+ * delay.
  */
 async function resolveTarget(hre, pools, chainId) {
   const fn = requireFunction();
@@ -488,6 +575,7 @@ async function listPending(hre, pools, timelock, chainId) {
 }
 
 module.exports = {
+  PROXY_KINDS,
   OWNER_TIER,
   OWNER_TIER_INTERFACE,
   TIMELOCK_INTERFACE,
@@ -500,6 +588,9 @@ module.exports = {
   buildOperation,
   encodeSchedule,
   encodeExecute,
+  buildBatch,
+  encodeScheduleBatch,
+  encodeExecuteBatch,
   encodeCancel,
   describeOperation,
 };
