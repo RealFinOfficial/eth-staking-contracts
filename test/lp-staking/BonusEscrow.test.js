@@ -1,33 +1,86 @@
 const { expect } = require("chai");
 const { ethers, upgrades } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  time,
+  impersonateAccount,
+  setBalance,
+  stopImpersonatingAccount,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
+const { valueAt, scaledAmount } = require("./helpers/positionValue");
+
+/**
+ * BonusEscrow — the whole life of an ApeBond bonus: reserve, move, scale, forfeit, pay.
+ *
+ * What this suite proves, against the B.3 decision document (2026-10-01) with the overrides of
+ * 2026-10-05:
+ *   - the implementation binds itself to ONE vault and refuses a bonus token that is not one of
+ *     that vault's pool tokens (a position's value can only be expressed in one of them);
+ *   - reservations are keyed by the position's `tokenId`, one per NFT, ever;
+ *   - RESERVE NOW, FUND LATER (override O2): `reserve` makes no balance check of any kind, and
+ *     `claim` pays the whole amount or reverts `InsufficientFunds` and changes nothing until the
+ *     escrow is funded;
+ *   - the vault's two notifications are the vault's alone, and follow one rule: an ACTIVE
+ *     reservation (exists, not claimed, not forfeited, before its cliff) is forfeited by
+ *     `onUnstake` and moved + scaled by `min(1, valueNew / valueOld)` at the vault's TWAP by
+ *     `onRebalance`; anything else returns at once without reading the oracle (D3);
+ *   - the same rules hold through a REAL `LPStakingVault` proxy linked with `setBonusEscrow`;
+ *   - `recoverSurplus` reaches only `balance - totalReserved`, and nothing while more is owed
+ *     than held;
+ *   - the proxy upgrades in place — directly and through an `LPTimelock` — with the book intact.
+ *
+ * The expected scaled amounts are computed in JavaScript from `helpers/positionValue.js`, a
+ * line-for-line BigInt port of the Uniswap math the contract uses, never read back from the
+ * contract under test.
+ */
 describe("BonusEscrow", function () {
-  let escrow, escrowAddr, bonus, bonusAddr;
-  let owner, adapter, alice, bob, keeper, treasury;
+  let escrow, escrowAddr, vault, vaultAddr, pool, poolAddr, nfpm, nfpmAddr, router, routerAddr;
+  let asset, assetAddr, usdc, usdcAddr, token0Addr, token1Addr, other, otherAddr;
+  let bonusIsToken0;
+  let owner, adapter, alice, bob, keeper, treasury, guardian;
+
+  const FEE = 3000;
+  const TWAP_WINDOW = 600;
+  const MAX_DEVIATION_TICKS = 500;
+  const TICK_LOWER = -600;
+  const TICK_UPPER = 600;
+  const NEW_TICK_LOWER = -1200;
+  const NEW_TICK_UPPER = -600;
+  const FAR_DEADLINE = 10n ** 12n;
+  const ZERO = ethers.ZeroAddress;
+  const UNSAFE_ALLOW = ["constructor", "state-variable-immutable"];
 
   const TOKENS = (n) => ethers.parseEther(String(n));
-
-  /// Purchase ids are opaque bytes32 in the escrow; the adapter derives them from the
-  /// ApeBond purchase. Any distinct value is a distinct reservation.
-  const ID = (label) => ethers.id(label);
-
   const SUPPLY = TOKENS(10_000_000);
   const FUNDING = TOKENS(1_000);
   const BONUS = TOKENS(100);
+  const HOUR = 3600;
 
-  /// Deploys an escrow UUPS proxy. `constructorArgs` is the implementation's one immutable;
-  /// `unsafeAllow` names exactly the two patterns the spec chose deliberately.
-  ///
-  /// `adapterAddress` is what `initialize` writes. It defaults to address(0) — the reserve
-  /// path closed, which is what every test below that calls `setAdapter` itself wants — and is
-  /// passed explicitly by the born-pointing test, which is the shape the deploy script uses.
-  async function deployEscrowProxy(tokenAddress, ownerAddress, adapterAddress = ethers.ZeroAddress) {
+  const NO_SWAP = { zeroForOne: true, amountIn: 0n, amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n };
+
+  // ── deployment helpers ─────────────────────────────────────────
+
+  async function deployVaultProxy(npm, poolAddress, t0, t1) {
+    const Vault = await ethers.getContractFactory("LPStakingVault");
+    return upgrades.deployProxy(
+      Vault,
+      [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+      {
+        kind: "uups",
+        constructorArgs: [npm, poolAddress, t0, t1, FEE, routerAddr],
+        unsafeAllow: UNSAFE_ALLOW,
+      }
+    );
+  }
+
+  /// An escrow UUPS proxy bound to `vaultAddress`, paying in `tokenAddress`. `adapterAddress`
+  /// is what `initialize` writes; address(0) is the closed path the deploy scripts start from.
+  async function deployEscrowProxy(tokenAddress, vaultAddress, ownerAddress, adapterAddress = ZERO) {
     const Escrow = await ethers.getContractFactory("BonusEscrow");
     return upgrades.deployProxy(Escrow, [ownerAddress, adapterAddress], {
       kind: "uups",
-      constructorArgs: [tokenAddress],
-      unsafeAllow: ["constructor", "state-variable-immutable"],
+      constructorArgs: [tokenAddress, vaultAddress],
+      unsafeAllow: UNSAFE_ALLOW,
     });
   }
 
@@ -38,109 +91,185 @@ describe("BonusEscrow", function () {
     return BigInt(await time.latest()) + BigInt(secs);
   }
 
-  async function reserve(id, beneficiary, amount = BONUS, unlockAt) {
-    const cliff = unlockAt ?? (await cliffIn(3600));
-    await asAdapter().reserve(id, beneficiary.address ?? beneficiary, amount, cliff);
+  async function reserve(tokenId, beneficiary, amount = BONUS, unlockAt) {
+    const cliff = unlockAt ?? (await cliffIn(HOUR));
+    await asAdapter().reserve(tokenId, beneficiary.address ?? beneficiary, amount, cliff);
     return cliff;
   }
 
+  /// Runs `fn` with the vault proxy's own address as `msg.sender`, so a hook can be called
+  /// directly — the shape of every notification the real vault sends.
+  async function asVault(fn) {
+    await impersonateAccount(vaultAddr);
+    await setBalance(vaultAddr, 10n ** 18n);
+    const signer = await ethers.getSigner(vaultAddr);
+    try {
+      return await fn(escrow.connect(signer));
+    } finally {
+      await stopImpersonatingAccount(vaultAddr);
+    }
+  }
+
+  const snap = (tickLower, tickUpper, liquidity) => ({ tickLower, tickUpper, liquidity });
+
+  /// The value the escrow must compute for a snapshot at the pool's TWAP tick.
+  async function valueOf(s) {
+    return valueAt(s.liquidity, s.tickLower, s.tickUpper, Number(await pool.twapTick()), bonusIsToken0);
+  }
+
+  /// Fabricates a position NFT for `holder` with funded principal and the vault approved.
+  async function createPosition(holder, liquidity, principal0 = TOKENS(1_000), principal1 = TOKENS(1_000)) {
+    await nfpm.mintFake(
+      holder.address,
+      token0Addr,
+      token1Addr,
+      FEE,
+      TICK_LOWER,
+      TICK_UPPER,
+      liquidity,
+      principal0,
+      principal1
+    );
+    const tokenId = await nfpm.lastMintedId();
+    const t0 = await ethers.getContractAt("MockERC20Decimals", token0Addr);
+    const t1 = await ethers.getContractAt("MockERC20Decimals", token1Addr);
+    await t0.transfer(nfpmAddr, principal0);
+    await t1.transfer(nfpmAddr, principal1);
+    await nfpm.connect(holder).approve(vaultAddr, tokenId);
+    return tokenId;
+  }
+
   beforeEach(async function () {
-    [owner, adapter, alice, bob, keeper, treasury] = await ethers.getSigners();
+    [owner, adapter, alice, bob, keeper, treasury, guardian] = await ethers.getSigners();
 
-    const BonusFactory = await ethers.getContractFactory("MockERC20Decimals");
-    bonus = await BonusFactory.deploy("Bonus Token", "BONUS", SUPPLY, 18);
-    bonusAddr = await bonus.getAddress();
+    // Both pool tokens at 18 decimals, so every principal below is in one unit. The bonus token
+    // is `asset`, whichever side the addresses happen to sort it onto.
+    const Token = await ethers.getContractFactory("MockERC20Decimals");
+    asset = await Token.deploy("Asset", "ASSET", SUPPLY, 18);
+    usdc = await Token.deploy("Quote", "QUOTE", SUPPLY, 18);
+    other = await Token.deploy("Other", "OTHER", SUPPLY, 18);
+    assetAddr = await asset.getAddress();
+    usdcAddr = await usdc.getAddress();
+    otherAddr = await other.getAddress();
+    [token0Addr, token1Addr] =
+      assetAddr.toLowerCase() < usdcAddr.toLowerCase() ? [assetAddr, usdcAddr] : [usdcAddr, assetAddr];
+    bonusIsToken0 = token0Addr === assetAddr;
 
-    escrow = await deployEscrowProxy(bonusAddr, owner.address);
+    const Pool = await ethers.getContractFactory("MockUniswapV3Pool");
+    pool = await Pool.deploy(token0Addr, token1Addr, FEE);
+    poolAddr = await pool.getAddress();
+
+    const Nfpm = await ethers.getContractFactory("MockPositionManager");
+    nfpm = await Nfpm.deploy();
+    nfpmAddr = await nfpm.getAddress();
+
+    const Router = await ethers.getContractFactory("MockSwapRouter");
+    router = await Router.deploy();
+    routerAddr = await router.getAddress();
+
+    vault = await deployVaultProxy(nfpmAddr, poolAddr, token0Addr, token1Addr);
+    vaultAddr = await vault.getAddress();
+
+    escrow = await deployEscrowProxy(assetAddr, vaultAddr, owner.address);
     escrowAddr = await escrow.getAddress();
-
-    // The campaign is funded FIRST and pointed at an adapter second — the order the escrow
-    // is designed around, since a reservation may never outrun the money behind it.
-    await bonus.transfer(escrowAddr, FUNDING);
   });
 
   // ─────────────────────────────────────────────────────────────
   describe("Deployment", function () {
-    it("exposes the bonus token, the owner and an empty book", async function () {
-      expect(await escrow.bonusToken()).to.equal(bonusAddr);
+    it("exposes the bonus token, the vault, the token side, the owner and an empty book", async function () {
+      expect(await escrow.bonusToken()).to.equal(assetAddr);
+      expect(await escrow.vault()).to.equal(vaultAddr);
+      expect(await escrow.bonusIsToken0()).to.equal(bonusIsToken0);
       expect(await escrow.owner()).to.equal(owner.address);
-      expect(await escrow.pendingOwner()).to.equal(ethers.ZeroAddress);
-      expect(await escrow.adapter()).to.equal(ethers.ZeroAddress);
+      expect(await escrow.pendingOwner()).to.equal(ZERO);
+      expect(await escrow.adapter()).to.equal(ZERO);
       expect(await escrow.totalReserved()).to.equal(0n);
     });
 
     it("starts with the reserve path closed, and says so in the proxy's own deploy tx", async function () {
-      // `initialize` runs inside the proxy's deployment transaction, so its events are that
-      // transaction's events — there is no second block to look in, and the `AdapterSet`
-      // history is complete from block one.
-      await expect(escrow.deploymentTransaction())
-        .to.emit(escrow, "AdapterSet")
-        .withArgs(ethers.ZeroAddress, ethers.ZeroAddress);
+      await expect(escrow.deploymentTransaction()).to.emit(escrow, "AdapterSet").withArgs(ZERO, ZERO);
 
-      await expect(asAdapter().reserve(ID("p1"), alice.address, BONUS, await cliffIn(3600)))
+      await expect(asAdapter().reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
         .to.be.revertedWithCustomError(escrow, "NotAdapter")
-        .withArgs(adapter.address, ethers.ZeroAddress);
+        .withArgs(adapter.address, ZERO);
     });
 
-    it("can instead be BORN pointing at an adapter, which is what the deploy script does", async function () {
-      // Production's escrow is born owned by the timelock and `setAdapter` is owner-tier, so
-      // the deploying key never gets a chance to wire it: the adapter's address is predicted
-      // from the deployer's nonce and passed to `initialize`. This is that shape, with the
-      // adapter address known in advance because the test picks it.
-      const born = await deployEscrowProxy(bonusAddr, owner.address, adapter.address);
-      const bornAddr = await born.getAddress();
-
-      await expect(born.deploymentTransaction())
-        .to.emit(born, "AdapterSet")
-        .withArgs(ethers.ZeroAddress, adapter.address);
-      expect(await born.adapter()).to.equal(adapter.address);
-
-      // And it works with no owner transaction at all: fund it, and the adapter can reserve.
-      await bonus.transfer(bornAddr, FUNDING);
-      await born.connect(adapter).reserve(ID("born"), alice.address, BONUS, await cliffIn(3600));
+    it("can instead be born pointing at an adapter", async function () {
+      const born = await deployEscrowProxy(assetAddr, vaultAddr, owner.address, adapter.address);
+      await expect(born.deploymentTransaction()).to.emit(born, "AdapterSet").withArgs(ZERO, adapter.address);
+      await born.connect(adapter).reserve(7n, alice.address, BONUS, await cliffIn(HOUR));
       expect(await born.totalReserved()).to.equal(BONUS);
     });
 
-    it("rejects a zero bonus token on the IMPLEMENTATION, before any proxy exists", async function () {
+    it("records which pool side the bonus token is, for both sides", async function () {
       const Escrow = await ethers.getContractFactory("BonusEscrow");
+      const on0 = await Escrow.deploy(token0Addr, vaultAddr);
+      const on1 = await Escrow.deploy(token1Addr, vaultAddr);
+      expect(await on0.bonusIsToken0()).to.equal(true);
+      expect(await on1.bonusIsToken0()).to.equal(false);
+    });
 
-      await expect(Escrow.deploy(ethers.ZeroAddress)).to.be.revertedWithCustomError(
-        Escrow,
-        "ZeroAddress"
-      );
+    it("rejects a zero bonus token or a zero vault on the IMPLEMENTATION", async function () {
+      const Escrow = await ethers.getContractFactory("BonusEscrow");
+      await expect(Escrow.deploy(ZERO, vaultAddr)).to.be.revertedWithCustomError(Escrow, "ZeroAddress");
+      await expect(Escrow.deploy(assetAddr, ZERO)).to.be.revertedWithCustomError(Escrow, "ZeroAddress");
+    });
+
+    it("rejects a bonus token that is neither of the vault's pool tokens", async function () {
+      const Escrow = await ethers.getContractFactory("BonusEscrow");
+      await expect(Escrow.deploy(otherAddr, vaultAddr))
+        .to.be.revertedWithCustomError(Escrow, "BonusTokenNotInPool")
+        .withArgs(otherAddr, token0Addr, token1Addr);
     });
 
     it("rejects a zero owner in initialize, through the proxy", async function () {
       const Escrow = await ethers.getContractFactory("BonusEscrow");
-
-      await expect(deployEscrowProxy(bonusAddr, ethers.ZeroAddress))
+      await expect(deployEscrowProxy(assetAddr, vaultAddr, ZERO))
         .to.be.revertedWithCustomError(Escrow, "OwnableInvalidOwner")
-        .withArgs(ethers.ZeroAddress);
+        .withArgs(ZERO);
     });
 
     it("cannot be initialised a second time, on the proxy or on the implementation", async function () {
-      await expect(
-        escrow.initialize(alice.address, adapter.address)
-      ).to.be.revertedWithCustomError(escrow, "InvalidInitialization");
+      await expect(escrow.initialize(alice.address, adapter.address)).to.be.revertedWithCustomError(
+        escrow,
+        "InvalidInitialization"
+      );
 
       const implAddr = await upgrades.erc1967.getImplementationAddress(escrowAddr);
       const impl = await ethers.getContractAt("BonusEscrow", implAddr);
-      await expect(
-        impl.initialize(alice.address, adapter.address)
-      ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
+      await expect(impl.initialize(alice.address, adapter.address)).to.be.revertedWithCustomError(
+        impl,
+        "InvalidInitialization"
+      );
     });
 
     it("refuses renounceOwnership, so the upgrade path can never be frozen", async function () {
-      await expect(escrow.renounceOwnership()).to.be.revertedWithCustomError(
-        escrow,
-        "RenounceDisabled"
-      );
+      await expect(escrow.renounceOwnership()).to.be.revertedWithCustomError(escrow, "RenounceDisabled");
       expect(await escrow.owner()).to.equal(owner.address);
 
-      // A stranger still gets the standard Ownable rejection, not the reason.
       await expect(escrow.connect(alice).renounceOwnership())
         .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
         .withArgs(alice.address);
+    });
+
+    it("has no funding check, no cap, no pause and no admin path into a reservation", async function () {
+      // Override O2 and Q5, asserted on the ABI rather than in prose.
+      for (const error of ["Underfunded"]) {
+        expect(escrow.interface.getError(error)).to.equal(null);
+      }
+      const names = escrow.interface.fragments.filter((f) => f.type === "function").map((f) => f.name);
+      for (const forbidden of [
+        "pause",
+        "setPaused",
+        "setGuardian",
+        "voidReservation",
+        "cancelReservation",
+        "setReservation",
+        "maxTotalBonus",
+        "maxBonusPerPurchase",
+      ]) {
+        expect(names).to.not.include(forbidden);
+      }
     });
   });
 
@@ -149,56 +278,46 @@ describe("BonusEscrow", function () {
     it("stores the adapter and announces both sides", async function () {
       await expect(escrow.setAdapter(adapter.address))
         .to.emit(escrow, "AdapterSet")
-        .withArgs(ethers.ZeroAddress, adapter.address);
-      expect(await escrow.adapter()).to.equal(adapter.address);
-
+        .withArgs(ZERO, adapter.address);
       await expect(escrow.setAdapter(keeper.address))
         .to.emit(escrow, "AdapterSet")
         .withArgs(adapter.address, keeper.address);
       expect(await escrow.adapter()).to.equal(keeper.address);
     });
 
-    it("is owner-only — not the adapter's own call to make", async function () {
-      await escrow.setAdapter(adapter.address);
-
+    it("is owner-only", async function () {
       for (const caller of [adapter, alice]) {
         await expect(escrow.connect(caller).setAdapter(caller.address))
           .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
           .withArgs(caller.address);
       }
-      expect(await escrow.adapter()).to.equal(adapter.address);
     });
 
     it("revokes the old adapter the moment a new one is pointed at", async function () {
       await escrow.setAdapter(adapter.address);
       await escrow.setAdapter(keeper.address);
 
-      await expect(asAdapter().reserve(ID("p1"), alice.address, BONUS, await cliffIn(3600)))
+      await expect(asAdapter().reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
         .to.be.revertedWithCustomError(escrow, "NotAdapter")
         .withArgs(adapter.address, keeper.address);
-
-      await escrow.connect(keeper).reserve(ID("p1"), alice.address, BONUS, await cliffIn(3600));
+      await escrow.connect(keeper).reserve(1n, alice.address, BONUS, await cliffIn(HOUR));
       expect(await escrow.totalReserved()).to.equal(BONUS);
     });
 
-    it("closes the reserve path on zero, and leaves standing reservations untouched", async function () {
+    it("closes the reserve path on zero, and leaves standing reservations payable", async function () {
       await escrow.setAdapter(adapter.address);
-      const cliff = await reserve(ID("p1"), alice);
+      const cliff = await reserve(1n, alice);
+      await escrow.setAdapter(ZERO);
 
-      await expect(escrow.setAdapter(ethers.ZeroAddress))
-        .to.emit(escrow, "AdapterSet")
-        .withArgs(adapter.address, ethers.ZeroAddress);
-
-      await expect(asAdapter().reserve(ID("p2"), bob.address, BONUS, await cliffIn(3600)))
+      await expect(asAdapter().reserve(2n, bob.address, BONUS, await cliffIn(HOUR)))
         .to.be.revertedWithCustomError(escrow, "NotAdapter")
-        .withArgs(adapter.address, ethers.ZeroAddress);
+        .withArgs(adapter.address, ZERO);
 
-      // The bonus already promised is still owed, and still payable on time.
-      expect(await escrow.totalReserved()).to.equal(BONUS);
+      await asset.transfer(escrowAddr, BONUS);
       await time.increaseTo(cliff);
-      await expect(escrow.connect(keeper).claim(ID("p1")))
+      await expect(escrow.connect(keeper).claim(1n))
         .to.emit(escrow, "BonusClaimed")
-        .withArgs(ID("p1"), alice.address, BONUS);
+        .withArgs(1n, alice.address, BONUS);
     });
   });
 
@@ -208,103 +327,96 @@ describe("BonusEscrow", function () {
       await escrow.setAdapter(adapter.address);
     });
 
-    it("records the reservation and emits its four fields", async function () {
-      const cliff = await cliffIn(3600);
-
-      await expect(asAdapter().reserve(ID("p1"), alice.address, BONUS, cliff))
+    it("records the reservation under the tokenId and emits its four fields", async function () {
+      const cliff = await cliffIn(HOUR);
+      await expect(asAdapter().reserve(42n, alice.address, BONUS, cliff))
         .to.emit(escrow, "BonusReserved")
-        .withArgs(ID("p1"), alice.address, BONUS, cliff);
+        .withArgs(42n, alice.address, BONUS, cliff);
 
-      const [beneficiary, amount, unlockAt, claimed] = await escrow.reservationOf(ID("p1"));
-      expect(beneficiary).to.equal(alice.address);
-      expect(amount).to.equal(BONUS);
-      expect(unlockAt).to.equal(cliff);
-      expect(claimed).to.equal(false);
+      const r = await escrow.reservationOf(42n);
+      expect(r.beneficiary).to.equal(alice.address);
+      expect(r.amount).to.equal(BONUS);
+      expect(r.unlockAt).to.equal(cliff);
+      expect(r.claimed).to.equal(false);
+      expect(r.forfeited).to.equal(false);
+      expect(await escrow.isActive(42n)).to.equal(true);
       expect(await escrow.totalReserved()).to.equal(BONUS);
     });
 
-    it("is callable by the adapter alone — the owner included", async function () {
+    it("is callable by the adapter alone — the owner and the vault included", async function () {
       for (const caller of [owner, alice]) {
-        await expect(
-          escrow.connect(caller).reserve(ID("p1"), alice.address, BONUS, await cliffIn(3600))
-        )
+        await expect(escrow.connect(caller).reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
           .to.be.revertedWithCustomError(escrow, "NotAdapter")
           .withArgs(caller.address, adapter.address);
       }
+      await asVault(async (e) => {
+        await expect(e.reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
+          .to.be.revertedWithCustomError(escrow, "NotAdapter")
+          .withArgs(vaultAddr, adapter.address);
+      });
+    });
+
+    it("records a bonus whatever the balance is — reserve now, fund later, no ceiling", async function () {
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
+
+      await reserve(1n, alice, TOKENS(5_000_000));
+      await reserve(2n, bob, TOKENS(4_000_000));
+
+      expect(await escrow.totalReserved()).to.equal(TOKENS(9_000_000));
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
     });
 
     it("sums every outstanding reservation into totalReserved", async function () {
-      await reserve(ID("p1"), alice, TOKENS(100));
-      await reserve(ID("p2"), bob, TOKENS(250));
-      await reserve(ID("p3"), alice, TOKENS(25));
-
+      await reserve(1n, alice, TOKENS(100));
+      await reserve(2n, bob, TOKENS(250));
+      await reserve(3n, alice, TOKENS(25));
       expect(await escrow.totalReserved()).to.equal(TOKENS(375));
-      expect((await escrow.reservationOf(ID("p2")))[0]).to.equal(bob.address);
     });
 
-    it("spends a purchase id exactly once", async function () {
-      await reserve(ID("p1"), alice);
+    it("allows one reservation per tokenId, ever", async function () {
+      await reserve(1n, alice);
 
-      await expect(asAdapter().reserve(ID("p1"), bob.address, TOKENS(1), await cliffIn(3600)))
+      await expect(asAdapter().reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
         .to.be.revertedWithCustomError(escrow, "DuplicateReservation")
-        .withArgs(ID("p1"));
-
-      // Not even for the same beneficiary and the same amount.
-      await expect(asAdapter().reserve(ID("p1"), alice.address, BONUS, await cliffIn(3600)))
+        .withArgs(1n);
+      await expect(asAdapter().reserve(1n, bob.address, TOKENS(1), await cliffIn(HOUR)))
         .to.be.revertedWithCustomError(escrow, "DuplicateReservation")
-        .withArgs(ID("p1"));
-
+        .withArgs(1n);
       expect(await escrow.totalReserved()).to.equal(BONUS);
     });
 
+    it("still refuses the tokenId after the bonus was forfeited or claimed", async function () {
+      await reserve(1n, alice);
+      await asVault((e) => e.onUnstake(1n));
+      await expect(asAdapter().reserve(1n, alice.address, BONUS, await cliffIn(HOUR)))
+        .to.be.revertedWithCustomError(escrow, "DuplicateReservation")
+        .withArgs(1n);
+
+      const cliff = await reserve(2n, bob);
+      await asset.transfer(escrowAddr, BONUS);
+      await time.increaseTo(cliff);
+      await escrow.claim(2n);
+      await expect(asAdapter().reserve(2n, bob.address, BONUS, await cliffIn(HOUR)))
+        .to.be.revertedWithCustomError(escrow, "DuplicateReservation")
+        .withArgs(2n);
+    });
+
     it("rejects a zero beneficiary and a zero amount", async function () {
+      await expect(asAdapter().reserve(1n, ZERO, BONUS, await cliffIn(HOUR))).to.be.revertedWithCustomError(
+        escrow,
+        "ZeroAddress"
+      );
       await expect(
-        asAdapter().reserve(ID("p1"), ethers.ZeroAddress, BONUS, await cliffIn(3600))
-      ).to.be.revertedWithCustomError(escrow, "ZeroAddress");
-
-      await expect(
-        asAdapter().reserve(ID("p1"), alice.address, 0n, await cliffIn(3600))
+        asAdapter().reserve(1n, alice.address, 0n, await cliffIn(HOUR))
       ).to.be.revertedWithCustomError(escrow, "ZeroAmount");
-
       expect(await escrow.totalReserved()).to.equal(0n);
     });
 
-    it("reserves the whole unreserved balance, and not one wei more", async function () {
-      // The exact boundary: `available == amount` is fundable, `available + 1` is not.
-      await expect(asAdapter().reserve(ID("p1"), alice.address, FUNDING + 1n, await cliffIn(3600)))
-        .to.be.revertedWithCustomError(escrow, "Underfunded")
-        .withArgs(FUNDING, FUNDING + 1n);
-
-      await asAdapter().reserve(ID("p1"), alice.address, FUNDING, await cliffIn(3600));
-      expect(await escrow.totalReserved()).to.equal(FUNDING);
-    });
-
-    it("never funds two reservations from the same wei", async function () {
-      await reserve(ID("p1"), alice, FUNDING - TOKENS(10));
-
-      await expect(asAdapter().reserve(ID("p2"), bob.address, TOKENS(11), await cliffIn(3600)))
-        .to.be.revertedWithCustomError(escrow, "Underfunded")
-        .withArgs(TOKENS(10), TOKENS(11));
-
-      // Topping the escrow up is all it takes; nothing about the first reservation moved.
-      await bonus.transfer(escrowAddr, TOKENS(1));
-      await asAdapter().reserve(ID("p2"), bob.address, TOKENS(11), await cliffIn(3600));
-      expect(await escrow.totalReserved()).to.equal(FUNDING + TOKENS(1));
-    });
-
-    it("reports a fully committed escrow as having nothing available", async function () {
-      await reserve(ID("p1"), alice, FUNDING);
-
-      await expect(asAdapter().reserve(ID("p2"), bob.address, TOKENS(1), await cliffIn(3600)))
-        .to.be.revertedWithCustomError(escrow, "Underfunded")
-        .withArgs(0n, TOKENS(1));
-    });
-
-    it("accepts a cliff already in the past — the adapter decides the schedule", async function () {
+    it("accepts a cliff already in the past — matured at once, never active", async function () {
       const past = BigInt(await time.latest()) - 1n;
-      await asAdapter().reserve(ID("p1"), alice.address, BONUS, past);
-
-      expect(await escrow.claimable(ID("p1"))).to.equal(BONUS);
+      await asAdapter().reserve(1n, alice.address, BONUS, past);
+      expect(await escrow.isActive(1n)).to.equal(false);
+      expect(await escrow.claimable(1n)).to.equal(BONUS);
     });
   });
 
@@ -312,154 +424,540 @@ describe("BonusEscrow", function () {
   describe("claim", function () {
     beforeEach(async function () {
       await escrow.setAdapter(adapter.address);
+      await asset.transfer(escrowAddr, FUNDING);
     });
 
     it("reverts before the cliff, naming the cliff and the current time", async function () {
-      const cliff = await reserve(ID("p1"), alice);
-      const now = BigInt(await time.latest());
-
+      const cliff = await reserve(1n, alice);
       await time.setNextBlockTimestamp(cliff - 1n);
-      await expect(escrow.claim(ID("p1")))
+      await expect(escrow.claim(1n))
         .to.be.revertedWithCustomError(escrow, "CliffNotReached")
         .withArgs(cliff, cliff - 1n);
-      expect(now).to.be.lt(cliff);
     });
 
-    it("pays at the exact cliff timestamp, not one second later", async function () {
-      const cliff = await reserve(ID("p1"), alice);
-      const before = await bonus.balanceOf(alice.address);
+    it("pays at the exact cliff timestamp", async function () {
+      const cliff = await reserve(1n, alice);
+      const before = await asset.balanceOf(alice.address);
 
       await time.setNextBlockTimestamp(cliff);
-      await expect(escrow.connect(alice).claim(ID("p1")))
+      await expect(escrow.connect(alice).claim(1n))
         .to.emit(escrow, "BonusClaimed")
-        .withArgs(ID("p1"), alice.address, BONUS);
+        .withArgs(1n, alice.address, BONUS);
 
-      expect(await bonus.balanceOf(alice.address)).to.equal(before + BONUS);
+      expect(await asset.balanceOf(alice.address)).to.equal(before + BONUS);
       expect(await escrow.totalReserved()).to.equal(0n);
-      expect((await escrow.reservationOf(ID("p1")))[3]).to.equal(true);
+      expect((await escrow.reservationOf(1n)).claimed).to.equal(true);
     });
 
     it("pays the recorded beneficiary even when a stranger triggers it", async function () {
-      const cliff = await reserve(ID("p1"), alice);
+      const cliff = await reserve(1n, alice);
       await time.increaseTo(cliff);
+      const keeperBefore = await asset.balanceOf(keeper.address);
 
-      const aliceBefore = await bonus.balanceOf(alice.address);
-      const keeperBefore = await bonus.balanceOf(keeper.address);
-
-      await expect(escrow.connect(keeper).claim(ID("p1")))
+      await expect(escrow.connect(keeper).claim(1n))
         .to.emit(escrow, "BonusClaimed")
-        .withArgs(ID("p1"), alice.address, BONUS);
-
-      expect(await bonus.balanceOf(alice.address)).to.equal(aliceBefore + BONUS);
-      expect(await bonus.balanceOf(keeper.address)).to.equal(keeperBefore);
+        .withArgs(1n, alice.address, BONUS);
+      expect(await asset.balanceOf(alice.address)).to.equal(BONUS);
+      expect(await asset.balanceOf(keeper.address)).to.equal(keeperBefore);
     });
 
     it("leaves every other reservation alone", async function () {
-      const cliff = await reserve(ID("p1"), alice, TOKENS(100));
-      await reserve(ID("p2"), bob, TOKENS(250), await cliffIn(86_400));
+      const cliff = await reserve(1n, alice, TOKENS(100));
+      await reserve(2n, bob, TOKENS(250), await cliffIn(86_400));
       await time.increaseTo(cliff);
-
-      await escrow.claim(ID("p1"));
+      await escrow.claim(1n);
 
       expect(await escrow.totalReserved()).to.equal(TOKENS(250));
-      expect(await escrow.claimable(ID("p2"))).to.equal(0n); // still locked
-      expect(await bonus.balanceOf(bob.address)).to.equal(0n);
+      expect(await escrow.claimable(2n)).to.equal(0n);
+      expect(await asset.balanceOf(bob.address)).to.equal(0n);
     });
 
     it("spends a reservation exactly once", async function () {
-      const cliff = await reserve(ID("p1"), alice);
+      const cliff = await reserve(1n, alice);
       await time.increaseTo(cliff);
-      await escrow.claim(ID("p1"));
-
-      await expect(escrow.claim(ID("p1")))
-        .to.be.revertedWithCustomError(escrow, "AlreadyClaimed")
-        .withArgs(ID("p1"));
-      expect(await bonus.balanceOf(alice.address)).to.equal(BONUS);
+      await escrow.claim(1n);
+      await expect(escrow.claim(1n)).to.be.revertedWithCustomError(escrow, "AlreadyClaimed").withArgs(1n);
+      expect(await asset.balanceOf(alice.address)).to.equal(BONUS);
     });
 
-    it("rejects an id that was never reserved", async function () {
-      await expect(escrow.claim(ID("never-happened")))
+    it("rejects a tokenId that was never reserved", async function () {
+      await expect(escrow.claim(999n))
         .to.be.revertedWithCustomError(escrow, "UnknownReservation")
-        .withArgs(ID("never-happened"));
+        .withArgs(999n);
+    });
+
+    it("rejects a forfeited reservation, even after the cliff and with the escrow funded", async function () {
+      const cliff = await reserve(1n, alice);
+      await asVault((e) => e.onUnstake(1n));
+      await time.increaseTo(cliff);
+
+      await expect(escrow.claim(1n)).to.be.revertedWithCustomError(escrow, "Forfeited").withArgs(1n);
+      expect(await asset.balanceOf(alice.address)).to.equal(0n);
     });
 
     it("returns the amount paid to its caller", async function () {
-      const cliff = await reserve(ID("p1"), alice, TOKENS(42));
+      const cliff = await reserve(1n, alice, TOKENS(42));
       await time.increaseTo(cliff);
-
-      expect(await escrow.claim.staticCall(ID("p1"))).to.equal(TOKENS(42));
+      expect(await escrow.claim.staticCall(1n)).to.equal(TOKENS(42));
     });
 
     it("keeps working after the reserve path is closed — a bonus owed is never withheld", async function () {
-      const cliff = await reserve(ID("p1"), alice);
-      await escrow.setAdapter(ethers.ZeroAddress);
+      const cliff = await reserve(1n, alice);
+      await escrow.setAdapter(ZERO);
       await time.increaseTo(cliff);
-
-      await expect(escrow.claim(ID("p1"))).to.emit(escrow, "BonusClaimed");
-      expect(await bonus.balanceOf(alice.address)).to.equal(BONUS);
-    });
-
-    it("marks the reservation spent BEFORE the transfer, so a token hook cannot re-enter", async function () {
-      // A callback token (ERC-777 shaped) whose hook fires inside the payout itself.
-      const HookFactory = await ethers.getContractFactory("MockHookERC20");
-      const hookToken = await HookFactory.deploy("Hook Bonus", "hBONUS", SUPPLY, 18);
-      const hookAddr = await hookToken.getAddress();
-
-      const hooked = await deployEscrowProxy(hookAddr, owner.address);
-      const hookedAddr = await hooked.getAddress();
-      await hookToken.transfer(hookedAddr, FUNDING);
-      await hooked.setAdapter(adapter.address);
-
-      const cliff = await cliffIn(3600);
-      await hooked.connect(adapter).reserve(ID("p1"), alice.address, BONUS, cliff);
-      await time.increaseTo(cliff);
-
-      // The hook fires on the transfer that pays alice, and calls straight back into `claim`.
-      const payload = hooked.interface.encodeFunctionData("claim", [ID("p1")]);
-      await hookToken.setRecipientHook(alice.address, hookedAddr, payload);
-
-      await expect(hooked.claim(ID("p1"))).to.be.revertedWithCustomError(
-        hooked,
-        "ReentrancyGuardReentrantCall"
-      );
-
-      // The same hook, aimed at a harmless read, proves it really fires inside the payout —
-      // so the rejection above was the guard and not a mis-wired test.
-      const benign = hooked.interface.encodeFunctionData("claimable", [ID("p1")]);
-      await hookToken.setRecipientHook(alice.address, hookedAddr, benign);
-
-      await expect(hooked.claim(ID("p1"))).to.emit(hooked, "BonusClaimed");
-      expect(await hookToken.hookCalls()).to.equal(1n);
-      expect(await hookToken.balanceOf(alice.address)).to.equal(BONUS);
-      expect(await hooked.totalReserved()).to.equal(0n);
+      await expect(escrow.claim(1n)).to.emit(escrow, "BonusClaimed");
     });
   });
 
   // ─────────────────────────────────────────────────────────────
-  describe("claimable", function () {
+  describe("claim — funding (override O2)", function () {
     beforeEach(async function () {
       await escrow.setAdapter(adapter.address);
     });
 
-    it("is zero for an id nobody reserved", async function () {
-      expect(await escrow.claimable(ID("never-happened"))).to.equal(0n);
+    it("reverts InsufficientFunds while the escrow is empty, and changes nothing", async function () {
+      const cliff = await reserve(1n, alice);
+      await time.increaseTo(cliff);
+
+      await expect(escrow.claim(1n))
+        .to.be.revertedWithCustomError(escrow, "InsufficientFunds")
+        .withArgs(BONUS, 0n);
+      const r = await escrow.reservationOf(1n);
+      expect(r.claimed).to.equal(false);
+      expect(r.amount).to.equal(BONUS);
+      expect(await escrow.totalReserved()).to.equal(BONUS);
     });
 
-    it("is zero while locked and the full amount from the cliff onwards", async function () {
-      const cliff = await reserve(ID("p1"), alice, TOKENS(7));
-
-      expect(await escrow.claimable(ID("p1"))).to.equal(0n);
-
+    it("pays nothing in part: one wei short is still a revert", async function () {
+      const cliff = await reserve(1n, alice);
       await time.increaseTo(cliff);
-      expect(await escrow.claimable(ID("p1"))).to.equal(TOKENS(7));
+      await asset.transfer(escrowAddr, BONUS - 1n);
+
+      await expect(escrow.claim(1n))
+        .to.be.revertedWithCustomError(escrow, "InsufficientFunds")
+        .withArgs(BONUS, BONUS - 1n);
+      expect(await asset.balanceOf(alice.address)).to.equal(0n);
     });
 
-    it("falls back to zero once the bonus has been paid", async function () {
-      const cliff = await reserve(ID("p1"), alice);
+    it("pays exactly the amount once the company funds the escrow", async function () {
+      const cliff = await reserve(1n, alice);
       await time.increaseTo(cliff);
-      await escrow.claim(ID("p1"));
+      await expect(escrow.claim(1n)).to.be.revertedWithCustomError(escrow, "InsufficientFunds");
 
-      expect(await escrow.claimable(ID("p1"))).to.equal(0n);
+      await asset.transfer(escrowAddr, BONUS);
+      await expect(escrow.claim(1n)).to.emit(escrow, "BonusClaimed").withArgs(1n, alice.address, BONUS);
+      expect(await asset.balanceOf(alice.address)).to.equal(BONUS);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
+      expect(await escrow.totalReserved()).to.equal(0n);
+    });
+
+    it("pays claims in any order while the balance lasts, and refuses the next one after it", async function () {
+      const cliff = await reserve(1n, alice, TOKENS(60));
+      await reserve(2n, bob, TOKENS(60), cliff);
+      await asset.transfer(escrowAddr, TOKENS(100));
+      await time.increaseTo(cliff);
+
+      await escrow.claim(2n);
+      await expect(escrow.claim(1n))
+        .to.be.revertedWithCustomError(escrow, "InsufficientFunds")
+        .withArgs(TOKENS(60), TOKENS(40));
+
+      await asset.transfer(escrowAddr, TOKENS(20));
+      await escrow.claim(1n);
+      expect(await asset.balanceOf(alice.address)).to.equal(TOKENS(60));
+    });
+
+    it("marks the reservation spent BEFORE the transfer, so a token hook cannot re-enter", async function () {
+      // A callback token on its own pool and vault: the escrow only accepts a pool token.
+      const Hook = await ethers.getContractFactory("MockHookERC20");
+      const hookToken = await Hook.deploy("Hook Bonus", "hBONUS", SUPPLY, 18);
+      const hookAddr = await hookToken.getAddress();
+      const [h0, h1] =
+        hookAddr.toLowerCase() < usdcAddr.toLowerCase() ? [hookAddr, usdcAddr] : [usdcAddr, hookAddr];
+      const Pool = await ethers.getContractFactory("MockUniswapV3Pool");
+      const hookPool = await Pool.deploy(h0, h1, FEE);
+      const hookVault = await deployVaultProxy(nfpmAddr, await hookPool.getAddress(), h0, h1);
+
+      const hooked = await deployEscrowProxy(
+        hookAddr,
+        await hookVault.getAddress(),
+        owner.address,
+        adapter.address
+      );
+      const hookedAddr = await hooked.getAddress();
+      await hookToken.transfer(hookedAddr, FUNDING);
+
+      const cliff = await cliffIn(HOUR);
+      await hooked.connect(adapter).reserve(1n, alice.address, BONUS, cliff);
+      await time.increaseTo(cliff);
+
+      const payload = hooked.interface.encodeFunctionData("claim", [1n]);
+      await hookToken.setRecipientHook(alice.address, hookedAddr, payload);
+      await expect(hooked.claim(1n)).to.be.revertedWithCustomError(hooked, "ReentrancyGuardReentrantCall");
+
+      const benign = hooked.interface.encodeFunctionData("claimable", [1n]);
+      await hookToken.setRecipientHook(alice.address, hookedAddr, benign);
+      await expect(hooked.claim(1n)).to.emit(hooked, "BonusClaimed");
+      expect(await hookToken.hookCalls()).to.equal(1n);
+      expect(await hookToken.balanceOf(alice.address)).to.equal(BONUS);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("claimable and isActive", function () {
+    beforeEach(async function () {
+      await escrow.setAdapter(adapter.address);
+    });
+
+    it("are zero / false for a tokenId nobody reserved", async function () {
+      expect(await escrow.claimable(1n)).to.equal(0n);
+      expect(await escrow.isActive(1n)).to.equal(false);
+    });
+
+    it("report a locked bonus as active and not yet claimable, then the reverse at the cliff", async function () {
+      const cliff = await reserve(1n, alice, TOKENS(7));
+      expect(await escrow.isActive(1n)).to.equal(true);
+      expect(await escrow.claimable(1n)).to.equal(0n);
+
+      await time.increaseTo(cliff);
+      expect(await escrow.isActive(1n)).to.equal(false);
+      expect(await escrow.claimable(1n)).to.equal(TOKENS(7));
+    });
+
+    it("report the owed amount even while the escrow cannot pay it — blind to the balance", async function () {
+      const cliff = await reserve(1n, alice);
+      await time.increaseTo(cliff);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
+      expect(await escrow.claimable(1n)).to.equal(BONUS);
+    });
+
+    it("fall back to zero once forfeited or paid", async function () {
+      const cliff = await reserve(1n, alice);
+      await reserve(2n, bob, BONUS, cliff);
+      await asVault((e) => e.onUnstake(1n));
+      await asset.transfer(escrowAddr, BONUS);
+      await time.increaseTo(cliff);
+      await escrow.claim(2n);
+
+      expect(await escrow.claimable(1n)).to.equal(0n);
+      expect(await escrow.claimable(2n)).to.equal(0n);
+      expect(await escrow.isActive(1n)).to.equal(false);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("onUnstake (called as the vault)", function () {
+    beforeEach(async function () {
+      await escrow.setAdapter(adapter.address);
+    });
+
+    it("is the vault's alone", async function () {
+      for (const caller of [owner, adapter, alice]) {
+        await expect(escrow.connect(caller).onUnstake(1n))
+          .to.be.revertedWithCustomError(escrow, "NotVault")
+          .withArgs(caller.address, vaultAddr);
+      }
+    });
+
+    it("forfeits an active reservation: amount gone, record kept, total released", async function () {
+      await reserve(1n, alice, TOKENS(100));
+      await reserve(2n, bob, TOKENS(50));
+
+      await asVault(async (e) => {
+        await expect(e.onUnstake(1n))
+          .to.emit(escrow, "BonusForfeited")
+          .withArgs(1n, alice.address, TOKENS(100));
+      });
+
+      const r = await escrow.reservationOf(1n);
+      expect(r.beneficiary).to.equal(alice.address);
+      expect(r.amount).to.equal(0n);
+      expect(r.forfeited).to.equal(true);
+      expect(await escrow.totalReserved()).to.equal(TOKENS(50));
+    });
+
+    it("does nothing for a tokenId with no reservation", async function () {
+      await reserve(2n, bob);
+      await asVault(async (e) => {
+        await expect(e.onUnstake(1n)).to.not.emit(escrow, "BonusForfeited");
+      });
+      expect(await escrow.totalReserved()).to.equal(BONUS);
+    });
+
+    it("does nothing once the cliff has passed (D3)", async function () {
+      const cliff = await reserve(1n, alice);
+      await time.increaseTo(cliff);
+      await asVault(async (e) => {
+        await expect(e.onUnstake(1n)).to.not.emit(escrow, "BonusForfeited");
+      });
+      const r = await escrow.reservationOf(1n);
+      expect(r.amount).to.equal(BONUS);
+      expect(r.forfeited).to.equal(false);
+    });
+
+    it("forfeits one second before the cliff", async function () {
+      const cliff = await reserve(1n, alice);
+      await time.setNextBlockTimestamp(cliff - 1n);
+      await asVault(async (e) => {
+        await expect(e.onUnstake(1n)).to.emit(escrow, "BonusForfeited");
+      });
+    });
+
+    it("does nothing to a forfeited or a claimed reservation", async function () {
+      const cliff = await reserve(1n, alice);
+      await asVault((e) => e.onUnstake(1n));
+      await asVault(async (e) => {
+        await expect(e.onUnstake(1n)).to.not.emit(escrow, "BonusForfeited");
+      });
+
+      await reserve(2n, bob, BONUS, cliff);
+      await asset.transfer(escrowAddr, BONUS);
+      await time.increaseTo(cliff);
+      await escrow.claim(2n);
+      await asVault(async (e) => {
+        await expect(e.onUnstake(2n)).to.not.emit(escrow, "BonusForfeited");
+      });
+      expect((await escrow.reservationOf(2n)).claimed).to.equal(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("onRebalance (called as the vault)", function () {
+    const OLD = snap(TICK_LOWER, TICK_UPPER, 1_000_000n);
+
+    beforeEach(async function () {
+      await escrow.setAdapter(adapter.address);
+    });
+
+    it("is the vault's alone", async function () {
+      for (const caller of [owner, adapter, alice]) {
+        await expect(escrow.connect(caller).onRebalance(1n, 2n, OLD, OLD))
+          .to.be.revertedWithCustomError(escrow, "NotVault")
+          .withArgs(caller.address, vaultAddr);
+      }
+    });
+
+    it("moves a value-keeping rebalance's reservation with the same amount", async function () {
+      const cliff = await reserve(1n, alice, BONUS);
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, OLD))
+          .to.emit(escrow, "BonusMoved")
+          .withArgs(1n, 2n, alice.address, BONUS, BONUS);
+      });
+
+      const moved = await escrow.reservationOf(2n);
+      expect(moved.beneficiary).to.equal(alice.address);
+      expect(moved.amount).to.equal(BONUS);
+      expect(moved.unlockAt).to.equal(cliff);
+      expect(moved.forfeited).to.equal(false);
+      expect((await escrow.reservationOf(1n)).beneficiary).to.equal(ZERO);
+      expect(await escrow.totalReserved()).to.equal(BONUS);
+    });
+
+    it("scales the amount by the share of value that stayed staked", async function () {
+      await reserve(1n, alice, BONUS);
+      const NEW = snap(TICK_LOWER, TICK_UPPER, 300_000n);
+      const expected = scaledAmount(BONUS, await valueOf(OLD), await valueOf(NEW));
+      expect(expected).to.be.lt(BONUS);
+
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, NEW))
+          .to.emit(escrow, "BonusMoved")
+          .withArgs(1n, 2n, alice.address, BONUS, expected);
+      });
+      expect((await escrow.reservationOf(2n)).amount).to.equal(expected);
+      expect(await escrow.totalReserved()).to.equal(expected);
+    });
+
+    it("never raises the amount, whatever the new position is worth", async function () {
+      await reserve(1n, alice, BONUS);
+      const NEW = snap(TICK_LOWER, TICK_UPPER, 5_000_000n);
+      expect(await valueOf(NEW)).to.be.gt(await valueOf(OLD));
+
+      await asVault((e) => e.onRebalance(1n, 2n, OLD, NEW));
+      expect((await escrow.reservationOf(2n)).amount).to.equal(BONUS);
+    });
+
+    it("values both positions at the TWAP tick, not at spot", async function () {
+      await reserve(1n, alice, BONUS);
+      // A range whose value relative to OLD differs between tick 0 and tick 400.
+      const NEW = snap(0, 1200, 600_000n);
+      await pool.setTicks(400, 0); // spot 400, TWAP 0 — deviation not consulted by the escrow
+
+      const atTwap = scaledAmount(
+        BONUS,
+        valueAt(OLD.liquidity, OLD.tickLower, OLD.tickUpper, 0, bonusIsToken0),
+        valueAt(NEW.liquidity, NEW.tickLower, NEW.tickUpper, 0, bonusIsToken0)
+      );
+      const atSpot = scaledAmount(
+        BONUS,
+        valueAt(OLD.liquidity, OLD.tickLower, OLD.tickUpper, 400, bonusIsToken0),
+        valueAt(NEW.liquidity, NEW.tickLower, NEW.tickUpper, 400, bonusIsToken0)
+      );
+      expect(atTwap).to.not.equal(atSpot);
+
+      await asVault((e) => e.onRebalance(1n, 2n, OLD, NEW));
+      expect((await escrow.reservationOf(2n)).amount).to.equal(atTwap);
+    });
+
+    it("forfeits at the new id when the new position is worth nothing", async function () {
+      const cliff = await reserve(1n, alice, BONUS);
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, snap(TICK_LOWER, TICK_UPPER, 0n)))
+          .to.emit(escrow, "BonusMoved")
+          .withArgs(1n, 2n, alice.address, BONUS, 0n);
+      });
+      const r = await escrow.reservationOf(2n);
+      expect(r.forfeited).to.equal(true);
+      expect(r.amount).to.equal(0n);
+      expect(await escrow.totalReserved()).to.equal(0n);
+
+      await asset.transfer(escrowAddr, BONUS);
+      await time.increaseTo(cliff);
+      await expect(escrow.claim(2n)).to.be.revertedWithCustomError(escrow, "Forfeited").withArgs(2n);
+    });
+
+    it("keeps nothing when the OLD position was worth nothing at the TWAP", async function () {
+      await reserve(1n, alice, BONUS);
+      await asVault((e) => e.onRebalance(1n, 2n, snap(TICK_LOWER, TICK_UPPER, 0n), OLD));
+      const r = await escrow.reservationOf(2n);
+      expect(r.amount).to.equal(0n);
+      expect(r.forfeited).to.equal(true);
+    });
+
+    it("refuses to move onto a tokenId that already carries a reservation", async function () {
+      await reserve(1n, alice);
+      await reserve(2n, bob);
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, OLD))
+          .to.be.revertedWithCustomError(escrow, "DuplicateReservation")
+          .withArgs(2n);
+      });
+    });
+
+    it("returns without reading the oracle when there is no reservation", async function () {
+      await pool.setObserveReverts(true);
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, OLD)).to.not.emit(escrow, "BonusMoved");
+      });
+    });
+
+    it("leaves a matured reservation under the OLD id, oracle or not (D3)", async function () {
+      const cliff = await reserve(1n, alice);
+      await time.increaseTo(cliff);
+      await pool.setObserveReverts(true);
+
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, snap(TICK_LOWER, TICK_UPPER, 1n))).to.not.emit(
+          escrow,
+          "BonusMoved"
+        );
+      });
+      expect((await escrow.reservationOf(1n)).amount).to.equal(BONUS);
+      expect((await escrow.reservationOf(2n)).beneficiary).to.equal(ZERO);
+    });
+
+    it("fails closed when the oracle cannot serve an active reservation", async function () {
+      await reserve(1n, alice);
+      await pool.setObserveReverts(true);
+      await asVault(async (e) => {
+        await expect(e.onRebalance(1n, 2n, OLD, OLD)).to.be.revertedWith("OLD");
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Through a real LPStakingVault", function () {
+    beforeEach(async function () {
+      await escrow.setAdapter(adapter.address);
+      await vault.setBonusEscrow(escrowAddr);
+    });
+
+    it("forfeits the bonus when the staker exits before the cliff, and the exit completes", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      await reserve(tokenId, alice);
+
+      const tx = vault.connect(alice).unstake(tokenId);
+      await expect(tx).to.emit(escrow, "BonusForfeited").withArgs(tokenId, alice.address, BONUS);
+      await expect(tx).to.not.emit(vault, "BonusHookFailed");
+      expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
+      expect(await escrow.totalReserved()).to.equal(0n);
+    });
+
+    it("keeps the bonus when the exit comes after the cliff, and pays it", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      const cliff = await reserve(tokenId, alice);
+      await asset.transfer(escrowAddr, BONUS);
+      await time.increaseTo(cliff);
+
+      await expect(vault.connect(alice).unstake(tokenId)).to.not.emit(escrow, "BonusForfeited");
+      await expect(escrow.claim(tokenId))
+        .to.emit(escrow, "BonusClaimed")
+        .withArgs(tokenId, alice.address, BONUS);
+    });
+
+    it("moves the bonus to the new NFT on a value-keeping rebalance", async function () {
+      // The mock re-mints amount0 + amount1, so liquidity = principal sum keeps it exactly.
+      const liquidity = TOKENS(1_000) * 2n;
+      const tokenId = await createPosition(alice, liquidity);
+      await vault.connect(alice).stake(tokenId);
+      await reserve(tokenId, alice);
+
+      const newId = await vault
+        .connect(alice)
+        .rebalance.staticCall(tokenId, TICK_LOWER, TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      await expect(vault.connect(alice).rebalance(tokenId, TICK_LOWER, TICK_UPPER, NO_SWAP, FAR_DEADLINE))
+        .to.emit(escrow, "BonusMoved")
+        .withArgs(tokenId, newId, alice.address, BONUS, BONUS);
+      expect(await vault.stakerOf(newId)).to.equal(alice.address);
+      expect((await escrow.reservationOf(newId)).amount).to.equal(BONUS);
+    });
+
+    it("scales the bonus when the rebalance returns half the tokens to the staker", async function () {
+      const liquidity = TOKENS(1_000) * 2n;
+      const tokenId = await createPosition(alice, liquidity);
+      await vault.connect(alice).stake(tokenId);
+      await reserve(tokenId, alice);
+      await nfpm.setMintConsumeBps(5_000); // the new mint keeps half, the rest is refunded
+
+      const newId = await vault
+        .connect(alice)
+        .rebalance.staticCall(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+      await vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE);
+
+      const [, , , , , , , newLiquidity] = await nfpm.positions(newId);
+      const expected = scaledAmount(
+        BONUS,
+        valueAt(liquidity, TICK_LOWER, TICK_UPPER, 0, bonusIsToken0),
+        valueAt(newLiquidity, NEW_TICK_LOWER, NEW_TICK_UPPER, 0, bonusIsToken0)
+      );
+      expect(expected).to.be.lt(BONUS);
+      expect((await escrow.reservationOf(newId)).amount).to.equal(expected);
+      expect(await escrow.totalReserved()).to.equal(expected);
+    });
+
+    it("lets a position with no reservation rebalance while the oracle is down", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      await pool.setObserveReverts(true);
+
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.emit(vault, "Rebalanced");
+    });
+
+    it("fails a bonus position's rebalance closed without the oracle, and the exit stays open", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      await reserve(tokenId, alice);
+      await pool.setObserveReverts(true);
+
+      await expect(
+        vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
+      ).to.be.revertedWith("OLD");
+      await expect(vault.connect(alice).unstake(tokenId)).to.emit(escrow, "BonusForfeited");
     });
   });
 
@@ -470,67 +968,59 @@ describe("BonusEscrow", function () {
     });
 
     it("moves exactly the unreserved balance", async function () {
-      await reserve(ID("p1"), alice, TOKENS(400));
-      const before = await bonus.balanceOf(treasury.address);
+      await asset.transfer(escrowAddr, FUNDING);
+      await reserve(1n, alice, TOKENS(400));
 
       await expect(escrow.recoverSurplus(treasury.address))
         .to.emit(escrow, "SurplusRecovered")
         .withArgs(treasury.address, FUNDING - TOKENS(400));
-
-      expect(await bonus.balanceOf(treasury.address)).to.equal(before + FUNDING - TOKENS(400));
-      expect(await bonus.balanceOf(escrowAddr)).to.equal(TOKENS(400));
-      expect(await escrow.totalReserved()).to.equal(TOKENS(400));
+      expect(await asset.balanceOf(treasury.address)).to.equal(FUNDING - TOKENS(400));
+      expect(await asset.balanceOf(escrowAddr)).to.equal(TOKENS(400));
     });
 
-    it("cannot reach a reserved wei, and the bonus still pays in full afterwards", async function () {
-      const cliff = await reserve(ID("p1"), alice, TOKENS(400));
-      await escrow.recoverSurplus(treasury.address);
-
-      // Everything left is spoken for, so a second sweep has nothing to take.
-      await expect(escrow.recoverSurplus(treasury.address)).to.be.revertedWithCustomError(
-        escrow,
-        "NoSurplus"
-      );
-
-      await time.increaseTo(cliff);
-      await escrow.claim(ID("p1"));
-      expect(await bonus.balanceOf(alice.address)).to.equal(TOKENS(400));
-      expect(await bonus.balanceOf(escrowAddr)).to.equal(0n);
-    });
-
-    it("reverts rather than emitting an empty recovery", async function () {
-      await reserve(ID("p1"), alice, FUNDING);
-
+    it("reverts NoSurplus when every wei is owed", async function () {
+      await asset.transfer(escrowAddr, BONUS);
+      await reserve(1n, alice, BONUS);
       await expect(escrow.recoverSurplus(treasury.address)).to.be.revertedWithCustomError(
         escrow,
         "NoSurplus"
       );
     });
 
-    it("is owner-only, and refuses to burn the surplus at address zero", async function () {
+    it("reverts NoSurplus while more is owed than held", async function () {
+      await asset.transfer(escrowAddr, TOKENS(50));
+      await reserve(1n, alice, TOKENS(100));
+      await expect(escrow.recoverSurplus(treasury.address)).to.be.revertedWithCustomError(
+        escrow,
+        "NoSurplus"
+      );
+      expect(await asset.balanceOf(escrowAddr)).to.equal(TOKENS(50));
+    });
+
+    it("returns a forfeited bonus to the recoverable surplus", async function () {
+      await asset.transfer(escrowAddr, BONUS);
+      await reserve(1n, alice, BONUS);
+      await asVault((e) => e.onUnstake(1n));
+
+      await expect(escrow.recoverSurplus(treasury.address))
+        .to.emit(escrow, "SurplusRecovered")
+        .withArgs(treasury.address, BONUS);
+    });
+
+    it("is owner-only, and refuses address zero", async function () {
+      await asset.transfer(escrowAddr, FUNDING);
       for (const caller of [adapter, alice]) {
         await expect(escrow.connect(caller).recoverSurplus(caller.address))
           .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
           .withArgs(caller.address);
       }
-
-      await expect(escrow.recoverSurplus(ethers.ZeroAddress)).to.be.revertedWithCustomError(
-        escrow,
-        "ZeroAddress"
-      );
-      expect(await bonus.balanceOf(escrowAddr)).to.equal(FUNDING);
+      await expect(escrow.recoverSurplus(ZERO)).to.be.revertedWithCustomError(escrow, "ZeroAddress");
     });
   });
 
   // ─────────────────────────────────────────────────────────────
   describe("Upgradeability", function () {
-    // `constructor` / `state-variable-immutable`: the two patterns the spec chose on purpose
-    // (an immutable protocol reference, `_disableInitializers()` in the implementation ctor).
-    // `missing-initializer`: V2 upgrades an ALREADY-initialized proxy, so it declares no
-    // `initializer` of its own — its `initializeV2` is a `reinitializer(2)`.
-    const V2_ARGS = {
-      unsafeAllow: ["constructor", "state-variable-immutable", "missing-initializer"],
-    };
+    const V2_ARGS = { unsafeAllow: [...UNSAFE_ALLOW, "missing-initializer"] };
 
     async function v2Factory() {
       return ethers.getContractFactory("BonusEscrowV2Mock");
@@ -541,67 +1031,42 @@ describe("BonusEscrow", function () {
     });
 
     it("passes the plugin's own implementation-safety check", async function () {
-      const V2 = await v2Factory();
-      await upgrades.validateImplementation(V2, {
+      await upgrades.validateImplementation(await v2Factory(), {
         kind: "uups",
-        constructorArgs: [bonusAddr],
+        constructorArgs: [assetAddr, vaultAddr],
         ...V2_ARGS,
       });
     });
 
-    it("keeps every reservation, the running total and the roles across upgradeProxy", async function () {
-      const cliff = await reserve(ID("p1"), alice, TOKENS(100));
-      await reserve(ID("p2"), bob, TOKENS(250));
+    it("keeps every reservation — forfeited ones included — the total and the roles", async function () {
+      const cliff = await reserve(1n, alice, TOKENS(100));
+      await reserve(2n, bob, TOKENS(250));
+      await asVault((e) => e.onUnstake(2n));
 
-      const V2 = await v2Factory();
-      const upgraded = await upgrades.upgradeProxy(escrowAddr, V2, {
+      const upgraded = await upgrades.upgradeProxy(escrowAddr, await v2Factory(), {
         kind: "uups",
-        constructorArgs: [bonusAddr],
-        ...V2_ARGS,
-      });
-
-      expect(await upgraded.version()).to.equal(2n);
-      expect(await upgraded.getAddress()).to.equal(escrowAddr);
-      expect(await upgraded.totalReserved()).to.equal(TOKENS(350));
-      expect(await upgraded.owner()).to.equal(owner.address);
-      expect(await upgraded.adapter()).to.equal(adapter.address);
-      expect(await upgraded.bonusToken()).to.equal(bonusAddr);
-
-      const [beneficiary, amount, unlockAt, claimed] = await upgraded.reservationOf(ID("p1"));
-      expect(beneficiary).to.equal(alice.address);
-      expect(amount).to.equal(TOKENS(100));
-      expect(unlockAt).to.equal(cliff);
-      expect(claimed).to.equal(false);
-
-      // ...and the obligation is still payable through the new code.
-      await time.increaseTo(cliff);
-      await expect(upgraded.claim(ID("p1")))
-        .to.emit(upgraded, "BonusClaimed")
-        .withArgs(ID("p1"), alice.address, TOKENS(100));
-      expect(await upgraded.totalReserved()).to.equal(TOKENS(250));
-    });
-
-    it("seeds V2-only state in a namespace V1 never wrote to", async function () {
-      await reserve(ID("p1"), alice, TOKENS(100));
-
-      const V2 = await v2Factory();
-      const upgraded = await upgrades.upgradeProxy(escrowAddr, V2, {
-        kind: "uups",
-        constructorArgs: [bonusAddr],
+        constructorArgs: [assetAddr, vaultAddr],
         call: { fn: "initializeV2", args: [42] },
         ...V2_ARGS,
       });
 
+      expect(await upgraded.version()).to.equal(2n);
       expect(await upgraded.upgradeMarker()).to.equal(42n);
       expect(await upgraded.totalReserved()).to.equal(TOKENS(100));
-      expect((await upgraded.reservationOf(ID("p1")))[0]).to.equal(alice.address);
       expect(await upgraded.adapter()).to.equal(adapter.address);
+      expect(await upgraded.vault()).to.equal(vaultAddr);
+      expect((await upgraded.reservationOf(2n)).forfeited).to.equal(true);
+
+      await asset.transfer(escrowAddr, TOKENS(100));
+      await time.increaseTo(cliff);
+      await expect(upgraded.claim(1n))
+        .to.emit(upgraded, "BonusClaimed")
+        .withArgs(1n, alice.address, TOKENS(100));
     });
 
     it("rejects upgradeToAndCall from anyone but the owner", async function () {
       const V2 = await v2Factory();
-      const impl = await V2.deploy(bonusAddr);
-      await impl.waitForDeployment();
+      const impl = await V2.deploy(assetAddr, vaultAddr);
       const implAddr = await impl.getAddress();
 
       for (const caller of [alice, adapter, treasury]) {
@@ -609,10 +1074,46 @@ describe("BonusEscrow", function () {
           .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
           .withArgs(caller.address);
       }
+      await expect(escrow.upgradeToAndCall(implAddr, "0x")).to.emit(escrow, "Upgraded").withArgs(implAddr);
+    });
 
-      await expect(escrow.upgradeToAndCall(implAddr, "0x"))
-        .to.emit(escrow, "Upgraded")
-        .withArgs(implAddr);
+    it("upgrades in place through an LPTimelock that owns it, after the delay, book intact", async function () {
+      const DELAY = 60;
+      const Timelock = await ethers.getContractFactory("LPTimelock");
+      const timelock = await Timelock.deploy(DELAY, [owner.address], [owner.address], ZERO);
+      const timelockAddr = await timelock.getAddress();
+
+      const owned = await deployEscrowProxy(assetAddr, vaultAddr, timelockAddr, adapter.address);
+      const ownedAddr = await owned.getAddress();
+      const cliff = await cliffIn(HOUR);
+      await owned.connect(adapter).reserve(5n, alice.address, BONUS, cliff);
+
+      const implAddr = await upgrades.prepareUpgrade(ownedAddr, await v2Factory(), {
+        kind: "uups",
+        constructorArgs: [assetAddr, vaultAddr],
+        ...V2_ARGS,
+      });
+
+      // The owner key itself is NOT the owner any more: only the timelock may upgrade.
+      await expect(owned.upgradeToAndCall(implAddr, "0x"))
+        .to.be.revertedWithCustomError(owned, "OwnableUnauthorizedAccount")
+        .withArgs(owner.address);
+
+      const data = owned.interface.encodeFunctionData("upgradeToAndCall", [implAddr, "0x"]);
+      const salt = ethers.id("bonus-escrow-upgrade");
+      await timelock.schedule(ownedAddr, 0, data, ethers.ZeroHash, salt, DELAY);
+      await expect(timelock.execute(ownedAddr, 0, data, ethers.ZeroHash, salt)).to.be.reverted;
+
+      await time.increase(DELAY + 1);
+      await timelock.execute(ownedAddr, 0, data, ethers.ZeroHash, salt);
+
+      const upgraded = await ethers.getContractAt("BonusEscrowV2Mock", ownedAddr);
+      expect(await upgraded.version()).to.equal(2n);
+      expect(await upgraded.owner()).to.equal(timelockAddr);
+      expect(await upgraded.totalReserved()).to.equal(BONUS);
+      const r = await upgraded.reservationOf(5n);
+      expect(r.beneficiary).to.equal(alice.address);
+      expect(r.unlockAt).to.equal(cliff);
     });
   });
 });
