@@ -3,9 +3,9 @@ const path = require("path");
 
 const hre = require("hardhat");
 
-// Upgrade-safety gate for the five UUPS proxies (LPStakingVault, RewardsDistributor,
-// LPEpochRegistry, TokenOverture, LPZapper). Runs in CI on every push, with no secrets and
-// no network access of its own.
+// Upgrade-safety gate for the six UUPS implementations: the five LP proxies (LPStakingVault,
+// RewardsDistributor, LPEpochRegistry, TokenOverture, LPZapper) and the ApeBond BonusEscrow.
+// Runs in CI on every push, with no secrets and no network access of its own.
 //
 // Two questions, and they are not the same question:
 //
@@ -23,8 +23,9 @@ const hre = require("hardhat");
 //      else after an upgrade. This half runs only for networks whose manifest is checked in,
 //      because that manifest IS the baseline.
 //
-// Three of the five carry `immutable` protocol references set in the implementation
-// constructor (the vault's market, the registry's distributor, the zapper's market), which the
+// Four of the six carry `immutable` protocol references set in the implementation constructor
+// (the vault's market, the registry's distributor, the zapper's market, the escrow's bonus
+// token and vault), which the
 // plugin flags by default — `unsafeAllow: ['constructor', 'state-variable-immutable']` is the
 // spec's own deliberate exception (`docs/specs/01-contracts.md` §1), not a silencer. The same
 // list is used by `lib/proxies.js` (the deploy path) and `deploy-implementation.js`; the three
@@ -79,8 +80,10 @@ const CONTRACTS = [
   },
   {
     name: "BonusEscrow",
-    // (bonusToken)
-    constructorArgs: [DUMMY.address],
+    // (bonusToken, vault) — the ApeBond escrow (Sepolia test stack #6 only until ApeBond's
+    // mainnet deploy). The constructor reads the vault's pool tokens, which only matters when
+    // it runs; `validateImplementation` never runs it.
+    constructorArgs: [DUMMY.address, "0x0000000000000000000000000000000000000002"],
   },
   {
     name: "LPZapper",
