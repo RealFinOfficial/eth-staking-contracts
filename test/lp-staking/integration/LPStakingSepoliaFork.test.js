@@ -2884,6 +2884,441 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     });
   });
 
+  /**
+   * The ApeBond route (B.3 decision document, 2026-10-01, with the overrides of 2026-10-05),
+   * deployed by the SAME script with LP_APEBOND_ENABLED=1 on the same fork, then linked, bought
+   * through and attacked — on the profile's REAL position manager, against its real tokens. The
+   * local-fork suite carries the same steps on mock tokens; this one proves them on the tokens
+   * Sepolia test stack #6 will use.
+   *
+   * ── What changed against the signature era ──────────────────────────────────────────────
+   *
+   * Nothing about a purchase is signed. The adapter COMPUTES the bonus: the value of the
+   * position that enters the vault, at the vault's TWAP, times the campaign's rate, zero below
+   * the campaign's minimum. The escrow records it under the position's tokenId whatever its
+   * balance is, and a claim reverts `InsufficientFunds` until the company funds it. The vault
+   * reports every exit and re-range to the escrow: an exit before the cliff forfeits the bonus
+   * (P2), a re-range scales it by the share of value that stayed staked (P3).
+   *
+   * ── Why a second full deploy ────────────────────────────────────────────────────────────
+   *
+   * The flag must stay optional: the run above never sets it and carries no ApeBond kind. This
+   * one sets it, on a stack that shares the pool and nothing else. LP_MULTISIG is the DEPLOYER
+   * and `LP_TIMELOCK_MIN_DELAY=0`, so the deploying key holds both timelock roles and
+   * `scripts/deploy-apebond.js` can schedule and execute the link batch in one run — the
+   * test-stack shape of Sepolia #6.
+   *
+   *   E1  deploy the stack + the pair; the link PRINTED and FILED, not sent
+   *   E2  deploy-apebond.js links it: ONE batch of three, the mandatory checks pass
+   *   E3  a purchase on the REAL position manager; the bonus is the contract formula, reserved
+   *       with an EMPTY escrow
+   *   E4  the loop: buy and unstake in one transaction -> BonusForfeited
+   *   E5  P3 on the real pool: two no-swap rebalances scale the bonus as the escrow's formula says
+   *   E6  after the cliff: InsufficientFunds -> fund-escrow.js covers what is owed -> exact payout;
+   *       recoverSurplus through the timelock reverts NoSurplus
+   */
+  describe("7. the ApeBond route, deployed by the same script", function () {
+    const pv = require("../helpers/positionValue");
+
+    const CAMPAIGN_LABEL = "real.apebond.campaign.sepoliafork";
+    const HALF_WIDTH = 1200;
+    const CLIFF = 300;
+    const BONUS_BPS = 1000n;
+    const MIN_BONUS_WHOLE = "1";
+
+    let apeRegistryFile = null;
+    let apeRun = null;
+    let linkRun = null;
+    let escrowAddr, adapterAddr, apeVaultAddr, apeTimelockAddr, mockCallerAddr;
+    let escrow, adapter, apeVault, apeTimelock, mockCaller;
+    let campaignId, campaign, bonusIsToken0;
+
+    /** Filled by E3 / E5 and read by E6. */
+    let buyTokenId = null;
+    let buyBonus = null;
+    let p3 = null;
+
+    function apeEnv(extra = {}) {
+      return deployScriptEnv({
+        DEPLOYMENTS_FILE: apeRegistryFile,
+        LP_MULTISIG: w.deployer.address,
+        LP_TIMELOCK_MIN_DELAY: "0",
+        LP_APEBOND_ENABLED: "1",
+        LP_APEBOND_SOULZAP_CALLERS: `${w.soulZapCaller.address},${mockCallerAddr}`,
+        LP_APEBOND_CAMPAIGN_ID: CAMPAIGN_LABEL,
+        LP_APEBOND_HALF_WIDTH_TICKS: String(HALF_WIDTH),
+        LP_APEBOND_CLIFF_SECONDS: String(CLIFF),
+        LP_APEBOND_BONUS_BPS: String(BONUS_BPS),
+        LP_APEBOND_MIN_BONUS: MIN_BONUS_WHOLE,
+        ...extra,
+      });
+    }
+
+    /** Lets the TWAP window pass with no trade, so the vault's TWAP equals the spot tick. */
+    async function settleTwap() {
+      await rpc.advance(provider, P.twapWindow + 1);
+      const preview = await apeVault.previewTwap();
+      expect(preview.withinBounds).to.equal(true);
+      expect(preview.twapTick).to.equal(preview.currentTick);
+      return Number(preview.twapTick);
+    }
+
+    /** Mints a position on the campaign's exact range for `recipient`, from `role`'s tokens. */
+    async function mintCampaignPosition(role, recipient) {
+      return uni.mintPosition({
+        npm,
+        npmAddress: P.npm,
+        signer: w[role],
+        token0,
+        token1,
+        fee: P.fee,
+        tickLower: Number(campaign.tickLower),
+        tickUpper: Number(campaign.tickUpper),
+        assetIsToken0,
+        assetAmount: C.APEBOND_MINT_ASSET,
+        usdcAmount: C.APEBOND_MINT_USDC,
+        recipient,
+      });
+    }
+
+    /** The value and the bonus the contract must compute for `tokenId` at `twapTick`. */
+    async function expectedBonus(tokenId, twapTick) {
+      const position = await npm.positions(tokenId);
+      const value = pv.valueAt(
+        position.liquidity,
+        Number(position.tickLower),
+        Number(position.tickUpper),
+        twapTick,
+        bonusIsToken0
+      );
+      return { value, bonus: pv.bonusFor(value, BONUS_BPS, ethers.parseUnits(MIN_BONUS_WHOLE, P.asset.decimals)) };
+    }
+
+    before(async function () {
+      if (node === null) this.skip();
+      apeRegistryFile = path.join(scratchDir, "deployments-apebond.json");
+
+      // The SoulZap seat as an EOA, funded and approved like any market participant.
+      // Funded from the deployer's own balance of the profile's real tokens: enough for the
+      // three campaign mints the section makes from this seat.
+      for (const [token, amount] of [
+        [asset, C.ASSET(20_000)],
+        [usdc, C.USDC(10_000)],
+      ]) {
+        await chain.send(token.connect(w.deployer).transfer(w.soulZapCaller.address, amount));
+        await chain.send(token.connect(w.soulZapCaller).approve(P.npm, ethers.MaxUint256));
+      }
+      // The SoulZap seat as a CONTRACT, for the one-transaction loop of E4.
+      const mockArtifact = await hre.artifacts.readArtifact("MockSoulZapCaller");
+      const mockFactory = new ethers.ContractFactory(mockArtifact.abi, mockArtifact.bytecode, w.deployer);
+      mockCaller = await (await mockFactory.deploy()).waitForDeployment();
+      mockCallerAddr = await mockCaller.getAddress();
+
+      apeRun = await runner.runHardhatScript("scripts/deploy-lp-staking.js", apeEnv(), {
+        logFile: path.join(scratchDir, "scripts.log"),
+        timeoutMs: 300_000,
+      });
+      if (apeRun.code !== 0) {
+        throw new Error(
+          `deploy-lp-staking.js (ApeBond) exited ${apeRun.code}\n${apeRun.stdout}\n${apeRun.stderr}`
+        );
+      }
+
+      const registry = runner.readRegistry(apeRegistryFile)["31337"];
+      escrowAddr = registry.BonusEscrow.address;
+      adapterAddr = registry.ApeBondPositionAdapter.address;
+      apeVaultAddr = registry.LPStakingVault.address;
+      apeTimelockAddr = registry.TimelockController.address;
+      escrow = await contractAt("BonusEscrow", escrowAddr);
+      adapter = await contractAt("ApeBondPositionAdapter", adapterAddr);
+      apeVault = await contractAt("LPStakingVault", apeVaultAddr);
+      apeTimelock = await contractAt("LPTimelock", apeTimelockAddr);
+
+      campaignId = ethers.id(CAMPAIGN_LABEL);
+      campaign = await adapter.campaigns(campaignId);
+      bonusIsToken0 = await escrow.bonusIsToken0();
+
+      notes.push(
+        `apebond: escrow=${escrowAddr} adapter=${adapterAddr} vault=${apeVaultAddr} timelock=${apeTimelockAddr}`,
+        `apebond: campaign ${campaignId} range ${campaign.tickLower}..${campaign.tickUpper}`,
+        `apebond: deploy-lp-staking (LP_APEBOND_ENABLED=1) ${apeRun.durationMs} ms`
+      );
+    });
+
+    it("E1 deployed the pair with its campaign, printed and filed the link, and sent none of it", async function () {
+      expect(apeRun.stdout).to.include("ApeBond route:      ENABLED");
+      expect(apeRun.stdout).to.include("All post-deploy checks passed.");
+      expect(apeRun.stdout).to.include("PENDING TIMELOCK BATCH");
+      expect(apeRun.stdout).to.not.include("FAIL ");
+      expect(apeRun.stdout).to.not.include("purchaseSigner");
+      expect(bonusIsToken0).to.equal(assetIsToken0);
+
+      const registry = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(Object.keys(registry).sort()).to.deep.equal([
+        "ApeBondPositionAdapter",
+        "BonusEscrow",
+        "LPEpochRegistry",
+        "LPStakingVault",
+        "LPZapper",
+        "RewardsDistributor",
+        "TimelockController",
+        "TokenOverture",
+        "UniswapV3Pool",
+      ]);
+      const escrowEntry = registry.BonusEscrow;
+      expect(escrowEntry.vault).to.equal(apeVaultAddr);
+      expect(ethers.getAddress(escrowEntry.bonusToken)).to.equal(ethers.getAddress(assetAddr));
+      expect(escrowEntry.owner).to.equal(apeTimelockAddr);
+      expect(escrowEntry.adapter).to.equal(C.ZERO_ADDRESS);
+      const implReceipt = await provider.getTransactionReceipt(escrowEntry.implementationTx);
+      expect(implReceipt.contractAddress).to.equal(escrowEntry.implementation);
+
+      const adapterEntry = registry.ApeBondPositionAdapter;
+      expect(adapterEntry.vault).to.equal(apeVaultAddr);
+      expect(adapterEntry.escrow).to.equal(escrowAddr);
+      expect(adapterEntry.tickSpacing).to.equal(TICK_SPACING);
+      expect(adapterEntry.guardian).to.equal(w.guardian.address);
+      expect(adapterEntry.owner).to.equal(apeTimelockAddr);
+      expect(adapterEntry.soulZapCallers).to.deep.equal([w.soulZapCaller.address, mockCallerAddr]);
+      expect(adapterEntry.campaigns).to.have.length(1);
+      expect(adapterEntry.campaigns[0]).to.deep.include({
+        id: campaignId,
+        label: CAMPAIGN_LABEL,
+        enabled: true,
+        tickLower: Number(campaign.tickLower),
+        tickUpper: Number(campaign.tickUpper),
+        bonusCliffSeconds: String(CLIFF),
+        bonusBps: Number(BONUS_BPS),
+        minBonusAmount: ethers.parseUnits(MIN_BONUS_WHOLE, P.asset.decimals).toString(),
+      });
+
+      // The range is around the pool's tick and sits on the pool's tick grid.
+      expect(Number(campaign.tickLower) % TICK_SPACING).to.equal(0);
+      expect(Number(campaign.tickUpper) % TICK_SPACING).to.equal(0);
+      expect(Number(campaign.tickUpper) - Number(campaign.tickLower)).to.be.at.least(2 * HALF_WIDTH);
+
+      // Nothing of the link is on chain yet: the vault reports to nobody, the adapter cannot
+      // stakeFor, and the escrow takes no reservation.
+      expect(await apeVault.bonusEscrow()).to.equal(C.ZERO_ADDRESS);
+      expect(await apeVault.isStakeOperator(adapterAddr)).to.equal(false);
+      expect(await escrow.adapter()).to.equal(C.ZERO_ADDRESS);
+      expect(await escrow.vault()).to.equal(apeVaultAddr);
+
+      // The filed batch is the three calls, in order, readable by lp-timelock.js.
+      const batch = JSON.parse(fs.readFileSync(path.join(scratchDir, "apebond-link-batch.json"), "utf8"));
+      expect(batch.map((call) => call.fn)).to.deep.equal(["setBonusEscrow", "setStakeOperator", "setAdapter"]);
+      expect(batch.map((call) => call.target)).to.deep.equal([apeVaultAddr, apeVaultAddr, escrowAddr]);
+    });
+
+    it("E1 left the un-flagged deployment above with no ApeBond route at all", async function () {
+      const plain = runner.readRegistry(registryFile)["31337"];
+      expect(plain).to.not.have.property("BonusEscrow");
+      expect(plain).to.not.have.property("ApeBondPositionAdapter");
+      expect(deployRun.stdout).to.include("ApeBond route:      not deployed");
+      expect(await vault.bonusEscrow()).to.equal(C.ZERO_ADDRESS);
+    });
+
+    it("E2 deploy-apebond.js links the pair with ONE batch and its mandatory checks pass", async function () {
+      linkRun = await runner.runHardhatScript(
+        "scripts/deploy-apebond.js",
+        apeEnv({ LP_APEBOND_WAIT_POLL_MS: "200" }),
+        { logFile: path.join(scratchDir, "scripts.log"), timeoutMs: 300_000 }
+      );
+      if (linkRun.code !== 0) {
+        throw new Error(`deploy-apebond.js exited ${linkRun.code}\n${linkRun.stdout}\n${linkRun.stderr}`);
+      }
+      expect(linkRun.stdout).to.include("phase 2: SKIPPED");
+      expect(linkRun.stdout).to.include("phase 3: SKIPPED");
+      expect(linkRun.stdout).to.include("A batch of 3 call(s)");
+      expect(linkRun.stdout).to.include("OK    BonusEscrow.vault (MANDATORY");
+      expect(linkRun.stdout).to.include("OK    LPStakingVault.bonusEscrow (MANDATORY");
+      expect(linkRun.stdout).to.include("All post-activation verification checks passed.");
+
+      expect(await apeVault.bonusEscrow()).to.equal(escrowAddr);
+      expect(await apeVault.isStakeOperator(adapterAddr)).to.equal(true);
+      expect(await escrow.adapter()).to.equal(adapterAddr);
+      const entries = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(entries.BonusEscrow.adapter).to.equal(adapterAddr);
+      expect(entries.LPStakingVault.bonusEscrow).to.equal(escrowAddr);
+    });
+
+    it("E3 a purchase on the real position manager reserves the contract's own bonus, with an empty escrow", async function () {
+      const twapTick = await settleTwap();
+      const beneficiary = w.carol.address;
+      const { tokenId } = await mintCampaignPosition("soulZapCaller", w.soulZapCaller.address);
+      await chain.send(npm.connect(w.soulZapCaller).approve(adapterAddr, tokenId));
+
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
+      const receipt = await chain.send(
+        adapter.connect(w.soulZapCaller).depositFor(tokenId, campaignId, beneficiary)
+      );
+      const deposited = chain.parseEvent(receipt, adapter.interface, adapterAddr, "ApeBondPositionDeposited");
+      const reserved = chain.parseEvent(receipt, escrow.interface, escrowAddr, "BonusReserved");
+      const { value, bonus } = await expectedBonus(tokenId, twapTick);
+
+      expect(Number(deposited.twapTick)).to.equal(twapTick);
+      expect(deposited.positionValue).to.equal(value);
+      expect(deposited.bonusAmount).to.equal(bonus);
+      expect(bonus).to.be.greaterThan(0n);
+      expect(reserved.amount).to.equal(bonus);
+      expect(reserved.beneficiary).to.equal(beneficiary);
+      const block = await provider.getBlock(receipt.blockNumber);
+      expect(reserved.unlockAt).to.equal(BigInt(block.timestamp + CLIFF));
+
+      expect(await npm.ownerOf(tokenId)).to.equal(apeVaultAddr);
+      expect(await apeVault.stakerOf(tokenId)).to.equal(beneficiary);
+      const [, amount, , claimed, forfeited] = await escrow.reservationOf(tokenId);
+      expect(amount).to.equal(bonus);
+      expect(claimed).to.equal(false);
+      expect(forfeited).to.equal(false);
+      expect(await escrow.totalReserved()).to.equal(bonus);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
+
+      buyTokenId = tokenId;
+      buyBonus = bonus;
+      notes.push(
+        `apebond E3: value ${ethers.formatUnits(value, P.asset.decimals)} ASSET, bonus ${ethers.formatUnits(bonus, P.asset.decimals)} ASSET`
+      );
+    });
+
+    it("E4 the loop — buy and unstake in ONE transaction — forfeits the bonus", async function () {
+      await settleTwap();
+      const reservedBefore = await escrow.totalReserved();
+      const { tokenId } = await mintCampaignPosition("deployer", mockCallerAddr);
+
+      const receipt = await chain.send(
+        mockCaller
+          .connect(w.deployer)
+          .depositAndUnstake(adapterAddr, P.npm, tokenId, campaignId, apeVaultAddr)
+      );
+      const reserved = chain.parseEvent(receipt, escrow.interface, escrowAddr, "BonusReserved");
+      const forfeitedEvent = chain.parseEvent(receipt, escrow.interface, escrowAddr, "BonusForfeited");
+      expect(reserved.amount).to.be.greaterThan(0n);
+      expect(forfeitedEvent.tokenId).to.equal(tokenId);
+      expect(forfeitedEvent.amount).to.equal(reserved.amount);
+      expect(chain.parseEvent(receipt, apeVault.interface, apeVaultAddr, "Unstaked").tokenId).to.equal(tokenId);
+
+      const [beneficiary, amount, , , forfeited] = await escrow.reservationOf(tokenId);
+      expect(beneficiary).to.equal(mockCallerAddr);
+      expect(amount).to.equal(0n);
+      expect(forfeited).to.equal(true);
+      expect(await escrow.totalReserved()).to.equal(reservedBefore);
+      expect(await npm.ownerOf(tokenId)).to.equal(mockCallerAddr);
+
+      await rpc.advance(provider, CLIFF + 1);
+      await chain.expectCustomError(
+        provider,
+        escrow.connect(w.deployer).claim(tokenId),
+        escrow.interface,
+        "Forfeited"
+      );
+    });
+
+    it("E5 P3 on the real pool: two no-swap rebalances scale the bonus by the value that stayed", async function () {
+      const twapTick = await settleTwap();
+      const { tokenId: id0 } = await mintCampaignPosition("soulZapCaller", w.soulZapCaller.address);
+      await chain.send(npm.connect(w.soulZapCaller).approve(adapterAddr, id0));
+      await chain.send(adapter.connect(w.soulZapCaller).depositFor(id0, campaignId, w.dave.address));
+      const [, bonus0] = await escrow.reservationOf(id0);
+      expect(bonus0).to.be.greaterThan(0n);
+
+      const grid = uni.alignDown(twapTick, TICK_SPACING);
+      const r1 = [grid - 6000, grid + TICK_SPACING]; // the upper bound one tick-spacing above the price
+      const r2 = [grid, grid + 6000 + TICK_SPACING]; // the lower bound at the price's own grid tick
+      const steps = [];
+      let current = id0;
+      for (const range of [r1, r2]) {
+        const before = await npm.positions(current);
+        const [, amountBefore] = await escrow.reservationOf(current);
+        const receipt = await chain.send(
+          apeVault.connect(w.dave).rebalance(current, range[0], range[1], swapLeg(0n), C.FAR_DEADLINE)
+        );
+        const rebalanced = chain.parseEvent(receipt, apeVault.interface, apeVaultAddr, "Rebalanced");
+        const moved = chain.parseEvent(receipt, escrow.interface, escrowAddr, "BonusMoved");
+        const tick = Number((await apeVault.previewTwap()).twapTick);
+        expect(tick, "a no-swap rebalance does not move the TWAP").to.equal(twapTick);
+        const valueOld = pv.valueAt(
+          before.liquidity,
+          Number(before.tickLower),
+          Number(before.tickUpper),
+          tick,
+          bonusIsToken0
+        );
+        const valueNew = pv.valueAt(rebalanced.liquidity, range[0], range[1], tick, bonusIsToken0);
+
+        expect(moved.oldTokenId).to.equal(current);
+        expect(moved.newTokenId).to.equal(rebalanced.newTokenId);
+        expect(moved.beneficiary).to.equal(w.dave.address);
+        expect(moved.previousAmount).to.equal(amountBefore);
+        expect(moved.newAmount).to.equal(pv.scaledAmount(amountBefore, valueOld, valueNew));
+        expect(moved.newAmount).to.be.lessThan(amountBefore);
+        const [gone] = await escrow.reservationOf(current);
+        expect(gone).to.equal(C.ZERO_ADDRESS);
+
+        steps.push({ range, newAmount: moved.newAmount });
+        current = rebalanced.newTokenId;
+      }
+      const ppm = steps.map((s) => Number((s.newAmount * 1_000_000n) / bonus0));
+      const line =
+        `P3 on the real pool at tick ${twapTick} (grid ${grid}): R1 [${r1}] -> ${ppm[0] / 10_000} % ` +
+        `of the bonus, R2 [${r2}] -> ${ppm[1] / 10_000} %`;
+      notes.push(`apebond E5 ${line}`);
+      console.log(`      ${line}`);
+      expect(ppm[0]).to.be.lessThan(800_000);
+      expect(ppm[1]).to.be.lessThan(ppm[0]);
+      expect(await apeVault.stakerOf(current)).to.equal(w.dave.address);
+      p3 = { tokenId: current, amount: steps[1].newAmount };
+    });
+
+    it("E6 after the cliff: InsufficientFunds, fund-escrow.js covers what is owed, the claim pays exactly", async function () {
+      await rpc.advance(provider, CLIFF + 1);
+      const owed = await escrow.totalReserved();
+      expect(owed).to.equal(buyBonus + p3.amount);
+
+      await chain.expectCustomError(
+        provider,
+        escrow.connect(w.deployer).claim(buyTokenId),
+        escrow.interface,
+        "InsufficientFunds"
+      );
+
+      const fundRun = await runScript("scripts/fund-escrow.js", {
+        ...baseScriptEnv(),
+        DEPLOYMENTS_FILE: apeRegistryFile,
+        LP_APEBOND_FUND_TARGET: "0",
+      });
+      expect(fundRun.stdout).to.include("SHORT");
+      expect(fundRun.stdout).to.include("is covered");
+      expect(await asset.balanceOf(escrowAddr)).to.equal(owed);
+
+      const carolBefore = await asset.balanceOf(w.carol.address);
+      const receipt = await chain.send(escrow.connect(w.deployer).claim(buyTokenId));
+      const claimedEvent = chain.parseEvent(receipt, escrow.interface, escrowAddr, "BonusClaimed");
+      expect(claimedEvent.amount).to.equal(buyBonus);
+      expect(claimedEvent.beneficiary).to.equal(w.carol.address);
+      expect((await asset.balanceOf(w.carol.address)) - carolBefore).to.equal(buyBonus);
+      expect(await escrow.totalReserved()).to.equal(p3.amount);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(p3.amount);
+
+      // Every remaining wei is owed, so the owner's recovery finds nothing: the timelock's
+      // execute bubbles the escrow's NoSurplus.
+      const op = lpTimelock.buildOperation({
+        target: escrowAddr,
+        fn: "recoverSurplus",
+        args: [w.deployer.address],
+      });
+      await chain.send(
+        apeTimelock.connect(w.deployer).schedule(op.target, op.value, op.data, op.predecessor, op.salt, 0)
+      );
+      await chain.expectCustomError(
+        provider,
+        apeTimelock.connect(w.deployer).execute(op.target, op.value, op.data, op.predecessor, op.salt),
+        escrow.interface,
+        "NoSurplus"
+      );
+    });
+  });
+
   // ── shared decoding map ────────────────────────────────────────────────
 
   function ifacesByAddress() {
