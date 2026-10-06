@@ -115,6 +115,22 @@
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "interval": 900,
       "scheduleMargin": 1800
+    },
+    "RewardToken:TRW": {
+      "address": "0x50566A6CBD1c080E0CBC3ae24b517bF5Aa22dDec",
+      "deployTx": "0x19db484556b2321d33ebf6cfa01670ba4e8f6e841b5ae3a1b0d8bf022a9b1a14",
+      "block": 11854199,
+      "implementation": "0xbf7070D03840a1B862fDaC5f804eb4acA5A3498A",
+      "implementationTx": "0x10df6b4ff8381906bedc3237d0e9f68fad3b27c3c0dd0db83e27aa8683f4dc39",
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "minter": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "name": "Test Reward Three",
+      "symbol": "TRW",
+      "decimals": 18,
+      "conditional": false,
+      "claimsEnabled": true,
+      "distributor": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
+      "addedVia": "timelock addRewardToken (pending until executed)"
     }
   }
 }

@@ -44,6 +44,10 @@
     {
       "address": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
       "kind": "uups"
+    },
+    {
+      "address": "0x50566A6CBD1c080E0CBC3ae24b517bF5Aa22dDec",
+      "kind": "uups"
     }
   ],
   "impls": {
@@ -2255,7 +2259,11 @@
             }
           ]
         }
-      }
+      },
+      "allAddresses": [
+        "0xf65A509644B19962a98D86554CAf905F55e9c9bD",
+        "0xbf7070D03840a1B862fDaC5f804eb4acA5A3498A"
+      ]
     },
     "e25b72188d18f5aa4390a91030d4dba72a42fa96211e49b74f74b5d9635ce76f": {
       "address": "0x31960c5129a39FfD5c05F34Db776924Ea9CbAd62",
