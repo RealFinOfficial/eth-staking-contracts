@@ -60,8 +60,8 @@
       "address": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "deployTx": "0xb03f61c5bced266621ff14325fc83cd5342aaf4fd15b197d521c6838874f8467",
       "block": 11854185,
-      "implementation": "0x22ba27E180A78A484C14b6447f82a59CAe1D5606",
-      "implementationTx": "0x785fc9d87def540bd88f9a139f98b4a74ca1d727c59779526824daa01a3e723f",
+      "implementation": "0x4b0b58BD98683Ae2B2AA5Ad61BDd9B6516492109",
+      "implementationTx": "0xfd635286bbc8bc1c22d5a1d6827020abbdd2ce6e05dae2df57cc8b45ad7cc83b",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
@@ -72,7 +72,7 @@
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "zapper": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
-      "bonusEscrow": "0x0000000000000000000000000000000000000000"
+      "bonusEscrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1"
     },
     "LPZapper": {
       "address": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
@@ -131,6 +131,52 @@
       "claimsEnabled": true,
       "distributor": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
       "addedVia": "timelock addRewardToken (pending until executed)"
+    },
+    "BonusEscrow": {
+      "address": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
+      "deployTx": "0x8ed87404bf889291e6727cecc379e2031e0144987102087c5c45ec0ca1023569",
+      "block": 11855968,
+      "implementation": "0xa42261895810101e4f50556E88ACCC34395124aD",
+      "implementationTx": "0x7a44f76640584f60bb5d46871f136e76256b648573766c01c96f1316df6ba21d",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "adapter": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148"
+    },
+    "ApeBondPositionAdapter": {
+      "address": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148",
+      "deployTx": "0x3eebf191a3e1526087a0fabe627283193946b6ae5d169b868768e9d1e8208622",
+      "block": 11855970,
+      "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "escrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
+      "positionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "soulZapCallers": [
+        "0xB4984AaEBa5BB73D5b9D78b93f0Aa9f863DC6FB9",
+        "0xD18469Ef8E5630263dC36AAe7CE502700cBa06d4"
+      ],
+      "campaigns": [
+        {
+          "id": "0xafbf246b355e4c751c9c4663c41070c2ac062e3c7806a4dc45bacfbe34962731",
+          "label": "apebond-sepolia-1",
+          "enabled": true,
+          "tickLower": -291360,
+          "tickUpper": -288960,
+          "bonusCliffSeconds": "300",
+          "bonusBps": 1000,
+          "minBonusAmount": "1000000000000000000",
+          "callers": [
+            "0xB4984AaEBa5BB73D5b9D78b93f0Aa9f863DC6FB9",
+            "0xD18469Ef8E5630263dC36AAe7CE502700cBa06d4"
+          ]
+        }
+      ],
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D"
     }
   }
 }
