@@ -277,8 +277,9 @@ mainnet Safe — it prints `to` / `value` / `data` and sends nothing. Mainnet ne
 Stack #6 was deployed before 2026-10-07: its distributor runs the v1 code (no `mintRewardToken`,
 no `asset` field) and its Overture token's minter is the operator
 `0x5576bD37419dadAab305cca998E16BcD73318A35`. Activating the change is ONE implementation deploy
-and TWO timelock operations. Stack #6's timelock delay is 300 s (mainnet: 172,800). Nothing below
-has been run; the values are stack #6's from `deployments.json`:
+and TWO timelock operations. Stack #6's timelock delay is 300 s (mainnet: 172,800). Stack #6 was
+activated with this runbook on 2026-10-07 (the record is at the end of this section); the values
+below are stack #6's from `deployments.json` as they were BEFORE it:
 
 | what | address |
 |---|---|
@@ -369,6 +370,34 @@ operator impersonated, the upgrade with `initializeV2(tREAL)` and the `setMinter
 every v1 field kept its value, the operator minted 1 `$OVTR` to a fresh wallet and 5 into the
 distributor, `mintRewardToken(tREAL, …)` reverted `AssetNotMintable(tREAL)`, and a second
 `initializeV2` reverted.
+
+**Activated on Sepolia test stack #6 on 2026-10-07** (10:20–10:29 UTC, all from the operator
+`0x5576bD37419dadAab305cca998E16BcD73318A35`, the timelock's proposer and executor). The
+distributor implementation moved from `0x31960c5129a39FfD5c05F34Db776924Ea9CbAd62` (v1) to
+`0xF6f1377d68e3A7AdA590D3f1520c64B1738b1ecA` (v2, runtime code 11,585 bytes; the storage-layout
+gate passed). The optional third operation (the TRW minter) was run too.
+
+| step | operation id | transaction | block |
+|---|---|---|---|
+| deploy the v2 implementation | — | `0x74978593f7a109d96a8d42b3cbfd484394a626d34db48d89927d978d02e18219` | 11862351 |
+| schedule `upgradeToAndCall(v2, initializeV2(tREAL))` | `0x7431d85b7a119d72c20b274e76b27763b30144abe1de22d2b2507f6b8f13ba94` | `0xef2fe23f007d3c85f68f0faef0234e1f1977ba8b851a642af9db87ae2d4633e7` | 11862357 |
+| schedule `TokenOverture.setMinter(distributor)` | `0xe21baed11db480556e5ab8e040d5d5eed93d36cd44fc90396e7f539d34f45879` | `0x7f689e357d523101106b2a6ba51706c2e234186e9b66285e0b7244147dd6230d` | 11862358 |
+| schedule TRW `setMinter(distributor)` | `0xdf8e2d93633608611b174a3c2636965193f0998c10a52ff3b4877c04aa888837` | `0xdcc12225d0eb301468be7b9381a8b948d15af4fec39e2bf211e3b312af78a428` | 11862359 |
+| execute the upgrade (`Upgraded`, `AssetSet(tREAL)`, `Initialized(2)`) | `0x7431…ba94` | `0xf0b9d21ff1e272134a1b1c0bc871ecdda3736847077bfa05b46811bd4cfdc354` | 11862386 |
+| execute the `$OVTR` minter move (`MinterChanged`) | `0xe21b…5879` | `0xa9172b15d10f6596b50eba32b10c4588e8f8c8c93958679b2b26081de6ad39f7` | 11862388 |
+| execute the TRW minter move (`MinterChanged`) | `0xdf8e…8837` | `0xfac06cec9b25d11089cbca51a0e236a74655129bea16a443adf6852c732da6f9` | 11862389 |
+| rehearsal: `mintRewardToken($OVTR, 0x2b98…bBEA, 1e18)` | — | `0xd9dbfda781270237b9b2f68464b181952718149ac612faf565407793a7b17cfc` | 11862392 |
+
+Post-checks, read after the three executes: the ERC-1967 slot holds the v2 implementation;
+`asset()` = tREAL; `TokenOverture.minter()` and TRW `minter()` = the distributor proxy;
+`owner()` of all three = the timelock; `operator()`, `signer()`, `guardian()`, `paused()`
+(false), `rewardTokens()` (tREAL, `$OVTR`, TRW) and every token's flags read the same as before
+the upgrade, and `claimed(tREAL, operator)` stayed 0. `mintRewardToken(tREAL, …)` simulated from
+the operator reverted `AssetNotMintable(tREAL)`. The rehearsal minted exactly 1 `$OVTR` to the
+rehearsal wallet `0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA` (balance 0 -> 1; event
+`RewardTokenMinted(token $OVTR, to 0x2b98…bBEA, amount 1e18, timestamp 1791368940)`); the
+distributor's own 70,000 `$OVTR` were not touched. The test server's
+`LP_EXPECTED_IMPLEMENTATION_*` keys are left empty on purpose, so nothing was handed over.
 
 ### Replacing the timelock
 

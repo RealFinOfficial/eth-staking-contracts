@@ -27,14 +27,15 @@
       "symbol": "OVTR",
       "decimals": 18,
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "minter": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04"
     },
     "RewardsDistributor": {
       "address": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
       "deployTx": "0xa22ebc58b22846b4776798640085e1695db1656cb13fef30d6969df5bdaeddf5",
       "block": 11854181,
-      "implementation": "0x31960c5129a39FfD5c05F34Db776924Ea9CbAd62",
-      "implementationTx": "0xf46a78b9051c0fe226a0a8ec872c7e4368f15cdf4f7b643a4ad5f16dd81dba36",
+      "implementation": "0xF6f1377d68e3A7AdA590D3f1520c64B1738b1ecA",
+      "implementationTx": "0x74978593f7a109d96a8d42b3cbfd484394a626d34db48d89927d978d02e18219",
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
@@ -123,7 +124,7 @@
       "implementation": "0xbf7070D03840a1B862fDaC5f804eb4acA5A3498A",
       "implementationTx": "0x10df6b4ff8381906bedc3237d0e9f68fad3b27c3c0dd0db83e27aa8683f4dc39",
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "minter": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
       "name": "Test Reward Three",
       "symbol": "TRW",
       "decimals": 18,
