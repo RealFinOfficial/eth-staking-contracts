@@ -14,7 +14,9 @@ const { REWARD_CLAIM_TYPEHASH } = require("./helpers/constants");
  * balance)` until the company funds the contract. There is no cap, budget or running total.
  *
  * The suite's launch configuration mirrors the deploy script: $ASSET conditional with claims
- * CLOSED, $OVTR unconditional with claims OPEN, both pre-funded.
+ * CLOSED, $OVTR unconditional with claims OPEN, both pre-funded. The distributor PROXY is the
+ * Overture token's minter, so the operator funds $OVTR — and mints it to any other wallet — with
+ * `mintRewardToken`; `claim` itself never mints.
  */
 describe("RewardsDistributor", function () {
   let distributor, overture, asset;
@@ -24,13 +26,17 @@ describe("RewardsDistributor", function () {
   // The three admin tiers are DIFFERENT accounts in this suite, so "is this owner-only,
   // guardian-only or operator-only" is never answered by two of them happening to be the same
   // address. In production `owner` is a TimelockController, `guardian` is a hot pause-only key
-  // and `operator` is the multisig (which is also the Overture token's minter; a separate
-  // `minter` signer is used here so the token's tier never stands in for the distributor's).
+  // and `operator` is the multisig. The Overture token's minter is the distributor proxy; the
+  // separate `minter` signer is only the token's placeholder minter at birth (and the "someone
+  // else is the minter" case below), because `upgrades.deployProxy` cannot be given the
+  // distributor's address before the distributor exists.
   const asGuardian = () => distributor.connect(guardian);
   const asOperator = () => distributor.connect(operatorSafe);
 
   const TOKENS = (n) => ethers.parseEther(String(n));
   const USDC = (n) => ethers.parseUnits(String(n), 6);
+  /// The pinned ERC-7201 base of `real.lp.storage.RewardsDistributor`.
+  const DISTRIBUTOR_NAMESPACE = "0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00";
   const FAR_DEADLINE = 10n ** 12n;
   const FUNDING = TOKENS(1_000_000);
 
@@ -48,11 +54,20 @@ describe("RewardsDistributor", function () {
   }
 
   /// Deploys a distributor UUPS proxy. The implementation takes no constructor arguments.
-  async function deployDistributorProxy(ownerAddress, guardianAddress, operatorAddress, signerAddress, tokens) {
+  /// `assetAddress` (the $ASSET `mintRewardToken` refuses) defaults to the suite's $ASSET mock;
+  /// `initialize` takes it after the signer and before the token list.
+  async function deployDistributorProxy(
+    ownerAddress,
+    guardianAddress,
+    operatorAddress,
+    signerAddress,
+    tokens,
+    assetAddress = assetAddr
+  ) {
     const Distributor = await ethers.getContractFactory("RewardsDistributor");
     return upgrades.deployProxy(
       Distributor,
-      [ownerAddress, guardianAddress, operatorAddress, signerAddress, tokens],
+      [ownerAddress, guardianAddress, operatorAddress, signerAddress, assetAddress, tokens],
       { kind: "uups", unsafeAllow: UNSAFE_ALLOW }
     );
   }
@@ -137,6 +152,8 @@ describe("RewardsDistributor", function () {
     asset = await AssetFactory.deploy("Asset", "ASSET", TOKENS(100_000_000), 18);
     assetAddr = await asset.getAddress();
 
+    // Born with a placeholder minter, handed to the distributor below with `setMinter` — the
+    // owner-tier call the timelock sends when this is activated on a live stack.
     overture = await deployOverture(minter.address);
     overtureAddr = await overture.getAddress();
 
@@ -149,9 +166,11 @@ describe("RewardsDistributor", function () {
     );
     distributorAddr = await distributor.getAddress();
 
-    // Funding, as the operator does it: $OVTR minted INTO the distributor, $ASSET transferred
-    // into it. Claims pay out of these balances.
-    await overture.connect(minter).mint(distributorAddr, FUNDING);
+    await overture.connect(owner).setMinter(distributorAddr);
+
+    // Funding, as the operator does it: $OVTR minted INTO the distributor through
+    // `mintRewardToken`, $ASSET transferred into it. Claims pay out of these balances.
+    await asOperator().mintRewardToken(overtureAddr, distributorAddr, FUNDING);
     await asset.transfer(distributorAddr, FUNDING);
   });
 
@@ -162,6 +181,7 @@ describe("RewardsDistributor", function () {
       expect(await distributor.owner()).to.equal(owner.address);
       expect(await distributor.guardian()).to.equal(guardian.address);
       expect(await distributor.operator()).to.equal(operatorSafe.address);
+      expect(await distributor.asset()).to.equal(assetAddr);
       expect(await distributor.pendingOwner()).to.equal(ethers.ZeroAddress);
       expect(await distributor.paused()).to.equal(false);
 
@@ -221,6 +241,7 @@ describe("RewardsDistributor", function () {
         "OperatorSet",
         "SignerChanged",
         "Paused",
+        "AssetSet", // the $ASSET address mintRewardToken refuses
         "RewardTokenAdded", // $ASSET
         "RewardTokenAdded", // $OVTR
         "Initialized", // OZ, closing the initializer
@@ -231,6 +252,7 @@ describe("RewardsDistributor", function () {
       await expect(deployTx).to.emit(distributor, "GuardianSet").withArgs(ethers.ZeroAddress, guardian.address);
       await expect(deployTx).to.emit(distributor, "OperatorSet").withArgs(ethers.ZeroAddress, operatorSafe.address);
       await expect(deployTx).to.emit(distributor, "Paused").withArgs(false);
+      await expect(deployTx).to.emit(distributor, "AssetSet").withArgs(assetAddr);
       await expect(deployTx)
         .to.emit(distributor, "RewardTokenAdded")
         .withArgs(assetAddr, true, false, 18, "ASSET");
@@ -250,7 +272,7 @@ describe("RewardsDistributor", function () {
       expect(await bare.rewardTokens()).to.deep.equal([]);
     });
 
-    it("rejects a zero owner, guardian, operator or signer in initialize, through the proxy", async function () {
+    it("rejects a zero owner, guardian, operator, signer or $ASSET in initialize, through the proxy", async function () {
       const Distributor = await ethers.getContractFactory("RewardsDistributor");
       const tokens = launchTokens(assetAddr, overtureAddr);
 
@@ -272,6 +294,18 @@ describe("RewardsDistributor", function () {
 
       await expect(
         deployDistributorProxy(owner.address, guardian.address, operatorSafe.address, ethers.ZeroAddress, tokens)
+      ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
+
+      // A zero $ASSET would leave mintRewardToken's address guard comparing against nothing.
+      await expect(
+        deployDistributorProxy(
+          owner.address,
+          guardian.address,
+          operatorSafe.address,
+          voucherSigner.address,
+          tokens,
+          ethers.ZeroAddress
+        )
       ).to.be.revertedWithCustomError(Distributor, "ZeroAddress");
     });
 
@@ -319,7 +353,7 @@ describe("RewardsDistributor", function () {
       expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(100));
       expect(await overture.balanceOf(distributorAddr)).to.equal(FUNDING - TOKENS(100));
       expect(await distributor.claimed(overtureAddr, alice.address)).to.equal(TOKENS(100));
-      // Nothing was minted: the supply is what the minter put into the distributor.
+      // Nothing was minted by the claim: the supply is what the operator minted into the distributor.
       expect(await overture.totalSupply()).to.equal(FUNDING);
     });
 
@@ -438,12 +472,12 @@ describe("RewardsDistributor", function () {
         .withArgs(overtureAddr, TOKENS(100), 0n);
 
       // One wei short is still short.
-      await overture.connect(minter).mint(distributorAddr, TOKENS(100) - 1n);
+      await asOperator().mintRewardToken(overtureAddr, distributorAddr, TOKENS(100) - 1n);
       await expect(claimOverture(alice, TOKENS(100), { signature: sig }))
         .to.be.revertedWithCustomError(distributor, "InsufficientFunds")
         .withArgs(overtureAddr, TOKENS(100), TOKENS(100) - 1n);
 
-      await overture.connect(minter).mint(distributorAddr, 1n);
+      await asOperator().mintRewardToken(overtureAddr, distributorAddr, 1n);
       await claimOverture(alice, TOKENS(100), { signature: sig });
       expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(100));
       expect(await overture.balanceOf(distributorAddr)).to.equal(0n);
@@ -1014,6 +1048,127 @@ describe("RewardsDistributor", function () {
   });
 
   // ─────────────────────────────────────────────────────────────
+  describe("mintRewardToken", function () {
+    // The operator mints a registered, mintable reward token straight to one wallet, outside
+    // the voucher flow. The distributor proxy is the token's minter; nothing else changes.
+
+    it("mints to a user's wallet, emits RewardTokenMinted and moves no claim ledger", async function () {
+      const supplyBefore = await overture.totalSupply();
+      const heldBefore = await overture.balanceOf(distributorAddr);
+
+      const tx = await asOperator().mintRewardToken(overtureAddr, alice.address, TOKENS(250));
+      await expect(tx)
+        .to.emit(distributor, "RewardTokenMinted")
+        .withArgs(overtureAddr, alice.address, TOKENS(250), await txTimestamp(tx));
+      await expect(tx).to.emit(overture, "Transfer").withArgs(ethers.ZeroAddress, alice.address, TOKENS(250));
+
+      expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(250));
+      expect((await overture.totalSupply()) - supplyBefore).to.equal(TOKENS(250));
+      expect(await overture.balanceOf(distributorAddr)).to.equal(heldBefore);
+      expect(await distributor.claimed(overtureAddr, alice.address)).to.equal(0n);
+
+      // A voucher still pays its full amount, by transfer, on top of what was minted.
+      await claimOverture(alice, TOKENS(100));
+      expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(350));
+      expect((await overture.totalSupply()) - supplyBefore).to.equal(TOKENS(250));
+    });
+
+    it("mints into the distributor itself, which is how $OVTR claims are funded", async function () {
+      await asOperator().recoverExcess(overtureAddr, FUNDING);
+      const sig = await signVoucher(overtureAddr, alice, TOKENS(100));
+      await expect(claimOverture(alice, TOKENS(100), { signature: sig }))
+        .to.be.revertedWithCustomError(distributor, "InsufficientFunds")
+        .withArgs(overtureAddr, TOKENS(100), 0n);
+
+      const tx = await asOperator().mintRewardToken(overtureAddr, distributorAddr, TOKENS(100));
+      await expect(tx)
+        .to.emit(distributor, "RewardTokenMinted")
+        .withArgs(overtureAddr, distributorAddr, TOKENS(100), await txTimestamp(tx));
+
+      await claimOverture(alice, TOKENS(100), { signature: sig });
+      expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(100));
+      expect(await overture.balanceOf(distributorAddr)).to.equal(0n);
+    });
+
+    it("is operator only — the owner, the guardian and a stranger are rejected", async function () {
+      for (const caller of [owner, guardian, alice]) {
+        await expect(distributor.connect(caller).mintRewardToken(overtureAddr, alice.address, 1n))
+          .to.be.revertedWithCustomError(distributor, "NotOperator")
+          .withArgs(caller.address, operatorSafe.address);
+      }
+    });
+
+    it("rejects a token that was never registered, even one whose minter is the distributor", async function () {
+      const loose = await deployOverture(distributorAddr);
+      const looseAddr = await loose.getAddress();
+      await expect(asOperator().mintRewardToken(looseAddr, alice.address, 1n))
+        .to.be.revertedWithCustomError(distributor, "UnknownRewardToken")
+        .withArgs(looseAddr);
+      expect(await loose.totalSupply()).to.equal(0n);
+    });
+
+    it("rejects the zero address as the recipient", async function () {
+      await expect(
+        asOperator().mintRewardToken(overtureAddr, ethers.ZeroAddress, 1n)
+      ).to.be.revertedWithCustomError(distributor, "ZeroAddress");
+    });
+
+    it("rejects a zero amount", async function () {
+      await expect(
+        asOperator().mintRewardToken(overtureAddr, alice.address, 0n)
+      ).to.be.revertedWithCustomError(distributor, "ZeroAmount");
+    });
+
+    it("mints a registered token whatever its two switches say", async function () {
+      await distributor.setRewardTokenEnabled(overtureAddr, false);
+      await distributor.setClaimsEnabled(overtureAddr, false);
+      await asOperator().mintRewardToken(overtureAddr, bob.address, TOKENS(5));
+      expect(await overture.balanceOf(bob.address)).to.equal(TOKENS(5));
+    });
+
+    it("bubbles the token's own NotMinter when the distributor is not the token's minter", async function () {
+      await overture.connect(owner).setMinter(minter.address);
+      await expect(asOperator().mintRewardToken(overtureAddr, alice.address, 1n))
+        .to.be.revertedWithCustomError(overture, "NotMinter")
+        .withArgs(distributorAddr);
+    });
+
+    it("refuses $ASSET by address with AssetNotMintable — the operator included", async function () {
+      const supplyBefore = await asset.totalSupply();
+      await expect(asOperator().mintRewardToken(assetAddr, alice.address, 1n))
+        .to.be.revertedWithCustomError(distributor, "AssetNotMintable")
+        .withArgs(assetAddr);
+      expect(await asset.totalSupply()).to.equal(supplyBefore);
+    });
+
+    it("refuses $ASSET by address even when the recorded token would mint for the distributor", async function () {
+      // A twin whose recorded $ASSET is the Overture token, which the twin is the minter of: the
+      // token would mint, the address guard refuses first.
+      const twin = await deployDistributorProxy(
+        owner.address,
+        guardian.address,
+        operatorSafe.address,
+        voucherSigner.address,
+        launchTokens(assetAddr, overtureAddr),
+        overtureAddr
+      );
+      await overture.connect(owner).setMinter(await twin.getAddress());
+      await expect(twin.connect(operatorSafe).mintRewardToken(overtureAddr, alice.address, 1n))
+        .to.be.revertedWithCustomError(twin, "AssetNotMintable")
+        .withArgs(overtureAddr);
+    });
+
+    it("reverts, unwrapped, on any other registered token that has no mint at all", async function () {
+      const Token = await ethers.getContractFactory("MockERC20Decimals");
+      const plain = await Token.deploy("Plain", "PLN", TOKENS(10), 18);
+      const plainAddr = await plain.getAddress();
+      await distributor.addRewardToken(plainAddr, false, true);
+      await expect(asOperator().mintRewardToken(plainAddr, alice.address, 1n)).to.be.reverted;
+      expect(await plain.totalSupply()).to.equal(TOKENS(10));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("setGuardian", function () {
     it("takes the owner or the operator, and names all three in the rejection", async function () {
       // The guardian cannot rotate itself, so a leaked hot key cannot keep itself installed.
@@ -1417,16 +1572,34 @@ describe("RewardsDistributor", function () {
       expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(100));
     });
 
+    it("initializeV2 is owner only, records $ASSET, and runs once", async function () {
+      await expect(distributor.connect(alice).initializeV2(assetAddr))
+        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+        .withArgs(alice.address);
+      await expect(asOperator().initializeV2(assetAddr))
+        .to.be.revertedWithCustomError(distributor, "OwnableUnauthorizedAccount")
+        .withArgs(operatorSafe.address);
+
+      await expect(distributor.initializeV2(assetAddr)).to.emit(distributor, "AssetSet").withArgs(assetAddr);
+      expect(await distributor.asset()).to.equal(assetAddr);
+
+      await expect(distributor.initializeV2(assetAddr)).to.be.revertedWithCustomError(
+        distributor,
+        "InvalidInitialization"
+      );
+      await expect(distributor.initializeV2.staticCall(ethers.ZeroAddress)).to.be.reverted;
+    });
+
     it("runs the V2 reinitializer once through upgradeToAndCall", async function () {
       const V2 = await v2Factory();
       const impl = await V2.deploy();
       await impl.waitForDeployment();
-      const data = impl.interface.encodeFunctionData("initializeV2", [99n]);
+      const data = impl.interface.encodeFunctionData("initializeV3", [99n]);
 
       await distributor.upgradeToAndCall(await impl.getAddress(), data);
       const v2 = await ethers.getContractAt("RewardsDistributorV2Mock", distributorAddr);
       expect(await v2.upgradeMarker()).to.equal(99n);
-      await expect(v2.initializeV2(1n)).to.be.revertedWithCustomError(v2, "InvalidInitialization");
+      await expect(v2.initializeV3(1n)).to.be.revertedWithCustomError(v2, "InvalidInitialization");
     });
 
     it("cannot initialise the implementation behind the proxy", async function () {
@@ -1434,13 +1607,13 @@ describe("RewardsDistributor", function () {
       const impl = await ethers.getContractAt("RewardsDistributor", implAddr);
 
       await expect(
-        impl.initialize(alice.address, alice.address, alice.address, alice.address, [])
+        impl.initialize(alice.address, alice.address, alice.address, alice.address, alice.address, [])
       ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
     });
 
     it("cannot initialise the proxy a second time", async function () {
       await expect(
-        distributor.initialize(alice.address, alice.address, alice.address, alice.address, [])
+        distributor.initialize(alice.address, alice.address, alice.address, alice.address, alice.address, [])
       ).to.be.revertedWithCustomError(distributor, "InvalidInitialization");
     });
 
@@ -1530,6 +1703,39 @@ describe("RewardsDistributor", function () {
         const Timelock = await ethers.getContractFactory("LPTimelock");
         timelock = await Timelock.deploy(MIN_DELAY, [treasury.address], [treasury.address], ethers.ZeroAddress);
         timelockAddr = await timelock.getAddress();
+      });
+
+      it("migrates a v1-state proxy: the timelock's upgradeToAndCall(impl, initializeV2(asset)) records $ASSET atomically", async function () {
+        await handOverToTimelock();
+        // The v1 state: identical to v2 except that the appended `asset` field (ERC-7201 base + 6)
+        // was never written.
+        const ASSET_SLOT = ethers.toBeHex(BigInt(DISTRIBUTOR_NAMESPACE) + 6n, 32);
+        await ethers.provider.send("hardhat_setStorageAt", [distributorAddr, ASSET_SLOT, ethers.ZeroHash]);
+        expect(await distributor.asset()).to.equal(ethers.ZeroAddress);
+
+        const Distributor = await ethers.getContractFactory("RewardsDistributor");
+        const impl = await Distributor.deploy();
+        await impl.waitForDeployment();
+        const implAddr = await impl.getAddress();
+        const upgrade = distributor.interface.encodeFunctionData("upgradeToAndCall", [
+          implAddr,
+          distributor.interface.encodeFunctionData("initializeV2", [assetAddr]),
+        ]);
+        await schedule(distributorAddr, upgrade);
+        await time.increase(Number(MIN_DELAY) + 1);
+
+        // `onlyOwner` holds inside the upgrade: the delegatecall keeps msg.sender = the timelock.
+        const tx = execute(distributorAddr, upgrade);
+        await expect(tx).to.emit(distributor, "Upgraded").withArgs(implAddr);
+        await expect(tx).to.emit(distributor, "AssetSet").withArgs(assetAddr);
+        expect(await distributor.asset()).to.equal(assetAddr);
+        expect(await upgrades.erc1967.getImplementationAddress(distributorAddr)).to.equal(implAddr);
+
+        await expect(asOperator().mintRewardToken(assetAddr, alice.address, 1n))
+          .to.be.revertedWithCustomError(distributor, "AssetNotMintable")
+          .withArgs(assetAddr);
+        await asOperator().mintRewardToken(overtureAddr, alice.address, 1n);
+        expect(await overture.balanceOf(alice.address)).to.equal(1n);
       });
 
       it("takes ownership only through a scheduled acceptOwnership, after the delay", async function () {

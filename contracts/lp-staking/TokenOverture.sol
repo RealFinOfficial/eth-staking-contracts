@@ -8,15 +8,22 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20Burnable
 import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 
+import "./interfaces/IMintableRewardToken.sol";
+
 /**
  * @title TokenOverture
  * @notice The Overture token (ticker $OVTR): one of the LP staking reward tokens. ERC-20 with
  *         18 decimals, EIP-2612 permit, burnable.
  *
  *  Supply:
- *    - Exactly one address — `minter` — may call `mint`. At launch the minter is the operator
- *      multisig, which mints $OVTR INTO `RewardsDistributor`; the distributor pays claims out of
- *      that balance by transfer, exactly like $ASSET. The distributor never mints.
+ *    - Exactly one address — `minter` — may call `mint`. At launch the minter is the
+ *      `RewardsDistributor` PROXY: the deploy script predicts the proxy's address and passes it
+ *      to {initialize}. The operator multisig mints through
+ *      `RewardsDistributor.mintRewardToken(token, to, amount)` — into the distributor to fund
+ *      claims, or straight to a user's wallet. A claim never mints: the distributor pays claims
+ *      out of its balance by transfer, exactly like $ASSET.
+ *    - `mint(address to, uint256 amount)` is the shape pinned by `IMintableRewardToken`, which
+ *      every reward token this program deploys carries.
  *    - There is no cap of any kind: no per-epoch cap, no total cap, no schedule. How much $OVTR
  *      exists is decided by the minter, and the emission schedule lives in `LPEpochRegistry`,
  *      which bounds nothing.
@@ -43,7 +50,8 @@ contract TokenOverture is
     ERC20Upgradeable,
     ERC20BurnableUpgradeable,
     ERC20PermitUpgradeable,
-    Ownable2StepUpgradeable
+    Ownable2StepUpgradeable,
+    IMintableRewardToken
 {
     // ──────────────────────── Errors ───────────────────────────
 
@@ -96,7 +104,8 @@ contract TokenOverture is
     /// @param name_   ERC-20 name; also the EIP-712 domain name `permit` uses. "Overture" at launch.
     /// @param symbol_ ERC-20 symbol. "OVTR" at launch.
     /// @param owner_  Owner: the timelock. Upgrades and `setMinter`.
-    /// @param minter_ Initial minter: the operator multisig. `address(0)` starts with minting off.
+    /// @param minter_ Initial minter: the `RewardsDistributor` proxy, whose address the deploy
+    ///                script predicts. `address(0)` starts with minting off.
     function initialize(string calldata name_, string calldata symbol_, address owner_, address minter_)
         external
         initializer
@@ -121,6 +130,8 @@ contract TokenOverture is
     }
 
     /// @notice Mints `amount` new tokens to `to`. Minter only; no cap of any kind.
+    /// @dev The `IMintableRewardToken` shape. At launch the minter is `RewardsDistributor`, so
+    ///      this runs only when the operator calls `RewardsDistributor.mintRewardToken`.
     function mint(address to, uint256 amount) external onlyMinter {
         if (amount == 0) revert ZeroAmount();
         _mint(to, amount);

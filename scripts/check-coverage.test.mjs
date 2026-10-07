@@ -111,11 +111,11 @@ test("one newly uncovered line fails the gate and names the file", () => {
 
 test("one newly uncovered branch fails the gate — every branch floor is the ceiling", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/RewardsDistributor.sol": {lines: [119, 122], branches: [17, 18]},
+    "contracts/lp-staking/RewardsDistributor.sol": {lines: [135, 138], branches: [21, 22]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /RewardsDistributor\.sol: branches coverage 94\.44% \(17\/18\)/);
+  assert.match(stderr, /RewardsDistributor\.sol: branches coverage 95\.45% \(21\/22\)/);
 });
 
 test("all violations are reported, not just the first", () => {

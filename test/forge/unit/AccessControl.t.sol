@@ -26,9 +26,9 @@ import {RejectingReceiver} from "../utils/attackers/Receivers.sol";
  *    | contract     | owner (timelock, delayed)                                         | operator (multisig, immediate)                     | guardian (hot key)                    | other            |
  *    |--------------|-------------------------------------------------------------------|----------------------------------------------------|---------------------------------------|------------------|
  *    | vault        | upgrade, setZapper, setBonusEscrow, setGuardian, setOperator      | setTwapParams, rescuePosition, setGuardian, pauses | setDepositsPaused, setRebalancePaused | —                |
- *    | distributor  | upgrade, addRewardToken, setRewardTokenEnabled, setClaimsEnabled, setGuardian, setOperator | setSigner, recoverExcess, setGuardian, setPaused | setPaused                    | signer (vouchers)|
+ *    | distributor  | upgrade, initializeV2 (once), addRewardToken, setRewardTokenEnabled, setClaimsEnabled, setGuardian, setOperator | setSigner, recoverExcess, mintRewardToken (never $ASSET), setGuardian, setPaused | setPaused | signer (vouchers); asset() public |
  *    | registry     | upgrade, setOperator                                              | scheduleEpoch, setEpochAmount, updateEpochBounds, cancelEpoch | —                         | —                |
- *    | Overture     | upgrade, setMinter                                                | —                                                  | —                                     | minter: mint     |
+ *    | Overture     | upgrade, setMinter                                                | —                                                  | —                                     | minter (the distributor proxy): mint |
  *    | zapper       | upgrade, setOperator                                              | setTwapParams, sweep, rescuePosition               | —                                     | —                |
  *
  *  Rules asserted in both directions below. First, every pause switch takes the guardian OR
@@ -36,7 +36,9 @@ import {RejectingReceiver} from "../utils/attackers/Receivers.sol";
  *  everything else on an operator tier takes the operator alone, so nothing the hot guardian
  *  key can call moves value or installs a key. Third, `setGuardian` takes the owner OR the
  *  operator: an undelayed hot key must be revocable without the timelock's delay. Fourth,
- *  `setOperator` (and `setMinter`) stay owner-only, so no undelayed tier rotates itself.
+ *  `setOperator` (and `setMinter`) stay owner-only, so no undelayed tier rotates itself. Fifth,
+ *  the Overture token's minter is the distributor PROXY, and the only road to it is the
+ *  distributor operator's `mintRewardToken`, which refuses $ASSET by address for every caller.
  *
  *  The matrix is stated per contract: what DIES with the owner, and — the half that matters to
  *  a staker — what SURVIVES. The design promise is that exits are unconditional, so a stack
@@ -329,6 +331,8 @@ contract AccessControlTest is LocalHarness {
         distributor.setOperator(voucherSigner);
         vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, voucherSigner));
         overture.mint(voucherSigner, 1);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, voucherSigner, address(this)));
+        distributor.mintRewardToken(address(overture), voucherSigner, 1);
         vm.expectRevert(abi.encodeWithSelector(ILPEpochRegistry.NotOperator.selector, voucherSigner, address(this)));
         registry.cancelEpoch(1);
         vm.stopPrank();
@@ -356,15 +360,31 @@ contract AccessControlTest is LocalHarness {
         split.mint(address(this), 1);
     }
 
-    /// @dev The distributor holds the reward balances but no role on the token: it can neither
-    ///      mint nor move the minter. Every reward is pre-funded; nothing is minted at claim.
-    function test_Roles_TheDistributorCannotMintOrAdministerTheOvertureToken() public {
+    /// @dev The distributor proxy is the Overture token's minter, and that is ALL it is on the
+    ///      token: it can neither move the minter role nor upgrade the token. Its mint right is
+    ///      reached only through `mintRewardToken`, which is its operator's; a claim never mints.
+    function test_Roles_TheDistributorMintsOnlyForItsOperatorAndAdministersNothing() public {
+        assertEq(overture.minter(), address(distributor), "precondition: the distributor is the minter");
+
         vm.startPrank(address(distributor));
-        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, address(distributor)));
-        overture.mint(address(distributor), 1);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(distributor)));
         overture.setMinter(address(distributor));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(distributor)));
+        (bool ok,) = address(overture).call(_upgradeCall());
+        ok;
         vm.stopPrank();
+
+        // The one road to the mint right is the operator's `mintRewardToken`...
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, stranger, address(this)));
+        distributor.mintRewardToken(address(overture), stranger, 1);
+
+        // ...and a claim pays by transfer out of the funded balance, never by minting.
+        uint256 supply = overture.totalSupply();
+        bytes memory sig = _signVoucher(voucherSignerPk, address(overture), alice, AWARD, FAR_DEADLINE);
+        vm.prank(alice);
+        distributor.claim(address(overture), AWARD, FAR_DEADLINE, sig);
+        assertEq(overture.totalSupply(), supply, "a claim must never mint");
     }
 
     /// @dev The zapper is a stakeFor right, not an admin right — in NONE of the vault's tiers.
@@ -682,8 +702,9 @@ contract AccessControlTest is LocalHarness {
         _expectUnauthorized(address(overture), abi.encodeCall(TokenOverture.setMinter, (carol)));
         _expectUnauthorized(address(overture), _upgradeCall());
 
-        // The mint right this contract kept is untouched by the ownership move.
-        overture.mint(alice, 1);
+        // The mint right — the distributor's, reached through its operator (this contract) — is
+        // untouched by the ownership move.
+        distributor.mintRewardToken(address(overture), alice, 1);
         assertEq(overture.balanceOf(alice), 1, "the minter keeps minting across an ownership handover");
     }
 
@@ -772,6 +793,12 @@ contract AccessControlTest is LocalHarness {
         _expectNotOperator(address(registry), abi.encodeCall(LPEpochRegistry.cancelEpoch, (1)), address(this), hole);
         vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, address(this)));
         overture.mint(address(distributor), 1);
+        _expectNotOperator(
+            address(distributor),
+            abi.encodeCall(RewardsDistributor.mintRewardToken, (address(overture), address(distributor), 1)),
+            address(this),
+            hole
+        );
 
         // An $ASSET voucher can never pay.
         bytes memory assetSig = _signVoucher(voucherSignerPk, address(asset), alice, AWARD, FAR_DEADLINE);
@@ -837,6 +864,12 @@ contract AccessControlTest is LocalHarness {
             address(this),
             operatorSafe
         );
+        _expectNotOperator(
+            address(d),
+            abi.encodeCall(RewardsDistributor.mintRewardToken, (address(overture), address(this), 1)),
+            address(this),
+            operatorSafe
+        );
 
         _expectRegistryOperatorTierRejects(r, address(this), operatorSafe);
         _expectZapperOperatorTierRejects(z, address(this), operatorSafe);
@@ -869,6 +902,12 @@ contract AccessControlTest is LocalHarness {
         _expectNotOperator(address(d), abi.encodeCall(RewardsDistributor.setSigner, (carol)), multisig, operatorSafe);
         _expectNotOperator(
             address(d), abi.encodeCall(RewardsDistributor.recoverExcess, (address(asset), 1)), multisig, operatorSafe
+        );
+        _expectNotOperator(
+            address(d),
+            abi.encodeCall(RewardsDistributor.mintRewardToken, (address(overture), multisig, 1)),
+            multisig,
+            operatorSafe
         );
 
         // ...and nothing on the owner tier.
@@ -943,6 +982,12 @@ contract AccessControlTest is LocalHarness {
         vm.prank(operatorSafe);
         d.recoverExcess(address(asset), 1_000e18);
         assertEq(asset.balanceOf(operatorSafe), 1_000e18, "the recovery must land on operator()");
+
+        // ...and minting a mintable reward token to a wallet, once the twin is that token's minter.
+        overture.setMinter(address(d));
+        vm.prank(operatorSafe);
+        d.mintRewardToken(address(overture), alice, 1e18);
+        assertEq(overture.balanceOf(alice), 1e18, "the operator must be able to mint through its distributor");
 
         // The registry's operator tier: the whole schedule, with no delay.
         _scheduleNext(r, operatorSafe);
@@ -1084,6 +1129,12 @@ contract AccessControlTest is LocalHarness {
         _expectNotOperator(
             address(d), abi.encodeCall(RewardsDistributor.recoverExcess, (address(asset), 1)), stranger, operatorSafe
         );
+        _expectNotOperator(
+            address(d),
+            abi.encodeCall(RewardsDistributor.mintRewardToken, (address(overture), stranger, 1)),
+            stranger,
+            operatorSafe
+        );
         _expectRegistryOperatorTierRejects(r, stranger, operatorSafe);
         _expectZapperOperatorTierRejects(z, stranger, operatorSafe);
 
@@ -1123,6 +1174,36 @@ contract AccessControlTest is LocalHarness {
         vm.stopPrank();
     }
 
+    /**
+     * @dev The v1 -> v2 migration is owner-tier like the upgrade it rides in: the operator, the
+     *      guardian and a stranger get the Ownable rejection, the owner runs it. The field it
+     *      writes is public: anyone reads `asset()`. And no tier mints $ASSET — the operator,
+     *      the one tier that reaches `mintRewardToken`, is refused by address.
+     */
+    function test_Tiers_InitializeV2IsOwnerOnlyAssetIsPublicAndNobodyMintsAsset() public {
+        RewardsDistributor d = _threeTierDistributor();
+        address[3] memory refused = [operatorSafe, multisig, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]));
+            d.initializeV2(address(asset));
+        }
+        d.initializeV2(address(asset));
+
+        vm.prank(stranger);
+        assertEq(d.asset(), address(asset), "asset() is a public view");
+
+        vm.prank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.AssetNotMintable.selector, address(asset)));
+        d.mintRewardToken(address(asset), operatorSafe, 1);
+        _expectNotOperator(
+            address(d),
+            abi.encodeCall(RewardsDistributor.mintRewardToken, (address(asset), address(this), 1)),
+            address(this),
+            operatorSafe
+        );
+    }
+
     // ──────────────────────── Helpers ──────────────────────────
 
     /// @dev The five contracts' proxy addresses, in deploy-script order.
@@ -1148,7 +1229,9 @@ contract AccessControlTest is LocalHarness {
     /**
      * @dev Hands every tier of every contract to a black hole that will never act again: the
      *      five owners (each handover accepted), the vault's and the distributor's guardian and
-     *      operator, the registry's and the zapper's operator, and the Overture minter.
+     *      operator, and the registry's and the zapper's operator. The Overture minter stays the
+     *      distributor proxy, exactly as in production; with the distributor's operator gone,
+     *      nobody can reach its `mintRewardToken` any more.
      */
     function _abandonEverything() private returns (RejectingReceiver blackHole) {
         blackHole = new RejectingReceiver();
@@ -1160,7 +1243,6 @@ contract AccessControlTest is LocalHarness {
         distributor.setOperator(hole);
         registry.setOperator(hole);
         zapper.setOperator(hole);
-        overture.setMinter(hole);
 
         _nominateAll(hole);
         vm.startPrank(hole);
@@ -1248,6 +1330,7 @@ contract AccessControlTest is LocalHarness {
             multisig,
             operatorSafe,
             voucherSigner,
+            address(asset),
             _launchRewardTokens(address(asset), false, address(overture))
         );
     }

@@ -5,7 +5,6 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {LocalHarness} from "../utils/LocalHarness.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
 import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
-import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
 
 /**
@@ -28,7 +27,8 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
  */
 contract ClaimLedgerHandler is Test {
     RewardsDistributor internal immutable distributor;
-    /// @dev The test contract: owner, operator, guardian, $OVTR minter, and holder of the supplies.
+    /// @dev The test contract: owner, operator (which mints $OVTR through the distributor),
+    ///      guardian, and holder of the supplies.
     address internal immutable admin;
     uint256 internal immutable signerPk;
     uint256 internal immutable foreignPk;
@@ -248,8 +248,9 @@ contract ClaimLedgerHandler is Test {
         _observeLedgers();
     }
 
-    /// @dev The company funds the distributor: $OVTR minted into it by the minter, the other
-    ///      tokens transferred into it from the treasury (the test contract).
+    /// @dev The company funds the distributor: $OVTR minted into it through `mintRewardToken`
+    ///      (the operator calls it; the distributor proxy is the minter), the other tokens
+    ///      transferred into it from the treasury (the test contract).
     function fund(uint256 tokenSeed, uint256 amountSeed) external {
         calls++;
         _prime();
@@ -257,7 +258,7 @@ contract ClaimLedgerHandler is Test {
         uint256 amount = bound(amountSeed, 1, MAX_FUND);
         vm.prank(admin);
         if (token == tokens[1]) {
-            TokenOverture(token).mint(address(distributor), amount);
+            distributor.mintRewardToken(token, address(distributor), amount);
         } else {
             MockERC20Permit(token).transfer(address(distributor), amount);
         }
@@ -432,7 +433,7 @@ contract ClaimLedgerInvariantsTest is LocalHarness {
         actorsAtStart.push(carol);
         actorsAtStart.push(stranger);
         tokensAtStart.push(address(asset));
-        tokensAtStart.push(address(overture)); // index 1: the handler mints this one as the minter
+        tokensAtStart.push(address(overture)); // index 1: the handler mints this one via mintRewardToken
         tokensAtStart.push(address(third));
         for (uint256 t = 0; t < tokensAtStart.length; ++t) {
             for (uint256 i = 0; i < actorsAtStart.length; ++i) {
@@ -452,8 +453,9 @@ contract ClaimLedgerInvariantsTest is LocalHarness {
             tokensAtStart
         );
 
-        // The handler acts as the owner, operator, guardian, $OVTR minter and treasury through
-        // `vm.prank` of this contract, which holds all five roles in the local harness.
+        // The handler acts as the owner, operator (minting $OVTR through the distributor),
+        // guardian and treasury through `vm.prank` of this contract, which holds all four roles
+        // in the local harness.
         bytes4[] memory selectors = new bytes4[](14);
         selectors[0] = ClaimLedgerHandler.claim.selector;
         selectors[1] = ClaimLedgerHandler.claim.selector; // the hot path, weighted x3

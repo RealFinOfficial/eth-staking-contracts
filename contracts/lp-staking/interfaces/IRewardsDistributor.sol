@@ -20,6 +20,12 @@ pragma solidity ^0.8.20;
  *  until the company funds the contract. There is no cap, no budget, no running total and no
  *  other bound on what a valid voucher pays.
  *
+ *  Minting happens OUTSIDE the claim flow only: the operator calls `mintRewardToken(token, to,
+ *  amount)` to mint a registered reward token that implements `IMintableRewardToken` and names
+ *  the distributor proxy as its minter ($OVTR) to one wallet — a user's wallet, or the
+ *  distributor itself to fund claims. It moves no claim ledger and emits {RewardTokenMinted}.
+ *  $ASSET (`asset()`) is refused by address with {AssetNotMintable}, whoever calls.
+ *
  *  Ownable2Step / UUPS members (`owner`, `pendingOwner`, `transferOwnership`,
  *  `acceptOwnership`, `upgradeToAndCall`, `proxiableUUID`) and ERC-5267 `eip712Domain` are
  *  inherited from OpenZeppelin and are not repeated here.
@@ -77,6 +83,15 @@ interface IRewardsDistributor {
     /// @notice The operator moved a token balance out of the distributor to itself.
     event ExcessRecovered(address indexed token, address to, uint256 amount, uint256 timestamp);
 
+    /// @notice The operator minted `amount` of the reward token `token` to the wallet `to`,
+    ///         outside the claim flow (`to` is the distributor itself when it funds claims). No
+    ///         claim ledger moved.
+    event RewardTokenMinted(address indexed token, address indexed to, uint256 amount, uint256 timestamp);
+
+    /// @notice The $ASSET token was recorded — by `initialize`, or by `initializeV2` on a proxy
+    ///         upgraded from v1. Full new state.
+    event AssetSet(address asset);
+
     /// @notice The voucher signer changed. Carries both sides.
     event SignerChanged(address previousSigner, address newSigner);
 
@@ -121,6 +136,9 @@ interface IRewardsDistributor {
 
     /// @dev A zero amount was passed where a positive one is required.
     error ZeroAmount();
+
+    /// @dev `mintRewardToken` was called for $ASSET. $ASSET is never minted here, whoever calls.
+    error AssetNotMintable(address token);
 
     /// @dev An operator-tier function was called by someone else — the owner and the guardian included.
     error NotOperator(address caller, address operator);
@@ -170,6 +188,10 @@ interface IRewardsDistributor {
 
     function recoverExcess(address token, uint256 amount) external;
 
+    /// @notice Mints `amount` of the registered, mintable reward token `token` to `to`, outside
+    ///         the voucher flow. The distributor proxy must be the token's minter.
+    function mintRewardToken(address token, address to, uint256 amount) external;
+
     // ──────────────────────── Views ────────────────────────────
 
     /// @notice keccak256("RewardClaim(address token,address user,uint256 cumulativeAmount,uint256 deadline)")
@@ -182,6 +204,10 @@ interface IRewardsDistributor {
     function guardian() external view returns (address);
 
     function operator() external view returns (address);
+
+    /// @notice The $ASSET reward token: registered like any other, never mintable through
+    ///         `mintRewardToken`.
+    function asset() external view returns (address);
 
     /// @notice Lifetime amount of `token` already paid to `user`.
     function claimed(address token, address user) external view returns (uint256);

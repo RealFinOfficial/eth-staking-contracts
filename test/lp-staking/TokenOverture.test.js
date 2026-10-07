@@ -9,9 +9,11 @@ const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
  * balances there, the permit domain names it, and `RewardsDistributor` is funded there. The
  * implementation behind it burns its own initializers and holds nothing.
  *
- * The token has no cap of any kind. The minter (the operator multisig at launch) mints $OVTR
- * INTO the distributor, which pays claims by transfer; the owner (the timelock) upgrades the
- * token and moves the minter role.
+ * The token has no cap of any kind. The minter — at launch the `RewardsDistributor` PROXY, which
+ * the operator drives with `mintRewardToken` — mints $OVTR INTO the distributor (which pays
+ * claims by transfer) or to any other wallet; the owner (the timelock) upgrades the token and
+ * moves the minter role. Here the `minter` signer stands in for the distributor: what is
+ * measured is the token's own rule, "one address mints", whoever that address is.
  */
 describe("TokenOverture", function () {
   let token, tokenAddr, deployTx;
@@ -334,6 +336,20 @@ describe("TokenOverture", function () {
         .withArgs(alice.address);
     });
 
+    it("carries the IMintableRewardToken shape: mint(address,uint256), selector 0x40c10f19", async function () {
+      // Every reward token this program deploys exposes exactly this call, so the distributor's
+      // `mintRewardToken` can reach any of them through the one interface.
+      const shaped = await ethers.getContractAt("IMintableRewardToken", tokenAddr);
+      expect(shaped.interface.getFunction("mint").selector).to.equal("0x40c10f19");
+      expect(token.interface.getFunction("mint").selector).to.equal("0x40c10f19");
+
+      await shaped.connect(minter).mint(alice.address, TOKENS(3));
+      expect(await token.balanceOf(alice.address)).to.equal(TOKENS(3));
+      await expect(shaped.connect(stranger).mint(alice.address, 1n))
+        .to.be.revertedWithCustomError(token, "NotMinter")
+        .withArgs(stranger.address);
+    });
+
     it("has no cap of any kind: repeated large mints all go through", async function () {
       // No per-epoch cap, no total cap, no schedule: the minter decides the supply.
       const big = TOKENS(1_000_000_000_000); // 1e12 tokens per call
@@ -349,8 +365,9 @@ describe("TokenOverture", function () {
     });
 
     it("mints INTO a distributor-like holder, which then pays by transfer", async function () {
-      // The launch flow: the operator (minter) mints $OVTR into RewardsDistributor, which pays
-      // claims out of that balance. Here `bob` stands in for the distributor's balance.
+      // The launch flow: the operator calls RewardsDistributor.mintRewardToken, the distributor
+      // (the minter) mints $OVTR into its own balance, and claims pay out of that balance. Here
+      // `bob` stands in for the distributor's balance.
       await token.connect(minter).mint(bob.address, TOKENS(1_000));
       await token.connect(bob).transfer(alice.address, TOKENS(250));
       expect(await token.balanceOf(alice.address)).to.equal(TOKENS(250));

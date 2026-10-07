@@ -40,7 +40,8 @@ abstract contract ForkHarness is BaseForge {
     // ──────────────────────── Actors ───────────────────────────
 
     /// @notice Final owner of all five proxies (standing in for the timelock), their guardian
-    ///         and their operator, and the Overture token's minter.
+    ///         and their operator. It mints $OVTR through `distributor.mintRewardToken`: the
+    ///         Overture token's minter is the distributor proxy, as in production.
     address internal multisig;
     /// @notice Backend voucher signer (LP_SIGNER) and its key, so tests can sign real vouchers.
     address internal voucherSigner;
@@ -245,20 +246,24 @@ abstract contract ForkHarness is BaseForge {
     }
 
     /// @dev Deploy + wiring + ownership, in the order of scripts/deploy-lp-staking.js:
-    ///      Overture token -> distributor (launch tokens) -> registry -> vault -> zapper, then the
-    ///      funding the operator does (mint $OVTR into the distributor, transfer $ASSET into it),
+    ///      Overture token (minter = the predicted distributor proxy) -> distributor (launch
+    ///      tokens) -> registry -> vault -> zapper, then the funding the operator does
+    ///      (`mintRewardToken` $OVTR into the distributor, transfer $ASSET into it),
     ///      then ownership of all five proxies to the multisig. The script names the timelock as
     ///      owner inside each proxy's own deployment transaction; here the deployer (this
     ///      contract) owns them first so it can wire `setZapper`, and then hands them over.
     function _deployStack() private {
-        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), multisig);
+        address predictedDistributor = _predictDistributorProxy();
+        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), predictedDistributor);
         distributor = _deployDistributorProxy(
             address(this),
             multisig,
             multisig,
             voucherSigner,
+            profile.asset,
             _launchRewardTokens(profile.asset, false, address(overture))
         );
+        assertEq(address(distributor), predictedDistributor, "the distributor proxy must land on the prediction");
         registry = _deployRegistryProxy(address(distributor), address(this), multisig);
         // Owner = the deployer (this contract) so the wiring below can run; guardian AND
         // operator = the multisig, which is what makes the fork tier's admin calls
@@ -301,10 +306,11 @@ abstract contract ForkHarness is BaseForge {
         vault.setZapper(address(zapper));
 
         // Funding, as the operator does it before claims open: $OVTR minted INTO the
-        // distributor by the minter, $ASSET transferred into it. Claims pay out of these
-        // balances and revert with InsufficientFunds when one runs short.
+        // distributor through `mintRewardToken` (the distributor is the minter), $ASSET
+        // transferred into it. Claims pay out of these balances and revert with
+        // InsufficientFunds when one runs short.
         vm.prank(multisig);
-        overture.mint(address(distributor), DISTRIBUTOR_FUNDING);
+        distributor.mintRewardToken(address(overture), address(distributor), DISTRIBUTOR_FUNDING);
         _fund(profile.asset, address(distributor), DISTRIBUTOR_FUNDING);
 
         // Ownership of all five to the multisig: Ownable2Step, so each transfer is only a

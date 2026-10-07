@@ -5,6 +5,7 @@ import {LocalHarness} from "../utils/LocalHarness.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";
 import {IRewardsDistributor} from "../../../contracts/lp-staking/interfaces/IRewardsDistributor.sol";
 import {RewardsDistributorV2Mock} from "../../../contracts/lp-staking/mocks/RewardsDistributorV2Mock.sol";
+import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -23,7 +24,9 @@ import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.s
  *
  *  The harness registers the launch list: $ASSET conditional with claims CLOSED (as at launch)
  *  and $OVTR (the Overture token) with claims open, both pre-funded. Tests that pay $ASSET open
- *  its claims first, exactly as the timelock will after maturity.
+ *  its claims first, exactly as the timelock will after maturity. The distributor proxy is the
+ *  Overture token's minter, so every top-up of $OVTR here goes through `mintRewardToken`, which
+ *  this contract may call as the distributor's operator.
  */
 contract DistributorBranchesTest is LocalHarness {
     uint256 internal constant AWARD = 1_000e18;
@@ -47,7 +50,7 @@ contract DistributorBranchesTest is LocalHarness {
         RewardsDistributor impl = new RewardsDistributor();
 
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), multisig, operatorSafe, voucherSigner, _noTokens());
+        impl.initialize(address(this), multisig, operatorSafe, voucherSigner, address(asset), _noTokens());
     }
 
     /**
@@ -76,7 +79,8 @@ contract DistributorBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                RewardsDistributor.initialize, (address(0), multisig, operatorSafe, voucherSigner, _noTokens())
+                RewardsDistributor.initialize,
+                (address(0), multisig, operatorSafe, voucherSigner, address(asset), _noTokens())
             )
         );
     }
@@ -88,7 +92,8 @@ contract DistributorBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                RewardsDistributor.initialize, (address(this), address(0), operatorSafe, voucherSigner, _noTokens())
+                RewardsDistributor.initialize,
+                (address(this), address(0), operatorSafe, voucherSigner, address(asset), _noTokens())
             )
         );
     }
@@ -102,7 +107,8 @@ contract DistributorBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                RewardsDistributor.initialize, (address(this), multisig, address(0), voucherSigner, _noTokens())
+                RewardsDistributor.initialize,
+                (address(this), multisig, address(0), voucherSigner, address(asset), _noTokens())
             )
         );
     }
@@ -114,7 +120,23 @@ contract DistributorBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                RewardsDistributor.initialize, (address(this), multisig, operatorSafe, address(0), _noTokens())
+                RewardsDistributor.initialize,
+                (address(this), multisig, operatorSafe, address(0), address(asset), _noTokens())
+            )
+        );
+    }
+
+    /// @dev $ASSET is the one token `mintRewardToken` refuses by address, so a zero there would
+    ///      leave the guard comparing against nothing.
+    function test_Initialize_RejectsAZeroAsset() public {
+        address impl = address(new RewardsDistributor());
+
+        vm.expectRevert(IRewardsDistributor.ZeroAddress.selector);
+        new LPProxy(
+            impl,
+            abi.encodeCall(
+                RewardsDistributor.initialize,
+                (address(this), multisig, operatorSafe, voucherSigner, address(0), _noTokens())
             )
         );
     }
@@ -128,7 +150,10 @@ contract DistributorBranchesTest is LocalHarness {
         vm.expectRevert(IRewardsDistributor.ZeroAddress.selector);
         new LPProxy(
             impl,
-            abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, operatorSafe, voucherSigner, list))
+            abi.encodeCall(
+                RewardsDistributor.initialize,
+                (address(this), multisig, operatorSafe, voucherSigner, address(asset), list)
+            )
         );
     }
 
@@ -139,7 +164,10 @@ contract DistributorBranchesTest is LocalHarness {
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.RewardTokenAlreadyAdded.selector, address(asset)));
         new LPProxy(
             impl,
-            abi.encodeCall(RewardsDistributor.initialize, (address(this), multisig, operatorSafe, voucherSigner, list))
+            abi.encodeCall(
+                RewardsDistributor.initialize,
+                (address(this), multisig, operatorSafe, voucherSigner, address(asset), list)
+            )
         );
     }
 
@@ -147,7 +175,7 @@ contract DistributorBranchesTest is LocalHarness {
     ///      through the timelock.
     function test_Initialize_AcceptsAnEmptyTokenList() public {
         RewardsDistributor fresh =
-            _deployDistributorProxy(address(this), multisig, operatorSafe, voucherSigner, _noTokens());
+            _deployDistributorProxy(address(this), multisig, operatorSafe, voucherSigner, address(asset), _noTokens());
         assertEq(fresh.rewardTokens().length, 0, "no token must be registered");
         assertFalse(fresh.isRewardToken(address(asset)), "and nothing must read as a reward token");
     }
@@ -156,7 +184,7 @@ contract DistributorBranchesTest is LocalHarness {
      * @dev Every mutable field must be followable from logs alone, from block one — the pause
      *      flag whose initial value is `false` included, so an indexer never has to hardcode a
      *      default. The order is the one `initialize` writes it in: the three roles, the pause,
-     *      then one `RewardTokenAdded` per token in list order.
+     *      the $ASSET address, then one `RewardTokenAdded` per token in list order.
      */
     function test_Initialize_AnnouncesEveryInitialFieldInOrder() public {
         RewardsDistributor impl = new RewardsDistributor();
@@ -170,6 +198,8 @@ contract DistributorBranchesTest is LocalHarness {
         emit IRewardsDistributor.SignerChanged(address(0), voucherSigner);
         vm.expectEmit(false, false, false, true);
         emit IRewardsDistributor.Paused(false);
+        vm.expectEmit(false, false, false, true);
+        emit IRewardsDistributor.AssetSet(address(asset));
         vm.expectEmit(true, false, false, true);
         emit IRewardsDistributor.RewardTokenAdded(address(asset), true, false, 18, "ASSET");
         vm.expectEmit(true, false, false, true);
@@ -179,7 +209,8 @@ contract DistributorBranchesTest is LocalHarness {
                 new LPProxy(
                     address(impl),
                     abi.encodeCall(
-                        RewardsDistributor.initialize, (address(this), multisig, operatorSafe, voucherSigner, list)
+                        RewardsDistributor.initialize,
+                        (address(this), multisig, operatorSafe, voucherSigner, address(asset), list)
                     )
                 )
             )
@@ -190,6 +221,7 @@ contract DistributorBranchesTest is LocalHarness {
         assertEq(fresh.operator(), operatorSafe, "the operator must be what OperatorSet announced");
         assertEq(fresh.signer(), voucherSigner, "the signer must be what SignerChanged announced");
         assertFalse(fresh.paused(), "the pause flag must be what Paused announced");
+        assertEq(fresh.asset(), address(asset), "the $ASSET address must be what AssetSet announced");
         address[] memory tokens = fresh.rewardTokens();
         assertEq(tokens.length, 2, "both launch tokens must be registered");
         assertEq(tokens[0], address(asset), "in list order: $ASSET first");
@@ -199,7 +231,7 @@ contract DistributorBranchesTest is LocalHarness {
     /// @dev A proxy is initialised exactly once; a second call cannot re-seat the owner.
     function test_Initialize_CannotRunTwiceOnTheProxy() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        distributor.initialize(alice, alice, alice, alice, _noTokens());
+        distributor.initialize(alice, alice, alice, alice, alice, _noTokens());
     }
 
     function test_Initialize_StartsWithTheLaunchState() public view {
@@ -207,6 +239,7 @@ contract DistributorBranchesTest is LocalHarness {
         assertEq(distributor.signer(), voucherSigner, "the configured signer must be stored");
         assertEq(distributor.guardian(), address(this), "the configured guardian must be stored");
         assertEq(distributor.operator(), address(this), "the configured operator must be stored");
+        assertEq(distributor.asset(), address(asset), "the configured $ASSET must be stored");
         assertEq(distributor.REWARD_CLAIM_TYPEHASH(), REWARD_CLAIM_TYPEHASH, "the one voucher type");
         assertEq(
             distributor.REWARD_CLAIM_TYPEHASH(),
@@ -242,6 +275,7 @@ contract DistributorBranchesTest is LocalHarness {
      *                (registered byte 0, enabled byte 1, conditional byte 2,
      *                 claimsEnabled byte 3, decimals byte 4)
      *        base+5  claimed mapping:  keccak(user . keccak(token . base+5))
+     *        base+6  asset            (appended in v2, after every v1 field)
      *
      *      Measured on a twin whose guardian and operator are two different addresses, so the
      *      two slots cannot pass by holding the same value.
@@ -263,6 +297,7 @@ contract DistributorBranchesTest is LocalHarness {
 
         assertEq(_loadAddress(address(twin), base + 1), multisig, "slot 1 must be `guardian`");
         assertEq(_loadAddress(address(twin), base + 2), operatorSafe, "slot 2 must be `operator`");
+        assertEq(_loadAddress(address(twin), base + 6), address(asset), "slot 6, after both mappings, must be `asset`");
 
         assertEq(uint256(vm.load(address(twin), bytes32(base + 3))), 2, "slot 3 must be rewardTokens.length");
         uint256 elements = uint256(keccak256(abi.encode(base + 3)));
@@ -384,7 +419,7 @@ contract DistributorBranchesTest is LocalHarness {
      */
     function test_InsufficientFunds_RevertsWithExactArgumentsThenPaysOnceFunded() public {
         _drain(ovtr);
-        overture.mint(address(distributor), AWARD / 2);
+        distributor.mintRewardToken(ovtr, address(distributor), AWARD / 2);
         bytes memory sig = _sign(ovtr, alice, AWARD, FAR_DEADLINE);
 
         vm.prank(alice);
@@ -395,7 +430,7 @@ contract DistributorBranchesTest is LocalHarness {
         assertEq(overture.balanceOf(alice), 0, "and must move nothing");
         assertEq(overture.balanceOf(address(distributor)), AWARD / 2, "the partial balance stays where it is");
 
-        overture.mint(address(distributor), AWARD / 2); // the company funds the rest
+        distributor.mintRewardToken(ovtr, address(distributor), AWARD / 2); // the company funds the rest
 
         vm.prank(alice);
         uint256 paid = distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig);
@@ -408,14 +443,14 @@ contract DistributorBranchesTest is LocalHarness {
     function test_InsufficientFunds_ComparesTheDeltaAndEqualityPays() public {
         _claim(ovtr, alice, AWARD);
         _drain(ovtr);
-        overture.mint(address(distributor), AWARD - 1);
+        distributor.mintRewardToken(ovtr, address(distributor), AWARD - 1);
         bytes memory sig = _sign(ovtr, alice, AWARD * 2, FAR_DEADLINE);
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.InsufficientFunds.selector, ovtr, AWARD, AWARD - 1));
         distributor.claim(ovtr, AWARD * 2, FAR_DEADLINE, sig);
 
-        overture.mint(address(distributor), 1);
+        distributor.mintRewardToken(ovtr, address(distributor), 1);
         vm.prank(alice);
         assertEq(distributor.claim(ovtr, AWARD * 2, FAR_DEADLINE, sig), AWARD, "balance == delta must pay");
         assertEq(overture.balanceOf(address(distributor)), 0, "leaving exactly nothing behind");
@@ -898,6 +933,173 @@ contract DistributorBranchesTest is LocalHarness {
         distributor.recoverExcess(ovtr, held + 1);
     }
 
+    // ──────────────────────── mintRewardToken ──────────────────
+
+    /**
+     * @dev The operator mints straight to a user's wallet, outside the voucher flow: the wallet
+     *      gains exactly `amount`, the supply grows by exactly `amount`, the distributor's own
+     *      balance and every claim ledger stay where they were, and the event carries the token,
+     *      the wallet, the amount and the block's timestamp.
+     */
+    function test_MintRewardToken_MintsToAUserWalletAndMovesNoLedger() public {
+        uint256 supplyBefore = overture.totalSupply();
+        uint256 heldBefore = overture.balanceOf(address(distributor));
+        vm.warp(block.timestamp + 1 days);
+
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit IRewardsDistributor.RewardTokenMinted(ovtr, alice, AWARD, block.timestamp);
+        distributor.mintRewardToken(ovtr, alice, AWARD);
+
+        assertEq(overture.balanceOf(alice), AWARD, "the wallet receives exactly the amount");
+        assertEq(overture.totalSupply() - supplyBefore, AWARD, "the supply grows by exactly the amount");
+        assertEq(overture.balanceOf(address(distributor)), heldBefore, "the funded balance does not move");
+        assertEq(distributor.claimed(ovtr, alice), 0, "and no claim ledger moves");
+
+        // A voucher still pays only out of the funded balance, in full, on top of the minted tokens.
+        _claim(ovtr, alice, AWARD);
+        assertEq(overture.balanceOf(alice), AWARD * 2, "the claim pays its own amount, by transfer");
+        assertEq(overture.totalSupply() - supplyBefore, AWARD, "and mints nothing");
+    }
+
+    /// @dev Minted into the distributor itself, the tokens are the balance claims pay from — the
+    ///      launch funding path. A drained balance reverts the claim until the mint lands.
+    function test_MintRewardToken_IntoTheDistributorFundsTheClaims() public {
+        _drain(ovtr);
+        bytes memory sig = _sign(ovtr, alice, AWARD, FAR_DEADLINE);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.InsufficientFunds.selector, ovtr, AWARD, uint256(0)));
+        distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig);
+
+        vm.expectEmit(true, true, false, true, address(distributor));
+        emit IRewardsDistributor.RewardTokenMinted(ovtr, address(distributor), AWARD, block.timestamp);
+        distributor.mintRewardToken(ovtr, address(distributor), AWARD);
+        assertEq(overture.balanceOf(address(distributor)), AWARD, "the mint is the funded balance");
+
+        vm.prank(alice);
+        assertEq(distributor.claim(ovtr, AWARD, FAR_DEADLINE, sig), AWARD, "the same voucher pays once funded");
+    }
+
+    /// @dev Registration is the gate, not the token's ability to mint: a token whose minter IS
+    ///      the distributor but which was never registered is refused before any call is made.
+    function test_MintRewardToken_RejectsAnUnregisteredToken() public {
+        TokenOverture loose = _deployOvertureProxy("Loose", "LSE", address(this), address(distributor));
+
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.UnknownRewardToken.selector, address(loose)));
+        distributor.mintRewardToken(address(loose), alice, 1);
+        assertEq(loose.totalSupply(), 0, "nothing was minted");
+    }
+
+    function test_MintRewardToken_RejectsAZeroRecipient() public {
+        vm.expectRevert(IRewardsDistributor.ZeroAddress.selector);
+        distributor.mintRewardToken(ovtr, address(0), 1);
+    }
+
+    function test_MintRewardToken_RejectsAZeroAmount() public {
+        vm.expectRevert(IRewardsDistributor.ZeroAmount.selector);
+        distributor.mintRewardToken(ovtr, alice, 0);
+    }
+
+    /// @dev The order the checks fire in: the operator, then $ASSET by address, then an unknown
+    ///      token, then a zero recipient, then a zero amount — each one wins over every check
+    ///      after it.
+    function test_MintRewardToken_CheckOrderIsCallerAssetTokenRecipientAmount() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, stranger, address(this)));
+        distributor.mintRewardToken(address(asset), address(0), 0);
+
+        // $ASSET is refused before registration is even looked at: a twin whose $ASSET was never
+        // registered still names AssetNotMintable, not UnknownRewardToken.
+        address unregisteredAsset = makeAddr("unregisteredAsset");
+        RewardsDistributor bare = _deployDistributorProxy(
+            address(this), multisig, address(this), voucherSigner, unregisteredAsset, _noTokens()
+        );
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.AssetNotMintable.selector, unregisteredAsset));
+        bare.mintRewardToken(unregisteredAsset, address(0), 0);
+
+        address unknown = makeAddr("unknown");
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.UnknownRewardToken.selector, unknown));
+        distributor.mintRewardToken(unknown, address(0), 0);
+
+        vm.expectRevert(IRewardsDistributor.ZeroAddress.selector);
+        distributor.mintRewardToken(ovtr, address(0), 0);
+    }
+
+    /// @dev "Registered" is the whole gate: a token taken off the schedule and with its claims
+    ///      closed is still mintable, because funding it is exactly what may happen next.
+    function test_MintRewardToken_IgnoresTheEnabledAndClaimsSwitches() public {
+        distributor.setRewardTokenEnabled(ovtr, false);
+        distributor.setClaimsEnabled(ovtr, false);
+
+        distributor.mintRewardToken(ovtr, bob, AWARD);
+        assertEq(overture.balanceOf(bob), AWARD, "a disabled, claims-closed token still mints");
+    }
+
+    /// @dev When the distributor is not the token's minter, the token's OWN revert reaches the
+    ///      caller unchanged — `NotMinter(distributor)`, naming the distributor as the caller the
+    ///      token refused. Nothing wraps it.
+    function test_MintRewardToken_BubblesTheTokensRevertWhenNotTheMinter() public {
+        overture.setMinter(carol);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, address(distributor)));
+        distributor.mintRewardToken(ovtr, alice, 1);
+    }
+
+    /// @dev $ASSET is refused BY ADDRESS, by the operator itself, with the token named — the
+    ///      token is never called. $ASSET is funded by transfer only.
+    function test_MintRewardToken_RefusesAssetByAddress() public {
+        uint256 supplyBefore = asset.totalSupply();
+
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.AssetNotMintable.selector, address(asset)));
+        distributor.mintRewardToken(address(asset), alice, 1);
+        assertEq(asset.totalSupply(), supplyBefore, "nothing was created");
+    }
+
+    /// @dev The guard is the ADDRESS, not the token's own refusal: on a twin whose recorded $ASSET
+    ///      is a token that WOULD mint for it (the twin is that token's minter), the operator is
+    ///      still refused, and the supply does not move.
+    function test_MintRewardToken_RefusesAssetEvenWhenTheTokenWouldMint() public {
+        RewardsDistributor twin = _deployDistributorProxy(
+            address(this), multisig, operatorSafe, voucherSigner, ovtr, _launchRewardTokens(address(asset), false, ovtr)
+        );
+        overture.setMinter(address(twin));
+        uint256 supplyBefore = overture.totalSupply();
+
+        vm.prank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.AssetNotMintable.selector, ovtr));
+        twin.mintRewardToken(ovtr, alice, 1);
+        assertEq(overture.totalSupply(), supplyBefore, "the token was never asked to mint");
+    }
+
+    /// @dev Any OTHER registered token without a `mint` reverts inside the token, unwrapped, and
+    ///      nothing moves.
+    function test_MintRewardToken_RevertsOnARegisteredTokenWithoutMint() public {
+        MockERC20Permit plain = new MockERC20Permit("Plain", "PLN", 1e24, 18);
+        distributor.addRewardToken(address(plain), false, true);
+        uint256 supplyBefore = plain.totalSupply();
+
+        vm.expectRevert();
+        distributor.mintRewardToken(address(plain), alice, 1);
+        assertEq(plain.totalSupply(), supplyBefore, "nothing was created");
+    }
+
+    /// @dev Operator only, measured on the twin whose three roles are three addresses: the owner,
+    ///      the guardian and a stranger are refused with the operator rejection, and the operator
+    ///      mints once the twin is the token's minter.
+    function test_MintRewardToken_IsOperatorOnly() public {
+        RewardsDistributor twin = _guardedTwin();
+        address[3] memory refused = [address(this), multisig, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, refused[i], operatorSafe));
+            twin.mintRewardToken(ovtr, alice, 1);
+        }
+
+        overture.setMinter(address(twin));
+        vm.prank(operatorSafe);
+        twin.mintRewardToken(ovtr, alice, 1);
+        assertEq(overture.balanceOf(alice), 1, "the operator mints through its own distributor");
+    }
+
     /// @dev A stranger holds none of the three tiers. Every rejection names the caller, and each
     ///      names the tier it failed.
     function test_AdminFunctions_RejectAStranger() public {
@@ -924,6 +1126,8 @@ contract DistributorBranchesTest is LocalHarness {
         distributor.setPaused(true);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, alice, address(this)));
         distributor.recoverExcess(ovtr, 1);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, alice, address(this)));
+        distributor.mintRewardToken(ovtr, alice, 1);
         vm.stopPrank();
     }
 
@@ -947,6 +1151,8 @@ contract DistributorBranchesTest is LocalHarness {
         twin.setSigner(carol);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, address(this), operatorSafe));
         twin.recoverExcess(ovtr, 1);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, address(this), operatorSafe));
+        twin.mintRewardToken(ovtr, address(this), 1);
 
         // The GUARDIAN is rejected on every owner function AND on every operator function —
         // `setGuardian` included, so a leaked hot key cannot keep itself installed.
@@ -965,6 +1171,8 @@ contract DistributorBranchesTest is LocalHarness {
         twin.setSigner(carol);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, multisig, operatorSafe));
         twin.recoverExcess(ovtr, 1);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, multisig, operatorSafe));
+        twin.mintRewardToken(ovtr, multisig, 1);
         vm.stopPrank();
 
         // The OPERATOR is rejected on every owner function. `setGuardian` is NOT one of them —
@@ -1076,6 +1284,89 @@ contract DistributorBranchesTest is LocalHarness {
         distributor.renounceOwnership();
     }
 
+    // ──────────────────────── v1 -> v2 migration ───────────────
+
+    /**
+     * @dev The live-proxy path, measured end to end: a proxy in the v1 state (no `asset` field —
+     *      emulated by clearing slot base+6, the only difference between the two layouts) is
+     *      upgraded by its owner with `upgradeToAndCall(impl, initializeV2(asset))`. The field and
+     *      `AssetSet` arrive in the upgrade transaction itself, every v1 field is untouched, and
+     *      the guard works from the next call on.
+     */
+    function test_InitializeV2_TheOwnersUpgradeRecordsAssetAtomically() public {
+        RewardsDistributor twin = _guardedTwin();
+        vm.store(address(twin), bytes32(uint256(NAMESPACE) + 6), bytes32(0));
+        assertEq(twin.asset(), address(0), "precondition: a v1 proxy has no asset field");
+        overture.setMinter(address(twin));
+
+        address impl = address(new RewardsDistributor());
+        vm.expectEmit(false, false, false, true, address(twin));
+        emit IRewardsDistributor.AssetSet(address(asset));
+        twin.upgradeToAndCall(impl, abi.encodeCall(RewardsDistributor.initializeV2, (address(asset))));
+
+        assertEq(_implementationOf(address(twin)), impl, "the new code is installed");
+        assertEq(twin.asset(), address(asset), "and the field is set in the same transaction");
+        assertEq(twin.operator(), operatorSafe, "every v1 field is untouched");
+        assertEq(twin.guardian(), multisig, "every v1 field is untouched");
+        assertEq(twin.rewardTokens().length, 2, "every v1 field is untouched");
+
+        vm.startPrank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.AssetNotMintable.selector, address(asset)));
+        twin.mintRewardToken(address(asset), alice, 1);
+        twin.mintRewardToken(ovtr, alice, 1);
+        vm.stopPrank();
+        assertEq(overture.balanceOf(alice), 1, "and $OVTR mints through the upgraded proxy");
+    }
+
+    /// @dev `reinitializer(2)`: once is all. The owner's second call is refused by OpenZeppelin.
+    function test_InitializeV2_RunsOnce() public {
+        distributor.initializeV2(address(asset));
+
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        distributor.initializeV2(address(asset));
+    }
+
+    /// @dev Owner only: the operator, the guardian and a stranger all get the Ownable rejection,
+    ///      and the field does not move.
+    function test_InitializeV2_IsOwnerOnly() public {
+        RewardsDistributor twin = _guardedTwin();
+        address[3] memory refused = [operatorSafe, multisig, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]));
+            twin.initializeV2(carol);
+        }
+        assertEq(twin.asset(), address(asset), "the field is where initialize put it");
+    }
+
+    /// @dev Same check as `initialize`: a zero $ASSET is refused, and the refusal reverts the
+    ///      whole upgrade with it — the code does not change either.
+    function test_InitializeV2_RejectsZeroAndRevertsTheWholeUpgrade() public {
+        address before = _implementationOf(address(distributor));
+        address impl = address(new RewardsDistributor());
+
+        vm.expectRevert(IRewardsDistributor.ZeroAddress.selector);
+        distributor.upgradeToAndCall(impl, abi.encodeCall(RewardsDistributor.initializeV2, (address(0))));
+        assertEq(_implementationOf(address(distributor)), before, "the upgrade did not happen");
+    }
+
+    /// @dev On a proxy born at v2 the field already came from `initialize`; the owner can still
+    ///      run `initializeV2` once, and it re-points the field (an owner-tier change, delayed by
+    ///      the timelock in production). Documented in the function's NatSpec.
+    function test_InitializeV2_OnAFreshProxyRepointsTheFieldOnceForTheOwner() public {
+        vm.expectEmit(false, false, false, true, address(distributor));
+        emit IRewardsDistributor.AssetSet(carol);
+        distributor.initializeV2(carol);
+        assertEq(distributor.asset(), carol, "the owner re-pointed the field");
+    }
+
+    /// @dev The bare implementation's initializers are burnt, `initializeV2` included.
+    function test_InitializeV2_CannotRunOnTheImplementation() public {
+        RewardsDistributor impl = new RewardsDistributor();
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        impl.initializeV2(address(asset));
+    }
+
     // ──────────────────────── Upgrades ─────────────────────────
 
     /**
@@ -1124,13 +1415,13 @@ contract DistributorBranchesTest is LocalHarness {
     function test_Upgrade_V2StateLivesInItsOwnNamespaceAndReinitializesOnce() public {
         _claim(ovtr, alice, AWARD);
         address v2 = address(new RewardsDistributorV2Mock());
-        distributor.upgradeToAndCall(v2, abi.encodeCall(RewardsDistributorV2Mock.initializeV2, (42)));
+        distributor.upgradeToAndCall(v2, abi.encodeCall(RewardsDistributorV2Mock.initializeV3, (42)));
 
         RewardsDistributorV2Mock upgraded = RewardsDistributorV2Mock(address(distributor));
         assertEq(upgraded.upgradeMarker(), 42, "the reinitializer ran inside the upgrade");
 
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        upgraded.initializeV2(7);
+        upgraded.initializeV3(7);
 
         assertEq(distributor.claimed(ovtr, alice), AWARD, "and V2 did not touch V1's namespace");
         assertEq(distributor.signer(), voucherSigner, "nor V1's roles");
@@ -1168,7 +1459,12 @@ contract DistributorBranchesTest is LocalHarness {
     ///      collapses into one. Registered with the launch list of the harness tokens.
     function _guardedTwin() private returns (RewardsDistributor) {
         return _deployDistributorProxy(
-            address(this), multisig, operatorSafe, voucherSigner, _launchRewardTokens(address(asset), false, ovtr)
+            address(this),
+            multisig,
+            operatorSafe,
+            voucherSigner,
+            address(asset),
+            _launchRewardTokens(address(asset), false, ovtr)
         );
     }
 

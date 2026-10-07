@@ -184,7 +184,8 @@ contract ReentrancyTest is LocalHarness {
         IRewardsDistributor.RewardTokenInit[] memory list = new IRewardsDistributor.RewardTokenInit[](1);
         list[0] =
             IRewardsDistributor.RewardTokenInit({token: address(hookAsset), conditional: true, claimsEnabled: true});
-        RewardsDistributor d = _deployDistributorProxy(address(this), address(this), address(this), voucherSigner, list);
+        RewardsDistributor d =
+            _deployDistributorProxy(address(this), address(this), address(this), voucherSigner, address(asset), list);
         hookAsset.mint(address(d), 1_000_000e18);
 
         ReentrantReceiver claimer = new ReentrantReceiver();
@@ -259,6 +260,7 @@ contract ReentrancyTest is LocalHarness {
             address(this),
             address(hostileOperator),
             voucherSigner,
+            address(asset),
             new IRewardsDistributor.RewardTokenInit[](0)
         );
 

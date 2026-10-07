@@ -38,10 +38,12 @@ contract RewardsDistributorV2Mock is RewardsDistributor {
         return 2;
     }
 
-    /// @notice The V2 half of the setup, run once via `upgradeToAndCall`. `reinitializer(2)`
-    ///         is what lets a second version seed state the first version never had, without
-    ///         re-running V1's `initialize`.
-    function initializeV2(uint256 marker) external reinitializer(2) {
+    /// @notice The mock's half of the setup, run once via `upgradeToAndCall`. A reinitializer
+    ///         is what lets a later version seed state an earlier one never had, without
+    ///         re-running `initialize`. Version 3, and named `initializeV3`, because the real
+    ///         implementation's own `initializeV2(address)` already holds version 2 (the v1 -> v2
+    ///         migration that records $ASSET); the mock is the revision AFTER it.
+    function initializeV3(uint256 marker) external reinitializer(3) {
         _v2Storage().upgradeMarker = marker;
     }
 

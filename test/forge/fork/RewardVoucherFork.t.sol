@@ -16,7 +16,8 @@ import {IERC20Like} from "../utils/Interfaces.sol";
  *
  *  The fork stack is the deploy script's shape: $ASSET registered conditional with claims CLOSED,
  *  $OVTR (the Overture token) with claims open, both pre-funded by the multisig — which stands in
- *  for the timelock as owner, and is also the operator, the guardian and the $OVTR minter.
+ *  for the timelock as owner, and is also the operator and the guardian. The $OVTR minter is the
+ *  distributor proxy; the multisig mints through `mintRewardToken`.
  *
  *  SEC-04 lives here.
  */
@@ -213,12 +214,13 @@ contract RewardVoucherForkTest is ForkHarness {
         assertEq(IERC20Like(assetToken).balanceOf(address(distributor)), 0, "out of exactly the refund");
     }
 
-    /// @dev No cap and no budget: a single claim of fifty million $OVTR pays as soon as the minter
-    ///      has funded that much — far beyond any epoch quantity the schedule could name.
+    /// @dev No cap and no budget: a single claim of fifty million $OVTR pays as soon as the
+    ///      operator has minted that much into the distributor — far beyond any epoch quantity
+    ///      the schedule could name.
     function test_NoBound_AClaimFarBeyondAnyScheduleQuantityPaysWhenFunded() public {
         uint256 huge = 50_000_000e18;
         vm.prank(multisig);
-        overture.mint(address(distributor), huge);
+        distributor.mintRewardToken(ovtr, address(distributor), huge);
 
         bytes memory voucher = _sign(ovtr, alice, huge);
         vm.prank(alice);
@@ -279,10 +281,12 @@ contract RewardVoucherForkTest is ForkHarness {
         _claim(ovtr, alice, AWARD);
 
         RewardsDistributor replacement = _deployDistributorProxy(
-            address(this), multisig, multisig, voucherSigner, _launchRewardTokens(assetToken, false, ovtr)
+            address(this), multisig, multisig, voucherSigner, assetToken, _launchRewardTokens(assetToken, false, ovtr)
         );
+        // Funded by the operator minting straight into the replacement's address — any wallet
+        // is a valid `mintRewardToken` target.
         vm.prank(multisig);
-        overture.mint(address(replacement), AWARD);
+        distributor.mintRewardToken(ovtr, address(replacement), AWARD);
 
         assertEq(replacement.claimed(ovtr, alice), 0, "the replacement starts with an empty ledger");
 

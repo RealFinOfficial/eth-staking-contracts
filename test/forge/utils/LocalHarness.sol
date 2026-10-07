@@ -29,18 +29,23 @@ import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswap
  *
  *  Harness-local divergences from production, all deliberate:
  *    * The test contract is the owner of all five proxies, the `guardian` and `operator`
- *      of the vault and the distributor, the operator of the registry and the zapper, and the
- *      Overture token's minter. Production splits these: the owner is a timelock, the guardian
- *      is a hot pause-only key and the operator (= the minter) is a multisig. Collapsing them
- *      here keeps every admin call in this tier callable without a prank; the files where the
- *      split itself is the subject ({AccessControlTest}, {VaultBranchesTest},
- *      {DistributorBranchesTest}) build second proxies with distinct roles, using {multisig}
- *      as the guardian and {operatorSafe} as the operator.
+ *      of the vault and the distributor, and the operator of the registry and the zapper.
+ *      Production splits these: the owner is a timelock, the guardian is a hot pause-only key
+ *      and the operator is a multisig. Collapsing them here keeps every admin call in this tier
+ *      callable without a prank; the files where the split itself is the subject
+ *      ({AccessControlTest}, {VaultBranchesTest}, {DistributorBranchesTest}) build second
+ *      proxies with distinct roles, using {multisig} as the guardian and {operatorSafe} as the
+ *      operator.
+ *    * The Overture token's minter is the distributor PROXY, exactly as in production: the
+ *      token is born with the predicted proxy address ({_predictDistributorProxy}). This
+ *      contract therefore mints $OVTR only through `distributor.mintRewardToken`, as the
+ *      distributor's operator.
  *    * The distributor is registered with the launch list: $ASSET conditional with claims
  *      CLOSED (as at launch) and $OVTR with claims open. A test that claims $ASSET opens it
  *      with `distributor.setClaimsEnabled(address(asset), true)` first. Both tokens are
  *      pre-funded into the distributor ({DISTRIBUTOR_FUNDING} each): the harness mints $OVTR
- *      into it as the minter and transfers $ASSET into it, exactly as the operator does.
+ *      into it through `mintRewardToken` and transfers $ASSET into it, exactly as the operator
+ *      does.
  *    * `twapWindow` is {MIN_TWAP_WINDOW} (300), which is also the production default, so a
  *      test that warps past a window warps five minutes.
  *    * The pool mock reports spot == TWAP == tick 0, so the guard passes unless a test
@@ -160,14 +165,19 @@ abstract contract LocalHarness is BaseForge {
     }
 
     function _deployStack() private {
-        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), address(this));
+        // The token is born with the distributor PROXY as its minter, the way the deploy script
+        // does it: the proxy's address is predicted before the token exists.
+        address predictedDistributor = _predictDistributorProxy();
+        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), predictedDistributor);
         distributor = _deployDistributorProxy(
             address(this),
             address(this),
             address(this),
             voucherSigner,
+            address(asset),
             _launchRewardTokens(address(asset), false, address(overture))
         );
+        assertEq(address(distributor), predictedDistributor, "the distributor proxy must land on the prediction");
         registry = _deployRegistryProxy(address(distributor), address(this), address(this));
         // `zapper_` is left at zero and set by `setZapper` below: this harness IS the owner,
         // so it can. The deploy script cannot — its proxies are born owned by the timelock —
@@ -214,8 +224,9 @@ abstract contract LocalHarness is BaseForge {
             vm.deal(users[i], 100 ether);
         }
         // Pre-funds both reward tokens, the way the operator does: $OVTR minted INTO the
-        // distributor (the harness is the minter), $ASSET transferred into it.
-        overture.mint(address(distributor), DISTRIBUTOR_FUNDING);
+        // distributor through `mintRewardToken` (the harness is the operator, the distributor is
+        // the minter), $ASSET transferred into it.
+        distributor.mintRewardToken(address(overture), address(distributor), DISTRIBUTOR_FUNDING);
         asset.transfer(address(distributor), DISTRIBUTOR_FUNDING);
     }
 

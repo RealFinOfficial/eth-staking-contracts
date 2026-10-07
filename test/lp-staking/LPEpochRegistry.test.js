@@ -72,6 +72,7 @@ describe("LPEpochRegistry", function () {
         guardian.address,
         operatorSafe.address,
         voucherSigner.address,
+        assetAddr, // the $ASSET the distributor's mintRewardToken refuses
         [
           { token: assetAddr, conditional: true, claimsEnabled: false },
           { token: overtureAddr, conditional: false, claimsEnabled: true },

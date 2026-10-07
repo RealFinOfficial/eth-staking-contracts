@@ -13,6 +13,7 @@ import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
 import "./interfaces/IRewardsDistributor.sol";
+import "./interfaces/IMintableRewardToken.sol";
 
 /**
  * @title RewardsDistributor
@@ -34,13 +35,22 @@ import "./interfaces/IRewardsDistributor.sol";
  *    the digest differs, the signature recovers to some other address, and `claimed[B]` is
  *    never touched.
  *
- *  Every reward token is PRE-FUNDED and paid by TRANSFER. Nothing is minted here. The company
- *  funds this contract with each reward token (the operator mints $OVTR into it and transfers
- *  $ASSET into it). A claim pays out of this contract's own balance of the claimed token, and
- *  when that balance is short the claim reverts with {InsufficientFunds} — until the contract
- *  is funded. There is NO cap, NO budget, NO running total and NO other limit on what a valid
- *  voucher pays: the signed cumulative figure minus what was already claimed, nothing else.
- *  The emission schedule in `LPEpochRegistry` bounds nothing here.
+ *  Every reward token is PRE-FUNDED and paid by TRANSFER. Nothing is minted AT CLAIM TIME. The
+ *  company funds this contract with each reward token: the operator transfers $ASSET into it,
+ *  and mints $OVTR into it through {mintRewardToken} (this proxy is the Overture token's minter).
+ *  A claim pays out of this contract's own balance of the claimed token, and when that balance
+ *  is short the claim reverts with {InsufficientFunds} — until the contract is funded. There is
+ *  NO cap, NO budget, NO running total and NO other limit on what a valid voucher pays: the
+ *  signed cumulative figure minus what was already claimed, nothing else. The emission schedule
+ *  in `LPEpochRegistry` bounds nothing here.
+ *
+ *  Minting, outside the claim flow: {mintRewardToken} lets the OPERATOR mint a registered reward
+ *  token that is mintable — it implements `IMintableRewardToken` and names this proxy as its
+ *  `minter` — to one concrete wallet: a user's wallet, or this contract itself to pre-fund
+ *  claims. No ledger moves when it does: `claimed[token][user]` is written by `claim` alone.
+ *  $ASSET — a token this program does not control, recorded in `asset` at initialization — is
+ *  refused BY ADDRESS with {AssetNotMintable}, whoever calls, before the token is ever called. It
+ *  is funded by transfer only.
  *
  *  Reward tokens:
  *    - `initialize` registers the launch tokens; the owner (the timelock) adds more with
@@ -59,7 +69,9 @@ import "./interfaces/IRewardsDistributor.sol";
  *  Trust (stated, not mitigated): with no cap anywhere, a leaked signer key can sign vouchers
  *  that take the whole funded balance of every token until the guardian pauses claims. The
  *  guardian's {setPaused} is the one-transaction containment; the operator then rotates the
- *  signer with {setSigner}. The guardian key must therefore stay hot and watched.
+ *  signer with {setSigner}. The guardian key must therefore stay hot and watched. A leaked
+ *  signer or guardian key cannot mint: {mintRewardToken} is the operator's alone, and it is the
+ *  only path from this contract to a token's `mint`. Nothing here caps what the operator mints.
  *
  *  UPGRADEABILITY. This contract is the implementation behind a UUPS (ERC-1967) proxy — see
  *  `contracts/lp-staking/deploy/LPProxy.sol`.
@@ -74,6 +86,10 @@ import "./interfaces/IRewardsDistributor.sol";
  *      An upgrade may append fields to it, and nothing an inherited OZ contract does to its own
  *      namespace can move ours. This v1 layout is a fresh layout in the same namespace (the
  *      Sepolia stack #5 proxy that carried the pre-v1 layout is abandoned, not upgraded).
+ *    - v2 (2026-10-07) APPENDS one field, `asset`, at the END of that struct and changes nothing
+ *      above it. A fresh proxy sets it in {initialize}; a live v1 proxy is upgraded with
+ *      `upgradeToAndCall(newImplementation, abi.encodeCall(initializeV2, (asset)))` through the
+ *      timelock, which sets it in the same transaction as the code change.
  *    - There are no immutables: every reward token is proxy storage, so a token can be added
  *      by the owner without a new implementation.
  *    - The implementation's own initializers are disabled in its constructor, so the bare
@@ -81,14 +97,15 @@ import "./interfaces/IRewardsDistributor.sol";
  *
  *  THREE-TIER ADMIN. `owner` is a `TimelockController` (48 h minimum delay on mainnet);
  *  `guardian` is a hot incident key that can ONLY pause; `operator` is a multisig with no
- *  delay for key rotation and treasury recovery:
+ *  delay for key rotation, treasury recovery and minting a mintable reward token:
  *
  *    | tier                | functions                                                         |
  *    |---------------------|-------------------------------------------------------------------|
  *    | owner (timelock)    | `_authorizeUpgrade`, `addRewardToken`, `setRewardTokenEnabled`,   |
- *    |                     | `setClaimsEnabled`, `setOperator`, `setGuardian`                  |
+ *    |                     | `setClaimsEnabled`, `setOperator`, `setGuardian`, `initializeV2`  |
  *    | guardian (hot key)  | `setPaused`                                                       |
- *    | operator (multisig) | `setSigner`, `recoverExcess`, `setGuardian`, `setPaused`          |
+ *    | operator (multisig) | `setSigner`, `recoverExcess`, `mintRewardToken`, `setGuardian`,   |
+ *    |                     | `setPaused`                                                       |
  *
  *  Nothing the guardian can do moves value or installs a key, which is what makes a hot
  *  guardian acceptable. The operator can pause as well, as the cold fallback for a lost
@@ -131,6 +148,10 @@ contract RewardsDistributor is
         mapping(address => RewardToken) tokens;
         /// token => user => lifetime amount of that token already paid to that user.
         mapping(address => mapping(address => uint256)) claimed;
+        /// The $ASSET reward token — a token this program does not control. Never mintable
+        /// through this contract; funded by transfer only. Appended in v2: a v1 proxy gets it
+        /// from {initializeV2}.
+        address asset;
     }
 
     /**
@@ -199,18 +220,23 @@ contract RewardsDistributor is
     /// @notice One-time setup, executed on the PROXY in its own deployment transaction.
     /// @param owner_    Owner: the `TimelockController`. Upgrades, reward tokens, roles.
     /// @param guardian_ Guardian: the hot incident key. Pause only.
-    /// @param operator_ Operator: the multisig. Signer rotation and recovery, no delay.
+    /// @param operator_ Operator: the multisig. Signer rotation, recovery and minting, no delay.
     /// @param signer_   Initial voucher signer.
+    /// @param asset_    The $ASSET token: the registered reward token {mintRewardToken} refuses.
+    ///                  Non-zero. It is registered like any other reward token — through
+    ///                  `tokens_`, as the conditional launch token — and this only marks which
+    ///                  registered token it is.
     /// @param tokens_   The launch reward tokens, in order. May be empty.
     /// @dev Every mutable field is written AND emitted here, the pause flag whose initial value
     ///      is `false` included, so the state is rebuildable from logs alone. The order of the
-    ///      events is: `GuardianSet`, `OperatorSet`, `SignerChanged`, `Paused(false)`, then one
-    ///      `RewardTokenAdded` per token in `tokens_` order.
+    ///      events is: `GuardianSet`, `OperatorSet`, `SignerChanged`, `Paused(false)`,
+    ///      `AssetSet`, then one `RewardTokenAdded` per token in `tokens_` order.
     function initialize(
         address owner_,
         address guardian_,
         address operator_,
         address signer_,
+        address asset_,
         RewardTokenInit[] calldata tokens_
     ) external initializer {
         __Ownable_init(owner_);
@@ -234,10 +260,28 @@ contract RewardsDistributor is
         emit OperatorSet(address(0), operator_);
         emit SignerChanged(address(0), signer_);
         emit Paused(false);
+        _setAsset(asset_);
 
         for (uint256 i = 0; i < tokens_.length; ++i) {
             _addRewardToken(tokens_[i].token, tokens_[i].conditional, tokens_[i].claimsEnabled);
         }
+    }
+
+    /// @notice The v1 -> v2 migration of a LIVE proxy: records which registered reward token is
+    ///         $ASSET, the one {mintRewardToken} refuses. Runs once, and only for the owner.
+    /// @param asset_ The $ASSET token. Non-zero.
+    /// @dev Meant to run ATOMICALLY inside the upgrade itself:
+    ///      `upgradeToAndCall(newImplementation, abi.encodeCall(initializeV2, (asset)))`, scheduled
+    ///      on and executed by the timelock. `onlyOwner` holds there because `upgradeToAndCall`
+    ///      delegatecalls this function from the proxy, so `msg.sender` stays the timelock — the
+    ///      owner. `reinitializer(2)` makes it run once: a second call reverts
+    ///      `InvalidInitialization`. Same check and same event as {initialize}: zero ->
+    ///      {ZeroAddress}, then {AssetSet}.
+    ///      On a proxy deployed fresh at v2, {initialize} (version 1) already set the field, and
+    ///      this function stays callable once by the owner there too: it would re-point the
+    ///      field — an owner-tier change, public for the whole timelock delay like any other.
+    function initializeV2(address asset_) external reinitializer(2) onlyOwner {
+        _setAsset(asset_);
     }
 
     // ──────────────────────── Views ────────────────────────────
@@ -260,6 +304,11 @@ contract RewardsDistributor is
     /// @inheritdoc IRewardsDistributor
     function operator() external view returns (address) {
         return _distributorStorage().operator;
+    }
+
+    /// @inheritdoc IRewardsDistributor
+    function asset() external view returns (address) {
+        return _distributorStorage().asset;
     }
 
     /// @inheritdoc IRewardsDistributor
@@ -443,6 +492,38 @@ contract RewardsDistributor is
         emit ExcessRecovered(token, to, amount, block.timestamp);
     }
 
+    /// @notice Mint `amount` of the reward token `token` to the wallet `to`, OUTSIDE the voucher
+    ///         flow — to a user's wallet, or to this contract itself to pre-fund the claims of
+    ///         `token`.
+    /// @param token  A registered reward token, enabled or not, that implements
+    ///               `IMintableRewardToken` and names this proxy as its `minter`. Never $ASSET.
+    /// @param to     The wallet that receives the new tokens. Any address except zero.
+    /// @param amount The number of tokens to mint, in `token`'s smallest unit. Positive.
+    /// @dev Operator tier: minting is treasury work like funding and recovery, so it must not wait
+    ///      out a timelock, and the hot guardian key must never create value. Check order, each a
+    ///      distinct revert: caller not the operator -> {NotOperator}; `token` is $ASSET ->
+    ///      {AssetNotMintable}; token never registered -> {UnknownRewardToken}; `to` is zero ->
+    ///      {ZeroAddress}; `amount` is zero -> {ZeroAmount}. Then `token.mint(to, amount)`, then
+    ///      {RewardTokenMinted}.
+    ///      $ASSET is refused BY ADDRESS, before the token is ever called: it is a token this
+    ///      program does not control, so no `mint` it might expose is ever reached from here.
+    ///      For every other token the token's own revert is NOT wrapped: it bubbles up unchanged.
+    ///      A registered token with no `mint` reverts inside the token, and a token whose minter
+    ///      is not this proxy reverts with its own error — `TokenOverture.NotMinter(address(this))`.
+    ///      Claims are untouched: no ledger moves here, and `claim` still pays by transfer out of
+    ///      the balance and never mints.
+    ///      No `nonReentrant`: this function writes NO distributor storage (it only reads the
+    ///      token's registration), so a token that calls back into this contract during `mint`
+    ///      finds no half-written state to exploit.
+    function mintRewardToken(address token, address to, uint256 amount) external onlyOperator {
+        if (token == _distributorStorage().asset) revert AssetNotMintable(token);
+        _requireRegistered(token);
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        IMintableRewardToken(token).mint(to, amount);
+        emit RewardTokenMinted(token, to, amount, block.timestamp);
+    }
+
     // ──────────────────────── Internal ─────────────────────────
 
     /// @dev Registers one token: zero and duplicates rejected, `decimals()` and `symbol()` read
@@ -464,6 +545,14 @@ contract RewardsDistributor is
         $.rewardTokens.push(token);
 
         emit RewardTokenAdded(token, conditional, claimsEnabled, decimals_, symbol_);
+    }
+
+    /// @dev Records the $ASSET address and announces it. Shared by {initialize} and
+    ///      {initializeV2}, so both run the same check and emit the same event.
+    function _setAsset(address asset_) private {
+        if (asset_ == address(0)) revert ZeroAddress();
+        _distributorStorage().asset = asset_;
+        emit AssetSet(asset_);
     }
 
     /// @dev The stored entry of a registered token, or {UnknownRewardToken}.

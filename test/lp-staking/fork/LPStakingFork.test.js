@@ -757,12 +757,17 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       // TimelockController" blocks and end to end in both integration suites.
 
       // 8. Deploy the reward side the way scripts/deploy-lp-staking.js does: the Overture
-      //    token proxy (minter = the operator), the distributor proxy born with both launch
-      //    reward tokens ($ASSET conditional with claims CLOSED, $OVTR with claims open),
+      //    token proxy (minter = the distributor PROXY, predicted from the deployer's nonce
+      //    before either exists), the distributor proxy born with $ASSET recorded and both
+      //    launch reward tokens ($ASSET conditional with claims CLOSED, $OVTR with claims open),
       //    and the epoch registry proxy bound to the distributor. `ASSET_ADDR` is the real
       //    mainnet ASSET token, exactly as the script passes LP_ASSET. Every proxy is born
       //    owned by the multisig here (the timelock's seat), so nothing is handed over.
       const ProxyFactory = await ethers.getContractFactory("LPProxy", deployer);
+      // Token implementation (nonce M), token proxy (M + 1), distributor implementation (M + 2),
+      // distributor PROXY (M + 3) — the prediction the deploy script makes.
+      const tokenImplNonce = await ethers.provider.getTransactionCount(deployer.address, "pending");
+      const predictedDistributor = ethers.getCreateAddress({ from: deployer.address, nonce: tokenImplNonce + 3 });
 
       const OvertureFactory = await ethers.getContractFactory("TokenOverture", deployer);
       const overtureImpl = await OvertureFactory.deploy();
@@ -773,7 +778,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
           OVERTURE_NAME,
           OVERTURE_SYMBOL,
           multisig.address, // owner — upgrades and setMinter
-          multisig.address, // minter — the operator, collapsed onto the multisig in this tier
+          predictedDistributor, // minter — the distributor proxy; the operator mints through it
         ])
       );
       await overtureProxy.waitForDeployment();
@@ -790,6 +795,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
           multisig.address, // guardian — the hot pause key, never behind a timelock
           multisig.address, // operator — collapsed onto the multisig in this tier, see below
           backOffice.address, // LP_SIGNER — the back office key, never the deployer
+          ASSET_ADDR, // $ASSET — the registered token mintRewardToken refuses by address
           [
             [ASSET_ADDR, true, false], // $ASSET: conditional, claims closed at launch
             [overtureAddr, false, true], // $OVTR: unconditional, claims open
@@ -798,6 +804,9 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       );
       await distributorProxy.waitForDeployment();
       distributorAddr = await distributorProxy.getAddress();
+      expect(distributorAddr, "the distributor proxy must land on the predicted address").to.equal(
+        predictedDistributor
+      );
       distributor = await ethers.getContractAt("RewardsDistributor", distributorAddr, deployer);
 
       const RegistryFactory = await ethers.getContractFactory("LPEpochRegistry", deployer);
@@ -812,9 +821,10 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       registry = await ethers.getContractAt("LPEpochRegistry", registryAddr, deployer);
 
       // Funding, as the operator does it before claims open: $OVTR minted INTO the
-      // distributor by the minter. The $ASSET side is funded inside the reward tests, from a
-      // real swap, because the real ASSET token has no mint.
-      await (await overture.connect(multisig).mint(distributorAddr, FUND_OVTR)).wait();
+      // distributor through mintRewardToken (the distributor is the minter). The $ASSET side is
+      // funded inside the reward tests, from a real swap, because the real ASSET token has no
+      // mint — and mintRewardToken refuses $ASSET by address anyway.
+      await (await distributor.connect(multisig).mintRewardToken(overtureAddr, distributorAddr, FUND_OVTR)).wait();
 
       // The voucher domain is a runtime fact of the deployed contract — its chain id is
       // the fork's, and its verifying contract only exists as of a minute ago.
@@ -1407,7 +1417,8 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(await overture.name()).to.equal(OVERTURE_NAME);
       expect(await overture.symbol()).to.equal(OVERTURE_SYMBOL);
       expect(await overture.decimals()).to.equal(18n);
-      expect(await overture.minter()).to.equal(multisig.address);
+      expect(await overture.minter()).to.equal(distributorAddr);
+      expect(await distributor.asset()).to.equal(ASSET_ADDR);
       expect(await overture.owner()).to.equal(multisig.address);
       // Funded, not minted on demand: the whole supply sits in the distributor.
       expect(await overture.totalSupply()).to.equal(FUND_OVTR);
@@ -1543,8 +1554,8 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         .withArgs(overtureAddr, FIRST_VOUCHER, 0n);
       expect(await distributor.claimed(overtureAddr, dave.address)).to.equal(0n);
 
-      // The minter funds it again; the very same voucher pays.
-      await (await overture.connect(multisig).mint(distributorAddr, FIRST_VOUCHER)).wait();
+      // The operator funds it again through mintRewardToken; the very same voucher pays.
+      await (await distributor.connect(multisig).mintRewardToken(overtureAddr, distributorAddr, FIRST_VOUCHER)).wait();
       await (await distributor.connect(dave).claim(overtureAddr, FIRST_VOUCHER, FAR_DEADLINE, voucher)).wait();
       expect(await overture.balanceOf(dave.address)).to.equal(FIRST_VOUCHER);
       expect(await overture.balanceOf(distributorAddr)).to.equal(0n);

@@ -128,7 +128,8 @@ abstract contract BaseForge is Test {
 
     /**
      * @notice Deploys the distributor the way production does: a constructor-less implementation,
-     *         then an {LPProxy} whose constructor delegatecalls `initialize` with the launch tokens.
+     *         then an {LPProxy} whose constructor delegatecalls `initialize` with the $ASSET
+     *         address (the token `mintRewardToken` refuses) and the launch tokens.
      * @dev Lives on this rung rather than on one harness because BOTH {LocalHarness} and
      *      {ForkHarness} need the identical two-transaction shape, and a test that deploys a
      *      bare implementation instead would be testing a contract nobody deploys.
@@ -138,12 +139,13 @@ abstract contract BaseForge is Test {
         address guardian_,
         address operator_,
         address signer_,
+        address asset_,
         IRewardsDistributor.RewardTokenInit[] memory tokens_
     ) internal returns (RewardsDistributor) {
         RewardsDistributor impl = new RewardsDistributor();
         LPProxy proxy = new LPProxy(
             address(impl),
-            abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, operator_, signer_, tokens_))
+            abi.encodeCall(RewardsDistributor.initialize, (owner_, guardian_, operator_, signer_, asset_, tokens_))
         );
         return RewardsDistributor(address(proxy));
     }
@@ -161,6 +163,18 @@ abstract contract BaseForge is Test {
         tokens_[0] =
             IRewardsDistributor.RewardTokenInit({token: asset_, conditional: true, claimsEnabled: assetClaimsEnabled});
         tokens_[1] = IRewardsDistributor.RewardTokenInit({token: overture_, conditional: false, claimsEnabled: true});
+    }
+
+    /**
+     * @notice The address the distributor PROXY will land on when this contract's next four
+     *         CREATEs are the Overture implementation, the Overture proxy, the distributor
+     *         implementation and the distributor proxy, in that order.
+     * @dev The same prediction `scripts/deploy-lp-staking.js` makes from the deployer's nonce, so
+     *      the Overture token is BORN with the distributor as its minter. Call it immediately
+     *      before {_deployOvertureProxy}; a CREATE in between moves every address by one.
+     */
+    function _predictDistributorProxy() internal view returns (address) {
+        return vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
     }
 
     /// @notice Deploys the Overture token the way production does: implementation, then a proxy.

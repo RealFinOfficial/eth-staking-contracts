@@ -161,7 +161,8 @@ contract RewardClaimGoldenVectorTest is BaseForge {
         IRewardsDistributor.RewardTokenInit[] memory tokens = new IRewardsDistributor.RewardTokenInit[](1);
         tokens[0] = IRewardsDistributor.RewardTokenInit({token: TOKEN_AT, conditional: false, claimsEnabled: true});
         bytes memory init = abi.encodeCall(
-            RewardsDistributor.initialize, (address(this), address(this), address(this), GOLDEN_SIGNER, tokens)
+            RewardsDistributor.initialize,
+            (address(this), address(this), address(this), GOLDEN_SIGNER, makeAddr("asset"), tokens)
         );
         deployCodeTo("LPProxy.sol:LPProxy", abi.encode(address(impl), init), DISTRIBUTOR_AT);
         d = RewardsDistributor(DISTRIBUTOR_AT);

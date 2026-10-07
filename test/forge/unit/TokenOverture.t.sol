@@ -4,6 +4,7 @@ pragma solidity 0.8.28;
 import {BaseForge} from "../utils/BaseForge.sol";
 import {TokenOverture} from "../../../contracts/lp-staking/TokenOverture.sol";
 import {TokenOvertureV2Mock} from "../../../contracts/lp-staking/mocks/TokenOvertureV2Mock.sol";
+import {IMintableRewardToken} from "../../../contracts/lp-staking/interfaces/IMintableRewardToken.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
@@ -14,8 +15,9 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
 /**
- * @notice Why this file exists: the Overture token ($OVTR) is a reward token the operator mints
- *         INTO `RewardsDistributor`, and it now runs behind a UUPS proxy owned by the timelock.
+ * @notice Why this file exists: the Overture token ($OVTR) is a reward token minted by exactly one
+ *         address — at launch the `RewardsDistributor` PROXY, which the operator drives with
+ *         `mintRewardToken` — and it runs behind a UUPS proxy owned by the timelock.
  *         Three claims follow from that and each is measured here, always THROUGH THE PROXY —
  *         the bare implementation is a contract nobody uses:
  *
@@ -28,14 +30,16 @@ import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.s
  *       nonces — lives in the proxy's storage and survives an upgrade, and the permit domain
  *       names the PROXY as its verifying contract.
  *
- *  Roles are split here the way production splits them: {timelock} owns the token,
- *  {operatorSafe} is the minter, and {stranger} holds neither.
+ *  Roles are split here the way production splits them: {timelock} owns the token, {minter}
+ *  holds the mint right (it stands in for the distributor proxy; the distributor's own side
+ *  is measured in `DistributorBranches.t.sol` and `AccessControl.t.sol`), and {stranger} holds
+ *  neither.
  */
 contract TokenOvertureTest is BaseForge {
     TokenOverture internal overture;
 
     address internal timelock;
-    address internal operatorSafe;
+    address internal minter;
     address internal stranger;
     address internal alice;
     uint256 internal alicePk;
@@ -55,12 +59,12 @@ contract TokenOvertureTest is BaseForge {
 
     function setUp() public {
         timelock = makeAddr("timelock");
-        operatorSafe = makeAddr("operatorSafe");
+        minter = makeAddr("minter");
         stranger = makeAddr("stranger");
         (alice, alicePk) = makeAddrAndKey("alice");
         bob = makeAddr("bob");
 
-        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, timelock, operatorSafe);
+        overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, timelock, minter);
     }
 
     // ──────────────────────── Initialization ───────────────────
@@ -71,7 +75,7 @@ contract TokenOvertureTest is BaseForge {
         assertEq(overture.decimals(), 18, "the Overture token has 18 decimals");
         assertEq(overture.owner(), timelock, "the owner is the timelock");
         assertEq(overture.pendingOwner(), address(0), "nothing is pending at birth");
-        assertEq(overture.minter(), operatorSafe, "the minter is the operator multisig");
+        assertEq(overture.minter(), minter, "the minter is the address initialize named");
         assertEq(overture.totalSupply(), 0, "the token is born with no supply");
     }
 
@@ -80,10 +84,8 @@ contract TokenOvertureTest is BaseForge {
         TokenOverture impl = new TokenOverture();
 
         vm.expectEmit(false, false, false, true);
-        emit MinterChanged(address(0), operatorSafe);
-        new LPProxy(
-            address(impl), abi.encodeCall(TokenOverture.initialize, ("Overture", "OVTR", timelock, operatorSafe))
-        );
+        emit MinterChanged(address(0), minter);
+        new LPProxy(address(impl), abi.encodeCall(TokenOverture.initialize, ("Overture", "OVTR", timelock, minter)));
     }
 
     /// @dev A zero minter is a legal birth state — minting simply starts switched off.
@@ -91,8 +93,8 @@ contract TokenOvertureTest is BaseForge {
         TokenOverture off = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, timelock, address(0));
         assertEq(off.minter(), address(0), "the minter slot holds zero");
 
-        vm.prank(operatorSafe);
-        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, operatorSafe));
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, minter));
         off.mint(alice, 1);
     }
 
@@ -100,9 +102,7 @@ contract TokenOvertureTest is BaseForge {
         TokenOverture impl = new TokenOverture();
 
         vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableInvalidOwner.selector, address(0)));
-        new LPProxy(
-            address(impl), abi.encodeCall(TokenOverture.initialize, ("Overture", "OVTR", address(0), operatorSafe))
-        );
+        new LPProxy(address(impl), abi.encodeCall(TokenOverture.initialize, ("Overture", "OVTR", address(0), minter)));
     }
 
     /// @dev A proxy is initialised exactly once; a second call cannot re-seat owner or minter.
@@ -117,7 +117,7 @@ contract TokenOvertureTest is BaseForge {
         TokenOverture impl = new TokenOverture();
 
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize("Overture", "OVTR", timelock, operatorSafe);
+        impl.initialize("Overture", "OVTR", timelock, minter);
     }
 
     // ──────────────────────── Minting ──────────────────────────
@@ -125,7 +125,7 @@ contract TokenOvertureTest is BaseForge {
     function test_Mint_ByTheMinterCreditsTheRecipient() public {
         vm.expectEmit(true, true, false, true, address(overture));
         emit Transfer(address(0), alice, 1_000e18);
-        vm.prank(operatorSafe);
+        vm.prank(minter);
         overture.mint(alice, 1_000e18);
 
         assertEq(overture.balanceOf(alice), 1_000e18, "the recipient holds what was minted");
@@ -142,13 +142,13 @@ contract TokenOvertureTest is BaseForge {
     }
 
     function test_Mint_RejectsAZeroAmount() public {
-        vm.prank(operatorSafe);
+        vm.prank(minter);
         vm.expectRevert(TokenOverture.ZeroAmount.selector);
         overture.mint(alice, 0);
     }
 
     function test_Mint_RejectsTheZeroAddressAsRecipient() public {
-        vm.prank(operatorSafe);
+        vm.prank(minter);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
         overture.mint(address(0), 1);
     }
@@ -159,7 +159,7 @@ contract TokenOvertureTest is BaseForge {
      *      first one with a zero cap armed.
      */
     function test_Mint_HasNoCapOfAnyKind() public {
-        vm.startPrank(operatorSafe);
+        vm.startPrank(minter);
         overture.mint(alice, 1e30);
         overture.mint(alice, 1e30);
         vm.warp(block.timestamp + 3650 days);
@@ -188,18 +188,38 @@ contract TokenOvertureTest is BaseForge {
         }
     }
 
+    /**
+     * @dev The token carries the `IMintableRewardToken` shape every reward token this program
+     *      deploys must carry. The implicit conversion below compiles only because the token
+     *      inherits the interface; the selector is the pinned `mint(address,uint256)`; and the
+     *      call through the interface type mints for the minter alone.
+     */
+    function test_Mint_CarriesTheIMintableRewardTokenShape() public {
+        IMintableRewardToken shaped = overture;
+        assertEq(IMintableRewardToken.mint.selector, bytes4(0x40c10f19), "the pinned selector");
+        assertEq(TokenOverture.mint.selector, IMintableRewardToken.mint.selector, "the token's mint is that shape");
+
+        vm.prank(minter);
+        shaped.mint(alice, 5e18);
+        assertEq(overture.balanceOf(alice), 5e18, "it mints through the interface type");
+
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, stranger));
+        shaped.mint(alice, 1);
+    }
+
     // ──────────────────────── Minter role ──────────────────────
 
     function test_SetMinter_ByTheOwnerMovesTheRoleAndAnnouncesBothSides() public {
         vm.expectEmit(false, false, false, true, address(overture));
-        emit MinterChanged(operatorSafe, bob);
+        emit MinterChanged(minter, bob);
         vm.prank(timelock);
         overture.setMinter(bob);
 
         assertEq(overture.minter(), bob, "the role moved");
 
-        vm.prank(operatorSafe);
-        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, operatorSafe));
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, minter));
         overture.mint(alice, 1);
 
         vm.prank(bob);
@@ -208,7 +228,7 @@ contract TokenOvertureTest is BaseForge {
     }
 
     function test_SetMinter_RejectsEveryoneButTheOwner() public {
-        address[3] memory callers = [operatorSafe, stranger, alice];
+        address[3] memory callers = [minter, stranger, alice];
         for (uint256 i = 0; i < callers.length; ++i) {
             vm.prank(callers[i]);
             vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, callers[i]));
@@ -221,8 +241,8 @@ contract TokenOvertureTest is BaseForge {
         vm.prank(timelock);
         overture.setMinter(address(0));
 
-        vm.prank(operatorSafe);
-        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, operatorSafe));
+        vm.prank(minter);
+        vm.expectRevert(abi.encodeWithSelector(TokenOverture.NotMinter.selector, minter));
         overture.mint(alice, 1);
     }
 
@@ -394,10 +414,10 @@ contract TokenOvertureTest is BaseForge {
         assertEq(overture.name(), "Overture", "the name survives");
         assertEq(overture.symbol(), "OVTR", "the symbol survives");
         assertEq(overture.owner(), timelock, "the owner survives");
-        assertEq(overture.minter(), operatorSafe, "the minter survives");
+        assertEq(overture.minter(), minter, "the minter survives");
 
         // The minter still mints under V2.
-        vm.prank(operatorSafe);
+        vm.prank(minter);
         overture.mint(bob, 1);
         assertEq(overture.balanceOf(bob), 1, "minting works after the upgrade");
 
@@ -408,7 +428,7 @@ contract TokenOvertureTest is BaseForge {
 
     function test_Upgrade_RejectsEveryoneButTheOwner() public {
         TokenOvertureV2Mock v2 = new TokenOvertureV2Mock();
-        address[2] memory callers = [operatorSafe, stranger];
+        address[2] memory callers = [minter, stranger];
         for (uint256 i = 0; i < callers.length; ++i) {
             vm.prank(callers[i]);
             vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, callers[i]));
@@ -429,9 +449,7 @@ contract TokenOvertureTest is BaseForge {
         assertEq(expected, TOKEN_OVERTURE_STORAGE, "the pinned literal is the ERC-7201 slot");
 
         assertEq(
-            address(uint160(uint256(vm.load(address(overture), expected)))),
-            operatorSafe,
-            "namespace slot 0 holds `minter`"
+            address(uint160(uint256(vm.load(address(overture), expected)))), minter, "namespace slot 0 holds `minter`"
         );
 
         vm.prank(timelock);
@@ -442,7 +460,7 @@ contract TokenOvertureTest is BaseForge {
     // ──────────────────────── Helpers ──────────────────────────
 
     function _mint(address to, uint256 amount) internal {
-        vm.prank(operatorSafe);
+        vm.prank(minter);
         overture.mint(to, amount);
     }
 

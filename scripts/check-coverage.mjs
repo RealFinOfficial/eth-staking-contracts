@@ -46,19 +46,29 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
-// ── Pinned floors, re-measured 2026-10-05 (Wednesday launch: tracks M / P / R / U) ──────────
+// ── Pinned floors, re-measured 2026-10-07 (`RewardsDistributor.mintRewardToken`) ──────────────
 //
 // | file                     | lines             | branches        |
 // |--------------------------|-------------------|-----------------|
 // | LPStakingVault.sol       |  97.91% (187/191) | 100.00% (34/34) |
 // | LPZapper.sol             |  96.08% (98/102)  | 100.00% (20/20) |
-// | RewardsDistributor.sol   |  97.54% (119/122) | 100.00% (18/18) |
+// | RewardsDistributor.sol   |  97.83% (135/138) | 100.00% (22/22) |
 // | LPEpochRegistry.sol      |  96.46% (109/113) | 100.00% (21/21) |
 // | TokenOverture.sol        |  84.62% (22/26)   | 100.00% (2/2)   |
 // | libraries/TwapGuard.sol  |  97.67% (42/43)   | 100.00% (7/7)   |
 //
 // Branch coverage is 100% on all six, so every branch floor is the ceiling: one newly uncovered
-// branch fails the gate. Measured on 546 Foundry tests in 28 suites.
+// branch fails the gate. Measured on 567 Foundry tests in 28 suites.
+//
+// The 2026-10-07 round moved one denominator: RewardsDistributor (lines 122 -> 138, branches
+// 18 -> 22) gained the operator-only `mintRewardToken(token, to, amount)` — the $ASSET guard by
+// address, the registration check, the zero-recipient and zero-amount checks, the call into the
+// token's `mint` and the `RewardTokenMinted` event — plus the appended `asset` field: its write in
+// `initialize`, the owner-only `initializeV2` migration, the shared `_setAsset` (zero check,
+// store, `AssetSet`) and the `asset()` view. All sixteen new lines and all four new branches are
+// covered. TokenOverture
+// only inherits `IMintableRewardToken` and keeps 26 lines and 2 branches; the import and the
+// NatSpec lines added above its code moved its four uncovered line NUMBERS below, not its counts.
 //
 // The 2026-10-05 round moved every denominator except TwapGuard's:
 //
@@ -83,17 +93,17 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // asserted by a test that passes in the same run; the inlined site simply loses its mapping:
 //
 //   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:207`,
-//     `LPZapper.sol:147`, `RewardsDistributor.sol:147`, `LPEpochRegistry.sol:93`,
-//     `TokenOverture.sol:82`, `libraries/TwapGuard.sol:126`; every getter reaches them and each
+//     `LPZapper.sol:147`, `RewardsDistributor.sol:168`, `LPEpochRegistry.sol:93`,
+//     `TokenOverture.sol:90`, `libraries/TwapGuard.sol:126`; every getter reaches them and each
 //     file's `test_Storage_*` test reads the pinned slot directly.
 //   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:396`,
-//     `LPZapper.sol:257`, `RewardsDistributor.sol:194`, `LPEpochRegistry.sol:112`,
-//     `TokenOverture.sol:90`; each `test_Constructor_DisablesTheImplementationsInitializers`
+//     `LPZapper.sol:257`, `RewardsDistributor.sol:215`, `LPEpochRegistry.sol:112`,
+//     `TokenOverture.sol:98`; each `test_Constructor_DisablesTheImplementationsInitializers`
 //     proves it ran.
 //   * the empty OpenZeppelin initializers — `__Ownable2Step_init();` at
-//     `LPStakingVault.sol:427`, `LPZapper.sol:276`, `RewardsDistributor.sol:217`,
-//     `LPEpochRegistry.sol:120`, `TokenOverture.sol:108`, and `__ERC20Burnable_init();` at
-//     `TokenOverture.sol:105` — kept because the upgrades plugin validates the parent-initializer
+//     `LPStakingVault.sol:427`, `LPZapper.sol:276`, `RewardsDistributor.sol:243`,
+//     `LPEpochRegistry.sol:120`, `TokenOverture.sol:117`, and `__ERC20Burnable_init();` at
+//     `TokenOverture.sol:114` — kept because the upgrades plugin validates the parent-initializer
 //     chain.
 //   * `_checkTwapDeviation();` — `LPStakingVault.sol:1003`, `LPZapper.sol:545`.
 //   * `break;` in the token scan of `setEpochAmount` — `LPEpochRegistry.sol:186`; executed by
@@ -112,8 +122,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 20, minHit: 20},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 122, minHit: 119},
-    branches: {found: 18, minHit: 18},
+    lines: {found: 138, minHit: 135},
+    branches: {found: 22, minHit: 22},
   },
   "contracts/lp-staking/LPEpochRegistry.sol": {
     lines: {found: 113, minHit: 109},
