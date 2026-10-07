@@ -1,0 +1,66 @@
+# Foundry lives BESIDE Hardhat in this repo, not instead of it.
+#
+# The Hardhat suites (unit + mainnet fork + local-fork integration) are unchanged and stay
+# the reference for the 45-step scenario. Foundry adds the adversarial / branch-coverage
+# tier under `test/forge/`, where `forge coverage` gives real per-branch numbers and
+# `vm.createSelectFork` reaches live Uniswap without spawning a node.
+#
+# Two settings keep the toolchains from colliding:
+#   * `cache_path` — Hardhat and Foundry BOTH default to `cache/solidity-files-cache.json`.
+#     Sharing it makes each tool invalidate the other's cache on every run, so forge gets
+#     `cache_forge/` of its own and `cache/` stays Hardhat's alone.
+#   * `test = "test/forge"` — mocha loads only `.js`, so the `.t.sol` files are invisible to
+#     `npx hardhat test`, and `npx hardhat compile` only ever reads `contracts/`.
+#
+# solc / evm_version / optimizer mirror hardhat.config.js exactly. A divergence would mean
+# the two suites are testing different bytecode.
+
+[profile.default]
+solc = "0.8.28"
+evm_version = "cancun"
+src = "contracts"
+test = "test/forge"
+out = "out"
+cache_path = "cache_forge"
+libs = ["node_modules", "lib"]
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+
+# Invariant knobs, pinned because forge's own defaults for a profile with no `[invariant]`
+# block are 256 runs x depth 500 — 128,000 handler calls per invariant, which made one
+# campaign take ~86 s and a bare `npm run test:forge` a multi-minute wait. `fuzz` keeps
+# forge's default; the ci profile below is the intensity knob for both.
+invariant = { runs = 64, depth = 25 }
+
+# The intensity knob, exactly as the reference repo uses it: the directory split
+# (fork / unit) is the taxonomy, the profile is how hard the fuzzer and the invariant
+# runner push. Everything not restated here is inherited from [profile.default].
+# CI runs `FOUNDRY_PROFILE=ci`.
+[profile.ci]
+fuzz = { runs = 1024 }
+invariant = { runs = 512, depth = 50 }
+
+# `block.timestamp` is this stack's time base: every voucher deadline, TWAP window and epoch
+# activation compares against it on purpose. The lint fires only on `contracts/`, which is
+# frozen for this tier, so it is excluded once here rather than annotated line by line.
+[lint]
+exclude_lints = ["block-timestamp"]
+
+# `forge fmt` owns test/forge/ ONLY. `contracts/` predates Foundry, is formatted by the
+# Hardhat side of the repo, and is frozen for this tier — reformatting it would produce a
+# large diff in production sources for no reason and would fight the other toolchain.
+[fmt]
+ignore = ["contracts/**/*.sol", "lib/**/*.sol"]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+
+# Resolved by scripts/run-forge.mjs before forge starts: it loads `.env` (which forge does
+# not read by itself), applies the runbook's MAINNET_RPC_URL -> INFURA_API_KEY -> public
+# fallback order, and exports the winner. An unset variable here is a hard failure inside
+# the fork tests rather than a silent skip — see test/forge/utils/BaseForge.sol.
+[rpc_endpoints]
+sepolia = "${SEPOLIA_RPC_URL}"
+mainnet = "${MAINNET_RPC_URL}"
