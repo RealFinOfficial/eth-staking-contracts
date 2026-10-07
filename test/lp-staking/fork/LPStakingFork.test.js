@@ -44,6 +44,7 @@ const { expect } = require("chai");
 const { ethers, network } = require("hardhat");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { takeSnapshot } = require("@nomicfoundation/hardhat-network-helpers");
+const redact = require("../helpers/redact");
 
 // ─────────────────────────── Mainnet constants ───────────────────────────
 
@@ -591,7 +592,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
         forked = true;
         break;
       } catch (error) {
-        failures.push(`${url}: ${error.shortMessage || error.message}`);
+        failures.push(`${redact.redactRpc(url)}: ${redact.redactRpcText(error.shortMessage || error.message)}`);
       }
     }
 
@@ -835,7 +836,7 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
       expect(preview.withinBounds).to.equal(true);
 
       notes.push(
-        `rpc=${rpcUsed} block=${PINNED_BLOCK} chainId=${chainId} whale=${whaleAddr}`,
+        `rpc=${redact.redactRpc(rpcUsed)} block=${PINNED_BLOCK} chainId=${chainId} whale=${whaleAddr}`,
         `pinned fees: baseFee=${pinnedFees.baseFee} maxFee=${pinnedFees.maxFeePerGas} ` +
           `priority=${pinnedFees.maxPriorityFeePerGas}`,
         `spot tick after warm-up=${preview.currentTick} twap=${preview.twapTick} pool liquidity=${await pool.liquidity()}`
