@@ -85,6 +85,12 @@ const pools = require("./lib/pools");
 //                            two. `missing-initializer` is the one a real V2 needs: a second
 //                            version declares a `reinitializer(2)` and no `initializer` of
 //                            its own, which the plugin flags by default
+//   IMPL_UPGRADE_DATA        the `data` argument of the printed `upgradeToAndCall` commands —
+//                            the reinitializer call that must run INSIDE the upgrade, as hex
+//                            calldata. Default `0x` (none). The RewardsDistributor v1 -> v2
+//                            upgrade of 2026-10-07 needs `initializeV2(<$ASSET>)` here: without
+//                            it the proxy runs the new code with no `asset` recorded (see
+//                            scripts/README.md, "Activating mintRewardToken on a live stack")
 //   RECORD=1                 write `pendingImplementation` / `pendingImplementationBlock`
 //                            into the proxy's entry in deployments.json
 //   CONFIRM=yes              required on mainnet, like every other state-changing script here
@@ -328,6 +334,8 @@ async function stripImplTxHash(implementation) {
  * @param {string} [options.proxyAddress]       overrides the registry lookup
  * @param {string} [options.contractName]       artifact to deploy; defaults to `kind`
  * @param {string[]} [options.unsafeAllowExtra] extra plugin flags on top of the spec's two
+ * @param {string} [options.upgradeData]        `data` of the printed `upgradeToAndCall`
+ *                                              commands (hex calldata); `0x` by default
  * @param {object} [options.deployer]           signer; defaults to `pools.getSigner()`
  * @param {boolean} [options.quiet]             suppress the console output
  */
@@ -337,11 +345,16 @@ async function deployImplementation(options) {
     proxyAddress: proxyOverride,
     contractName = kind,
     unsafeAllowExtra = [],
+    upgradeData = "0x",
     deployer: deployerOverride,
     quiet = false,
   } = options;
 
   const log = quiet ? () => {} : (line = "") => console.log(line);
+
+  if (!hre.ethers.isHexString(upgradeData) || upgradeData.includes(",")) {
+    throw new Error(`IMPL_UPGRADE_DATA must be hex calldata (0x for none) — got ${upgradeData}`);
+  }
 
   if (!IMPL_KINDS.includes(kind)) {
     throw new Error(`IMPL_TARGET must be one of ${IMPL_KINDS.join(", ")} — got ${kind}`);
@@ -509,11 +522,11 @@ async function deployImplementation(options) {
 
   const scheduleCommand =
     `TIMELOCK_ACTION=schedule TIMELOCK_TARGET=${kind} TIMELOCK_FN=upgradeToAndCall \\\n` +
-    `  TIMELOCK_ARGS=${implementation},0x \\\n` +
+    `  TIMELOCK_ARGS=${implementation},${upgradeData} \\\n` +
     `  npx hardhat run scripts/lp-timelock.js --network ${network}`;
   const executeCommand =
     `TIMELOCK_ACTION=execute TIMELOCK_TARGET=${kind} TIMELOCK_FN=upgradeToAndCall \\\n` +
-    `  TIMELOCK_ARGS=${implementation},0x \\\n` +
+    `  TIMELOCK_ARGS=${implementation},${upgradeData} \\\n` +
     `  npx hardhat run scripts/lp-timelock.js --network ${network}`;
 
   log("");
@@ -535,8 +548,12 @@ async function deployImplementation(options) {
     log(executeCommand);
     log("");
     log(
-      "`data` is 0x: this upgrade runs no reinitializer. If a future revision needs one, the\n" +
-        "second argument is its encoded call and BOTH commands must carry the same value — the\n" +
+      (upgradeData === "0x"
+        ? "`data` is 0x: this upgrade runs no reinitializer. If a revision needs one, pass its\n" +
+          "encoded call as IMPL_UPGRADE_DATA (the RewardsDistributor v1 -> v2 upgrade needs\n" +
+          "initializeV2(<$ASSET>)). "
+        : `\`data\` is ${upgradeData}: the reinitializer call that runs INSIDE the upgrade. `) +
+        "BOTH commands must carry the same value — the\n" +
         "operation id is a hash of the whole call, so an execute with different arguments is a\n" +
         "different operation that was never scheduled. If this exact upgrade was scheduled and\n" +
         "executed once before, add TIMELOCK_SALT_TAG=<something new> to both commands."
@@ -575,6 +592,7 @@ async function main() {
     proxyAddress: process.env.IMPL_PROXY_ADDRESS,
     contractName: process.env.IMPL_CONTRACT,
     unsafeAllowExtra,
+    upgradeData: process.env.IMPL_UPGRADE_DATA || "0x",
   });
 
   if (sameValue(result.implementation, result.currentImplementation)) {

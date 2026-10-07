@@ -14,27 +14,39 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 // the timelock as the owner inside the proxy's own deployment transaction, and no key ever
 // holds the owner tier, not even for one block. Nothing is left to hand over afterwards — no
 // `setMinter`, no `transferOwnership`, no `acceptOwnership`: the Overture token is born with
-// the operator as its minter, the distributor is born with both launch reward tokens, the
-// registry is born bound to the distributor, and the vault is born pointing at the zapper.
+// the RewardsDistributor PROXY as its minter, the distributor is born with both launch reward
+// tokens, the registry is born bound to the distributor, and the vault is born pointing at the
+// zapper.
 //
-// That last one works because the zapper's address is known before the zapper exists. A
-// CREATE address is a pure function of (deployer, nonce), and every transaction in this
-// script carries an explicit nonce (see `deployContract`). The vault implementation takes
-// nonce N, the vault proxy N + 1, the zapper implementation N + 2 and the zapper PROXY N + 3;
-// the script computes N + 3 with `getCreateAddress`, passes it to the vault's `initialize`,
-// deploys the zapper, and asserts its proxy landed there. If it did not, the run throws and
-// names the one repair: `setZapper` through the timelock.
+// The first and the last of those work because two addresses are known before their contracts
+// exist. A CREATE address is a pure function of (deployer, nonce), and every transaction in this
+// script carries an explicit nonce (see `deployContract`), so the script PREDICTS them:
+//
+//   - the distributor proxy. The Overture token implementation takes nonce M, the token proxy
+//     M + 1, the distributor implementation M + 2 and the distributor PROXY M + 3. The script
+//     computes M + 3 with `getCreateAddress`, passes it to the token's `initialize` as the
+//     minter (decision 2026-10-07: the operator mints only through
+//     `RewardsDistributor.mintRewardToken`), deploys the distributor, and asserts its proxy
+//     landed there. If it did not, the run STOPS right there, before the registry: a token whose
+//     minter is not the distributor cannot be minted through `mintRewardToken`.
+//   - the zapper proxy. The vault implementation takes nonce N, the vault proxy N + 1, the
+//     zapper implementation N + 2 and the zapper PROXY N + 3; the script passes N + 3 to the
+//     vault's `initialize`, deploys the zapper, and asserts its proxy landed there. If it did
+//     not, the run throws and names the one repair: `setZapper` through the timelock.
 //
 // The order, in full:
 //
 //   1. config, local validation and the on-chain checks (pool triple, decimals, factory)
 //   2. `LPTimelock(minDelay, [multisig], [multisig], address(0))` — depends on nothing,
 //      and everything below names it, so it goes first
-//   3. TokenOverture implementation + LPProxy,
-//      `initialize(name, symbol, owner = timelock, minter = operator)`
+//   3. predict the distributor PROXY's address from the deployer's nonce + 3, then
+//      TokenOverture implementation + LPProxy,
+//      `initialize(name, symbol, owner = timelock, minter = the predicted distributor proxy)`
 //   4. RewardsDistributor implementation + LPProxy,
-//      `initialize(owner = timelock, guardian, operator, signer,
+//      `initialize(owner = timelock, guardian, operator, signer, asset = LP_ASSET,
 //                  [{ASSET, conditional, claims LP_ASSET_CLAIMS_ENABLED}, {OVTR, unconditional, claims open}])`
+//      — `asset` marks the registered token `mintRewardToken` refuses by address;
+//      record it, then assert the proxy address matches the prediction (fatal on a miss)
 //   5. LPEpochRegistry implementation (bound to the distributor) + LPProxy,
 //      `initialize(owner = timelock, operator)`
 //   6. predict the zapper PROXY's address from the deployer's nonce + 3
@@ -63,10 +75,11 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //            deploy time, and it must NOT be the operator.
 // operator = LP_OPERATOR, a multisig. Immediate levers on every proxy: the vault's and the
 //            zapper's `setTwapParams` and `rescuePosition`, the zapper's `sweep`, the
-//            distributor's `setSigner` and `recoverExcess`, the registry's epoch scheduling,
-//            the pause switches as the cold fallback, `setGuardian` on the vault and the
-//            distributor. It is also the Overture token's MINTER, and the party that funds the
-//            distributor (mints $OVTR into it, transfers $ASSET into it). Required.
+//            distributor's `setSigner`, `recoverExcess` and `mintRewardToken`, the registry's
+//            epoch scheduling, the pause switches as the cold fallback, `setGuardian` on the
+//            vault and the distributor. It is the party that funds the distributor (mints $OVTR
+//            into it through `mintRewardToken` — the distributor proxy is the Overture token's
+//            minter, the operator is not — and transfers $ASSET into it). Required.
 //
 // Required env
 //   LP_ASSET       — ASSET token (18 decimals), one side of the pool and a reward token
@@ -77,7 +90,7 @@ const { TIMELOCK_KIND } = require("./lp-timelock");
 //                    every claim, which a Ledger cannot serve
 //   LP_MULTISIG    — the timelock's sole proposer, executor and canceller
 //   LP_GUARDIAN    — pause tier (see above). A hot key; the run throws if it equals LP_OPERATOR
-//   LP_OPERATOR    — operator tier on all five proxies and the Overture token's minter
+//   LP_OPERATOR    — operator tier on all five proxies; mints $OVTR through the distributor
 //
 // Optional env (defaults in parentheses)
 //   LP_OVERTURE_NAME          — the Overture token's ERC-20 name, also its permit domain name
@@ -229,10 +242,11 @@ async function main() {
   // a key held for speed and a key held for value must not be the same key.
   const guardian = readAddress("LP_GUARDIAN");
   // Routine-operations tier on all five proxies: TWAP calibration and NFT rescue (vault and
-  // zapper), the zapper's sweep, the distributor's signer rotation and recovery, the
-  // registry's epoch scheduling, all three pause switches as the cold fallback for a lost
-  // guardian key, and `setGuardian` on the vault and the distributor. It is also the Overture
-  // token's minter and the address rescued NFTs and recovered tokens are sent to. Required.
+  // zapper), the zapper's sweep, the distributor's signer rotation, recovery and
+  // `mintRewardToken`, the registry's epoch scheduling, all three pause switches as the cold
+  // fallback for a lost guardian key, and `setGuardian` on the vault and the distributor. It is
+  // the address rescued NFTs and recovered tokens are sent to. It is NOT the Overture token's
+  // minter: the distributor proxy is, and the operator mints through it. Required.
   const operator = readAddress("LP_OPERATOR");
 
   // The timelock's own parameter. 48 h on mainnet; staging and the fork suites shorten it so
@@ -340,7 +354,7 @@ async function main() {
     `Timelock minDelay:  ${timelockMinDelay}s` +
       (timelockMinDelay === DEFAULT_TIMELOCK_MIN_DELAY ? " (48 h, the mainnet default)" : "")
   );
-  console.log(`Overture token:     ${overtureName} (${overtureSymbol}), minter = the operator`);
+  console.log(`Overture token:     ${overtureName} (${overtureSymbol}), minter = the RewardsDistributor proxy`);
   console.log(
     `Reward tokens:      ASSET (conditional, claims ${assetClaimsEnabled ? "OPEN" : "closed"}), ` +
       `${overtureSymbol} (unconditional, claims open)`
@@ -484,13 +498,30 @@ async function main() {
     admin: hre.ethers.ZeroAddress,
   });
 
+  // The Overture token is born with the DISTRIBUTOR PROXY as its minter (decision 2026-10-07),
+  // and the distributor does not exist yet. `setMinter` is owner-tier — the timelock, 48 h on
+  // mainnet — so the proxy's address is PREDICTED instead, exactly like the zapper's below: the
+  // next four transactions are the token implementation (nonce M), the token proxy (M + 1), the
+  // distributor implementation (M + 2) and the distributor PROXY (M + 3). `resolveNonce` is the
+  // same reader `deployContract` uses for each of those four, and nothing else sends from the
+  // deployer in between (`validateImplementation` and `forceImport` send no transaction).
+  const overtureImplNonce = await pools.resolveNonce(deployer.address);
+  const predictedDistributor = hre.ethers.getCreateAddress({
+    from: deployer.address,
+    nonce: overtureImplNonce + 3,
+  });
+  console.log(
+    `\nPredicted RewardsDistributor proxy address: ${predictedDistributor} (deployer nonce ${overtureImplNonce + 3})`
+  );
+
   // The Overture token: a UUPS proxy born owned by the timelock (upgrades, `setMinter`), with
-  // the operator as its minter. No cap of any kind: the operator mints $OVTR INTO the
-  // distributor, which pays claims out of that balance by transfer.
+  // the predicted distributor proxy as its minter. No cap of any kind: the operator mints $OVTR
+  // INTO the distributor through `RewardsDistributor.mintRewardToken`, and the distributor pays
+  // claims out of that balance by transfer.
   const overtureDeploy = await deployProxyPair(
     "TokenOverture",
     [],
-    [overtureName, overtureSymbol, timelockDeploy.address, operator],
+    [overtureName, overtureSymbol, timelockDeploy.address, predictedDistributor],
     deployer
   );
   pools.recordDeployment(chainId, "TokenOverture", overtureDeploy.address, {
@@ -502,12 +533,13 @@ async function main() {
     symbol: overtureSymbol,
     decimals: OVERTURE_DECIMALS,
     owner: timelockDeploy.address,
-    minter: operator,
+    minter: predictedDistributor,
   });
 
-  // The distributor, born with both launch reward tokens. Every reward token is PRE-FUNDED and
-  // paid by transfer; a claim whose token balance is short reverts with InsufficientFunds until
-  // the operator funds it. There is no cap anywhere.
+  // The distributor, born with both launch reward tokens and with $ASSET recorded as the token
+  // `mintRewardToken` refuses by address (a token this program does not control). Every reward
+  // token is PRE-FUNDED and paid by transfer; a claim whose token balance is short reverts with
+  // InsufficientFunds until the operator funds it. There is no cap anywhere.
   const launchRewardTokens = [
     { token: asset, conditional: true, claimsEnabled: assetClaimsEnabled },
     { token: overtureDeploy.address, conditional: false, claimsEnabled: true },
@@ -520,6 +552,7 @@ async function main() {
       guardian,
       operator,
       signer,
+      asset,
       launchRewardTokens.map((t) => [t.token, t.conditional, t.claimsEnabled]),
     ],
     deployer
@@ -533,6 +566,7 @@ async function main() {
     owner: timelockDeploy.address,
     guardian,
     operator,
+    asset,
     rewardTokens: [
       {
         address: asset,
@@ -550,6 +584,21 @@ async function main() {
       },
     ],
   });
+
+  // Recorded BEFORE the prediction is checked, like the zapper: both proxies are on chain, and
+  // their addresses must not be lost with the error.
+  if (distributorDeploy.address.toLowerCase() !== predictedDistributor.toLowerCase()) {
+    throw new Error(
+      `RewardsDistributor's proxy landed at ${distributorDeploy.address}, but the Overture token ` +
+        `${overtureDeploy.address} was born with minter ${predictedDistributor}. The run stops here: the ` +
+        `timelock, the token and the distributor are deployed and recorded; the registry, the vault ` +
+        `and the zapper are NOT. Nobody can mint $OVTR through mintRewardToken until the timelock ` +
+        `executes TokenOverture.setMinter(${distributorDeploy.address}) ` +
+        `(TIMELOCK_TARGET=TokenOverture TIMELOCK_FN=setMinter). The clean repair is a fresh run of this ` +
+        `script with nothing else sending from the deployer key ${deployer.address} meanwhile.`
+    );
+  }
+  console.log(`  RewardsDistributor's proxy landed on the predicted address; the Overture token was born minting through it`);
 
   // The emission schedule. Its implementation is bound to the distributor (immutable); the
   // proxy is born owned by the timelock with the operator as the scheduler. No epoch exists
@@ -710,7 +759,9 @@ async function main() {
   check("TokenOverture.name", await overture.name(), overtureName);
   check("TokenOverture.symbol", await overture.symbol(), overtureSymbol);
   check("TokenOverture.decimals", await overture.decimals(), OVERTURE_DECIMALS);
-  check("TokenOverture.minter", await overture.minter(), operator);
+  // The minter is the distributor PROXY, never the operator: the operator mints $OVTR only
+  // through `RewardsDistributor.mintRewardToken`.
+  check("TokenOverture.minter", await overture.minter(), distributorDeploy.address);
   check("TokenOverture.owner", await overture.owner(), expectedProxyOwner);
   check("TokenOverture.pendingOwner", await overture.pendingOwner(), expectedPendingOwner);
   check("TokenOverture.totalSupply", await overture.totalSupply(), 0);
@@ -726,6 +777,8 @@ async function main() {
   check("RewardsDistributor.guardian", await distributor.guardian(), guardian);
   check("RewardsDistributor.operator", await distributor.operator(), operator);
   check("RewardsDistributor.paused", await distributor.paused(), false);
+  // The one registered token `mintRewardToken` refuses by address, whoever calls.
+  check("RewardsDistributor.asset", await distributor.asset(), asset);
   check("RewardsDistributor.REWARD_CLAIM_TYPEHASH", await distributor.REWARD_CLAIM_TYPEHASH(), REWARD_CLAIM_TYPEHASH);
   const domain = await distributor.eip712Domain();
   check("RewardsDistributor.eip712Domain.name", domain.name, "RealLPRewards");
@@ -887,7 +940,8 @@ async function main() {
 
   console.log(
     "\n──────── next steps for the operator (nothing below was done by this run) ────────\n" +
-      `1. Fund the distributor (the operator mints ${overtureSymbol} into it and transfers ASSET):\n` +
+      `1. Fund the distributor (the operator mints ${overtureSymbol} into it through RewardsDistributor.mintRewardToken\n` +
+      `   and transfers ASSET into it):\n` +
       `   LP_FUND_OVTR_AMOUNT=… LP_FUND_ASSET_AMOUNT=… npx hardhat run scripts/lp-fund-rewards.js --network ${network}\n` +
       "   Claims of a token revert with InsufficientFunds until its balance covers them.\n" +
       "2. Schedule epoch 1 on the registry, at least 30 minutes before it starts:\n" +

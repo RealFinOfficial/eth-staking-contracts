@@ -401,7 +401,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     // S7 — deploy the whole stack and grow the oracle, by the repo's own script. All five
     //      proxies come out of it owned by the timelock already: `initialize` names the
     //      timelock inside each proxy's own deployment transaction, the Overture token is born
-    //      with the operator as its minter, the distributor with both launch reward tokens,
+    //      with the distributor PROXY as its minter (its address predicted from the deployer's
+    //      nonce), the distributor with $ASSET recorded and both launch reward tokens,
     //      and the vault pointing at the zapper PROXY whose address the script predicted from
     //      the deployer's nonce. Nothing is left to wire or to hand over.
     deployFromBlock = (await head()) + 1;
@@ -474,8 +475,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     // S9 — the operator funds the distributor, through scripts/lp-fund-rewards.js. Claims pay
     //      out of the distributor's own balance by transfer; nothing is minted at claim time.
     //      The script runs with the deployer's key: the deployer holds the tASSET here (the
-    //      treasury), so the script sends that leg itself; it is NOT the Overture token's
-    //      minter, so it prints the mint for the operator's Safe, and the operator sends it.
+    //      treasury), so the script sends that leg itself; it is NOT the distributor's
+    //      operator, so it prints `RewardsDistributor.mintRewardToken(ovtr, distributor,
+    //      amount)` for the operator's Safe (the distributor proxy is the Overture minter), and
+    //      the operator sends it.
     const fundRun = await runScript("scripts/lp-fund-rewards.js", {
       ...baseScriptEnv(),
       LP_ASSET: assetAddr,
@@ -486,13 +489,20 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     ledger.record("S9", "the treasury transfers tASSET into the distributor", await provider.getTransactionReceipt(assetFundingHash), [
       { address: assetAddr, name: "Transfer" },
     ]);
+    expect(fundRun.stdout).to.include("path: RewardsDistributor.mintRewardToken");
     const [mintPayload] = safePayloads(fundRun.stdout);
-    expect(mintPayload.to).to.equal(overtureAddr);
+    expect(mintPayload.to).to.equal(distributorAddr);
+    expect(mintPayload.data).to.equal(
+      distributor.interface.encodeFunctionData("mintRewardToken", [overtureAddr, distributorAddr, C.FUND_OVTR])
+    );
     ledger.record(
       "S9",
-      "the operator mints $OVTR into the distributor",
+      "the operator mints $OVTR into the distributor through mintRewardToken",
       await chain.send(w.operator.sendTransaction({ to: mintPayload.to, data: mintPayload.data })),
-      [{ address: overtureAddr, name: "Transfer" }]
+      [
+        { address: overtureAddr, name: "Transfer" },
+        { address: distributorAddr, name: "RewardTokenMinted" },
+      ]
     );
     expect(await overture.balanceOf(distributorAddr)).to.equal(C.FUND_OVTR);
     expect(await asset.balanceOf(distributorAddr)).to.equal(C.FUND_ASSET);
@@ -604,7 +614,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       LP_GUARDIAN: w.guardian.address,
       // The operator tier is the vault's and the zapper's setTwapParams and rescuePosition, the
       // zapper's sweep, the distributor's setSigner and recoverExcess, the registry's epoch
-      // schedule, and the Overture token's minter (S9/S10, A19/A20, A23-A25, A29, A31,
+      // schedule, and the distributor's `mintRewardToken` (S9/S10, A19/A20, A23-A25, A29, A31,
       // A35-A39 send from `w.operator`).
       LP_OPERATOR: w.operator.address,
       LP_TIMELOCK_MIN_DELAY: String(C.TIMELOCK_MIN_DELAY),
@@ -844,9 +854,13 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
       expect(await registry.operator(), "registry.operator").to.equal(w.operator.address);
       expect(await zapper.operator(), "zapper.operator").to.equal(w.operator.address);
-      // The Overture token's minter is the operator, from birth: no `setMinter` transaction
-      // exists in this run, and the distributor is NOT the minter — it pays by transfer.
-      expect(await overture.minter(), "overture.minter").to.equal(w.operator.address);
+      // The Overture token's minter is the distributor PROXY, from birth: the script predicted
+      // the proxy's address from the deployer's nonce, so no `setMinter` transaction exists in
+      // this run. The operator mints through `mintRewardToken`; a claim still pays by transfer.
+      expect(await overture.minter(), "overture.minter").to.equal(distributorAddr);
+      expect(deployRun.stdout).to.include(`Predicted RewardsDistributor proxy address: ${distributorAddr}`);
+      // $ASSET is recorded as the one registered token mintRewardToken refuses by address.
+      expect(await distributor.asset(), "distributor.asset").to.equal(assetAddr);
 
       // The zapper's PROXY landed on the address the script predicted from the deployer's
       // nonce, and the vault was initialized with it: no `setZapper` transaction exists here.
@@ -970,6 +984,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           "OperatorSet",
           "SignerChanged",
           "Paused",
+          "AssetSet",
           "RewardTokenAdded",
           "RewardTokenAdded",
           "Initialized",
@@ -1033,15 +1048,16 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           ifaces
         );
 
-      // The Overture token: born owned by the timelock, with the operator as its minter.
+      // The Overture token: born owned by the timelock, with the distributor proxy as its minter.
       const overtureLogs = await logsOf(overtureAddr);
       expect(overtureLogs[1].args.previousOwner).to.equal(C.ZERO_ADDRESS);
       expect(overtureLogs[1].args.newOwner).to.equal(timelockAddr);
       expect(overtureLogs[2].args.previousMinter).to.equal(C.ZERO_ADDRESS);
-      expect(overtureLogs[2].args.newMinter).to.equal(w.operator.address);
+      expect(overtureLogs[2].args.newMinter).to.equal(distributorAddr);
 
-      // The distributor announces both launch tokens with their full state.
+      // The distributor announces $ASSET, then both launch tokens with their full state.
       const distributorLogs = await logsOf(distributorAddr);
+      expect(distributorLogs.find((l) => l.name === "AssetSet").args.asset).to.equal(assetAddr);
       const [assetAdded, overtureAdded] = distributorLogs.filter((l) => l.name === "RewardTokenAdded");
       expect(assetAdded.args.token).to.equal(assetAddr);
       expect(assetAdded.args.conditional).to.equal(true);
@@ -1755,15 +1771,15 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
     it("A29: a third reward token joins through the timelock and pays once it is funded", async function () {
       // The token: an Overture-shaped proxy deployed by scripts/add-reward-token.js (owner =
-      // the timelock, minter = the operator), recorded as RewardToken:TRW. The script sends
-      // nothing to the timelock; it prints the operation, which the multisig runs below.
+      // the timelock, minter = the distributor proxy — the script's default, the rule for every
+      // reward token we deploy), recorded as RewardToken:TRW. The script sends nothing to the
+      // timelock; it prints the operation, which the multisig runs below.
       const addRun = await runScript("scripts/add-reward-token.js", {
         ...baseScriptEnv(),
         REWARD_TOKEN_NAME: "Third Reward",
         REWARD_TOKEN_SYMBOL: "TRW",
         REWARD_TOKEN_CONDITIONAL: "0",
         REWARD_TOKEN_CLAIMS_ENABLED: "1",
-        REWARD_TOKEN_MINTER: w.operator.address,
       });
       const entry = runner.registryEntry(registryFile, 31337, "RewardToken:TRW");
       thirdTokenAddr = entry.address;
@@ -1777,7 +1793,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         { address: thirdTokenAddr, name: "Initialized" },
       ]);
       expect(await thirdToken.owner()).to.equal(timelockAddr);
-      expect(await thirdToken.minter()).to.equal(w.operator.address);
+      expect(await thirdToken.minter()).to.equal(distributorAddr);
       expect(addRun.stdout).to.include("TIMELOCK_FN=addRewardToken");
 
       const { executed } = await throughTimelock("A29", "add TRW as a reward token", {
@@ -1806,12 +1822,29 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(args.balance).to.equal(0n);
       ledger.recordRevert("A29", "alice's TRW claim reverts: not funded", headBefore, "InsufficientFunds");
 
-      // The operator funds it; the very same voucher pays.
+      // The operator funds it through scripts/lp-mint-reward.js — RewardsDistributor.mintRewardToken,
+      // which needs the token registered, hence after the execute. The script runs with the
+      // deployer's key, which is not the operator, so it prints the Safe payload; the operator
+      // sends it. The very same voucher then pays.
+      const mintRun = await runScript("scripts/lp-mint-reward.js", {
+        ...baseScriptEnv(),
+        MINT_TOKEN: "TRW",
+        MINT_TO: "distributor",
+        MINT_AMOUNT: ethers.formatUnits(amount, 18),
+      });
+      const [trwPayload] = safePayloads(mintRun.stdout);
+      expect(trwPayload.to).to.equal(distributorAddr);
+      expect(trwPayload.data).to.equal(
+        distributor.interface.encodeFunctionData("mintRewardToken", [thirdTokenAddr, distributorAddr, amount])
+      );
       ledger.record(
         "A29",
-        "operator mints TRW into the distributor",
-        await chain.send(thirdToken.connect(w.operator).mint(distributorAddr, amount)),
-        [{ address: thirdTokenAddr, name: "Transfer" }]
+        "operator mints TRW into the distributor through mintRewardToken",
+        await chain.send(w.operator.sendTransaction({ to: trwPayload.to, data: trwPayload.data })),
+        [
+          { address: thirdTokenAddr, name: "Transfer" },
+          { address: distributorAddr, name: "RewardTokenMinted" },
+        ]
       );
       const receipt = await chain.send(
         distributor.connect(w.alice).claim(thirdTokenAddr, amount, C.FAR_DEADLINE, signature)
@@ -2069,19 +2102,19 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         expected: [{ address: overtureAddr, name: "MinterChanged" }],
       });
       let args = chain.parseEvent(away, overture.interface, overtureAddr, "MinterChanged");
-      expect(args.previousMinter).to.equal(w.operator.address);
+      expect(args.previousMinter).to.equal(distributorAddr);
       expect(args.newMinter).to.equal(w.signer2.address);
 
       const { executed: back } = await throughTimelock("A42", "restore the minter", {
         target: overtureAddr,
         fn: "setMinter",
-        args: [w.operator.address],
+        args: [distributorAddr],
         expected: [{ address: overtureAddr, name: "MinterChanged" }],
       });
       args = chain.parseEvent(back, overture.interface, overtureAddr, "MinterChanged");
       expect(args.previousMinter).to.equal(w.signer2.address);
-      expect(args.newMinter).to.equal(w.operator.address);
-      expect(await overture.minter()).to.equal(w.operator.address);
+      expect(args.newMinter).to.equal(distributorAddr);
+      expect(await overture.minter()).to.equal(distributorAddr);
     });
 
     it("A43: the guardian pauses rebalance", async function () {

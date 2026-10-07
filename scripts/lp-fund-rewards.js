@@ -9,20 +9,28 @@ const pools = require("./lib/pools");
 // `InsufficientFunds(token, needed, balance)` until the company funds the contract. This script
 // is that funding:
 //
-//   - $OVTR: the operator multisig is the Overture token's MINTER, so it mints $OVTR straight
-//     INTO the distributor — `TokenOverture.mint(distributor, amount)`.
+//   - $OVTR: the RewardsDistributor PROXY is the Overture token's minter (decision 2026-10-07),
+//     so the OPERATOR mints $OVTR INTO the distributor through it —
+//     `RewardsDistributor.mintRewardToken(ovtr, distributor, amount)`, sent to the distributor.
+//     FALLBACK, for a stack that has not been upgraded to that model yet (Sepolia stack #6 before
+//     its activation, where the minter is still the operator): when `TokenOverture.minter()` IS
+//     the configured signer, the script sends the old direct `TokenOverture.mint(distributor,
+//     amount)` instead. It prints which of the two paths it took. Any other minter is an error
+//     that names the activation steps.
 //   - $ASSET: the operator transfers $ASSET it already holds INTO the distributor —
 //     `ASSET.transfer(distributor, amount)`.
 //
-// When the configured signer IS the minter (for $OVTR) or holds the $ASSET (for $ASSET), the
-// script sends the transaction. Otherwise — the mainnet case, where the operator is a Safe —
-// it prints the exact `to` and `data` to paste into the Safe, and sends nothing.
+// When the configured signer is the operator (for the `mintRewardToken` path), the minter (for
+// the fallback) or holds the $ASSET (for $ASSET), the script sends the transaction. Otherwise —
+// the mainnet case, where the operator is a Safe — it prints the exact `to` and `data` to paste
+// into the Safe, and sends nothing. The `mintRewardToken` call is simulated from the operator's
+// address first, so a Safe transaction that would revert is never printed.
 //
 // ──────────────────────── environment ────────────────────────
 //
 //   LP_FUND_OVTR_AMOUNT    $OVTR to mint into the distributor, in WHOLE tokens (decimals are
 //                          read from chain). Empty or 0 skips the $OVTR leg. PLACEHOLDER:
-//                          the launch figure is to be decided with Brandon before 7 Oct.
+//                          the launch figure is to be decided with Brandon.
 //   LP_FUND_ASSET_AMOUNT   $ASSET to transfer into the distributor, in whole tokens. Empty or 0
 //                          skips the $ASSET leg. PLACEHOLDER, same as above.
 //   LP_DISTRIBUTOR_ADDRESS overrides the deployments.json lookup of RewardsDistributor
@@ -46,6 +54,7 @@ const FUNDING_ABI = [
 const DISTRIBUTOR_ABI = [
   "function operator() view returns (address)",
   "function rewardToken(address token) view returns ((bool registered, bool enabled, bool conditional, bool claimsEnabled, uint8 decimals))",
+  "function mintRewardToken(address token, address to, uint256 amount)",
 ];
 
 /** A registry address, overridable by an env var; throws with the fix when neither exists. */
@@ -67,20 +76,65 @@ function parseAmount(envName, decimals) {
   return amount;
 }
 
-async function fundLeg({ label, token, amount, decimals, symbol, distributor, signer, canSend, build, chainId }) {
+/**
+ * Sends one funding transaction, or prints it for the operator's Safe. `to` is the contract the
+ * call goes to (the token, or the distributor for `mintRewardToken`); `data` its calldata.
+ */
+async function fundLeg({ label, to, data, amount, decimals, symbol, distributor, signer, canSend, chainId }) {
   const human = hre.ethers.formatUnits(amount, decimals);
-  const data = build.data;
   console.log(`\n${label}: ${human} ${symbol} into ${distributor}`);
   if (!canSend) {
     console.log(
       `  The signer ${signer.address} cannot send this one. Safe transaction for the operator:\n` +
-        `    to:    ${token}\n    value: 0\n    data:  ${data}`
+        `    to:    ${to}\n    value: 0\n    data:  ${data}`
     );
     return false;
   }
   pools.requireConfirmation(chainId, `${label} ${human} ${symbol}`);
-  await pools.send(`${label} ${human} ${symbol}`, signer, (o) => signer.sendTransaction({ to: token, data, ...o }));
+  await pools.send(`${label} ${human} ${symbol}`, signer, (o) => signer.sendTransaction({ to, data, ...o }));
   return true;
+}
+
+/**
+ * The $OVTR leg's route, decided by `TokenOverture.minter()`:
+ *   - the distributor proxy -> `RewardsDistributor.mintRewardToken`, sent by the operator;
+ *   - the configured signer -> FALLBACK, the direct `TokenOverture.mint` (a pre-upgrade stack);
+ *   - anything else         -> an error naming the activation steps.
+ */
+function overtureRoute({ minter, signer, operator, distributorAddress, overtureAddress, amount }) {
+  const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+  if (same(minter, distributorAddress)) {
+    return {
+      path: "mintRewardToken",
+      label: "Minting through RewardsDistributor.mintRewardToken",
+      note: "path: RewardsDistributor.mintRewardToken — the distributor is the Overture minter; the operator sends it",
+      to: distributorAddress,
+      data: new hre.ethers.Interface(DISTRIBUTOR_ABI).encodeFunctionData("mintRewardToken", [
+        overtureAddress,
+        distributorAddress,
+        amount,
+      ]),
+      canSend: same(operator, signer.address),
+    };
+  }
+  if (same(minter, signer.address)) {
+    return {
+      path: "fallback",
+      label: "FALLBACK minting with TokenOverture.mint",
+      note:
+        "path: FALLBACK — direct TokenOverture.mint. The signer is still the token's minter, so this stack " +
+        "has not been activated for mintRewardToken (scripts/README.md, 'Activating mintRewardToken on a live stack')",
+      to: overtureAddress,
+      data: new hre.ethers.Interface(FUNDING_ABI).encodeFunctionData("mint", [distributorAddress, amount]),
+      canSend: true,
+    };
+  }
+  throw new Error(
+    `TokenOverture.minter() is ${minter}: neither the RewardsDistributor proxy ${distributorAddress} ` +
+      `(the model since 2026-10-07) nor the signer ${signer.address} (the pre-upgrade fallback). ` +
+      `Finish the activation — upgrade the distributor, then TokenOverture.setMinter(${distributorAddress}) ` +
+      `through the timelock — or run this with the minter's key.`
+  );
 }
 
 async function main() {
@@ -126,16 +180,38 @@ async function main() {
 
   const iface = new hre.ethers.Interface(FUNDING_ABI);
   if (ovtrAmount > 0n) {
+    const route = overtureRoute({
+      minter,
+      signer,
+      operator,
+      distributorAddress,
+      overtureAddress,
+      amount: ovtrAmount,
+    });
+    console.log(`\n$OVTR minter: ${minter}`);
+    console.log(route.note);
+    if (route.path === "mintRewardToken") {
+      // Simulated from the OPERATOR's address, whoever signs this run: a distributor that has
+      // not been upgraded yet, or a token whose minter moved, reverts here instead of in the Safe.
+      try {
+        await hre.ethers.provider.call({ from: operator, to: route.to, data: route.data });
+      } catch (error) {
+        throw new Error(
+          `RewardsDistributor.mintRewardToken would revert when the operator ${operator} sends it: ` +
+            `${error.shortMessage || error.message}. Is the distributor implementation upgraded?`
+        );
+      }
+    }
     await fundLeg({
-      label: "Minting",
-      token: overtureAddress,
+      label: route.label,
+      to: route.to,
+      data: route.data,
       amount: ovtrAmount,
       decimals: ovtrDecimals,
       symbol: ovtrSymbol,
       distributor: distributorAddress,
       signer,
-      canSend: minter.toLowerCase() === signer.address.toLowerCase(),
-      build: { data: iface.encodeFunctionData("mint", [distributorAddress, ovtrAmount]) },
+      canSend: route.canSend,
       chainId,
     });
   }
@@ -150,7 +226,8 @@ async function main() {
       distributor: distributorAddress,
       signer,
       canSend: held >= assetAmount,
-      build: { data: iface.encodeFunctionData("transfer", [distributorAddress, assetAmount]) },
+      to: assetAddress,
+      data: iface.encodeFunctionData("transfer", [distributorAddress, assetAmount]),
       chainId,
     });
   }

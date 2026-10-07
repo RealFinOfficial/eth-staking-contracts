@@ -12,8 +12,11 @@ const { buildOperation, encodeSchedule, encodeExecute, describeOperation, TIMELO
 //
 //   1. the token itself — either an existing ERC-20 (`REWARD_TOKEN_ADDRESS`), or a new
 //      Overture-shaped token deployed here: a `TokenOverture` implementation + `LPProxy`,
-//      `initialize(name, symbol, owner = the timelock, minter = the operator)`, through the
-//      same `deployProxyPair` the stack deploy uses (validation + manifest).
+//      `initialize(name, symbol, owner = the timelock, minter = the RewardsDistributor proxy)`,
+//      through the same `deployProxyPair` the stack deploy uses (validation + manifest). Every
+//      reward token we deploy carries the `IMintableRewardToken` mint and names the distributor
+//      as its single minter (decision 2026-10-07), so once the timelock has added it the operator
+//      mints it with `RewardsDistributor.mintRewardToken` — into the distributor, or to a wallet.
 //   2. a `RewardToken:<SYMBOL>` entry in deployments.json.
 //   3. the timelock operation, printed: target, calldata, salt, id, the `schedule` and
 //      `execute` calldata for the Safe, and the two `lp-timelock.js` command lines.
@@ -32,7 +35,8 @@ const { buildOperation, encodeSchedule, encodeExecute, describeOperation, TIMELO
 //                               (like $OVTR). Required: it is a program decision.
 //   REWARD_TOKEN_CLAIMS_ENABLED 1 to open its claims in the same operation, 0 to open later
 //                               with `setClaimsEnabled`. Required.
-//   REWARD_TOKEN_MINTER         minter of a NEW token (default: the distributor's operator)
+//   REWARD_TOKEN_MINTER         minter of a NEW token (default: the RewardsDistributor proxy from
+//                               deployments.json — the rule; override only for a rehearsal)
 //   TIMELOCK_SALT_TAG           passed through to the printed operation (see lp-timelock.js)
 //   CONFIRM=yes                 required on mainnet before the token deploy
 //
@@ -45,7 +49,6 @@ const TOKEN_ABI = [
   "function decimals() view returns (uint8)",
 ];
 const DISTRIBUTOR_ABI = [
-  "function operator() view returns (address)",
   "function owner() view returns (address)",
   "function rewardToken(address token) view returns ((bool registered, bool enabled, bool conditional, bool claimsEnabled, uint8 decimals))",
 ];
@@ -85,7 +88,16 @@ async function main() {
     const name = process.env.REWARD_TOKEN_NAME;
     const symbol = process.env.REWARD_TOKEN_SYMBOL;
     if (!name || !symbol) throw new Error("Set REWARD_TOKEN_ADDRESS, or REWARD_TOKEN_NAME and REWARD_TOKEN_SYMBOL");
-    const minter = hre.ethers.getAddress(process.env.REWARD_TOKEN_MINTER || (await distributor.operator()));
+    // The distributor proxy is the minter of every reward token we deploy; the operator reaches
+    // `mint` only through `RewardsDistributor.mintRewardToken`.
+    const minter = hre.ethers.getAddress(process.env.REWARD_TOKEN_MINTER || distributorAddress);
+    if (minter !== distributorAddress) {
+      console.log(
+        `WARNING: REWARD_TOKEN_MINTER ${minter} is not the RewardsDistributor proxy ${distributorAddress}.\n` +
+          `         RewardsDistributor.mintRewardToken cannot mint this token until the timelock moves its\n` +
+          `         minter there with TokenOverture.setMinter.`
+      );
+    }
     const deployer = await pools.getSigner();
     console.log(`Deploying a new Overture-shaped reward token "${name}" (${symbol})`);
     console.log(`  owner = the timelock ${timelockAddress}, minter = ${minter}`);
@@ -151,8 +163,11 @@ async function main() {
   console.log(
     `\n──────── after the execute ────────\n` +
       `1. Fund it: the distributor pays ${symbol} claims out of its own balance and reverts\n` +
-      `   InsufficientFunds(token, needed, balance) until it holds enough. Mint (if the operator is\n` +
-      `   the minter) or transfer ${symbol} into ${distributorAddress}.\n` +
+      `   InsufficientFunds(token, needed, balance) until it holds enough. When the distributor is\n` +
+      `   its minter (a token deployed here), the operator mints it in with\n` +
+      `   MINT_TOKEN=${symbol} MINT_TO=${distributorAddress} MINT_AMOUNT=… npx hardhat run scripts/lp-mint-reward.js --network ${network}\n` +
+      `   (RewardsDistributor.mintRewardToken; it needs the execute above first). Otherwise transfer\n` +
+      `   ${symbol} into ${distributorAddress}.\n` +
       `2. Indexer module: register the token as an ERC-20 target from the execute block\n` +
       `   (init_lp_staking.sh with ADD_REWARD_TOKEN=1 REWARD_TOKEN_ADDRESS=${tokenAddress});\n` +
       `   RewardTokenAdded on the distributor announces it (decimals ${decimals}, conditional ${conditional}).\n` +

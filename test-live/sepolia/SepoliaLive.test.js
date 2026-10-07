@@ -36,8 +36,9 @@
  * The deploy script schedules no timelock operation and sleeps out no delay: `initialize`
  * names the LPTimelock as the owner of all five proxies (`TokenOverture`, `RewardsDistributor`,
  * `LPEpochRegistry`, `LPStakingVault`, `LPZapper`) inside each proxy's own deployment
- * transaction, the Overture token is born with the operator as its minter, the distributor
- * with both launch reward tokens, and the vault pointing at the zapper PROXY whose address the
+ * transaction, the Overture token is born with the distributor PROXY as its minter (its address
+ * predicted from the deployer's nonce), the distributor with $ASSET recorded and both launch
+ * reward tokens, and the vault pointing at the zapper PROXY whose address the
  * script predicted from the deployer's nonce. The run is a straight line of about a dozen
  * transactions at Sepolia block times. `LP_TIMELOCK_MIN_DELAY` is still forwarded — it is the
  * delay the timelock will enforce on every LATER owner-tier call — but no part of this run

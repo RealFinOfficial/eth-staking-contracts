@@ -59,7 +59,7 @@ const ROLES = {
   // to run with `guardian == operator`, and collapsing either onto the multisig is the
   // staging shortcut the script warns about. The fork suites deploy the production shape.
   guardian: 8, // LP_GUARDIAN — the hot pause key: the three pause switches and nothing else
-  operator: 9, // LP_OPERATOR — operator of all five proxies, Overture minter, funds the distributor
+  operator: 9, // LP_OPERATOR — operator of all five proxies, mints through mintRewardToken, funds the distributor
 };
 
 // ─────────────────────────── Pool and stack parameters ───────────────────────────

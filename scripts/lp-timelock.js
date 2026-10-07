@@ -5,8 +5,8 @@
 // guardian, the operator, a new reward token, a reward token's switches, the Overture minter,
 // an ownership move, and the timelock's own delay — has to go through this contract: schedule
 // it, wait out `minDelay`, execute it. The operator tier is NOT here (`setTwapParams`,
-// `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the epoch schedule, the pauses):
-// those are sent directly by the multisig with no delay. This script is the one place that
+// `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, `mintRewardToken`, the epoch
+// schedule, the pauses): those are sent directly by the multisig with no delay. This script is the one place that
 // builds the timelock transactions, so the calldata a Safe signs and the calldata the fork
 // suites send are produced by the same code. `lp-switch-timelock.js` and `add-reward-token.js`
 // build theirs with the builders exported below.
@@ -73,8 +73,9 @@ const ethers = require("ethers");
  * The owner tier, in full. Everything here is `onlyOwner` on a contract the timelock owns, so
  * everything here can ONLY be reached through a scheduled operation. The guardian tier (the
  * vault's two pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
- * `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the registry's epoch functions, the
- * Overture `mint`, and those same pauses) are deliberately absent: those are one-transaction
+ * `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the distributor's `mintRewardToken`
+ * — the operator's only road to minting $OVTR, since the distributor proxy is the token's
+ * minter — the registry's epoch functions, and those same pauses) are deliberately absent: those are one-transaction
  * calls the hot key and the multisig send directly, and routing them through here would defeat
  * the reason they exist.
  *
@@ -133,7 +134,8 @@ const OWNER_TIER = {
   setMinter: {
     signature: "function setMinter(address newMinter)",
     kinds: ["TokenOverture"],
-    note: "moves the Overture token's minter role, or address(0) to stop minting",
+    note: "moves the Overture token's minter role (the RewardsDistributor proxy since 2026-10-07), "
+      + "or address(0) to stop minting",
   },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",

@@ -62,6 +62,8 @@ describe("deploy-implementation.js", function () {
   const MIN_DELAY = 60n;
   const TOKENS = (n) => ethers.parseEther(String(n));
   const FAR_DEADLINE = 10n ** 12n;
+  /// The pinned ERC-7201 base of `real.lp.storage.RewardsDistributor`; `asset` sits at base + 6.
+  const DISTRIBUTOR_NAMESPACE = "0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00";
 
   /// The V2 mocks are upgrades of an ALREADY-initialized proxy, so they declare no
   /// `initializer` of their own. Everything else is the script's own fixed flag list.
@@ -207,6 +209,7 @@ describe("deploy-implementation.js", function () {
         guardian.address,
         operatorSafe.address,
         voucherSigner.address,
+        assetAddr, // the $ASSET mintRewardToken refuses
         [
           [assetAddr, true, true],
           [overtureAddr, false, true],
@@ -265,9 +268,15 @@ describe("deploy-implementation.js", function () {
     );
     zapperAddr = await zapper.getAddress();
 
-    // Funding, the way the operator does it: $OVTR minted INTO the distributor by the minter,
-    // $ASSET transferred into it. Claims pay out of these balances.
-    await overture.connect(operatorSafe).mint(distributorAddr, TOKENS(1_000_000));
+    // The token above is born the way Sepolia stack #6 was — the operator as its minter — and
+    // the timelock now moves the minter to the distributor PROXY: the second operation of the
+    // 2026-10-07 activation (scripts/README.md, "Activating mintRewardToken on a live stack").
+    // From here on the operator mints only through RewardsDistributor.mintRewardToken.
+    await scheduleAndExecute(overtureAddr, "setMinter", [distributorAddr]);
+
+    // Funding, the way the operator does it: $OVTR minted INTO the distributor through
+    // mintRewardToken, $ASSET transferred into it. Claims pay out of these balances.
+    await distributor.connect(operatorSafe).mintRewardToken(overtureAddr, distributorAddr, TOKENS(1_000_000));
     await assetToken.transfer(distributorAddr, TOKENS(100_000));
   });
 
@@ -392,6 +401,62 @@ describe("deploy-implementation.js", function () {
       );
     });
 
+    it("activates mintRewardToken on a v1-state distributor: upgradeToAndCall(impl, initializeV2(asset)) through the timelock", async function () {
+      // The live stack #6 shape before the activation: v1 never wrote the appended `asset` field
+      // (ERC-7201 base + 6). Emulated by clearing that one slot — the only layout difference.
+      const assetSlot = ethers.toBeHex(BigInt(DISTRIBUTOR_NAMESPACE) + 6n, 32);
+      await network.provider.send("hardhat_setStorageAt", [distributorAddr, assetSlot, ethers.ZeroHash]);
+      expect(await distributor.asset()).to.equal(ethers.ZeroAddress);
+
+      // The reinitializer call travels as the upgrade's `data`, and the printed commands carry it.
+      const upgradeData = distributor.interface.encodeFunctionData("initializeV2", [assetAddr]);
+      const result = await deployImplementation({
+        kind: "RewardsDistributor",
+        proxyAddress: distributorAddr,
+        contractName: "RewardsDistributorV2Mock",
+        unsafeAllowExtra: V2_UNSAFE_ALLOW_EXTRA,
+        upgradeData,
+        deployer,
+        quiet: true,
+      });
+      for (const command of [result.scheduleCommand, result.executeCommand]) {
+        expect(command).to.include(`TIMELOCK_ARGS=${result.implementation},${upgradeData}`);
+      }
+
+      // `onlyOwner` holds inside the upgrade: the delegatecall keeps msg.sender = the timelock.
+      const executed = scheduleAndExecute(distributorAddr, "upgradeToAndCall", [result.implementation, upgradeData]);
+      await expect(executed).to.emit(distributor, "Upgraded").withArgs(result.implementation);
+      await expect(executed).to.emit(distributor, "AssetSet").withArgs(assetAddr);
+
+      // The post-checks of the runbook.
+      expect(await upgrades.erc1967.getImplementationAddress(distributorAddr)).to.equal(result.implementation);
+      expect(await distributor.asset()).to.equal(assetAddr);
+      expect(await overture.minter()).to.equal(distributorAddr);
+      expect(await distributor.owner()).to.equal(timelockAddr);
+      expect(await distributor.operator()).to.equal(operatorSafe.address);
+      await distributor.connect(operatorSafe).mintRewardToken(overtureAddr, alice.address, TOKENS(1));
+      expect(await overture.balanceOf(alice.address)).to.equal(TOKENS(1));
+      await expect(distributor.connect(operatorSafe).mintRewardToken(assetAddr, alice.address, TOKENS(1)))
+        .to.be.revertedWithCustomError(distributor, "AssetNotMintable")
+        .withArgs(assetAddr);
+
+      // The reinitializer is spent: the same upgrade scheduled again (a fresh salt tag, so it is a
+      // new operation) is refused by OpenZeppelin's reinitializer when it executes.
+      const again = lpTimelock.buildOperation({
+        target: distributorAddr,
+        fn: "upgradeToAndCall",
+        args: [result.implementation, upgradeData],
+        tag: "again",
+      });
+      await timelock
+        .connect(multisig)
+        .schedule(again.target, again.value, again.data, again.predecessor, again.salt, MIN_DELAY);
+      await time.increase(Number(MIN_DELAY) + 1);
+      await expect(
+        timelock.connect(multisig).execute(again.target, again.value, again.data, again.predecessor, again.salt)
+      ).to.be.revertedWithCustomError(distributor, "InvalidInitialization");
+    });
+
     it("deploys a registry implementation bound to the same distributor, schedule kept", async function () {
       const now = await time.latest();
       const startsAt = BigInt(Math.ceil((now + 3600) / 900) * 900);
@@ -431,7 +496,7 @@ describe("deploy-implementation.js", function () {
     });
 
     it("deploys an Overture token implementation the timelock upgrades onto, balances kept", async function () {
-      await overture.connect(operatorSafe).mint(alice.address, TOKENS(7));
+      await distributor.connect(operatorSafe).mintRewardToken(overtureAddr, alice.address, TOKENS(7));
 
       const result = await deployImplementation({
         kind: "TokenOverture",
@@ -453,7 +518,7 @@ describe("deploy-implementation.js", function () {
       expect(await upgraded.symbol()).to.equal("OVTR");
       expect(await upgraded.balanceOf(alice.address)).to.equal(TOKENS(7));
       expect(await upgraded.balanceOf(distributorAddr)).to.equal(TOKENS(1_000_000));
-      expect(await upgraded.minter()).to.equal(operatorSafe.address);
+      expect(await upgraded.minter()).to.equal(distributorAddr);
       expect(await upgraded.owner()).to.equal(timelockAddr);
     });
 
