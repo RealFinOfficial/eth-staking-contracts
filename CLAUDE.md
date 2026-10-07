@@ -68,9 +68,11 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
   reverts `DepositsArePaused` before any USDC moves. Zap-out is out of scope for V1
 - **`TokenOverture.sol`** — the Overture token. ERC-20, 18 decimals, EIP-2612 permit (domain =
   the token PROXY), burnable. ERC-20 name "Overture", symbol "OVTR" (`LP_OVERTURE_NAME` /
-  `LP_OVERTURE_SYMBOL`). Exactly one `minter` (the operator multisig at launch), moved by the
-  owner (the timelock) with `setMinter`. NO cap of any kind: the operator mints `$OVTR` INTO the
-  distributor, which pays it out by transfer
+  `LP_OVERTURE_SYMBOL`). Exactly one `minter` — the `RewardsDistributor` PROXY, predicted by the
+  deploy script before it exists — moved by the owner (the timelock) with `setMinter`. Its
+  `mint(address to, uint256 amount)` is the `IMintableRewardToken` shape every reward token we
+  deploy carries. NO cap of any kind: the operator mints `$OVTR` through the distributor's
+  `mintRewardToken`, INTO the distributor (which pays it out by transfer) or to any wallet
 - **`RewardsDistributor.sol`** — cumulative-voucher claims for any number of reward tokens. One
   EIP-712 type for every token, `RewardClaim(address token,address user,uint256
   cumulativeAmount,uint256 deadline)` (typehash `0x746a03cb…0c63`, domain `("RealLPRewards",
@@ -84,7 +86,11 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
   (SEC-04). Tiers — **owner** (the timelock): upgrades, `addRewardToken(token, conditional,
   claimsEnabled)`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator`;
   **guardian**: `setPaused`; **operator**: `setSigner`, `recoverExcess(token, amount)` (to the
-  operator), `setGuardian`, `setPaused`. Launch tokens: `$ASSET` (conditional, claims CLOSED,
+  operator), `mintRewardToken(token, to, amount)` (mints a registered token whose minter is the
+  distributor to one wallet, outside the claim flow; `$ASSET` — stored as `asset()`, appended to
+  the namespace in v2 — is refused by address with `AssetNotMintable`, whoever calls),
+  `setGuardian`, `setPaused`. A v1 proxy (stack #6) migrates with `upgradeToAndCall(impl,
+  initializeV2($ASSET))` through the timelock (`initializeV2` is `reinitializer(2) onlyOwner`). Launch tokens: `$ASSET` (conditional, claims CLOSED,
   opened later by the timelock) and `$OVTR` (unconditional, claims open). `enabled` only decides
   whether the registry may schedule a token; `claimsEnabled` gates `claim`. A leaked signer key
   can take the funded balances until the guardian pauses — keep the guardian hot
@@ -126,10 +132,14 @@ and leaves nothing to hand over:
    (ASSET 18 / USDC 6), and the **factory check** — `factory.getPool(token0, token1, fee) ==
    LP_POOL`
 2. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))`
-3. `TokenOverture` implementation + `LPProxy`, `initialize(name, symbol, timelock, operator)`
+3. Predict the distributor PROXY: `getCreateAddress({from: deployer, nonce: M + 3})` — token
+   implementation M, token proxy M + 1, distributor implementation M + 2, distributor proxy
+   M + 3; then `TokenOverture` implementation + `LPProxy`, `initialize(name, symbol, timelock,
+   minter = predicted distributor)`
 4. `RewardsDistributor` implementation (no constructor arguments) + `LPProxy`,
-   `initialize(timelock, guardian, operator, signer, [{ASSET, conditional, claims =
-   LP_ASSET_CLAIMS_ENABLED (default 0)}, {OVTR, unconditional, claims open}])`
+   `initialize(timelock, guardian, operator, signer, asset = LP_ASSET, [{ASSET, conditional,
+   claims = LP_ASSET_CLAIMS_ENABLED (default 0)}, {OVTR, unconditional, claims open}])`; recorded,
+   then asserted equal to the prediction (fatal: the run stops before the registry)
 5. `LPEpochRegistry(distributor)` implementation + `LPProxy`, `initialize(timelock, operator)`
 6. Predict the zapper PROXY: `getCreateAddress({from: deployer, nonce: N + 3})` — vault
    implementation N, vault proxy N + 1, zapper implementation N + 2, zapper proxy N + 3
@@ -141,8 +151,9 @@ and leaves nothing to hand over:
    then asserted equal to the prediction (the repair if not: `setZapper` through the timelock)
 9. `pool.increaseObservationCardinalityNext(target)` — permissionless
 10. Post-deploy verification of all five proxies (ERC-1967 implementation slot, EMPTY admin
-    slot, owner == timelock, pendingOwner == 0), the token's name/symbol/minter/zero supply,
-    the distributor's `rewardTokens()` and flags and `REWARD_CLAIM_TYPEHASH`, the registry's
+    slot, owner == timelock, pendingOwner == 0), the token's name/symbol/minter (== the
+    distributor proxy)/zero supply, the distributor's `asset()`, `rewardTokens()` and flags and
+    `REWARD_CLAIM_TYPEHASH`, the registry's
     distributor/operator/`epochCount == 0`/constants, `vault.bonusEscrow() == 0`, the zapper's
     operator, the timelock's roles; the address summary, the verify commands (two per proxy),
     and the operator's next steps
@@ -153,7 +164,7 @@ calldata, and `upgrades.forceImport`, which records the storage layout in
 `.openzeppelin/<network>.json` (committed on named networks; OS temp dir on dev chains).
 
 After the deploy the operator multisig, with no delay: funds the distributor
-(`scripts/lp-fund-rewards.js`: `LP_FUND_OVTR_AMOUNT`, `LP_FUND_ASSET_AMOUNT`, placeholders to be
+(`scripts/lp-fund-rewards.js`, `$OVTR` through `mintRewardToken`: `LP_FUND_OVTR_AMOUNT`, `LP_FUND_ASSET_AMOUNT`, placeholders to be
 decided with Brandon) and schedules epoch 1 at least 30 minutes ahead (`scripts/lp-epoch.js`).
 A new reward token later: `scripts/add-reward-token.js` + the `addRewardToken` timelock
 operation, then funding and `lp-epoch.js set-amount`.
@@ -195,14 +206,15 @@ contracts/           — Solidity source files
     LPStakingVault.sol        — Custody and atomic re-ranging for Uniswap V3 LP positions, and
                                 the bonus-escrow notifications (off at launch); UUPS
     LPZapper.sol              — USDC in, staked position out; UUPS, operator tier
-    TokenOverture.sol         — The Overture token ($OVTR): one minter, no cap; UUPS
+    TokenOverture.sol         — The Overture token ($OVTR): one minter (the distributor), no cap; UUPS
     RewardsDistributor.sol    — EIP-712 `RewardClaim` cumulative claims for any number of
                                 pre-funded reward tokens; UUPS
     LPEpochRegistry.sol       — The on-chain emission schedule, operator-run; UUPS
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the five proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool),
-                                IRewardsDistributor, ILPEpochRegistry, IBonusEscrowHooks
+                                IRewardsDistributor, ILPEpochRegistry, IBonusEscrowHooks,
+                                IMintableRewardToken (the mint shape of every reward token we deploy)
     libraries/TwapGuard.sol   — Shared spot-vs-TWAP check and the SwapParams struct
     mocks/                    — Test-only Uniswap doubles, permit token, reentrancy attackers,
                                 the five V2 mocks (upgrade tests), three bonus-escrow mocks
@@ -416,14 +428,14 @@ without it. The `forge-1.7` half names the toolchain, which is why CI pins
 `foundry-rs/foundry-toolchain` to `v1.7.1` instead of `stable` — a newer forge attributes
 `--ir-minimum` coverage differently. Bump the pin and the basis together, never one alone.
 
-Re-measured 2026-10-05 — branch coverage is 100% on all six files, so every branch floor is
+Re-measured 2026-10-07 — branch coverage is 100% on all six files, so every branch floor is
 also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
 | `LPStakingVault.sol` | 97.91% (187/191) | 100.00% (34/34) |
 | `LPZapper.sol` | 96.08% (98/102) | 100.00% (20/20) |
-| `RewardsDistributor.sol` | 97.54% (119/122) | 100.00% (18/18) |
+| `RewardsDistributor.sol` | 97.83% (135/138) | 100.00% (22/22) |
 | `LPEpochRegistry.sol` | 96.46% (109/113) | 100.00% (21/21) |
 | `TokenOverture.sol` | 84.62% (22/26) | 100.00% (2/2) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |

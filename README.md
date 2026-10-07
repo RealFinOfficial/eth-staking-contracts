@@ -248,8 +248,9 @@ historical Sepolia addresses. Compiled ABIs for both pools and for the five LP c
 checked in under `abi/`.
 
 The LP staking stack has its own scripts — `deploy-lp-staking.js`, `lp-fund-rewards.js`,
-`lp-epoch.js`, `add-reward-token.js`, `lp-timelock.js`, `lp-switch-timelock.js`,
-`deploy-implementation.js` — documented in `scripts/README.md` under "The LP staking stack".
+`lp-epoch.js`, `lp-mint-reward.js`, `add-reward-token.js`, `lp-timelock.js`,
+`lp-switch-timelock.js`, `deploy-implementation.js` — documented in `scripts/README.md` under "The
+LP staking stack".
 
 ## Functions
 
@@ -329,10 +330,14 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   (`scripts/lp-switch-timelock.js`). Two further tiers sit outside the timelock: a `guardian`,
   a hot key holding the three pause switches and nothing else, and an `operator` multisig
   holding the immediate levers — `setTwapParams`, `rescuePosition`, `sweep`, `setSigner`,
-  `recoverExcess`, the epoch schedule in `LPEpochRegistry`, `setGuardian`, the pause switches as
-  the cold fallback — and the Overture token's minter role. Every reward token is pre-funded:
-  the distributor pays by transfer out of its own balance, a claim whose token balance is short
-  reverts `InsufficientFunds` until it is funded, and there is no cap of any kind. Operating the
+  `recoverExcess`, `mintRewardToken`, the epoch schedule in `LPEpochRegistry`, `setGuardian`, the
+  pause switches as the cold fallback. The minter of every reward token the program deploys
+  (`$OVTR` included, shape `IMintableRewardToken`) is the distributor PROXY, so the operator mints
+  only through `mintRewardToken(token, to, amount)` — to a user's wallet or into the distributor —
+  and `$ASSET` is refused there by address (`AssetNotMintable`). Every reward token is
+  pre-funded: a claim never mints, the distributor pays by transfer out of its own balance, a
+  claim whose token balance is short reverts `InsufficientFunds` until it is funded, and there is
+  no cap of any kind. Operating the
   timelock is `scripts/lp-timelock.js`; the runbook and the reasoning are in
   `docs/lp-staking-audit-notes.md` item 14
 - **Ethers.js** v6
@@ -511,16 +516,16 @@ hits "Stack too deep" in `WeightedStakingPool.sol` without it, so the npm script
 `node --test scripts/check-coverage.test.mjs` tests the gate itself, with no forge and no
 network.
 
-Re-measured 2026-10-05, after the Wednesday-launch round (Overture token, multi-token
-distributor, epoch registry, the zapper as a proxy, the vault's bonus-escrow notifications) on
-546 Foundry tests in 28 suites. Branch coverage is 100% on all six files, so every branch floor
-is also the ceiling:
+Re-measured 2026-10-07, after `RewardsDistributor.mintRewardToken` and its `$ASSET` guard (the Wednesday-launch round
+of 2026-10-05 before it: Overture token, multi-token distributor, epoch registry, the zapper as a
+proxy, the vault's bonus-escrow notifications) on 567 Foundry tests in 28 suites. Branch coverage
+is 100% on all six files, so every branch floor is also the ceiling:
 
 | file | lines | branches |
 |---|---|---|
 | `LPStakingVault.sol` | 97.91% (187/191) | 100.00% (34/34) |
 | `LPZapper.sol` | 96.08% (98/102) | 100.00% (20/20) |
-| `RewardsDistributor.sol` | 97.54% (119/122) | 100.00% (18/18) |
+| `RewardsDistributor.sol` | 97.83% (135/138) | 100.00% (22/22) |
 | `LPEpochRegistry.sol` | 96.46% (109/113) | 100.00% (21/21) |
 | `TokenOverture.sol` | 84.62% (22/26) | 100.00% (2/2) |
 | `libraries/TwapGuard.sol` | 97.67% (42/43) | 100.00% (7/7) |

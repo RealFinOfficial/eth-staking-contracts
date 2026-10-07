@@ -139,7 +139,8 @@ and canceller.
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
 | `deploy-lp-staking.js` | Deploy the whole stack: the `LPTimelock` first, then the five proxies, each born owned by that timelock with its final roles and links. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
-| `lp-fund-rewards.js` | Fund the distributor: the operator mints `$OVTR` into it (it is the Overture minter) and transfers `$ASSET` into it. `LP_FUND_OVTR_AMOUNT` / `LP_FUND_ASSET_AMOUNT` in whole tokens. Sends when the signer is the minter / holds the `$ASSET`; prints the Safe transaction otherwise |
+| `lp-fund-rewards.js` | Fund the distributor: the operator mints `$OVTR` into it through `RewardsDistributor.mintRewardToken` (the distributor proxy is the Overture minter) and transfers `$ASSET` into it. `LP_FUND_OVTR_AMOUNT` / `LP_FUND_ASSET_AMOUNT` in whole tokens. Sends when the signer is the operator / holds the `$ASSET`; prints the Safe transaction otherwise. On a stack not yet activated (the signer is still the token's minter) it falls back to the direct `TokenOverture.mint` and prints `path: FALLBACK` |
+| `lp-mint-reward.js` | Operator front end for `RewardsDistributor.mintRewardToken(token, to, amount)`: mint a mintable reward token to ONE wallet outside the claim flow — a user's wallet, or `MINT_TO=distributor` to pre-fund claims. `MINT_TOKEN` (kind, symbol or address), `MINT_TO`, `MINT_AMOUNT` in whole tokens. Simulates the call from the operator first; sends when the signer is the operator, prints the Safe transaction otherwise. See "Minting a reward token to a wallet" below |
 | `lp-epoch.js` | Drive the emission schedule in `LPEpochRegistry`: `EPOCH_ACTION=show\|schedule\|set-amount\|update-bounds\|cancel`. Quantities in whole tokens per symbol (`EPOCH_AMOUNTS="OVTR=1000000,ASSET=3000"`); the grid, the 30-minute margin and the overlap rule are checked against chain time before anything is proposed. Sends when the signer is the registry operator; prints the Safe transaction otherwise |
 | `add-reward-token.js` | Prepare a NEW reward token: deploy an Overture-shaped token proxy (or take `REWARD_TOKEN_ADDRESS`), record `RewardToken:<SYMBOL>` in `deployments.json`, and print the `addRewardToken(token, conditional, claimsEnabled)` timelock operation and the follow-ups. Sends nothing to the timelock |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `cancel`, `status`, `pending`. Also exports the operation and batch builders the other scripts and the suites use |
@@ -152,30 +153,33 @@ and canceller.
 ### What `deploy-lp-staking.js` deploys, in order
 
 1. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))`.
-2. `TokenOverture` proxy, `initialize(LP_OVERTURE_NAME ("Overture"), LP_OVERTURE_SYMBOL ("OVTR"), owner = timelock, minter = LP_OPERATOR)`.
-3. `RewardsDistributor` proxy, `initialize(owner = timelock, guardian, operator, signer, [{ASSET, conditional, claims = LP_ASSET_CLAIMS_ENABLED (default closed)}, {OVTR, unconditional, claims open}])`.
+2. `TokenOverture` proxy, `initialize(LP_OVERTURE_NAME ("Overture"), LP_OVERTURE_SYMBOL ("OVTR"), owner = timelock, minter = the PREDICTED RewardsDistributor proxy)`.
+3. `RewardsDistributor` proxy, `initialize(owner = timelock, guardian, operator, signer, asset = LP_ASSET, [{ASSET, conditional, claims = LP_ASSET_CLAIMS_ENABLED (default closed)}, {OVTR, unconditional, claims open}])`; the run stops if the proxy did not land on the predicted address.
 4. `LPEpochRegistry` proxy (implementation bound to the distributor), `initialize(owner = timelock, operator)`.
 5. `LPStakingVault` proxy, `initialize(owner = timelock, guardian, operator, zapper = predicted, window, ticks)`; `bonusEscrow` stays zero.
 6. `LPZapper` proxy, `initialize(owner = timelock, operator, window, ticks)`.
 
 Nothing is wired or handed over afterwards: no `setMinter`, no `transferOwnership`, no
-`acceptOwnership`. The vault is born pointing at the zapper because the script predicts the
-zapper PROXY's CREATE address from the deployer's nonce (vault implementation at N, vault proxy
-N + 1, zapper implementation N + 2, zapper proxy N + 3), passes it in, deploys the zapper, records
+`acceptOwnership`. Two addresses are PREDICTED from the deployer's nonce before their contracts
+exist. The Overture token is born with the distributor PROXY as its minter (token implementation
+at M, token proxy M + 1, distributor implementation M + 2, distributor proxy M + 3); if the
+distributor lands elsewhere the run stops right after it, before the registry, and names the
+repair. The vault is born pointing at the zapper PROXY (vault implementation at N, vault proxy
+N + 1, zapper implementation N + 2, zapper proxy N + 3); the script deploys the zapper, records
 it, and only then asserts it landed there. If it did not, the run throws and names the repair:
 `setZapper` through the timelock. Everything else already works.
 
 The post-deploy checks cover all five proxies: the ERC-1967 implementation slot, an EMPTY admin
-slot, `owner == timelock` and `pendingOwner == 0`; the Overture token's name, symbol, minter and
-zero supply; the distributor's `rewardTokens()` and each token's flags and decimals, and
-`REWARD_CLAIM_TYPEHASH`; the registry's distributor, operator, `epochCount == 0`, `INTERVAL` and
+slot, `owner == timelock` and `pendingOwner == 0`; the Overture token's name, symbol, minter
+(`== the distributor proxy`) and zero supply; the distributor's `asset() == LP_ASSET`,
+`rewardTokens()` and each token's flags and decimals, and `REWARD_CLAIM_TYPEHASH`; the registry's distributor, operator, `epochCount == 0`, `INTERVAL` and
 `SCHEDULE_MARGIN`; `vault.bonusEscrow() == 0`; the zapper's operator. The run ends by printing
 the two operator steps it does not do: funding (`lp-fund-rewards.js`) and epoch 1
 (`lp-epoch.js`).
 
 Three role variables are read and all three are printed before anything is deployed.
-`LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B — also the Overture minter and
-the registry's scheduler) are both REQUIRED and have no defaults; the script THROWS when they
+`LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B — it mints `$OVTR` through the
+distributor's `mintRewardToken`, and it is the registry's scheduler) are both REQUIRED and have no defaults; the script THROWS when they
 are equal and WARNS when either collapses onto `LP_MULTISIG` or onto the deploying key, which is
 what staging deliberately does.
 
@@ -204,9 +208,9 @@ Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` an
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
 pause switches (`setDepositsPaused`, `setRebalancePaused`, `setPaused`), sent directly by the hot
 key; the operator tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper),
-`setSigner` and `recoverExcess` (distributor), the registry's four epoch functions, the
-Overture `mint`, plus the three pauses as the cold fallback and `setGuardian` — sent directly by
-the operator multisig.
+`setSigner`, `recoverExcess` and `mintRewardToken` (distributor), the registry's four epoch
+functions, plus the three pauses as the cold fallback and `setGuardian` — sent directly by the
+operator multisig.
 
 `setGuardian` is the one call that is on BOTH sides. It stayed routable here because the owner
 can still send it, but since 2026-09-14 it is owner OR operator, so a revocation that cannot
@@ -236,11 +240,135 @@ EPOCH_ACTION=show npx hardhat run scripts/lp-epoch.js --network sepolia
 # 4. a third test token through the timelock: prepare, schedule, wait 300 s, execute, fund
 REWARD_TOKEN_NAME="Test Reward" REWARD_TOKEN_SYMBOL=TRW REWARD_TOKEN_CONDITIONAL=0 \
   REWARD_TOKEN_CLAIMS_ENABLED=1 npx hardhat run scripts/add-reward-token.js --network sepolia
-# …then the two lp-timelock.js commands it prints, then mint/transfer TRW into the distributor
+# …then the two lp-timelock.js commands it prints, then fund TRW: a token deployed by this script
+# has the distributor as its minter, so the operator mints it in with lp-mint-reward.js
+MINT_TOKEN=TRW MINT_TO=distributor MINT_AMOUNT=… npx hardhat run scripts/lp-mint-reward.js --network sepolia
 ```
 
 Then hand the five proxy addresses, the timelock and the block numbers to the indexer module
 and the backend (`deployments.json` holds them all), and check one `$OVTR` claim end to end.
+
+### Minting a reward token to a wallet
+
+Every reward token this program deploys (`$OVTR`, and any Overture-shaped token added later) has
+ONE minter: the `RewardsDistributor` proxy. The operator multisig mints through the distributor's
+operator-only `mintRewardToken(token, to, amount)` — no timelock delay — to one concrete wallet.
+The claim flow is untouched: a claim still pays by transfer out of the funded balance, and tokens
+minted to a wallet move no claim ledger. `$ASSET` is refused by address (`AssetNotMintable`),
+whoever calls; it is funded by transfer only.
+
+```bash
+# to a user's wallet (whole tokens; MINT_TOKEN is a kind, a symbol or an address)
+MINT_TOKEN=OVTR MINT_TO=0xUserWallet MINT_AMOUNT=250 \
+  npx hardhat run scripts/lp-mint-reward.js --network sepolia
+# into the distributor itself, to pre-fund claims (lp-fund-rewards.js does the same for $OVTR)
+MINT_TOKEN=OVTR MINT_TO=distributor MINT_AMOUNT=2000000 \
+  npx hardhat run scripts/lp-mint-reward.js --network sepolia
+```
+
+The script checks, in the contract's order and in words, that the token is not `$ASSET`, that it
+is registered, that it has a `minter()`, and that the minter is the distributor; then it simulates the call FROM the
+operator's address, so a Safe transaction that would revert is never printed. It prints the
+recipient's balance before (and after, when it sends). With a key that is not the operator — the
+mainnet Safe — it prints `to` / `value` / `data` and sends nothing. Mainnet needs `CONFIRM=yes`.
+
+### Activating mintRewardToken on a live stack (Sepolia test stack #6)
+
+Stack #6 was deployed before 2026-10-07: its distributor runs the v1 code (no `mintRewardToken`,
+no `asset` field) and its Overture token's minter is the operator
+`0x5576bD37419dadAab305cca998E16BcD73318A35`. Activating the change is ONE implementation deploy
+and TWO timelock operations. Stack #6's timelock delay is 300 s (mainnet: 172,800). Nothing below
+has been run; the values are stack #6's from `deployments.json`:
+
+| what | address |
+|---|---|
+| `RewardsDistributor` proxy | `0xf839BE391803fe7104612bfd39A12EAde5DB7a04` |
+| `TokenOverture` proxy | `0x49C5D5478e0DE581525Df80146C339A0cA9E4c89` |
+| `$ASSET` (tREAL) | `0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f` |
+| `LPTimelock` | `0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D` |
+
+The upgrade must run `initializeV2($ASSET)` INSIDE itself, as the `data` of `upgradeToAndCall`:
+an upgrade with `0x` would leave the new `asset` field zero. For tREAL that calldata is
+
+```
+0x29b6eca90000000000000000000000008e65d19be4ba1cc61005b4c70f21cd179512e33f
+```
+
+(`initializeV2(address)`, selector `0x29b6eca9`; recompute with
+`cast calldata "initializeV2(address)" 0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f`).
+
+1. **Deploy the new distributor implementation and record it.** `IMPL_UPGRADE_DATA` puts the
+   calldata into the two commands the script prints. The plugin validates the new layout against
+   the proxy's; no `IMPL_UNSAFE_ALLOW_EXTRA` is needed (measured: `prepareUpgrade` passes with the
+   two default flags).
+
+   ```bash
+   IMPL_TARGET=RewardsDistributor RECORD=1 \
+     IMPL_UPGRADE_DATA=0x29b6eca90000000000000000000000008e65d19be4ba1cc61005b4c70f21cd179512e33f \
+     npx hardhat run scripts/deploy-implementation.js --network sepolia
+   npx hardhat run scripts/validate-upgrade-safety.js --network sepolia
+   ```
+
+2. **Schedule both operations, wait `getMinDelay()`, execute both** — the upgrade FIRST, the
+   minter second (the other order would leave a window in which the minter is a distributor that
+   has no `mintRewardToken`). `<newImpl>` is the address step 1 printed.
+
+   ```bash
+   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=RewardsDistributor TIMELOCK_FN=upgradeToAndCall \
+     TIMELOCK_ARGS=<newImpl>,0x29b6eca90000000000000000000000008e65d19be4ba1cc61005b4c70f21cd179512e33f \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=TokenOverture TIMELOCK_FN=setMinter \
+     TIMELOCK_ARGS=0xf839BE391803fe7104612bfd39A12EAde5DB7a04 \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+
+   TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network sepolia   # both READY?
+
+   TIMELOCK_ACTION=execute TIMELOCK_TARGET=RewardsDistributor TIMELOCK_FN=upgradeToAndCall \
+     TIMELOCK_ARGS=<newImpl>,0x29b6eca90000000000000000000000008e65d19be4ba1cc61005b4c70f21cd179512e33f \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+   TIMELOCK_ACTION=execute TIMELOCK_TARGET=TokenOverture TIMELOCK_FN=setMinter \
+     TIMELOCK_ARGS=0xf839BE391803fe7104612bfd39A12EAde5DB7a04 \
+     npx hardhat run scripts/lp-timelock.js --network sepolia
+   ```
+
+   `onlyOwner` on `initializeV2` holds inside the execute: `upgradeToAndCall` delegatecalls it
+   from the proxy, so `msg.sender` is the timelock — the owner. Optional third operation, only if
+   `TRW` (`0x50566A6CBD1c080E0CBC3ae24b517bF5Aa22dDec`, minter still the operator) should be
+   minted through the distributor too: the same `setMinter` with
+   `TIMELOCK_TARGET_ADDRESS=0x50566A6CBD1c080E0CBC3ae24b517bF5Aa22dDec` instead of
+   `TIMELOCK_TARGET=TokenOverture`.
+
+3. **Post-checks.** The ERC-1967 implementation slot of the distributor equals `<newImpl>`
+   (re-run step 1: it reports `Current impl` = the new one and sends nothing); `asset()` returns
+   tREAL; `TokenOverture.minter()` returns the distributor proxy; `owner()`, `guardian()`,
+   `operator()`, `signer()` and `rewardTokens()` are unchanged; then a 1-token rehearsal from the
+   operator, and the `$ASSET` refusal by simulation:
+
+   ```bash
+   cast call 0xf839BE391803fe7104612bfd39A12EAde5DB7a04 "asset()(address)" --rpc-url $SEPOLIA_RPC_URL
+   cast call 0x49C5D5478e0DE581525Df80146C339A0cA9E4c89 "minter()(address)" --rpc-url $SEPOLIA_RPC_URL
+   MINT_TOKEN=OVTR MINT_TO=<a rehearsal wallet> MINT_AMOUNT=1 \
+     npx hardhat run scripts/lp-mint-reward.js --network sepolia
+   # must revert AssetNotMintable(0x8e65…33f) — a call simulated from the operator, nothing sent
+   cast call 0xf839BE391803fe7104612bfd39A12EAde5DB7a04 "mintRewardToken(address,address,uint256)" \
+     0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f <a rehearsal wallet> 1 \
+     --from 0x5576bD37419dadAab305cca998E16BcD73318A35 --rpc-url $SEPOLIA_RPC_URL
+   ```
+
+4. **Record and hand over.** Move `pendingImplementation` into `implementation` in the
+   `RewardsDistributor` entry of `deployments.json`, set the `TokenOverture` entry's `minter` to
+   the distributor proxy, add `asset` to the `RewardsDistributor` entry, and commit. Hand the new
+   implementation address to the backend owner (krumbgf) for
+   `LP_EXPECTED_IMPLEMENTATION_DISTRIBUTOR`, and recreate the api and worker containers. The
+   indexer and the backend should learn the two new events, `RewardTokenMinted(token, to, amount,
+   timestamp)` and `AssetSet(asset)` (the ABI is `abi/RewardsDistributor.json`); tokens minted
+   to a wallet move no claim ledger.
+
+Rehearsed on a LOCAL fork of Sepolia at block 11,861,835 (2026-10-07): with the timelock and the
+operator impersonated, the upgrade with `initializeV2(tREAL)` and the `setMinter` both executed,
+every v1 field kept its value, the operator minted 1 `$OVTR` to a fresh wallet and 5 into the
+distributor, `mintRewardToken(tREAL, …)` reverted `AssetNotMintable(tREAL)`, and a second
+`initializeV2` reverted.
 
 ### Replacing the timelock
 
@@ -330,7 +458,9 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
      npx hardhat run scripts/lp-timelock.js --network sepolia
    ```
 
-   `0x` is the `data` argument and means "no reinitializer call". Each command prints its
+   `0x` is the `data` argument and means "no reinitializer call". The distributor's v1 -> v2
+   upgrade of 2026-10-07 is the exception: its `data` is `initializeV2($ASSET)` — see
+   "Activating mintRewardToken on a live stack". Each command prints its
    operation id; keep them, `TIMELOCK_ACTION=status TIMELOCK_ID=<id>` reads one back.
 
 4. **Wait out `getMinDelay()`** — 300 s on this stack. `TIMELOCK_ACTION=pending` lists every

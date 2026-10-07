@@ -12,6 +12,13 @@ voucher type; the emission schedule moved on-chain into `LPEpochRegistry`; all f
 contracts are UUPS proxies owned by the timelock; the vault gained the bonus-escrow
 notifications, OFF at launch (item 15). Items 1, 3, 5, 6, 10 and 14 were rewritten for it.
 
+Revision 2026-10-07: the Overture token's minter is the `RewardsDistributor` PROXY, and the
+operator mints through the distributor's new operator-only `mintRewardToken(token, to, amount)`
+— to a user's wallet or into the distributor — outside the claim flow. `$ASSET` is refused there
+by address (`AssetNotMintable`), from a new `asset` field appended to the distributor's
+namespace; a live v1 proxy gets it from `initializeV2` inside the upgrade. New item 16; items 1,
+3, 5, 10 and 14 were touched for it.
+
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
 ---
@@ -24,7 +31,7 @@ claimed yet. There is no "only after the program ends" gate — unlike
 `StakingPool.recoverExcessRewards()`, which requires `block.timestamp >= endEpoch`.
 
 Deliberate. Every reward token is funded ad hoc by the company (the operator mints `$OVTR` into
-the distributor and transfers `$ASSET` into it) and the vouchers are cumulative with no program
+the distributor through `mintRewardToken` and transfers `$ASSET` into it) and the vouchers are cumulative with no program
 end date on-chain, so there is no schedule a timing rule could key off; any threshold would be an
 arbitrary number that also blocks legitimate cleanup — overfunding, a retired reward token, a
 stray transfer of an unrelated token. Two properties bound the exposure:
@@ -98,8 +105,9 @@ call bricked every admin path permanently, with no recovery.
 
 Who owns what after a deployment — item 14 holds the full matrix: all five proxies are owned by
 the `LPTimelock` from their own deployment transaction onwards. Nothing is handed over after the
-deploy; the operator multisig holds the operator tier (and the Overture minter role) by
-`initialize`, not by ownership.
+deploy; the operator multisig holds the operator tier by `initialize`, not by ownership — and
+with it `mintRewardToken`, its only road to minting `$OVTR`, since the Overture token's minter is
+the distributor proxy (item 16).
 
 **What a LOST owner (a dead timelock, decision T19 case 2) still costs, per contract.**
 Renouncing is impossible, but the timelock can still become unusable, so this table is the
@@ -107,11 +115,11 @@ failure analysis:
 
 | Contract | Lost | Survives |
 |---|---|---|
-| `TokenOverture` | the upgrade path, `setMinter` | transfers, `permit`, `burn`; `mint` by the standing minter keeps working |
+| `TokenOverture` | the upgrade path, `setMinter` | transfers, `permit`, `burn`; `mint` by the standing minter — the distributor, driven by the operator's `mintRewardToken` — keeps working |
 | `LPZapper` | the upgrade path, `setOperator` | `zapIn` / `zapInWithPermit`; the operator's `setTwapParams`, `sweep`, `rescuePosition` |
 | `LPEpochRegistry` | the upgrade path, `setOperator` | the operator's whole schedule (`scheduleEpoch`, `setEpochAmount`, `updateEpochBounds`, `cancelEpoch`) — the program keeps running for every token already registered |
 | `LPStakingVault` | the upgrade path, `setZapper`, `setBonusEscrow`, `setOperator` | everything else; the three tiers are independent slots, so the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` / `setGuardian` stay. `stake` and `unstake` were never the owner's to lose |
-| `RewardsDistributor` | the upgrade path, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setOperator` | `claim` for every registered token whose claims are open; the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcess` and `setGuardian` |
+| `RewardsDistributor` | the upgrade path, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setOperator` | `claim` for every registered token whose claims are open; the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcess`, `mintRewardToken` and `setGuardian` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
 because `unstake` is permissionless and unpausable, and claims of open tokens keep paying. The
@@ -169,12 +177,14 @@ to the sender. Documented in natspec at all four functions.
 Decision T7/T8 (2026-10-05): there is NO cap, throttle, budget, running total or schedule bound
 on what the distributor pays, for any token. The per-epoch mint cap of the pre-v1 reward token is
 gone — `setEpochCap`, `armNextEpoch`, `cancelNextEpoch`, `effectiveEpoch`, `EpochMintCapExceeded`
-and the pending-epoch machinery no longer exist — and the distributor never mints.
+and the pending-epoch machinery no longer exist — and a claim never mints. (Minting happens only
+outside the claim flow, when the operator calls `mintRewardToken`, item 16.)
 
 How a claim is paid now:
 
-- Every reward token is PRE-FUNDED. The operator mints `$OVTR` INTO the distributor (it is the
-  Overture minter) and transfers `$ASSET` into it (`scripts/lp-fund-rewards.js`).
+- Every reward token is PRE-FUNDED. The operator mints `$OVTR` INTO the distributor through
+  `RewardsDistributor.mintRewardToken` (the distributor proxy is the Overture minter) and
+  transfers `$ASSET` into it (`scripts/lp-fund-rewards.js`).
 - `claim(token, cumulativeAmount, deadline, signature)` pays exactly
   `cumulativeAmount - claimed[token][user]` by `safeTransfer` out of the distributor's own balance.
 - When that balance is short the claim reverts `InsufficientFunds(token, needed, balance)` —
@@ -348,7 +358,9 @@ What changed with v1 (2026-10-05):
   starts empty.
 - **The old mitigations are gone.** The per-epoch mint cap that used to bound a replay, and the
   "re-point the token's minter at a new distributor" escape hatch, no longer exist: the token has
-  no cap and the distributor never mints.
+  no cap, and a claim never mints. (Since 2026-10-07 the distributor IS the Overture minter, but
+  only the operator's `mintRewardToken` reaches it, outside the claim flow — item 16. A
+  replacement distributor would still need the timelock's `setMinter` before it could mint.)
 - **The trust note that comes with it** (item 5): with no bound anywhere, a leaked signer key can
   take the funded balance of every token until the guardian pauses claims.
 
@@ -547,18 +559,32 @@ mitigation still has to be a switch a key outside the timelock can throw by itse
   holder, so even a role change is a scheduled, publicly visible operation.
 - The distributor's implementation constructor takes NO arguments (every reward token is proxy
   storage) and only calls `_disableInitializers()`.
-  `initialize(owner_, guardian_, operator_, signer_, RewardTokenInit[] tokens_)` runs on the
-  proxy, inside the proxy's own deployment transaction, and `owner_` is the timelock from that
+  `initialize(owner_, guardian_, operator_, signer_, asset_, RewardTokenInit[] tokens_)` runs on
+  the proxy, inside the proxy's own deployment transaction, and `owner_` is the timelock from that
   transaction onwards — no key ever holds the owner tier on a proxy, not even for one block
   (finding N-7, 2026-09-10).
 - The distributor's mutable state lives in ONE ERC-7201 namespace,
   `erc7201:real.lp.storage.RewardsDistributor`, at
   `0x111abb03172b09f746748b28040854f0c669e7caa9373080b8bbaa7c3af02e00`, in the v1 layout
   `signer`+`paused` | `guardian` | `operator` | `address[] rewardTokens` |
-  `mapping(token => RewardToken)` | `mapping(token => mapping(user => claimed))`. The literal is
-  pinned in the contract and re-derived by `test_Storage_LivesAtThePinnedErc7201Slot`, which also
-  reads `claimed[token][user]` at `keccak(user, keccak(token, base + 5))`: if that slot ever moved,
+  `mapping(token => RewardToken)` | `mapping(token => mapping(user => claimed))`, and, APPENDED in
+  v2 (2026-10-07) after every v1 field, `address asset` at base + 6 — the `$ASSET` token
+  `mintRewardToken` refuses by address. The literal is pinned in the contract and re-derived by
+  `test_Storage_TheV1LayoutLivesAtThePinnedErc7201Slot`, which also reads `claimed[token][user]`
+  at `keccak(user, keccak(token, base + 5))` and `asset` at base + 6: if a slot ever moved,
   every ledger would read zero and every lifetime voucher would pay out again.
+- **The distributor's v1 -> v2 migration.** A proxy deployed at v1 (Sepolia stack #6) never wrote
+  base + 6. It is upgraded with ONE timelock operation,
+  `upgradeToAndCall(newImplementation, abi.encodeCall(initializeV2, ($ASSET)))`:
+  `initializeV2(address)` is `reinitializer(2) onlyOwner`, so it runs once, inside the upgrade,
+  where the delegatecall keeps `msg.sender` = the timelock = the owner. Same check and event as
+  `initialize` (zero -> `ZeroAddress`, then `AssetSet`). Upgrading WITHOUT that call would leave
+  `asset` zero, and `mintRewardToken` would then compare against nothing — the runbook
+  (`scripts/README.md`, "Activating mintRewardToken on a live stack") carries the calldata. On a
+  proxy born at v2, `initialize` (version 1) already set the field and `initializeV2` stays
+  callable once by the owner, where it would re-point it — an owner-tier change, public for the
+  timelock delay. The appended field validates as a legal successor of the stack #6 layout
+  recorded in `.openzeppelin/sepolia.json`.
 - `LPEpochRegistry`: constructor `(distributor)` (immutable) + `_disableInitializers()`;
   `initialize(owner_, operator_)`; namespace `erc7201:real.lp.storage.LPEpochRegistry` at
   `0x9ecda8e3fad78b619c97eff816bc5317dd5b4101194b9333568095fc1dd01f00`.
@@ -633,9 +659,9 @@ now.
 
 | tier | functions | why |
 |---|---|---|
-| owner | `_authorizeUpgrade`, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator` | a code change, a new reward token, opening or closing a token's claims, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
+| owner | `_authorizeUpgrade`, `initializeV2` (once, inside the v1 -> v2 upgrade), `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator` | a code change, a new reward token, opening or closing a token's claims, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
 | guardian | `setPaused` | a bug in the claim path — or a leaked signer key — has to be stoppable in minutes |
-| operator | `setSigner`, `recoverExcess`, **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, a token leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
+| operator | `setSigner`, `recoverExcess`, `mintRewardToken` (never `$ASSET`), **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, a token leaves the contract only towards the operator, minting is treasury work the hot key must never do, and a hot guardian key has to be revocable without a delay |
 
 `LPStakingVault`:
 
@@ -651,7 +677,7 @@ pause):
 | contract | owner (timelock) | operator (multisig) |
 |---|---|---|
 | `LPEpochRegistry` | `_authorizeUpgrade`, `setOperator` | `scheduleEpoch`, `setEpochAmount`, `updateEpochBounds`, `cancelEpoch` (decision T9: arming the next epoch is immediate) |
-| `TokenOverture` | `_authorizeUpgrade`, `setMinter` | — ; the **minter** role (the operator multisig at launch) holds `mint` |
+| `TokenOverture` | `_authorizeUpgrade`, `setMinter` | — ; the **minter** role holds `mint`: the `RewardsDistributor` proxy since 2026-10-07, so the operator mints through `mintRewardToken` |
 | `LPZapper` | `_authorizeUpgrade`, `setOperator` | `setTwapParams`, `sweep`, `rescuePosition` (decision Q-d) |
 
 Three rules follow from the matrix, and each is asserted in both directions on the vault and the
@@ -765,9 +791,11 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   nonce prediction it rests on and for what happens if the prediction misses.
 - All five proxies are deployed timelock-owned; nothing is deployer-owned and nothing is
   nominated at the end of the run (until 2026-10-05 the reward token and the zapper were
-  deployer-owned and nominated to the operator). The Overture token is born with the operator
-  as its minter, and the distributor with both launch reward tokens, so the deploy needs no
-  wiring transaction at all.
+  deployer-owned and nominated to the operator). The Overture token is born with the
+  distributor PROXY as its minter — the script predicts the proxy's address from the deployer's
+  nonce, exactly as it predicts the zapper's, and stops the run if the distributor lands
+  elsewhere — and the distributor with `$ASSET` recorded and both launch reward tokens, so the
+  deploy needs no wiring transaction at all.
 
 ### Runbook — operating the timelock
 
@@ -838,7 +866,7 @@ The thrown error names that command and both addresses, so the repair does not h
 reconstructed from the logs.
 
 **What still needs the Safe after the deploy.** No ownership step. The operator multisig funds
-the distributor (`scripts/lp-fund-rewards.js`: mint `$OVTR` into it, transfer `$ASSET` into it)
+the distributor (`scripts/lp-fund-rewards.js`: `mintRewardToken` `$OVTR` into it, transfer `$ASSET` into it)
 and schedules epoch 1 at least 30 minutes ahead (`scripts/lp-epoch.js`). Both are operator
 calls with no delay.
 
@@ -957,3 +985,60 @@ Tests: `test/forge/unit/VaultBonusHooks.t.sol` —
 `test_Unstake_StillWorksWhileTheEscrowRefusesEveryRebalance`, the three `test_HookGas_*` cases and
 `test_Storage_BonusEscrowSitsAtNamespaceSlotFive`; Hardhat: the "Bonus escrow hooks" block of
 `test/lp-staking/LPStakingVault.test.js`.
+
+## 16. `mintRewardToken`: the operator mints through the distributor; `$ASSET` never (2026-10-07)
+
+Decision 2026-10-07 (Vladimir): every reward token the program DEPLOYS carries the same
+`mint(address to, uint256 amount)` with exactly one minter, pinned as
+`interfaces/IMintableRewardToken.sol` (`TokenOverture is IMintableRewardToken`; its bytecode is
+unchanged). That minter is the `RewardsDistributor` PROXY, and the distributor gained one
+operator-only function, `mintRewardToken(token, to, amount)`, which mints a registered reward token
+to ONE concrete wallet: a user's wallet, or the distributor itself to pre-fund claims.
+
+What a reviewer will ask, answered:
+
+- **Did the operator gain power?** No. Before this change the operator multisig WAS the
+  `$OVTR` minter and could mint any amount to any address with no delay. It still can, through
+  the distributor, and nothing caps it — the same trust, one hop longer. What changed is WHO
+  holds the mint right on the token: a contract whose only path to it is operator-gated.
+- **Can a leaked signer or guardian key mint?** No. `mintRewardToken` is `onlyOperator`; the
+  guardian and the owner are rejected with `NotOperator`. A claim never mints: it pays by transfer
+  out of the funded balance, exactly as before (item 5).
+- **`$ASSET` is refused by ADDRESS, whoever calls.** `$ASSET` is a token this program does not
+  control. The distributor stores it (`asset`, appended to the namespace, item 14) and the FIRST
+  check of `mintRewardToken`'s body is `token == asset -> AssetNotMintable(token)`, before the
+  token is ever called — so even a `$ASSET` that exposed a `mint` the distributor could reach
+  would never be asked. Measured on a twin whose recorded `asset` is a token that WOULD mint for
+  it (`test_MintRewardToken_RefusesAssetEvenWhenTheTokenWouldMint`).
+- **Any other token's refusal is not wrapped.** A registered token with no `mint` reverts inside
+  the token; a token whose minter is not this proxy reverts with its own error
+  (`TokenOverture.NotMinter(distributor)`). Check order: `NotOperator` -> `AssetNotMintable` ->
+  `UnknownRewardToken` (registered is the gate; `enabled` and `claimsEnabled` are ignored) ->
+  `ZeroAddress` (`to`) -> `ZeroAmount` -> the token's `mint` -> `RewardTokenMinted(token, to,
+  amount, timestamp)`.
+- **No `nonReentrant`.** The function writes no distributor storage; a token that calls back
+  during `mint` finds no half-written state.
+- **No ledger moves.** `claimed[token][user]` is written by `claim` alone; tokens minted to a
+  user's wallet are outside the voucher accounting, and the backend must treat them that way.
+- **The deploy.** `scripts/deploy-lp-staking.js` predicts the distributor proxy's CREATE address
+  (token implementation at nonce M, token proxy M + 1, distributor implementation M + 2,
+  distributor proxy M + 3), passes it to the token's `initialize` as the minter, and stops the
+  run with the repair named if the distributor lands elsewhere. `scripts/add-reward-token.js`
+  defaults a new token's minter to the distributor proxy.
+- **A live stack** (stack #6 was deployed with the operator as minter) is activated by two
+  timelock operations: `RewardsDistributor.upgradeToAndCall(newImpl, initializeV2($ASSET))` and
+  `TokenOverture.setMinter(distributor proxy)` — `scripts/README.md`, "Activating mintRewardToken
+  on a live stack". Until both have executed, `scripts/lp-fund-rewards.js` falls back to the
+  direct `TokenOverture.mint` when the signer is still the minter, and says so.
+
+Tests: `test/forge/unit/DistributorBranches.t.sol` — the `test_MintRewardToken_*` cases (every
+branch: wallet, distributor, unregistered, zero recipient, zero amount, check order, switches
+ignored, the token's `NotMinter` bubbling, `$ASSET` by address twice, a token without `mint`,
+operator only) and the `test_InitializeV2_*` cases (the atomic upgrade from the v1 state, once,
+owner only, zero rejected with the whole upgrade, a fresh proxy, the implementation);
+`test/forge/unit/AccessControl.t.sol` — `mintRewardToken` and `initializeV2` across the tier
+matrix; `test/forge/unit/TokenOverture.t.sol:test_Mint_CarriesTheIMintableRewardTokenShape`;
+Hardhat: the `mintRewardToken` block and the timelock migration in
+`test/lp-staking/RewardsDistributor.test.js`, the activation in
+`test/lp-staking/DeployImplementation.test.js`, and S9 / A29 of both integration suites (funding
+through `lp-fund-rewards.js` and `lp-mint-reward.js`).
