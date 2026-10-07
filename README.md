@@ -555,3 +555,8 @@ side formats it. Mocha loads only `.js`, so the `.t.sol` files are invisible to
 `git submodule update --init --recursive`. `scripts/run-forge.mjs` wraps `forge` because forge
 does not read `.env` — it resolves the fork endpoint, exports it, and runs forge. Bare
 `forge test` works too; the fork tier then skips with a reason.
+
+## License
+
+The LP staking contracts in `contracts/lp-staking/` are licensed GPL-2.0-or-later (full text in
+`LICENSE`), because they build on Uniswap v3 libraries that are GPL-2.0-or-later.

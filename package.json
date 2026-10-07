@@ -19,7 +19,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "GPL-2.0-or-later",
   "type": "commonjs",
   "devDependencies": {
     "@nomicfoundation/hardhat-ledger": "^1.2.2",
