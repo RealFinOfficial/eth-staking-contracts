@@ -9,5 +9,129 @@
       "endEpoch": 1794330000
     }
   },
-  "11155111": {}
+  "11155111": {
+    "UniswapV3Pool": {
+      "address": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
+      "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "fee": 3000,
+      "observationCardinality": 150
+    },
+    "TokenOverture": {
+      "address": "0x49C5D5478e0DE581525Df80146C339A0cA9E4c89",
+      "deployTx": "0x7275efff312ae133a6fb2acbf8c5909b8d5b2d249c501b42a91aae212f2baff2",
+      "block": 11854179,
+      "implementation": "0xf65A509644B19962a98D86554CAf905F55e9c9bD",
+      "implementationTx": "0xd641125be6525315407a6aef92f9c65075cfd5bec07cea4937538bb6c77126f1",
+      "name": "Overture",
+      "symbol": "OVTR",
+      "decimals": 18,
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04"
+    },
+    "RewardsDistributor": {
+      "address": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
+      "deployTx": "0xa22ebc58b22846b4776798640085e1695db1656cb13fef30d6969df5bdaeddf5",
+      "block": 11854181,
+      "implementation": "0xF6f1377d68e3A7AdA590D3f1520c64B1738b1ecA",
+      "implementationTx": "0x74978593f7a109d96a8d42b3cbfd484394a626d34db48d89927d978d02e18219",
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "rewardTokens": [
+        {
+          "address": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+          "symbol": "tREAL",
+          "decimals": 18,
+          "conditional": true,
+          "claimsEnabled": false
+        },
+        {
+          "address": "0x49C5D5478e0DE581525Df80146C339A0cA9E4c89",
+          "symbol": "OVTR",
+          "decimals": 18,
+          "conditional": false,
+          "claimsEnabled": true
+        }
+      ]
+    },
+    "LPStakingVault": {
+      "address": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "deployTx": "0xb03f61c5bced266621ff14325fc83cd5342aaf4fd15b197d521c6838874f8467",
+      "block": 11854185,
+      "implementation": "0x22ba27E180A78A484C14b6447f82a59CAe1D5606",
+      "implementationTx": "0x785fc9d87def540bd88f9a139f98b4a74ca1d727c59779526824daa01a3e723f",
+      "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
+      "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "fee": 3000,
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "zapper": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
+      "bonusEscrow": "0x0000000000000000000000000000000000000000"
+    },
+    "LPZapper": {
+      "address": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
+      "deployTx": "0x9ae7e8696998e6147fed845ebb62825ae6ca9feca6efa49860e4df7a09f1765d",
+      "block": 11854187,
+      "implementation": "0xbcC6c8E65bAF6Dc2eBf50Fa7e121022AF2fC716a",
+      "implementationTx": "0x0d0afbf82351ee8610d8c874d6540206b3742a37ee4b27ccb026264ebec5ea5f",
+      "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "TimelockController": {
+      "address": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "deployTx": "0xa2fe0432635087a7493499b4e0f16c643dba7df33820cfb2106d02446eccb81c",
+      "block": 11854177,
+      "minDelay": 300,
+      "proposers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "executors": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "cancellers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "admin": "0x0000000000000000000000000000000000000000"
+    },
+    "LPEpochRegistry": {
+      "address": "0x818e60D675d3846cb955065DA2a2292497EBfb5e",
+      "deployTx": "0x12c8fb15b6c57e664e91263d6bf0efec2eb1dee3fc1af68463d722775dcf9151",
+      "block": 11854183,
+      "implementation": "0xBbEde547e6Da9AD557083Cd013682f5a8b0aAf0c",
+      "implementationTx": "0x95465a872d266c760815de6316423fd7340f4f77baa085afd4c6cb3ce8ed8941",
+      "distributor": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "interval": 900,
+      "scheduleMargin": 1800
+    },
+    "RewardToken:TRW": {
+      "address": "0x50566A6CBD1c080E0CBC3ae24b517bF5Aa22dDec",
+      "deployTx": "0x19db484556b2321d33ebf6cfa01670ba4e8f6e841b5ae3a1b0d8bf022a9b1a14",
+      "block": 11854199,
+      "implementation": "0xbf7070D03840a1B862fDaC5f804eb4acA5A3498A",
+      "implementationTx": "0x10df6b4ff8381906bedc3237d0e9f68fad3b27c3c0dd0db83e27aa8683f4dc39",
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
+      "name": "Test Reward Three",
+      "symbol": "TRW",
+      "decimals": 18,
+      "conditional": false,
+      "claimsEnabled": true,
+      "distributor": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
+      "addedVia": "timelock addRewardToken (pending until executed)"
+    }
+  }
 }
