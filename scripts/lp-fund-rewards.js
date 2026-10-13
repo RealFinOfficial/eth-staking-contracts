@@ -29,10 +29,11 @@ const pools = require("./lib/pools");
 // ──────────────────────── environment ────────────────────────
 //
 //   LP_FUND_OVTR_AMOUNT    $OVTR to mint into the distributor, in WHOLE tokens (decimals are
-//                          read from chain). Empty or 0 skips the $OVTR leg. PLACEHOLDER:
-//                          the launch figure is to be decided with Brandon.
+//                          read from chain). Empty or 0 skips the $OVTR leg. DECIDED for the
+//                          mainnet launch (13 Oct 2026): exactly 7,500, all of it for epoch 1.
 //   LP_FUND_ASSET_AMOUNT   $ASSET to transfer into the distributor, in whole tokens. Empty or 0
-//                          skips the $ASSET leg. PLACEHOLDER, same as above.
+//                          skips the $ASSET leg. PLACEHOLDER: the launch figure is still to be
+//                          decided (at least 3,000, the epoch-1 amount).
 //   LP_DISTRIBUTOR_ADDRESS overrides the deployments.json lookup of RewardsDistributor
 //   LP_OVERTURE_ADDRESS    overrides the deployments.json lookup of TokenOverture
 //   LP_ASSET               overrides the deployments.json lookup of the $ASSET token
