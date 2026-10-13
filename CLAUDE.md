@@ -165,7 +165,9 @@ calldata, and `upgrades.forceImport`, which records the storage layout in
 
 After the deploy the operator multisig, with no delay: funds the distributor
 (`scripts/lp-fund-rewards.js`, `$OVTR` through `mintRewardToken`: `LP_FUND_OVTR_AMOUNT`, `LP_FUND_ASSET_AMOUNT`, placeholders to be
-decided with Brandon) and schedules epoch 1 at least 30 minutes ahead (`scripts/lp-epoch.js`).
+decided with Brandon) and schedules epoch 1 at least 30 minutes ahead (`scripts/lp-epoch.js`; the epoch-1
+amounts are decided: 3,000 `$ASSET` and 7,500 `$OVTR`, `LP_EPOCH1_ASSET_AMOUNT` /
+`LP_EPOCH1_OVTR_AMOUNT`, whole tokens; only the funding amounts remain placeholders).
 A new reward token later: `scripts/add-reward-token.js` + the `addRewardToken` timelock
 operation, then funding and `lp-epoch.js set-amount`.
 

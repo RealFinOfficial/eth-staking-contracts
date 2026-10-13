@@ -148,7 +148,7 @@ const REGISTRY_SCHEDULE_MARGIN = 1800; // LPEpochRegistry.SCHEDULE_MARGIN — 30
 const EPOCH_LENGTH = 7 * 24 * 3600;
 const EPOCH_ONE = 1n;
 const EPOCH_TWO = 2n;
-/** Suite quantities only. Production quantities are LP_EPOCH1_* placeholders (Brandon). */
+/** Suite quantities only. Production epoch 1 (LP_EPOCH1_*, Brandon): 7,500 $OVTR, 3,000 $ASSET. */
 const EPOCH_ONE_OVTR = TOKENS(1_000_000);
 const EPOCH_ONE_ASSET = ASSET(3_000);
 const EPOCH_TWO_OVTR = TOKENS(500_000);
