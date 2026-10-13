@@ -163,13 +163,14 @@ Every proxy is born through `scripts/lib/proxies.js` `deployProxyPair`:
 calldata, and `upgrades.forceImport`, which records the storage layout in
 `.openzeppelin/<network>.json` (committed on named networks; OS temp dir on dev chains).
 
-After the deploy the operator multisig, with no delay: funds the distributor
-(`scripts/lp-fund-rewards.js`, `$OVTR` through `mintRewardToken`: `LP_FUND_OVTR_AMOUNT=7500`, decided
-2026-10-13 — exactly 7,500 `$OVTR` minted at launch, all of it epoch 1, nothing more until a later epoch is
-decided; `LP_FUND_ASSET_AMOUNT` is still a placeholder to be decided with Brandon) and schedules epoch 1 at
-least 30 minutes ahead (`scripts/lp-epoch.js`; the epoch-1 amounts are decided: 3,000 `$ASSET` and
-7,500 `$OVTR`, `LP_EPOCH1_ASSET_AMOUNT` / `LP_EPOCH1_OVTR_AMOUNT`, whole tokens; only the `$ASSET`
-funding amount remains a placeholder).
+After the deploy the operator multisig, with no delay, funds the distributor and schedules epoch 1.
+Funding uses `scripts/lp-fund-rewards.js` (`$OVTR` through `mintRewardToken`). Both funding amounts are
+decided (2026-10-13): `LP_FUND_OVTR_AMOUNT=7500` and `LP_FUND_ASSET_AMOUNT=3000`, so at launch exactly
+7,500 `$OVTR` are minted and exactly 3,000 `$ASSET` are moved into the distributor, all of it epoch 1.
+Nothing more is minted until a later epoch is decided. Epoch 1 is scheduled at least 30 minutes ahead
+(`scripts/lp-epoch.js`). The epoch-1 amounts are decided: 3,000 `$ASSET` and 7,500 `$OVTR`
+(`LP_EPOCH1_ASSET_AMOUNT` / `LP_EPOCH1_OVTR_AMOUNT`, whole tokens). The only open launch item is the
+start time of epoch 1.
 A new reward token later: `scripts/add-reward-token.js` + the `addRewardToken` timelock
 operation, then funding and `lp-epoch.js set-amount`.
 
