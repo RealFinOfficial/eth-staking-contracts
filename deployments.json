@@ -175,6 +175,19 @@
             "0xB4984AaEBa5BB73D5b9D78b93f0Aa9f863DC6FB9",
             "0xD18469Ef8E5630263dC36AAe7CE502700cBa06d4"
           ]
+        },
+        {
+          "id": "0x27b61b49ccf8edbe25f81453c673d25f5c086cf0c76540683380f26ed91971cf",
+          "label": "apebond-sepolia-90d",
+          "enabled": true,
+          "tickLower": -291360,
+          "tickUpper": -288960,
+          "bonusCliffSeconds": "7776000",
+          "bonusBps": 1000,
+          "minBonusAmount": "1000000000000000000",
+          "callers": [
+            "0xB4984AaEBa5BB73D5b9D78b93f0Aa9f863DC6FB9"
+          ]
         }
       ],
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D"
