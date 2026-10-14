@@ -142,12 +142,12 @@
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "adapter": "0x0043B79C98B3f294cF586E47f886FA1d3B3B602f"
+      "adapter": "0xC84994647Fa4817bb506bFa0607F927A3b7c46f7"
     },
     "ApeBondPositionAdapter": {
-      "address": "0x0043B79C98B3f294cF586E47f886FA1d3B3B602f",
-      "deployTx": "0x556742e2d6f31f4a9f7d3638e223fada33b777f1332515df4a53d12581d0d85e",
-      "block": 11912762,
+      "address": "0xC84994647Fa4817bb506bFa0607F927A3b7c46f7",
+      "deployTx": "0xb89d2f111a94d8c2d0f99d29826992b44e6db0069ecc7c6a54a677e8180e2686",
+      "block": 11913277,
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "escrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
       "positionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
@@ -167,8 +167,11 @@
           "id": "0xafbf246b355e4c751c9c4663c41070c2ac062e3c7806a4dc45bacfbe34962731",
           "label": "apebond-sepolia-1",
           "enabled": true,
-          "tickLower": -291360,
-          "tickUpper": -288960,
+          "downTicks": 6932,
+          "upTicks": 6932,
+          "toleranceTicks": 500,
+          "downPct": "50.00",
+          "upPct": "100.00",
           "bonusCliffSeconds": "300",
           "bonusBps": 1000,
           "minBonusAmount": "1000000000000000000",
@@ -181,8 +184,11 @@
           "id": "0x27b61b49ccf8edbe25f81453c673d25f5c086cf0c76540683380f26ed91971cf",
           "label": "apebond-sepolia-90d",
           "enabled": true,
-          "tickLower": -291360,
-          "tickUpper": -288960,
+          "downTicks": 6932,
+          "upTicks": 6932,
+          "toleranceTicks": 500,
+          "downPct": "50.00",
+          "upPct": "100.00",
           "bonusCliffSeconds": "7776000",
           "bonusBps": 1000,
           "minBonusAmount": "1000000000000000000",
@@ -192,7 +198,10 @@
         }
       ],
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "previousAdapter": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148"
+      "previousAdapter": [
+        "0x0043B79C98B3f294cF586E47f886FA1d3B3B602f",
+        "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148"
+      ]
     }
   }
 }
