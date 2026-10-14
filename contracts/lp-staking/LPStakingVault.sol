@@ -15,6 +15,13 @@ import "./interfaces/INonfungiblePositionManager.sol";
 import "./interfaces/ISwapRouter02.sol";
 import "./libraries/TwapGuard.sol";
 
+/// @dev The one escrow read the vault makes outside the two hooks: what the CURRENT escrow still
+///      owes, read by `setBonusEscrow` before the link moves. Declared locally, so the vault never
+///      imports the escrow.
+interface IBonusEscrowReservations {
+    function totalReserved() external view returns (uint256);
+}
+
 /**
  * @title LPStakingVault
  * @notice Custody vault for Uniswap V3 ASSET-USDC liquidity positions.
@@ -318,6 +325,9 @@ contract LPStakingVault is
     error InsufficientGasForBonusHook();
     /// @dev `setBonusEscrow` was given a non-zero address with no code.
     error NotAContract(address account);
+    /// @dev `setBonusEscrow` would unlink or replace `escrow` while it still owes `totalReserved`
+    ///      in reservations that are neither claimed nor forfeited (audit C-13).
+    error EscrowHasReservations(address escrow, uint256 totalReserved);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -716,12 +726,28 @@ contract LPStakingVault is
      *      must carry code: a call to an address without code reverts in the vault itself, before
      *      `try` could catch it, and would block every `unstake` — the one thing that must never
      *      happen.
+     *
+     *      AN ESCROW THAT STILL OWES IS PERMANENT (audit C-13, 7 Oct 2026). While the linked
+     *      escrow's `totalReserved()` is above zero, this call reverts {EscrowHasReservations}:
+     *      the link can be neither cleared nor moved to another escrow. Every reservation is
+     *      conditional on this vault reporting the exits and re-ranges of its position; once the
+     *      link moved, the old escrow would hear of no exit, and a holder could unstake before
+     *      the cliff and still claim the bonus after it — with the timelock's public queue
+     *      announcing the moment in advance. The link becomes movable again only when every
+     *      reservation has been CLAIMED (after its cliff, once the escrow holds the funds) or
+     *      FORFEITED (an exit before its cliff). A matured bonus nobody has claimed yet still
+     *      counts. Linking an escrow where none is linked is never refused by this rule.
      * @param newEscrow The escrow (a contract implementing {IBonusEscrowHooks}), or zero.
      */
     function setBonusEscrow(address newEscrow) external onlyOwner {
         if (newEscrow != address(0) && newEscrow.code.length == 0) revert NotAContract(newEscrow);
         LPStakingVaultStorage storage $ = _vaultStorage();
-        emit BonusEscrowSet($.bonusEscrow, newEscrow);
+        address current = $.bonusEscrow;
+        if (current != address(0)) {
+            uint256 reserved = IBonusEscrowReservations(current).totalReserved();
+            if (reserved != 0) revert EscrowHasReservations(current, reserved);
+        }
+        emit BonusEscrowSet(current, newEscrow);
         $.bonusEscrow = newEscrow;
     }
 

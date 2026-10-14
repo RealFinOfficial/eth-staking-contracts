@@ -48,6 +48,7 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-10-14 (audit C-13: vault lines 199 -> 203, branches 35 -> 37) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-12: adapter lines 126 -> 128, branches 34 -> 35) ──
 // ── Pinned floors, re-measured 2026-10-07 (`RewardsDistributor.mintRewardToken`) ──────────────
 // ── Pinned floors, re-measured 2026-10-05 (lane 2: the B.3 ApeBond refactor on lane 1) ──────
@@ -56,7 +57,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // |-----------------------------|-------------------|-----------------|
 // | ApeBondPositionAdapter.sol  | 100.00% (128/128) | 100.00% (35/35) |
 // | BonusEscrow.sol             |  97.30% (108/111) | 100.00% (23/23) |
-// | LPStakingVault.sol          |  97.99% (195/199) | 100.00% (35/35) |
+// | LPStakingVault.sol          |  98.03% (199/203) | 100.00% (37/37) |
 // | LPZapper.sol                |  96.08% (98/102)  | 100.00% (20/20) |
 // | RewardsDistributor.sol      |  97.83% (135/138) | 100.00% (22/22) |
 // | LPEpochRegistry.sol         |  96.46% (109/113) | 100.00% (21/21) |
@@ -119,21 +120,21 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // than a gap (line numbers as of lane 2: the vault's moved with the allowlist). Each is a call site, an assembly body, an empty OZ initializer or a jump whose effect is
 // asserted by a test that passes in the same run; the inlined site simply loses its mapping:
 //
-//   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:213`, `BonusEscrow.sol:205`,
+//   * the ERC-7201 accessor bodies `$.slot := …` — `LPStakingVault.sol:220`, `BonusEscrow.sol:205`,
 //     `LPZapper.sol:147`, `RewardsDistributor.sol:168`, `LPEpochRegistry.sol:93`,
 //     `TokenOverture.sol:90`, `libraries/TwapGuard.sol:126`; every getter reaches them and each
 //     file's `test_Storage_*` test reads the pinned slot directly.
-//   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:415`,
+//   * `_disableInitializers();` in each implementation constructor — `LPStakingVault.sol:425`,
 //     `BonusEscrow.sol:269`,
 //     `LPZapper.sol:257`, `RewardsDistributor.sol:215`, `LPEpochRegistry.sol:112`,
 //     `TokenOverture.sol:98`; each `test_Constructor_DisablesTheImplementationsInitializers`
 //     proves it ran.
 //   * the empty OpenZeppelin initializers — `__Ownable2Step_init();` at
-//     `LPStakingVault.sol:446`, `BonusEscrow.sol:285`, `LPZapper.sol:276`, `RewardsDistributor.sol:243`,
+//     `LPStakingVault.sol:456`, `BonusEscrow.sol:285`, `LPZapper.sol:276`, `RewardsDistributor.sol:243`,
 //     `LPEpochRegistry.sol:120`, `TokenOverture.sol:117`, and `__ERC20Burnable_init();` at
 //     `TokenOverture.sol:114` — kept because the upgrades plugin validates the parent-initializer
 //     chain.
-//   * `_checkTwapDeviation();` — `LPStakingVault.sol:1073`, `LPZapper.sol:545`.
+//   * `_checkTwapDeviation();` — `LPStakingVault.sol:1099`, `LPZapper.sol:545`.
 //   * `break;` in the token scan of `setEpochAmount` — `LPEpochRegistry.sol:186`; executed by
 //     `test_SetEpochAmount_ChangesALiveNotStartedEpochAndAnnouncesIt` and
 //     `test_SetEpochAmount_AppendsANewTokenExactlyOnce`, both arms of its `if` are covered.
@@ -150,8 +151,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 23, minHit: 23},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 199, minHit: 195},
-    branches: {found: 35, minHit: 35},
+    lines: {found: 203, minHit: 199},
+    branches: {found: 37, minHit: 37},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},

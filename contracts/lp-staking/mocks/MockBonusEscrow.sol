@@ -65,12 +65,20 @@ contract MockBonusEscrow is IBonusEscrowHooks {
     Snapshot internal _lastOld;
     Snapshot internal _lastNew;
 
+    /// @dev What the vault's `setBonusEscrow` reads before it moves the link (audit C-13). Zero
+    ///      unless a test sets it, so this mock can be unlinked like an escrow that owes nothing.
+    uint256 public totalReserved;
+
     constructor(address vault_) {
         vault = vault_;
     }
 
     function setMode(Mode mode_) external {
         mode = mode_;
+    }
+
+    function setTotalReserved(uint256 totalReserved_) external {
+        totalReserved = totalReserved_;
     }
 
     function onUnstake(uint256 tokenId) external {

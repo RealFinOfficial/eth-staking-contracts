@@ -156,6 +156,28 @@ contract VaultBonusHooksTest is LocalHarness {
         assertEq(vault.bonusEscrow(), address(0), "the refused link is not stored");
     }
 
+    /// @dev Audit C-13: while the CURRENT escrow owes anything, the link can be neither cleared
+    ///      nor moved — the old escrow would hear of no exit, and a holder could leave before the
+    ///      cliff and still claim. What the INCOMING escrow owes is not the question.
+    function test_SetBonusEscrow_RefusesToMoveTheLinkWhileTheEscrowOwes() public {
+        MockBonusEscrow second = new MockBonusEscrow(address(vault));
+        second.setTotalReserved(5e18);
+        vault.setBonusEscrow(address(escrow));
+        escrow.setTotalReserved(7e18);
+
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.EscrowHasReservations.selector, address(escrow), 7e18));
+        vault.setBonusEscrow(address(0));
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.EscrowHasReservations.selector, address(escrow), 7e18));
+        vault.setBonusEscrow(address(second));
+        assertEq(vault.bonusEscrow(), address(escrow), "the link did not move");
+
+        escrow.setTotalReserved(0);
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit LPStakingVault.BonusEscrowSet(address(escrow), address(second));
+        vault.setBonusEscrow(address(second));
+        assertEq(vault.bonusEscrow(), address(second), "nothing owed: the link moves");
+    }
+
     /// @dev Zero is the off switch: after an unlink, an exit and a rebalance call nobody.
     function test_SetBonusEscrow_ZeroSwitchesTheNotificationsOff() public {
         vault.setBonusEscrow(address(escrow));

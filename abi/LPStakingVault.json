@@ -95,6 +95,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "escrow",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "totalReserved",
+        "type": "uint256"
+      }
+    ],
+    "name": "EscrowHasReservations",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "FailedCall",
     "type": "error"

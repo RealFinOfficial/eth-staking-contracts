@@ -266,6 +266,46 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         assertFalse(f2, "at the cliff: kept");
     }
 
+    // ──────────────────────── The link (audit C-13) ────────────
+
+    /// @dev A real reservation makes the linked escrow permanent: neither an unlink nor a
+    ///      replacement goes through. The exit before the cliff is still reported, the bonus is
+    ///      forfeited, and with nothing owed the link moves.
+    function test_Link_AnEscrowThatOwesStaysLinkedUntilTheBonusIsForfeited() public {
+        uint256 tokenId = _buy(alice, BUY_LIQUIDITY);
+        uint256 owed = escrow.totalReserved();
+        assertGt(owed, 0, "the purchase reserved a bonus");
+        BonusEscrow second = _deployBonusEscrowProxy(address(asset), address(vault), address(this), address(0));
+
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.EscrowHasReservations.selector, address(escrow), owed));
+        vault.setBonusEscrow(address(0));
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.EscrowHasReservations.selector, address(escrow), owed));
+        vault.setBonusEscrow(address(second));
+
+        vm.prank(alice);
+        vault.unstake(tokenId);
+        (,,,, bool forfeited) = escrow.reservationOf(tokenId);
+        assertTrue(forfeited, "the exit before the cliff was still reported");
+        vault.setBonusEscrow(address(second));
+        assertEq(vault.bonusEscrow(), address(second), "nothing owed: the link moves");
+    }
+
+    /// @dev Past the cliff the bonus can no longer be forfeited but is still owed, so the link
+    ///      holds until it is claimed.
+    function test_Link_AMaturedBonusKeepsTheEscrowLinkedUntilItIsClaimed() public {
+        uint256 tokenId = _buy(alice, BUY_LIQUIDITY);
+        (, uint256 bonus) = _expectedBonus(BUY_LIQUIDITY);
+        vm.warp(block.timestamp + CLIFF);
+
+        vm.expectRevert(abi.encodeWithSelector(LPStakingVault.EscrowHasReservations.selector, address(escrow), bonus));
+        vault.setBonusEscrow(address(0));
+
+        _fundEscrow(escrow, bonus);
+        escrow.claim(tokenId);
+        vault.setBonusEscrow(address(0));
+        assertEq(vault.bonusEscrow(), address(0), "claimed: the escrow can be unlinked");
+    }
+
     // ──────────────────────── The oracle ───────────────────────
 
     /// @dev An ordinary staker's no-swap rebalance needs no oracle: the escrow returns before

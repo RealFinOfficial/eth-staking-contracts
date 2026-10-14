@@ -959,6 +959,50 @@ describe("BonusEscrow", function () {
       ).to.be.revertedWith("OLD");
       await expect(vault.connect(alice).unstake(tokenId)).to.emit(escrow, "BonusForfeited");
     });
+
+    // Audit C-13: once the link moved, the old escrow would hear of no exit, and the holder
+    // could unstake before the cliff and still claim. An escrow that owes is permanent.
+    it("refuses to unlink or replace an escrow that owes a bonus, and lets it go once forfeited (C-13)", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      await reserve(tokenId, alice);
+      const second = await deployEscrowProxy(assetAddr, vaultAddr, owner.address);
+      const secondAddr = await second.getAddress();
+
+      await expect(vault.setBonusEscrow(ZERO))
+        .to.be.revertedWithCustomError(vault, "EscrowHasReservations")
+        .withArgs(escrowAddr, BONUS);
+      await expect(vault.setBonusEscrow(secondAddr))
+        .to.be.revertedWithCustomError(vault, "EscrowHasReservations")
+        .withArgs(escrowAddr, BONUS);
+      expect(await vault.bonusEscrow()).to.equal(escrowAddr);
+
+      // The exit before the cliff is still reported, so the bonus is forfeited and nothing is owed.
+      await expect(vault.connect(alice).unstake(tokenId)).to.emit(escrow, "BonusForfeited");
+      expect(await escrow.totalReserved()).to.equal(0n);
+      await expect(vault.setBonusEscrow(secondAddr))
+        .to.emit(vault, "BonusEscrowSet")
+        .withArgs(escrowAddr, secondAddr);
+      expect(await vault.bonusEscrow()).to.equal(secondAddr);
+    });
+
+    it("keeps a matured bonus's escrow linked until it is claimed, then lets it go (C-13)", async function () {
+      const tokenId = await createPosition(alice, 1_000_000n);
+      await vault.connect(alice).stake(tokenId);
+      const cliff = await reserve(tokenId, alice);
+      await time.increaseTo(cliff);
+
+      // Past the cliff the bonus can no longer be forfeited, but it is still owed.
+      await expect(vault.setBonusEscrow(ZERO))
+        .to.be.revertedWithCustomError(vault, "EscrowHasReservations")
+        .withArgs(escrowAddr, BONUS);
+
+      await asset.transfer(escrowAddr, BONUS);
+      await escrow.claim(tokenId);
+      expect(await escrow.totalReserved()).to.equal(0n);
+      await expect(vault.setBonusEscrow(ZERO)).to.emit(vault, "BonusEscrowSet").withArgs(escrowAddr, ZERO);
+      expect(await vault.bonusEscrow()).to.equal(ZERO);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
