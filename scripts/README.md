@@ -136,9 +136,13 @@ deployment transaction: `LPStakingVault`, `RewardsDistributor`, `LPEpochRegistry
 OpenZeppelin `TimelockController`; the multisig (`LP_MULTISIG`) is its only proposer, executor
 and canceller.
 
-On Sepolia test stack #6 only (mainnet launches without it, `vault.bonusEscrow() == 0`), the
-ApeBond route adds a sixth proxy, `BonusEscrow`, and one plain contract,
-`ApeBondPositionAdapter` — see "The ApeBond route" below and audit notes items 17 and 18.
+On Sepolia test stack #6, and in the mainnet launch deploy too, the ApeBond route adds a sixth
+proxy, `BonusEscrow`, and one plain contract, `ApeBondPositionAdapter` — see "The ApeBond route"
+below and audit notes items 17 and 18. Mainnet is path (a), the decision of 14 Oct 2026: the
+launch deploy runs with `LP_APEBOND_ENABLED=1` and the production campaign —
+`LP_APEBOND_CLIFF_SECONDS=7776000` (90 days), `LP_APEBOND_BONUS_BPS=1000` (10 %),
+`LP_APEBOND_MIN_BONUS=1` (1 `$ASSET`), `LP_APEBOND_DOWN_PCT=50`, `LP_APEBOND_UP_PCT=100`,
+`LP_APEBOND_TOLERANCE_TICKS=500` — on an adapter built with `LP_APEBOND_MIN_CLIFF_SECONDS=86400`.
 
 | Script | Purpose |
 |---|---|
@@ -193,7 +197,7 @@ distributor's `mintRewardToken`, and it is the registry's scheduler) are both RE
 are equal and WARNS when either collapses onto `LP_MULTISIG` or onto the deploying key, which is
 what staging deliberately does.
 
-### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 only)
+### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 and the mainnet launch)
 
 With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision document, overrides of
 2026-10-05; there is NO purchase signer anywhere):
@@ -239,15 +243,16 @@ With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision docum
    in chain time, executes and asserts the link), or from the multisig with
    `TIMELOCK_ACTION=schedule-batch` / `execute-batch` and the filed batch.
 
-A vault proxy that does NOT carry the route (lane 1's vault, as mainnet deploys it) is activated
-in place by `deploy-apebond.js`: phase 2 deploys the current `LPStakingVault` implementation
-(hardhat-upgrades validates the lane-1 → current layout: `stakeOperators` is appended after
-`bonusEscrow`), and the batch starts with `upgradeToAndCall(newImplementation, 0x)` — it has to be
-one operation, because `setStakeOperator` does not exist before the upgrade. Replacing the adapter
-later is `LP_APEBOND_MODE=replace-adapter`: a new adapter configured and handed over, then one
-batch `setStakeOperator(new, true)`, `setStakeOperator(old, false)`, `escrow.setAdapter(new)`.
-`LP_APEBOND_MODE=verify` re-runs the link checks read-only at any time — a wrong link fails OPEN
-(exits would keep their bonus), so run it after any owner-tier change touching the route.
+A vault proxy that does NOT carry the route (lane 1's vault, deployed before the route existed) is
+activated in place by `deploy-apebond.js`: phase 2 deploys the current `LPStakingVault`
+implementation (hardhat-upgrades validates the lane-1 → current layout: `stakeOperators` is
+appended after `bonusEscrow`), and the batch starts with `upgradeToAndCall(newImplementation, 0x)`
+— it has to be one operation, because `setStakeOperator` does not exist before the upgrade.
+Replacing the adapter later is `LP_APEBOND_MODE=replace-adapter`: a new adapter configured and
+handed over, then one batch `setStakeOperator(new, true)`, `setStakeOperator(old, false)`,
+`escrow.setAdapter(new)`. `LP_APEBOND_MODE=verify` re-runs the link checks read-only at any time —
+a wrong link fails OPEN (exits would keep their bonus), so run it after any owner-tier change
+touching the route.
 
 ### The timelock
 
@@ -330,15 +335,16 @@ MINT_TOKEN=TRW MINT_TO=distributor MINT_AMOUNT=… npx hardhat run scripts/lp-mi
 Then hand the five proxy addresses, the timelock and the block numbers to the indexer module
 and the backend (`deployments.json` holds them all), and check one `$OVTR` claim end to end.
 
-Stack #6 also carries the ApeBond route (lane 2's head; mainnet does not). Steps 0 and 1 replace
-step 1 above:
+Stack #6 also carries the ApeBond route (lane 2's head), and the mainnet launch deploys it too
+(path (a), decision of 14 Oct 2026). Steps 0 and 1 replace step 1 above:
 
 ```bash
 # 0. the SoulZap stand-in the rehearsal buys through (its address goes into step 1)
 LP_REHEARSAL_PHASE=caller npx hardhat run scripts/apebond-rehearsal.js --network sepolia
 # 1. the stack WITH the route: escrow + adapter + one campaign (300 s cliff, 10 %, min 1 $ASSET)
 LP_TIMELOCK_MIN_DELAY=300 LP_APEBOND_ENABLED=1 LP_APEBOND_SOULZAP_CALLERS=<caller>,<Doublo router> \
-  LP_APEBOND_CAMPAIGN_ID=apebond-sepolia-1 LP_APEBOND_DOWN_PCT=50 LP_APEBOND_UP_PCT=100 \
+  LP_APEBOND_MIN_CLIFF_SECONDS=300 LP_APEBOND_CAMPAIGN_ID=apebond-sepolia-1 \
+  LP_APEBOND_DOWN_PCT=50 LP_APEBOND_UP_PCT=100 LP_APEBOND_TOLERANCE_TICKS=500 \
   LP_APEBOND_CLIFF_SECONDS=300 LP_APEBOND_BONUS_BPS=1000 LP_APEBOND_MIN_BONUS=1 \
   npx hardhat run scripts/deploy-lp-staking.js --network sepolia
 # 5. the link batch (printed by step 1): schedule, wait 300 s, execute, assert the link

@@ -365,7 +365,11 @@ async function main() {
   }
 
   pools.requireConfirmation(chainId, `run the ApeBond route (mode ${mode}) on chain ${chainId}`);
-  if (mainnet) console.log("\nEvery transaction below needs a Ledger confirmation.");
+  if (mainnet) {
+    console.log(
+      "\nEvery transaction below is signed by the mainnet deployer. Owner-tier operations go through the Safe."
+    );
+  }
 
   // ──────── phase 2: a new vault implementation, when the live one lacks the route ────────
 

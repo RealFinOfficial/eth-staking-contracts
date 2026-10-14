@@ -128,10 +128,14 @@ An un-flagged run is byte-for-byte the stack above, and mainnet launches with `b
   `PositionValue.valueAt` at the vault's TWAP (reverting when spot is outside the TWAP bounds),
   takes the campaign's `bonusBps` of it, and reserves nothing below the campaign's
   `minBonusAmount` (the purchase is still staked). **No signature, no purchase id, no limit of any
-  kind**: a campaign is exactly its range (exact ticks), cliff, rate and minimum. `depositFor`
+  kind**: a campaign is its two price offsets (`downTicks`, `upTicks`) and its `toleranceTicks`
+  around the pool price at the purchase (`campaignRange` places the band around the spot tick at
+  each deposit; an NFT edge further off reverts `TickRangeOutsideTolerance`), its cliff (at least
+  the adapter's immutable `minCliffSeconds`, audit C-14), rate and minimum. `depositFor`
   writes no storage (transient reentrancy lock and receive window). No rescue, no sweep, no
   arbitrary call. Owner (the timelock): `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`,
-  `setSoulZapCaller`, `setGuardian`; guardian (a pause key): `setDepositsPaused`
+  `setSoulZapCaller`, `setGuardian`; the vault's operator (read live from `vault.operator()`,
+  audit C-29): `setGuardian` too; guardian (a pause key): `setDepositsPaused`
 - **`libraries/TickMath.sol`, `libraries/LiquidityAmounts.sol`** (vendored from Uniswap's 0.8
   branches, GPL-2.0-or-later headers kept — open item O6) and **`libraries/PositionValue.sol`**
   (ours): the ONE valuation the adapter and the escrow share
@@ -340,7 +344,8 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               timelock operation
   lp-timelock.js            — Operator front end for the timelock: schedule / execute / cancel /
                               status / pending, plus the operation and batch builders
-  lp-switch-timelock.js     — Planned switch of all five proxies to a new timelock
+  lp-switch-timelock.js     — Planned switch to a new timelock of the five proxies and, when
+                              recorded, the escrow, the adapter and every reward token (C-15)
   lib/apebond.js            — The ApeBond pair's deploy, wiring, link batch and link checks,
                               shared by the two scripts below
   deploy-apebond.js         — The ApeBond route on a LIVE stack: activate (upgrading a lane-1
@@ -582,8 +587,9 @@ through the timelock, and a third reward token added through the timelock that r
 `InsufficientFunds` until it is funded — and the next sections assert that everything they
 emitted is stored on that chain and retrievable from it: by address, by indexed topic, by block
 hash, in chunked ranges, and from receipts. A snapshot revert proves an orphaned block really
-disappears. The last section runs `scripts/lp-switch-timelock.js` end to end and moves all
-five proxies to a new timelock.
+disappears. Section 7 runs `scripts/lp-switch-timelock.js` end to end and moves all five
+proxies to a new timelock; E7 in section 8 runs it on the stack with the ApeBond route and moves
+the escrow, the adapter and a reward token with the five (audit C-15).
 
 What it covers that `fork/LPStakingFork.test.js` cannot: the deployment scripts (they need
 a JSON-RPC endpoint, not an in-process provider) and log retrieval across a real chain of

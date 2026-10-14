@@ -51,7 +51,7 @@ async function deployContract(name, args, deployer) {
  *     written from a constructor and a missing `_authorizeUpgrade`. Cheaper to fail here than
  *     to find out after the implementation is on chain.
  *   - two nonce-controlled deploys rather than `upgrades.deployProxy`, because mainnet signs
- *     through a Ledger and every transaction in this script carries an explicit nonce (see
+ *     through the mainnet signer and every transaction in this script carries an explicit nonce (see
  *     deployContract); the plugin sends its own un-nonce-able pair. `initialize` still runs
  *     inside the proxy's OWN deployment transaction — an uninitialized proxy is one
  *     `initialize` race away from belonging to whoever calls it first.

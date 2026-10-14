@@ -27,6 +27,23 @@ by address (`AssetNotMintable`), from a new `asset` field appended to the distri
 namespace; a live v1 proxy gets it from `initializeV2` inside the upgrade. New item 16; items 1,
 3, 5, 10 and 14 were touched for it.
 
+Revision 2026-10-14 (audit rows C-12 to C-15 and C-29 of 7 Oct 2026, and Vladimir's decision of
+14 Oct 2026 on the campaign band): `depositFor` first checks that `vault.bonusEscrow()` is the
+adapter's escrow and reverts `EscrowNotLinked` otherwise, so no bonus is reserved that an early
+exit could not forfeit (C-12). The vault's `setBonusEscrow` reverts `EscrowHasReservations` while
+the current escrow's `totalReserved()` is above zero, so no live reservation loses its exit
+reports (C-13). The adapter takes an immutable `minCliffSeconds` (zero refused with
+`ZeroMinCliff`) and `setCampaign` refuses a shorter cliff with `CliffBelowMinimum`, which the
+deploy scripts set to 86,400 s by default and never lower on mainnet (C-14).
+`scripts/lp-switch-timelock.js` moves `BonusEscrow`, the adapter and every recorded reward token
+the old timelock owns together with the five proxies (C-15). The adapter's `setGuardian` takes the
+owner OR `vault.operator()` (`NotOwnerOrOperator` otherwise), so a leaked pause key is replaced
+without the 48 h timelock delay (C-29). A campaign no longer stores an exact tick range:
+`CampaignConfig{enabled, downTicks, upTicks, toleranceTicks, bonusCliffSeconds, bonusBps,
+minBonusAmount}` places the band around the pool's spot tick at each purchase (`campaignRange`,
+defaults 6932 / 6932 / 500 ticks), and an NFT edge further than `toleranceTicks` from the band's
+edge reverts `TickRangeOutsideTolerance`. Item 17 was touched for it.
+
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
 ---
@@ -1075,24 +1092,34 @@ not counted (L7). Removed with the signature: `EIP712`, `ECDSA`, the purchase st
 `purchaseSigner` / `setPurchaseSigner`, the spent-id and nonce books, six errors and four
 constructor arguments; the backend holds no purchase-signing key.
 
-**No limit of any kind (override O2).** A campaign is exactly four numbers — its exact range
-(`tickLower`/`tickUpper`, validated in `setCampaign` against Uniswap's bounds and the pool's tick
-spacing), its cliff (`bonusCliffSeconds`), its rate (`bonusBps ≤ 10,000`) and its minimum. There
+**No limit of any kind (override O2).** A campaign is its band, its cliff (`bonusCliffSeconds`),
+its rate (`bonusBps ≤ 10,000`) and its minimum. The band is not a fixed range (Vladimir's decision
+of 14 Oct 2026): the campaign stores two offsets around the $ASSET price at the purchase —
+`downTicks` below it and `upTicks` above it (the deploy scripts default to −50 % and +100 %, 6932
+ticks each) — and a `toleranceTicks` (default 500, at least the pool's tick spacing), validated in
+`setCampaign` (`InvalidCampaignOffsets`). At each deposit `campaignRange` places the band around
+the pool's spot tick, rounded outward to the tick spacing and clamped to Uniswap's usable bounds,
+and the NFT is accepted when each of its edges is within the tolerance of the band's edge. There
 is no per-purchase, per-campaign, daily or total cap, and the escrow records a bonus whatever its
 balance is (item 18). The consequence is stated rather than mitigated: the total promise has no
 ceiling on-chain, all campaigns share one escrow balance (L5), and what bounds the payout is the
-company's funding — claims revert until it arrives. A campaign with a zero cliff unlocks at once,
-so its bonus cannot be forfeited by an exit; that is a timelock configuration choice.
+company's funding — claims revert until it arrives. A zero cliff is no longer a configuration
+choice: `setCampaign` refuses a cliff below the adapter's immutable `minCliffSeconds`
+(`CliffBelowMinimum`, audit C-14; never zero, at least 86,400 s on mainnet as the deploy scripts
+enforce, 300 s on Sepolia stack #6), so no bonus unlocks before an exit could forfeit it.
 
-**Order inside `depositFor` (B.3 §5.4).** Pause → global allowlist AND campaign allowlist →
-campaign exists and is enabled → beneficiary not zero / adapter / vault / position manager (SEC-05,
-item 11) → caller owns the NFT and approved the adapter → pool, fee, EXACT range, liquidity > 0 →
-TWAP within bounds → value and bonus → pull the NFT in the receive window, `vault.stakeFor` →
-`escrow.reserve` when the bonus is above zero → custody assertion → `ApeBondPositionDeposited
-(tokenId, campaignId, beneficiary, liquidity, tickLower, tickUpper, twapTick, positionValue,
-bonusAmount, bonusUnlockAt)`. The three reported input fields (`inputToken`, gross, net) are left
-out, the document's recommendation for open item O4. A second deposit of the same NFT cannot earn
-a second bonus: the escrow keeps every record, forfeited ones included, and refuses a duplicate.
+**Order inside `depositFor` (B.3 §5.4, with step 0 of audit C-12).** The vault reports to this
+adapter's escrow (`vault.bonusEscrow() == escrow`, else `EscrowNotLinked`) → pause → global
+allowlist AND campaign allowlist → campaign exists and is enabled → beneficiary not zero / adapter
+/ vault / position manager (SEC-05, item 11) → caller owns the NFT and approved the adapter → pool,
+fee, ticks within the tolerance of the band computed from the spot tick
+(`TickRangeOutsideTolerance`), liquidity > 0 → TWAP within bounds → value and bonus → pull the
+NFT in the receive window, `vault.stakeFor` → `escrow.reserve` when the bonus is above zero →
+custody assertion → `ApeBondPositionDeposited(tokenId, campaignId, beneficiary, liquidity,
+tickLower, tickUpper, twapTick, positionValue, bonusAmount, bonusUnlockAt)`. The three reported
+input fields (`inputToken`, gross, net) are left out, the document's recommendation for open item
+O4. A second deposit of the same NFT cannot earn a second bonus: the escrow keeps every record,
+forfeited ones included, and refuses a duplicate.
 
 **Writes nothing.** `depositFor` changes no storage of the adapter: the reentrancy lock
 (`ReentrancyGuardTransient`) and the NFT receive window are EIP-1153 transient storage, so the

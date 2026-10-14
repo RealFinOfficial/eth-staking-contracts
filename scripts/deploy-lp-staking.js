@@ -59,7 +59,8 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //      `bonusEscrow` stays zero (the ApeBond escrow is not part of this stack)
 //   8. LPZapper implementation + LPProxy, `initialize(owner = timelock, operator, window, ticks)`;
 //      record it, then assert the proxy address matches the prediction
-//   9. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6; mainnet deploys without it):
+//   9. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6, and the mainnet launch deploy
+//      too — decision of 14 Oct 2026, path (a)):
 //      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
 //      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
 //      guardian, minCliffSeconds)`; its callers and campaign written by the deployer, then
@@ -99,7 +100,7 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //   LP_POOL        — the Uniswap V3 ASSET-USDC pool this stack is bound to
 //   LP_SIGNER      — backend voucher signer for RewardsDistributor; MUST NOT be
 //                    the deployer or the multisig — it signs EIP-712 payloads on
-//                    every claim, which a Ledger cannot serve
+//                    every claim, which a hardware or multisig signer cannot serve
 //   LP_MULTISIG    — the timelock's sole proposer, executor and canceller
 //   LP_GUARDIAN    — pause tier (see above). A hot key; the run throws if it equals LP_OPERATOR
 //   LP_OPERATOR    — operator tier on all five proxies; mints $OVTR through the distributor
@@ -134,9 +135,10 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
 //                               needs >= 600
 //
-// Optional env — the ApeBond route (B.3 decision document; Sepolia only until ApeBond goes to
-// mainnet). OFF unless LP_APEBOND_ENABLED=1; with it off nothing below is read and the run is
-// exactly the stack above. There is no purchase signer: the adapter computes every bonus.
+// Optional env — the ApeBond route (B.3 decision document; Sepolia test stack #6, and the mainnet
+// launch deploy too — decision of 14 Oct 2026, path (a)). OFF unless LP_APEBOND_ENABLED=1; with it
+// off nothing below is read and the run is exactly the stack above. There is no purchase signer:
+// the adapter computes every bonus.
 //   LP_APEBOND_ENABLED          — 1 deploys BonusEscrow + ApeBondPositionAdapter; 0 or unset not
 //   LP_APEBOND_BONUS_TOKEN      — the escrow's immutable bonus token; must be one of the pool's
 //                                 two tokens (LP_ASSET)
@@ -562,7 +564,7 @@ async function main() {
     console.log(
       "\nWARNING: LP_SIGNER is the deployer or the multisig.\n" +
         "         The signer signs an EIP-712 voucher on every claim — it must be a hot\n" +
-        "         backend key, and a Ledger cannot serve that role."
+        "         backend key, and a hardware or multisig signer cannot serve that role."
     );
   }
   // The role rules that are NOT fatal. Every one of them is a collapse a staging run is
@@ -584,7 +586,11 @@ async function main() {
 
 
   pools.requireConfirmation(chainId, "deploy the LP staking stack");
-  if (mainnet) console.log("\nEvery transaction below needs a Ledger confirmation.");
+  if (mainnet) {
+    console.log(
+      "\nEvery transaction below is signed by the mainnet deployer. Owner-tier operations go through the Safe."
+    );
+  }
 
   // ──────────────────────── deploy ────────────────────────
 
