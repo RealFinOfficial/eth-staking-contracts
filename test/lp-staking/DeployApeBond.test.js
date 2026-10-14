@@ -83,11 +83,15 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       );
     });
 
-    it("refuses a campaign range off the pool's tick grid", async function () {
+    it("refuses a campaign tolerance below the pool's tick spacing", async function () {
       await refused(
-        { LP_APEBOND_TICK_LOWER: "-1201", LP_APEBOND_TICK_UPPER: "1200" },
-        /is not a range a position on this pool can have \(tick spacing 60/
+        { LP_APEBOND_TOLERANCE_TICKS: "59" },
+        /LP_APEBOND_TOLERANCE_TICKS 59 is below the pool's tick spacing 60/
       );
+    });
+
+    it("refuses a fall of 100 % or more, which no tick can express", async function () {
+      await refused({ LP_APEBOND_DOWN_PCT: "100" }, /LP_APEBOND_DOWN_PCT must be below 100 — got 100/);
     });
 
     it("refuses a rate above the whole value", async function () {
@@ -150,6 +154,130 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
   });
 
   // ─────────────────────────────────────────────────────────────
+  /**
+   * The campaign's band variables, parsed in this process by `readCampaign` (the function both
+   * deploy scripts call): percentages to ticks, the tick overrides, the defaults, and every
+   * refusal the adapter's `setCampaign` would make.
+   */
+  describe("the campaign band variables (readCampaign)", function () {
+    const KEYS = [
+      "LP_APEBOND_CAMPAIGN_ID",
+      "LP_APEBOND_DOWN_PCT",
+      "LP_APEBOND_UP_PCT",
+      "LP_APEBOND_DOWN_TICKS",
+      "LP_APEBOND_UP_TICKS",
+      "LP_APEBOND_TOLERANCE_TICKS",
+      "LP_APEBOND_CLIFF_SECONDS",
+      "LP_APEBOND_BONUS_BPS",
+      "LP_APEBOND_MIN_BONUS",
+      "LP_APEBOND_CAMPAIGN_ENABLED",
+    ];
+    const POOL = { tickSpacing: 60, bonusDecimals: 18 };
+    let saved;
+
+    /** readCampaign with exactly `env` (plus the three required campaign variables) set. */
+    function parse(env, pool = POOL) {
+      for (const key of KEYS) delete process.env[key];
+      Object.assign(process.env, {
+        LP_APEBOND_CAMPAIGN_ID: "band-test",
+        LP_APEBOND_CLIFF_SECONDS: "300",
+        LP_APEBOND_BONUS_BPS: "1000",
+        ...env,
+      });
+      return apebond.readCampaign(pool, 300n);
+    }
+    const band = (c) => [c.config.downTicks, c.config.upTicks, c.config.toleranceTicks];
+
+    beforeEach(function () {
+      saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+    });
+    afterEach(function () {
+      for (const key of KEYS) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    });
+
+    it("defaults to -50 % / +100 % around the price at purchase, 500 ticks of tolerance", function () {
+      expect(band(parse({}))).to.deep.equal([6932, 6932, 500]);
+      // Both are ln 2 / ln 1.0001 = 6931.8: the price halves, the price doubles.
+      expect(apebond.downPctToTicks(50)).to.equal(6932);
+      expect(apebond.upPctToTicks(100)).to.equal(6932);
+    });
+
+    it("converts any percentage with round(ln(...) / ln(1.0001))", function () {
+      // ln(1 / 0.75) / ln 1.0001 = 2876.96; ln 1.5 / ln 1.0001 = 4054.85;
+      // ln(1 / 0.665) / ln 1.0001 = 4079.89; ln 1.1 / ln 1.0001 = 953.15
+      expect(band(parse({ LP_APEBOND_DOWN_PCT: "25", LP_APEBOND_UP_PCT: "50" }))).to.deep.equal([2877, 4055, 500]);
+      expect(band(parse({ LP_APEBOND_DOWN_PCT: "33.5", LP_APEBOND_UP_PCT: "10" }))).to.deep.equal([4080, 953, 500]);
+      expect(apebond.downTicksToPct(2877)).to.equal("25.00");
+      expect(apebond.upTicksToPct(4055)).to.equal("50.00");
+    });
+
+    it("takes LP_APEBOND_DOWN_TICKS / _UP_TICKS over the percentages, each on its own", function () {
+      expect(
+        band(parse({ LP_APEBOND_DOWN_PCT: "25", LP_APEBOND_DOWN_TICKS: "1200", LP_APEBOND_UP_TICKS: "3000" }))
+      ).to.deep.equal([1200, 3000, 500]);
+      expect(band(parse({ LP_APEBOND_UP_TICKS: "3000" }))).to.deep.equal([6932, 3000, 500]);
+      expect(band(parse({ LP_APEBOND_DOWN_TICKS: "1", LP_APEBOND_UP_TICKS: "1", LP_APEBOND_TOLERANCE_TICKS: "60" })))
+        .to.deep.equal([1, 1, 60]);
+    });
+
+    it("refuses a tolerance below the pool's tick spacing, on any spacing", function () {
+      expect(() => parse({ LP_APEBOND_TOLERANCE_TICKS: "59" })).to.throw(
+        /LP_APEBOND_TOLERANCE_TICKS 59 is below the pool's tick spacing 60/
+      );
+      expect(band(parse({ LP_APEBOND_TOLERANCE_TICKS: "60" }))).to.deep.equal([6932, 6932, 60]);
+      // The 1 % tier's 200-tick spacing: the 500 default passes, 199 does not.
+      expect(band(parse({}, { tickSpacing: 200, bonusDecimals: 18 }))).to.deep.equal([6932, 6932, 500]);
+      expect(() => parse({ LP_APEBOND_TOLERANCE_TICKS: "199" }, { tickSpacing: 200, bonusDecimals: 18 })).to.throw(
+        /LP_APEBOND_TOLERANCE_TICKS 199 is below the pool's tick spacing 200/
+      );
+    });
+
+    it("refuses every offset the adapter would refuse, each by its own message", function () {
+      const refusals = [
+        [{ LP_APEBOND_DOWN_PCT: "0" }, /LP_APEBOND_DOWN_PCT must be above 0 — got 0/],
+        [{ LP_APEBOND_DOWN_PCT: "100" }, /LP_APEBOND_DOWN_PCT must be below 100 — got 100/],
+        [{ LP_APEBOND_UP_PCT: "-5" }, /LP_APEBOND_UP_PCT must be a positive number of percent — got -5/],
+        [{ LP_APEBOND_UP_PCT: "ten" }, /LP_APEBOND_UP_PCT must be a positive number of percent — got ten/],
+        [{ LP_APEBOND_DOWN_TICKS: "0" }, /The campaign's downTicks must be above zero — got 0/],
+        [{ LP_APEBOND_UP_TICKS: "-60" }, /The campaign's upTicks must be above zero — got -60/],
+        [{ LP_APEBOND_DOWN_TICKS: "1.5" }, /LP_APEBOND_DOWN_TICKS must be an integer — got 1\.5/],
+        [{ LP_APEBOND_TOLERANCE_TICKS: "8388608" }, /LP_APEBOND_TOLERANCE_TICKS must be <= 8388607 — got 8388608/],
+        [
+          { LP_APEBOND_DOWN_TICKS: "887272", LP_APEBOND_UP_TICKS: "887272" },
+          /downTicks \+ upTicks = 1774544 must be below 1774544/,
+        ],
+      ];
+      for (const [env, pattern] of refusals) {
+        expect(() => parse(env), JSON.stringify(env)).to.throw(pattern);
+      }
+      // One tick narrower than the whole tick range is legal, as on chain.
+      expect(band(parse({ LP_APEBOND_DOWN_TICKS: "887272", LP_APEBOND_UP_TICKS: "887271" }))).to.deep.equal([
+        887272, 887271, 500,
+      ]);
+    });
+
+    it("records and describes the band in ticks and in percent", function () {
+      const campaign = parse({ LP_APEBOND_DOWN_TICKS: "2877", LP_APEBOND_UP_PCT: "50" });
+      const record = apebond.campaignRecord(campaign, []);
+      expect(record).to.deep.include({
+        downTicks: 2877,
+        upTicks: 4055,
+        toleranceTicks: 500,
+        downPct: "25.00",
+        upPct: "50.00",
+      });
+      expect(record).to.not.have.property("tickLower");
+      expect(apebond.campaignTuple(campaign.config)).to.deep.equal([true, 2877, 4055, 500, 300n, 1000n, 0n]);
+      const text = apebond.describeCampaign(campaign, { tickSpacing: 60, bonusDecimals: 18, bonusSymbol: "ASSET" });
+      expect(text).to.include("2877 ticks below (-25.00 %) to 4055 ticks above (+50.00 %)");
+      expect(text).to.include("tolerance 500 ticks per edge (spacing 60)");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("a fresh stack with the route (deploy-lp-staking.js)", function () {
     before(async function () {
       fresh = await world.runOk(
@@ -199,15 +327,22 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
         expect(await adapter.soulZapCallers(caller)).to.equal(true);
         expect(await adapter.campaignCallers(CAMPAIGN_ID, caller)).to.equal(true);
       }
+      // The default band: -50 % and +100 % (6932 ticks each way), a 500-tick tolerance.
       const c = await adapter.campaigns(CAMPAIGN_ID);
       expect([
         c.enabled,
-        c.tickLower,
-        c.tickUpper,
+        c.downTicks,
+        c.upTicks,
+        c.toleranceTicks,
         c.bonusCliffSeconds,
         c.bonusBps,
         c.minBonusAmount,
-      ]).to.deep.equal([true, -1200n, 1200n, 300n, 1000n, 10n ** 18n]);
+      ]).to.deep.equal([true, 6932n, 6932n, 500n, 300n, 1000n, 10n ** 18n]);
+      // Placed around the mock pool's tick 0 and rounded outward to the 60-tick grid.
+      expect([...(await adapter.campaignRange(CAMPAIGN_ID))]).to.deep.equal([-6960n, 6960n, 0n]);
+      expect(fresh.stdout).to.match(
+        /6932 ticks below \(-50\.00 %\) to 6932 ticks above \(\+100\.00 %\), tolerance 500 ticks per edge \(spacing 60\)/
+      );
     });
 
     it("recorded both contracts in the new registry schema", function () {
@@ -257,8 +392,11 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
           id: CAMPAIGN_ID,
           label: "deploy-suite-campaign",
           enabled: true,
-          tickLower: -1200,
-          tickUpper: 1200,
+          downTicks: 6932,
+          upTicks: 6932,
+          toleranceTicks: 500,
+          downPct: "50.00",
+          upPct: "100.00",
           bonusCliffSeconds: "300",
           bonusBps: 1000,
           minBonusAmount: (10n ** 18n).toString(),

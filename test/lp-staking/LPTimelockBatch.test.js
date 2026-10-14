@@ -493,18 +493,22 @@ describe("lp-timelock.js — batches", function () {
    */
   describe("the ApeBond calls", function () {
     const CAMPAIGN = ethers.id("apebond.campaign.batch-test");
+    // The band of 14 Oct 2026: offsets below and above the $ASSET price at purchase, and a
+    // tolerance per edge (-50 % / +100 % are 6932 ticks each).
     const CONFIG = {
       enabled: false,
-      tickLower: -1200,
-      tickUpper: 1200,
+      downTicks: 6932,
+      upTicks: 6932,
+      toleranceTicks: 500,
       bonusCliffSeconds: 300,
       bonusBps: 1000,
       minBonusAmount: 10n ** 18n,
     };
     const asArray = (c) => [
       c.enabled,
-      c.tickLower,
-      c.tickUpper,
+      c.downTicks,
+      c.upTicks,
+      c.toleranceTicks,
       c.bonusCliffSeconds,
       c.bonusBps,
       c.minBonusAmount,
@@ -516,13 +520,37 @@ describe("lp-timelock.js — batches", function () {
       return {
         id: decoded[0],
         enabled: config[0],
-        tickLower: Number(config[1]),
-        tickUpper: Number(config[2]),
-        bonusCliffSeconds: Number(config[3]),
-        bonusBps: Number(config[4]),
-        minBonusAmount: config[5],
+        downTicks: Number(config[1]),
+        upTicks: Number(config[2]),
+        toleranceTicks: Number(config[3]),
+        bonusCliffSeconds: Number(config[4]),
+        bonusBps: Number(config[5]),
+        minBonusAmount: config[6],
       };
     }
+
+    it("encodes the seven-field CampaignConfig the adapter takes, selector included", function () {
+      const signature =
+        "setCampaign(bytes32,(bool,int24,int24,int24,uint64,uint16,uint256))";
+      const data = lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, asArray(CONFIG)]);
+      expect(data.slice(0, 10)).to.equal(ethers.id(signature).slice(0, 10));
+      expect(lpTimelock.OWNER_TIER_INTERFACE.getFunction("setCampaign").format()).to.equal(signature);
+      expect(
+        lpTimelock.OWNER_TIER_INTERFACE.getFunction("setCampaign").inputs[1].components.map((c) => c.name)
+      ).to.deep.equal([
+        "enabled",
+        "downTicks",
+        "upTicks",
+        "toleranceTicks",
+        "bonusCliffSeconds",
+        "bonusBps",
+        "minBonusAmount",
+      ]);
+      const artifact = require("../../abi/ApeBondPositionAdapter.json");
+      const adapterIface = new ethers.Interface(artifact);
+      expect(adapterIface.getFunction("setCampaign").selector).to.equal(data.slice(0, 10));
+      expect(adapterIface.encodeFunctionData("setCampaign", [CAMPAIGN, asArray(CONFIG)])).to.equal(data);
+    });
 
     it("encodes setCampaign identically from an array, an object and a JSON string", function () {
       const fromArray = lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, asArray(CONFIG)]);
@@ -549,14 +577,14 @@ describe("lp-timelock.js — batches", function () {
     it("keeps the string \"false\" false, and refuses a bool that is neither", function () {
       const data = lpTimelock.encodeOwnerCall("setCampaign", [
         CAMPAIGN,
-        ["false", "-1200", "1200", "300", "1000", "1"],
+        ["false", "6932", "6932", "500", "300", "1000", "1"],
       ]);
       expect(decodeCampaign(data).enabled).to.equal(false);
 
       expect(() =>
         lpTimelock.encodeOwnerCall("setCampaign", [
           CAMPAIGN,
-          ["no", "-1200", "1200", "300", "1000", "1"],
+          ["no", "6932", "6932", "500", "300", "1000", "1"],
         ])
       ).to.throw(/setCampaign argument 1 \(config\)\.enabled must be true or false — got no/);
       expect(() => lpTimelock.encodeOwnerCall("setCampaignEnabled", [CAMPAIGN, "yes"])).to.throw(
@@ -570,14 +598,21 @@ describe("lp-timelock.js — batches", function () {
     });
 
     it("refuses a struct with the wrong shape", function () {
+      // The retired six-field shape (exact tickLower / tickUpper) no longer encodes.
       expect(() =>
-        lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, asArray(CONFIG).slice(0, 5)])
-      ).to.throw(/setCampaign argument 1 \(config\) needs 6 components — got 5/);
+        lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, [false, -1200, 1200, 300, 1000, 1]])
+      ).to.throw(/setCampaign argument 1 \(config\) needs 7 components — got 6/);
+      expect(() =>
+        lpTimelock.encodeOwnerCall("setCampaign", [
+          CAMPAIGN,
+          { enabled: false, tickLower: -1200, tickUpper: 1200, bonusCliffSeconds: 300, bonusBps: 1000, minBonusAmount: 1 },
+        ])
+      ).to.throw(/setCampaign argument 1 \(config\) is missing downTicks/);
       const { minBonusAmount, ...missing } = CONFIG;
       expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, missing])).to.throw(
         /setCampaign argument 1 \(config\) is missing minBonusAmount/
       );
-      expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, "[true, -1200"])).to.throw(
+      expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN, "[true, 6932"])).to.throw(
         /setCampaign argument 1 \(config\) must be a JSON array or object/
       );
       expect(() => lpTimelock.encodeOwnerCall("setCampaign", [CAMPAIGN])).to.throw(
@@ -701,8 +736,9 @@ describe("lp-timelock.js — batches", function () {
       expect(await escrow.adapter()).to.equal(apeAdapterAddr);
       const stored = await apeAdapter.campaigns(CAMPAIGN);
       expect(stored.enabled).to.equal(true);
-      expect(stored.tickLower).to.equal(BigInt(CONFIG.tickLower));
-      expect(stored.tickUpper).to.equal(BigInt(CONFIG.tickUpper));
+      expect(stored.downTicks).to.equal(BigInt(CONFIG.downTicks));
+      expect(stored.upTicks).to.equal(BigInt(CONFIG.upTicks));
+      expect(stored.toleranceTicks).to.equal(BigInt(CONFIG.toleranceTicks));
       expect(stored.bonusCliffSeconds).to.equal(BigInt(CONFIG.bonusCliffSeconds));
       expect(stored.bonusBps).to.equal(BigInt(CONFIG.bonusBps));
       expect(stored.minBonusAmount).to.equal(CONFIG.minBonusAmount);

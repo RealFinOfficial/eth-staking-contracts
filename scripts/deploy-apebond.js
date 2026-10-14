@@ -83,7 +83,16 @@ const {
 //   LP_APEBOND_SOULZAP_CALLERS   comma-separated SoulZap contracts (none)
 //   LP_APEBOND_MIN_CLIFF_SECONDS a new adapter's immutable floor under every campaign cliff, in
 //                                seconds (86400); at least 1, and at least 86400 on mainnet
-//   LP_APEBOND_CAMPAIGN_ID …     the campaign: see `readCampaign` in scripts/lib/apebond.js
+//   LP_APEBOND_CAMPAIGN_ID       the campaign to configure (none). Its band is placed around the
+//                                $ASSET price at each purchase, not fixed (decision of 14 Oct 2026):
+//   LP_APEBOND_DOWN_PCT          how far below that price the band starts, in percent (50)
+//   LP_APEBOND_UP_PCT            how far above it the band ends, in percent (100)
+//   LP_APEBOND_DOWN_TICKS        the same offsets in ticks; each overrides its percentage
+//   LP_APEBOND_UP_TICKS          (50 % down and 100 % up are both 6932 ticks)
+//   LP_APEBOND_TOLERANCE_TICKS   the accepted distance of each NFT edge from the band's edge, at
+//                                least the pool's tick spacing (500)
+//   LP_APEBOND_CLIFF_SECONDS …   cliff, rate, minimum, switch: see `readCampaign` in
+//                                scripts/lib/apebond.js
 //   LP_APEBOND_ASSERT_POSITIONS  comma-separated token ids whose staker must read the same
 //                                before and after (none)
 //   LP_APEBOND_BATCH_FILE        where the batch is filed (apebond-<mode>-batch.json beside the
@@ -98,7 +107,7 @@ const {
 //   CONFIRM=yes                  required on mainnet
 //
 //     LP_APEBOND_SOULZAP_CALLERS=0xRouter LP_APEBOND_CAMPAIGN_ID=campaign-1 \
-//       LP_APEBOND_HALF_WIDTH_TICKS=1200 LP_APEBOND_CLIFF_SECONDS=300 LP_APEBOND_BONUS_BPS=1000 \
+//       LP_APEBOND_DOWN_PCT=50 LP_APEBOND_UP_PCT=100 LP_APEBOND_CLIFF_SECONDS=300 LP_APEBOND_BONUS_BPS=1000 \
 //       npx hardhat run scripts/deploy-apebond.js --network sepolia
 
 const VAULT_KIND = "LPStakingVault";

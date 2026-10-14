@@ -2857,7 +2857,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     const pv = require("../helpers/positionValue");
 
     const CAMPAIGN_LABEL = "real.apebond.campaign.localfork";
-    const HALF_WIDTH = 1200;
+    // The scripts' default band (no band variable set): -50 % / +100 % around the $ASSET price
+    // at each purchase, 6932 ticks each way, a 500-tick tolerance (decision of 14 Oct 2026).
+    const BAND_TICKS = 6932;
+    const TOLERANCE = 500;
     const CLIFF = 300;
     const BONUS_BPS = 1000n;
     const MIN_BONUS_WHOLE = "1";
@@ -2882,7 +2885,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         LP_APEBOND_ENABLED: "1",
         LP_APEBOND_SOULZAP_CALLERS: `${w.soulZapCaller.address},${mockCallerAddr}`,
         LP_APEBOND_CAMPAIGN_ID: CAMPAIGN_LABEL,
-        LP_APEBOND_HALF_WIDTH_TICKS: String(HALF_WIDTH),
         LP_APEBOND_CLIFF_SECONDS: String(CLIFF),
         LP_APEBOND_MIN_CLIFF_SECONDS: String(C.APEBOND_MIN_CLIFF_SECONDS),
         LP_APEBOND_BONUS_BPS: String(BONUS_BPS),
@@ -2900,8 +2902,12 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       return Number(preview.twapTick);
     }
 
-    /** Mints a position on the campaign's exact range for `recipient`, from `role`'s tokens. */
+    /**
+     * Mints a position for `recipient`, from `role`'s tokens, on the campaign's band of the
+     * moment: `campaignRange`, read right before the mint, as SoulZap does.
+     */
     async function mintCampaignPosition(role, recipient) {
+      const [bandLower, bandUpper] = await adapter.campaignRange(campaignId);
       return uni.mintPosition({
         npm,
         npmAddress: C.NPM_ADDR,
@@ -2909,8 +2915,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         token0,
         token1,
         fee: C.FEE,
-        tickLower: Number(campaign.tickLower),
-        tickUpper: Number(campaign.tickUpper),
+        tickLower: Number(bandLower),
+        tickUpper: Number(bandUpper),
         assetIsToken0,
         assetAmount: C.APEBOND_MINT_ASSET,
         usdcAmount: C.APEBOND_MINT_USDC,
@@ -2975,7 +2981,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
       notes.push(
         `apebond: escrow=${escrowAddr} adapter=${adapterAddr} vault=${apeVaultAddr} timelock=${apeTimelockAddr}`,
-        `apebond: campaign ${campaignId} range ${campaign.tickLower}..${campaign.tickUpper}`,
+        `apebond: campaign ${campaignId} band ${campaign.downTicks} below / ${campaign.upTicks} above, ` +
+          `tolerance ${campaign.toleranceTicks}`,
         `apebond: deploy-lp-staking (LP_APEBOND_ENABLED=1) ${apeRun.durationMs} ms`
       );
     });
@@ -3020,17 +3027,23 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         id: campaignId,
         label: CAMPAIGN_LABEL,
         enabled: true,
-        tickLower: Number(campaign.tickLower),
-        tickUpper: Number(campaign.tickUpper),
+        downTicks: BAND_TICKS,
+        upTicks: BAND_TICKS,
+        toleranceTicks: TOLERANCE,
+        downPct: "50.00",
+        upPct: "100.00",
         bonusCliffSeconds: String(CLIFF),
         bonusBps: Number(BONUS_BPS),
         minBonusAmount: ethers.parseUnits(MIN_BONUS_WHOLE, 18).toString(),
       });
 
-      // The range is around the pool's tick and sits on the 60-tick grid.
-      expect(Number(campaign.tickLower) % 60).to.equal(0);
-      expect(Number(campaign.tickUpper) % 60).to.equal(0);
-      expect(Number(campaign.tickUpper) - Number(campaign.tickLower)).to.be.at.least(2 * HALF_WIDTH);
+      // The band is placed around the pool's spot tick, sits on the 60-tick grid, and is the two
+      // offsets rounded outward: at least 2 x 6932 ticks wide, less than one grid step more each side.
+      const [bandLower, bandUpper, spot] = await adapter.campaignRange(campaignId);
+      expect(Number(bandLower) % 60).to.equal(0);
+      expect(Number(bandUpper) % 60).to.equal(0);
+      expect(Number(spot) - Number(bandLower)).to.be.within(BAND_TICKS, BAND_TICKS + 59);
+      expect(Number(bandUpper) - Number(spot)).to.be.within(BAND_TICKS, BAND_TICKS + 59);
 
       // Nothing of the link is on chain yet: the vault reports to nobody, the adapter cannot
       // stakeFor, and the escrow takes no reservation.

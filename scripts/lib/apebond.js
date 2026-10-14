@@ -40,6 +40,17 @@ const ADAPTER_KIND = "ApeBondPositionAdapter";
 const MIN_TICK = -887272;
 const MAX_TICK = 887272;
 const MAX_BPS = 10_000;
+
+/**
+ * The campaign band's defaults (Vladimir's decision of 14 Oct 2026): every new position spans
+ * -50 % and +100 % around the $ASSET price at the moment of the purchase, each NFT edge within
+ * 500 ticks of the expected edge.
+ */
+const DEFAULT_DOWN_PCT = "50";
+const DEFAULT_UP_PCT = "100";
+const DEFAULT_TOLERANCE_TICKS = 500n;
+const LN_TICK_BASE = Math.log(1.0001);
+const MAX_INT24 = (1n << 23n) - 1n;
 const MAX_UINT64 = (1n << 64n) - 1n;
 
 /** The adapter's cliff floor when LP_APEBOND_MIN_CLIFF_SECONDS is unset: one day. */
@@ -80,7 +91,8 @@ const ADAPTER_ABI = [
   "function depositsPaused() view returns (bool)",
   "function soulZapCallers(address caller) view returns (bool)",
   "function campaignCallers(bytes32 campaignId, address caller) view returns (bool)",
-  "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 tickLower, int24 tickUpper, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
+  "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 downTicks, int24 upTicks, int24 toleranceTicks, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
+  "function campaignRange(bytes32 campaignId) view returns (int24 tickLower, int24 tickUpper, int24 currentTick)",
   "function minCliffSeconds() view returns (uint64)",
 ];
 const POOL_ABI = [
@@ -176,6 +188,66 @@ function readMinCliff(chainId) {
   return value;
 }
 
+/**
+ * A percentage env var: a positive decimal number ("50", "33.3"), `fallback` when unset. Returned
+ * as a Number; `below` (exclusive) is the ceiling where one applies.
+ */
+function readPercent(name, fallback, { below } = {}) {
+  const raw = process.env[name];
+  const text = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
+  if (!/^[0-9]+(\.[0-9]+)?$/.test(text)) throw new Error(`${name} must be a positive number of percent — got ${raw}`);
+  const value = Number(text);
+  if (!(value > 0)) throw new Error(`${name} must be above 0 — got ${raw}`);
+  if (below !== undefined && !(value < below)) throw new Error(`${name} must be below ${below} — got ${raw}`);
+  return value;
+}
+
+/**
+ * A fall of the $ASSET price by `pct` percent, in ticks: round(ln(1 / (1 - pct/100)) / ln(1.0001)).
+ * 50 % is 6932 ticks (the price halves).
+ */
+function downPctToTicks(pct) {
+  return Math.round(Math.log(1 / (1 - pct / 100)) / LN_TICK_BASE);
+}
+
+/**
+ * A rise of the $ASSET price by `pct` percent, in ticks: round(ln(1 + pct/100) / ln(1.0001)).
+ * 100 % is 6932 ticks too (the price doubles; ln 2 / ln 1.0001 = 6931.8).
+ */
+function upPctToTicks(pct) {
+  return Math.round(Math.log(1 + pct / 100) / LN_TICK_BASE);
+}
+
+/** The price move `ticks` stand for, as a percentage with two decimals: down, then up. */
+function downTicksToPct(ticks) {
+  return ((1 - Math.pow(1.0001, -Number(ticks))) * 100).toFixed(2);
+}
+function upTicksToPct(ticks) {
+  return ((Math.pow(1.0001, Number(ticks)) - 1) * 100).toFixed(2);
+}
+
+/**
+ * The adapter's `setCampaign` offset rules, applied before anything is sent, each refused with
+ * its own reason: both offsets above zero, a tolerance of at least one tick spacing, and a band
+ * narrower than Uniswap's whole tick range.
+ */
+function checkOffsets({ downTicks, upTicks, toleranceTicks }, tickSpacing) {
+  if (!(downTicks > 0)) throw new Error(`The campaign's downTicks must be above zero — got ${downTicks}`);
+  if (!(upTicks > 0)) throw new Error(`The campaign's upTicks must be above zero — got ${upTicks}`);
+  if (toleranceTicks < tickSpacing) {
+    throw new Error(
+      `LP_APEBOND_TOLERANCE_TICKS ${toleranceTicks} is below the pool's tick spacing ${tickSpacing}: every NFT ` +
+        `edge sits on the spacing, so the adapter refuses a tolerance below it`
+    );
+  }
+  if (downTicks + upTicks >= MAX_TICK - MIN_TICK) {
+    throw new Error(
+      `The campaign band is too wide: downTicks + upTicks = ${downTicks + upTicks} must be below ` +
+        `${MAX_TICK - MIN_TICK} (Uniswap's whole tick range)`
+    );
+  }
+}
+
 /** A campaign id: a 32-byte hex value as given, or keccak256 of any other label. */
 function campaignIdFrom(raw) {
   const value = raw.trim();
@@ -186,12 +258,22 @@ function campaignIdFrom(raw) {
 /**
  * The one campaign this run configures, or `null` when `LP_APEBOND_CAMPAIGN_ID` is unset.
  *
- * A campaign carries exactly four numbers (override O2: no limit of any kind): its exact range,
- * its cliff, its rate and its minimum bonus.
+ * A campaign carries its band, its cliff, its rate and its minimum bonus (override O2: no limit of
+ * any kind). The band is not a fixed range: the adapter places it around the pool's spot tick at
+ * each purchase (Vladimir's decision of 14 Oct 2026), `downTicks` below and `upTicks` above the
+ * $ASSET price — the two swap sides on the tick axis when $ASSET is token1 — and accepts an NFT
+ * whose two edges are each within `toleranceTicks` of the band's.
  *
  *   LP_APEBOND_CAMPAIGN_ID        32-byte hex, or a label hashed with keccak256 (required)
- *   LP_APEBOND_TICK_LOWER/UPPER   the exact range; or LP_APEBOND_HALF_WIDTH_TICKS around the
- *                                 pool's CURRENT tick, aligned down to the tick spacing
+ *   LP_APEBOND_DOWN_PCT           how far below the $ASSET price at the purchase the band starts,
+ *                                 in percent, above 0 and below 100 (50): downTicks =
+ *                                 round(ln(1 / (1 - pct/100)) / ln(1.0001)), 50 -> 6932
+ *   LP_APEBOND_UP_PCT             how far above it the band ends, in percent, above 0 (100):
+ *                                 upTicks = round(ln(1 + pct/100) / ln(1.0001)), 100 -> 6932
+ *   LP_APEBOND_DOWN_TICKS         downTicks given directly; overrides LP_APEBOND_DOWN_PCT
+ *   LP_APEBOND_UP_TICKS           upTicks given directly; overrides LP_APEBOND_UP_PCT
+ *   LP_APEBOND_TOLERANCE_TICKS    the largest accepted distance of each NFT edge from the band's
+ *                                 edge, in ticks, at least the pool's tick spacing (500)
  *   LP_APEBOND_CLIFF_SECONDS      seconds from the deposit to the unlock (required); at least
  *                                 `minCliffSeconds` (LP_APEBOND_MIN_CLIFF_SECONDS, see readMinCliff)
  *   LP_APEBOND_BONUS_BPS          the bonus as basis points of the position's value, <= 10,000
@@ -199,35 +281,27 @@ function campaignIdFrom(raw) {
  *                                 staked without a bonus (0)
  *   LP_APEBOND_CAMPAIGN_ENABLED   1 to accept deposits at once, 0 to configure it switched off (1)
  *
- * @param {{currentTick: number, tickSpacing: number, bonusDecimals: number}} pool
+ * @param {{tickSpacing: number, bonusDecimals: number}} pool
  * @param {bigint} minCliffSeconds the adapter's cliff floor, from {@link readMinCliff}
  */
-function readCampaign({ currentTick, tickSpacing, bonusDecimals }, minCliffSeconds) {
+function readCampaign({ tickSpacing, bonusDecimals }, minCliffSeconds) {
   const rawId = process.env.LP_APEBOND_CAMPAIGN_ID;
   if (!rawId || rawId.trim() === "") return null;
   const id = campaignIdFrom(rawId);
 
-  let tickLower = readInteger("LP_APEBOND_TICK_LOWER", { required: false });
-  let tickUpper = readInteger("LP_APEBOND_TICK_UPPER", { required: false });
-  if ((tickLower === undefined) !== (tickUpper === undefined)) {
-    throw new Error("Set both LP_APEBOND_TICK_LOWER and LP_APEBOND_TICK_UPPER, or neither");
-  }
-  if (tickLower === undefined) {
-    const halfWidth = Number(readInteger("LP_APEBOND_HALF_WIDTH_TICKS", { min: 1 }));
-    const spacing = Number(tickSpacing);
-    const lower = currentTick - halfWidth;
-    const upper = currentTick + halfWidth;
-    tickLower = BigInt(Math.floor(lower / spacing) * spacing);
-    tickUpper = BigInt(Math.ceil(upper / spacing) * spacing);
-  }
-  const lower = Number(tickLower);
-  const upper = Number(tickUpper);
-  if (lower >= upper || lower < MIN_TICK || upper > MAX_TICK || lower % tickSpacing !== 0 || upper % tickSpacing !== 0) {
-    throw new Error(
-      `The campaign range [${lower}, ${upper}] is not a range a position on this pool can have ` +
-        `(tick spacing ${tickSpacing}, bounds ${MIN_TICK}..${MAX_TICK}, lower below upper)`
-    );
-  }
+  const downOverride = readInteger("LP_APEBOND_DOWN_TICKS", { required: false });
+  const upOverride = readInteger("LP_APEBOND_UP_TICKS", { required: false });
+  const downTicks =
+    downOverride !== undefined
+      ? Number(downOverride)
+      : downPctToTicks(readPercent("LP_APEBOND_DOWN_PCT", DEFAULT_DOWN_PCT, { below: 100 }));
+  const upTicks =
+    upOverride !== undefined ? Number(upOverride) : upPctToTicks(readPercent("LP_APEBOND_UP_PCT", DEFAULT_UP_PCT));
+  // int24 on chain: a larger value would fail to encode after the escrow and adapter exist.
+  const toleranceTicks = Number(
+    readInteger("LP_APEBOND_TOLERANCE_TICKS", { max: MAX_INT24, fallback: DEFAULT_TOLERANCE_TICKS })
+  );
+  checkOffsets({ downTicks, upTicks, toleranceTicks }, Number(tickSpacing));
 
   const bonusCliffSeconds = readInteger("LP_APEBOND_CLIFF_SECONDS", { min: 0, max: (1n << 64n) - 1n });
   if (bonusCliffSeconds < minCliffSeconds) {
@@ -249,19 +323,25 @@ function readCampaign({ currentTick, tickSpacing, bonusDecimals }, minCliffSecon
   return {
     id,
     label: rawId.trim(),
-    config: { enabled, tickLower: lower, tickUpper: upper, bonusCliffSeconds, bonusBps, minBonusAmount },
+    config: { enabled, downTicks, upTicks, toleranceTicks, bonusCliffSeconds, bonusBps, minBonusAmount },
   };
 }
 
-/** A campaign as `deployments.json` records it: every number a string, nothing a BigInt. */
+/**
+ * A campaign as `deployments.json` records it: every number a string or a plain number, nothing
+ * a BigInt. `downPct` / `upPct` are the price moves the two offsets stand for, for the reader only.
+ */
 function campaignRecord(campaign, callers) {
   const c = campaign.config;
   return {
     id: campaign.id,
     label: campaign.label,
     enabled: c.enabled,
-    tickLower: c.tickLower,
-    tickUpper: c.tickUpper,
+    downTicks: c.downTicks,
+    upTicks: c.upTicks,
+    toleranceTicks: c.toleranceTicks,
+    downPct: downTicksToPct(c.downTicks),
+    upPct: upTicksToPct(c.upTicks),
     bonusCliffSeconds: c.bonusCliffSeconds.toString(),
     bonusBps: Number(c.bonusBps),
     minBonusAmount: c.minBonusAmount.toString(),
@@ -273,8 +353,9 @@ function campaignRecord(campaign, callers) {
 function campaignTuple(config) {
   return [
     config.enabled,
-    config.tickLower,
-    config.tickUpper,
+    config.downTicks,
+    config.upTicks,
+    config.toleranceTicks,
     config.bonusCliffSeconds,
     config.bonusBps,
     config.minBonusAmount,
@@ -377,10 +458,12 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
       const current = await adapter.campaigns(campaign.id);
       const wanted = campaign.config;
       const same =
-        current.tickLower !== current.tickUpper &&
+        current.downTicks > 0n &&
+        current.upTicks > 0n &&
         current.enabled === wanted.enabled &&
-        Number(current.tickLower) === wanted.tickLower &&
-        Number(current.tickUpper) === wanted.tickUpper &&
+        Number(current.downTicks) === wanted.downTicks &&
+        Number(current.upTicks) === wanted.upTicks &&
+        Number(current.toleranceTicks) === wanted.toleranceTicks &&
         current.bonusCliffSeconds === wanted.bonusCliffSeconds &&
         current.bonusBps === wanted.bonusBps &&
         current.minBonusAmount === wanted.minBonusAmount;
@@ -406,7 +489,7 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
     for (const caller of soulZapCallers) if (!(await adapter.soulZapCallers(caller))) missing.push(`setSoulZapCaller(${caller}, true)`);
     if (campaign) {
       const current = await adapter.campaigns(campaign.id);
-      if (current.tickLower === current.tickUpper) missing.push(`setCampaign(${campaign.id}, …)`);
+      if (!(current.downTicks > 0n && current.upTicks > 0n)) missing.push(`setCampaign(${campaign.id}, …)`);
       for (const caller of soulZapCallers) {
         if (!(await adapter.campaignCallers(campaign.id, caller))) missing.push(`setCampaignCaller(${campaign.id}, ${caller}, true)`);
       }
@@ -434,7 +517,7 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
     const campaigns = (rest.campaigns || []).filter((c) => !campaign || c.id !== campaign.id);
     if (campaign) {
       const current = await adapter.campaigns(campaign.id);
-      if (current.tickLower !== current.tickUpper) {
+      if (current.downTicks > 0n && current.upTicks > 0n) {
         const permitted = [];
         for (const caller of soulZapCallers) if (await adapter.campaignCallers(campaign.id, caller)) permitted.push(caller);
         campaigns.push(campaignRecord(campaign, permitted));
@@ -529,8 +612,9 @@ async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, 
     const c = await adapter.campaigns(campaign.id);
     const w = campaign.config;
     check(`campaign ${campaign.label}.enabled`, c.enabled, w.enabled);
-    check(`campaign ${campaign.label}.tickLower`, c.tickLower, w.tickLower);
-    check(`campaign ${campaign.label}.tickUpper`, c.tickUpper, w.tickUpper);
+    check(`campaign ${campaign.label}.downTicks`, c.downTicks, w.downTicks);
+    check(`campaign ${campaign.label}.upTicks`, c.upTicks, w.upTicks);
+    check(`campaign ${campaign.label}.toleranceTicks`, c.toleranceTicks, w.toleranceTicks);
     check(`campaign ${campaign.label}.bonusCliffSeconds`, c.bonusCliffSeconds, w.bonusCliffSeconds);
     check(`campaign ${campaign.label}.bonusBps`, c.bonusBps, w.bonusBps);
     check(`campaign ${campaign.label}.minBonusAmount`, c.minBonusAmount, w.minBonusAmount);
@@ -546,7 +630,9 @@ function describeCampaign(campaign, facts) {
   const c = campaign.config;
   return (
     `${campaign.label} (${campaign.id})\n` +
-    `    range ${c.tickLower}..${c.tickUpper} (pool tick ${facts.currentTick}, spacing ${facts.tickSpacing}), ` +
+    `    band around the ${facts.bonusSymbol} price at each purchase: ${c.downTicks} ticks below ` +
+    `(-${downTicksToPct(c.downTicks)} %) to ${c.upTicks} ticks above (+${upTicksToPct(c.upTicks)} %), ` +
+    `tolerance ${c.toleranceTicks} ticks per edge (spacing ${facts.tickSpacing}), ` +
     `cliff ${c.bonusCliffSeconds}s, rate ${c.bonusBps} bps, minimum ` +
     `${hre.ethers.formatUnits(c.minBonusAmount, facts.bonusDecimals)} ${facts.bonusSymbol}, ` +
     `${c.enabled ? "enabled" : "switched OFF"}`
@@ -565,6 +651,10 @@ module.exports = {
   readAddress,
   readAddressList,
   readCampaign,
+  downPctToTicks,
+  upPctToTicks,
+  downTicksToPct,
+  upTicksToPct,
   campaignIdFrom,
   campaignRecord,
   campaignTuple,

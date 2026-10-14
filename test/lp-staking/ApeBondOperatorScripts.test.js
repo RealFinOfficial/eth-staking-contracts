@@ -150,12 +150,22 @@ describe("the ApeBond operator scripts — funding and the test-stack rehearsal"
     });
 
     it("buys a position for the beneficiary and reserves the computed bonus with an EMPTY escrow", async function () {
+      // The band follows the price (decision of 14 Oct 2026): with spot and TWAP moved to tick
+      // 120, the rehearsal must mint on campaignRange's band of THAT moment, [-6840, 7080] (the
+      // default 6932 ticks each way, rounded outward), not on the tick-0 band [-6960, 6960].
+      await chain.send(world.pool.connect(w.deployer).setTicks(120, 120));
+      const [bandLower, bandUpper, spot] = await adapter.campaignRange(campaignId);
+      expect([bandLower, bandUpper, spot]).to.deep.equal([-6840n, 7080n, 120n]);
+
       const result = await rehearsalOk("deposit", { LP_REHEARSAL_BENEFICIARY: w.alice.address });
       purchase = readRecord().purchases.at(-1);
       expect(purchase.kind).to.equal("deposit");
       expect(purchase.beneficiary).to.equal(w.alice.address);
+      expect(result.stdout).to.include("Minting on [-6840, 7080] (pool tick 120)");
 
       const tokenId = BigInt(purchase.tokenId);
+      const position = await nfpm.positions(tokenId);
+      expect([position.tickLower, position.tickUpper]).to.deep.equal([bandLower, bandUpper]);
       expect(await nfpm.ownerOf(tokenId)).to.equal(vaultAddr);
       expect(await vault.stakerOf(tokenId)).to.equal(w.alice.address);
 
@@ -180,6 +190,7 @@ describe("the ApeBond operator scripts — funding and the test-stack rehearsal"
       expect(deposited.args.campaignId).to.equal(campaignId);
       expect(deposited.args.bonusAmount).to.equal(bonus);
       expect(result.stdout).to.include("bonus ");
+      await chain.send(world.pool.connect(w.deployer).setTicks(0, 0));
     });
   });
 
@@ -253,13 +264,14 @@ describe("the ApeBond operator scripts — funding and the test-stack rehearsal"
         await chain.send(token.approve(world.nfpmAddr, ethers.MaxUint256));
       }
       const npmAsDeployer = nfpm.connect(w.deployer);
+      const [bandLower, bandUpper] = await adapter.campaignRange(campaignId);
       await chain.send(
         npmAsDeployer.mint({
           token0: world.token0Addr,
           token1: world.token1Addr,
           fee: 3000,
-          tickLower: -1200,
-          tickUpper: 1200,
+          tickLower: bandLower,
+          tickUpper: bandUpper,
           amount0Desired: 10n ** 22n,
           amount1Desired: 10n ** 22n,
           amount0Min: 0,
@@ -282,7 +294,7 @@ describe("the ApeBond operator scripts — funding and the test-stack rehearsal"
       };
       const before = await valueOf(id0);
       const vaultAsAlice = vault.connect(w.alice);
-      await chain.send(vaultAsAlice.rebalance(id0, -1200, 1200, [false, 0, 0, 0, 0], 10n ** 12n));
+      await chain.send(vaultAsAlice.rebalance(id0, bandLower, bandUpper, [false, 0, 0, 0, 0], 10n ** 12n));
       const id1 = await nfpm.lastMintedId();
       const [, bonus1] = await escrow.reservationOf(id1);
       expect(bonus1).to.equal(PV.scaledAmount(bonus0, before, await valueOf(id1)));

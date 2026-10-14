@@ -203,8 +203,26 @@ With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision docum
 8. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian =
    LP_APEBOND_GUARDIAN (LP_GUARDIAN), minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS (86400, at least 86400 on mainnet; a campaign cliff below it is refused))`; then, from the deployer, `setSoulZapCaller` for every
    `LP_APEBOND_SOULZAP_CALLERS` entry, `setCampaign` for the `LP_APEBOND_CAMPAIGN_*` campaign (its
-   exact range, cliff, rate and minimum — nothing else exists), `setCampaignCaller` for each
-   caller, and `transferOwnership(timelock)`.
+   band, cliff, rate and minimum — nothing else exists), `setCampaignCaller` for each caller, and
+   `transferOwnership(timelock)`.
+
+   The campaign's band is not a fixed range (Vladimir's decision of 14 Oct 2026). At each purchase
+   the adapter places it around the $ASSET price of that moment (the pool's spot tick) and accepts
+   the NFT when each edge is within the tolerance of the band's edge; `campaignRange(campaignId)`
+   returns the band right now. The run reads:
+
+   | variable | meaning | default |
+   |---|---|---|
+   | `LP_APEBOND_DOWN_PCT` | how far below the $ASSET price the band starts, in percent (above 0, below 100); `downTicks = round(ln(1 / (1 - pct/100)) / ln(1.0001))` | 50 (6932 ticks) |
+   | `LP_APEBOND_UP_PCT` | how far above it the band ends, in percent (above 0); `upTicks = round(ln(1 + pct/100) / ln(1.0001))` | 100 (6932 ticks) |
+   | `LP_APEBOND_DOWN_TICKS` / `LP_APEBOND_UP_TICKS` | the offset in ticks, overriding its percentage | unset |
+   | `LP_APEBOND_TOLERANCE_TICKS` | the accepted distance of each NFT edge from the band's edge, in ticks; at least the pool's tick spacing | 500 |
+
+   The run refuses, before sending anything, what `setCampaign` would refuse: an offset at or
+   below zero, a tolerance below the tick spacing, or `downTicks + upTicks` of 1,774,544 or more
+   (Uniswap's whole tick range). "Down" always means a lower $ASSET price: when $ASSET is the
+   pool's token1 the adapter puts it on the upper tick side. The registry records `downTicks`,
+   `upTicks`, `toleranceTicks` and, for the reader, `downPct` / `upPct`.
 9. The link — ONE timelock batch, PRINTED and FILED (`apebond-link-batch.json` beside the
    registry), not sent, because every proxy is born owned by the timelock:
 
@@ -320,7 +338,7 @@ step 1 above:
 LP_REHEARSAL_PHASE=caller npx hardhat run scripts/apebond-rehearsal.js --network sepolia
 # 1. the stack WITH the route: escrow + adapter + one campaign (300 s cliff, 10 %, min 1 $ASSET)
 LP_TIMELOCK_MIN_DELAY=300 LP_APEBOND_ENABLED=1 LP_APEBOND_SOULZAP_CALLERS=<caller>,<Doublo router> \
-  LP_APEBOND_CAMPAIGN_ID=apebond-sepolia-1 LP_APEBOND_HALF_WIDTH_TICKS=1200 \
+  LP_APEBOND_CAMPAIGN_ID=apebond-sepolia-1 LP_APEBOND_DOWN_PCT=50 LP_APEBOND_UP_PCT=100 \
   LP_APEBOND_CLIFF_SECONDS=300 LP_APEBOND_BONUS_BPS=1000 LP_APEBOND_MIN_BONUS=1 \
   npx hardhat run scripts/deploy-lp-staking.js --network sepolia
 # 5. the link batch (printed by step 1): schedule, wait 300 s, execute, assert the link

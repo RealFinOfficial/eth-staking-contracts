@@ -145,8 +145,16 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //                                 the callers permitted for the campaign below (none)
 //   LP_APEBOND_MIN_CLIFF_SECONDS — the adapter's immutable floor under every campaign cliff, in
 //                                 seconds (86400); at least 1, and at least 86400 on mainnet
-//   LP_APEBOND_CAMPAIGN_ID and the campaign's four numbers — see `readCampaign` in
-//                                 scripts/lib/apebond.js (none: no campaign is configured)
+//   LP_APEBOND_CAMPAIGN_ID      — the campaign to configure (none). Its band is placed around the
+//                                 $ASSET price at each purchase, not fixed (decision of 14 Oct 2026):
+//   LP_APEBOND_DOWN_PCT         — how far below that price the band starts, in percent (50)
+//   LP_APEBOND_UP_PCT           — how far above it the band ends, in percent (100)
+//   LP_APEBOND_DOWN_TICKS       — the same offsets in ticks; each overrides its percentage
+//   LP_APEBOND_UP_TICKS           (50 % down and 100 % up are both 6932 ticks)
+//   LP_APEBOND_TOLERANCE_TICKS  — the accepted distance of each NFT edge from the band's edge, at
+//                                 least the pool's tick spacing (500)
+//   LP_APEBOND_CLIFF_SECONDS …  — cliff, rate, minimum, switch: see `readCampaign` in
+//                                 scripts/lib/apebond.js
 //   LP_APEBOND_BATCH_FILE       — where the link batch is filed (apebond-link-batch.json beside
 //                                 the registry)
 //
@@ -522,8 +530,8 @@ async function main() {
   console.log(`  oracle: cardinality ${cardinality}, next ${cardinalityNext}`);
 
   // The ApeBond route's inputs, checked before a single byte is deployed: the bonus token must
-  // be one of the pool's two tokens (the escrow's constructor enforces it too), and the campaign
-  // must be a range a position on this pool can have.
+  // be one of the pool's two tokens (the escrow's constructor enforces it too), and the campaign's
+  // offsets and tolerance must be ones the adapter's setCampaign accepts on this pool.
   let apeBondCampaign = null;
   let apeBondFacts = null;
   if (apeBond) {

@@ -16,11 +16,13 @@ const { deployContract } = require("./lib/proxies");
 //                                  deployed and pass its address in LP_APEBOND_SOULZAP_CALLERS, so
 //                                  the adapter allowlists it for the campaign at wiring time.
 //   LP_REHEARSAL_PHASE=deposit     (default) one purchase: the signer mints a position on the
-//                                  campaign's exact range INTO the caller contract, which deposits
-//                                  it for LP_REHEARSAL_BENEFICIARY. The adapter computes the bonus
-//                                  (value at the vault's TWAP x rate, zero below the minimum) and
-//                                  the escrow records it under the NFT's tokenId — with no balance
-//                                  needed (override O2).
+//                                  campaign's band of the moment — `campaignRange(campaignId)`,
+//                                  read right before the mint, because the band follows the
+//                                  $ASSET price (decision of 14 Oct 2026) — INTO the caller
+//                                  contract, which deposits it for LP_REHEARSAL_BENEFICIARY. The
+//                                  adapter computes the bonus (value at the vault's TWAP x rate,
+//                                  zero below the minimum) and the escrow records it under the
+//                                  NFT's tokenId — with no balance needed (override O2).
 //   LP_REHEARSAL_PHASE=loop        B.3 P2: the caller buys with ITSELF as the beneficiary and
 //                                  unstakes in the same transaction. The escrow must emit
 //                                  `BonusForfeited`; a claim after the cliff reverts `Forfeited`.
@@ -73,7 +75,8 @@ const ADAPTER_ABI = [
   "function tickSpacing() view returns (int24)",
   "function soulZapCallers(address caller) view returns (bool)",
   "function campaignCallers(bytes32 campaignId, address caller) view returns (bool)",
-  "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 tickLower, int24 tickUpper, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
+  "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 downTicks, int24 upTicks, int24 toleranceTicks, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
+  "function campaignRange(bytes32 campaignId) view returns (int24 tickLower, int24 tickUpper, int24 currentTick)",
   "function previewBonus(bytes32 campaignId, uint128 liquidity) view returns (uint256 positionValue, uint256 bonus, int24 twapTick)",
   "event ApeBondPositionDeposited(uint256 indexed tokenId, bytes32 indexed campaignId, address indexed beneficiary, uint128 liquidity, int24 tickLower, int24 tickUpper, int24 twapTick, uint256 positionValue, uint256 bonusAmount, uint64 bonusUnlockAt)",
 ];
@@ -254,7 +257,9 @@ async function resolveStack(chainId, signer) {
   if (!rawCampaign) throw new Error("Set LP_REHEARSAL_CAMPAIGN_ID: the adapter's registry entry records no campaign");
   const campaignId = /^0x[0-9a-fA-F]{64}$/.test(rawCampaign) ? rawCampaign : hre.ethers.id(rawCampaign);
   const campaign = await adapter.campaigns(campaignId);
-  if (campaign.tickLower === campaign.tickUpper) throw new Error(`Campaign ${campaignId} is not configured on ${adapter.target}`);
+  if (!(campaign.downTicks > 0n && campaign.upTicks > 0n)) {
+    throw new Error(`Campaign ${campaignId} is not configured on ${adapter.target}`);
+  }
 
   return {
     adapter,
@@ -289,9 +294,19 @@ async function resolveCaller(record, signer, stack) {
   return caller;
 }
 
-/** Mints a position on the campaign's exact range into `recipient`, from the signer's tokens. */
+/**
+ * The band a purchase must match RIGHT NOW: the adapter's `campaignRange`, which places the
+ * campaign's offsets around the pool's spot tick (decision of 14 Oct 2026). Read immediately
+ * before each mint, so a price that moved since the last purchase moves the mint with it.
+ */
+async function campaignBand(stack) {
+  const [tickLower, tickUpper] = await stack.adapter.campaignRange(stack.campaignId);
+  return [Number(tickLower), Number(tickUpper)];
+}
+
+/** Mints a position on the campaign's band of the moment into `recipient`, from the signer's tokens. */
 async function mintCampaignPosition(stack, signer, recipient, range) {
-  const [tickLower, tickUpper] = range || [Number(stack.campaign.tickLower), Number(stack.campaign.tickUpper)];
+  const [tickLower, tickUpper] = range || (await campaignBand(stack));
   const slot0 = await stack.pool.slot0();
   const d0 = Number(await stack.token0.decimals());
   const d1 = Number(await stack.token1.decimals());
@@ -514,9 +529,11 @@ async function main() {
 
   const stack = await resolveStack(chainId, signer);
   const c = stack.campaign;
+  const [bandLower, bandUpper] = await campaignBand(stack);
   console.log(
     `Adapter ${stack.adapter.target}, escrow ${stack.escrow.target}, vault ${stack.vault.target}\n` +
-      `Campaign ${stack.campaignId}: range ${c.tickLower}..${c.tickUpper}, cliff ${c.bonusCliffSeconds}s, ` +
+      `Campaign ${stack.campaignId}: ${c.downTicks} ticks below / ${c.upTicks} above the price at purchase ` +
+      `(band now ${bandLower}..${bandUpper}, tolerance ${c.toleranceTicks}), cliff ${c.bonusCliffSeconds}s, ` +
       `rate ${c.bonusBps} bps, minimum ${units(stack, c.minBonusAmount)}, ${c.enabled ? "enabled" : "DISABLED"}`
   );
   const context = { chainId, signer, stack, record, recordFile };

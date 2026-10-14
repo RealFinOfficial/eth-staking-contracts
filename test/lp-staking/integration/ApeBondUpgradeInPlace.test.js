@@ -344,9 +344,11 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
       const [beneficiary] = await escrow.reservationOf(tokenId);
       expect(beneficiary).to.equal(w.alice.address);
 
-      // The old adapter's deposit reaches the vault, which no longer lets it stake.
+      // The old adapter's deposit, minted on its band of the moment, reaches the vault, which no
+      // longer lets it stake.
       const old = await world.contractAt("ApeBondPositionAdapter", oldAdapter);
       const caller = await world.contractAt("MockSoulZapCaller", callerAddr, w.deployer);
+      const [bandLower, bandUpper] = await old.campaignRange(CAMPAIGN_ID);
       await chain.send(
         nfpm
           .connect(w.deployer)
@@ -355,8 +357,8 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
             world.token0Addr,
             world.token1Addr,
             FEE,
-            -1200,
-            1200,
+            bandLower,
+            bandUpper,
             10n ** 24n,
             10n ** 18n,
             10n ** 18n

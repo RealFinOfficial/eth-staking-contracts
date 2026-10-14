@@ -219,12 +219,13 @@ const OWNER_TIER = {
   },
   setCampaign: {
     signature:
-      "function setCampaign(bytes32 campaignId, (bool enabled, int24 tickLower, int24 tickUpper, " +
-      "uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount) config)",
+      "function setCampaign(bytes32 campaignId, (bool enabled, int24 downTicks, int24 upTicks, " +
+      "int24 toleranceTicks, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount) config)",
     kinds: [ADAPTER_KIND],
     note:
-      "creates or reconfigures one campaign: exact range, cliff, rate (<= 10,000 bps), minimum " +
-      "bonus. Pass the config as an array or object in a TIMELOCK_BATCH file",
+      "creates or reconfigures one campaign: the band's offsets below and above the $ASSET price at " +
+      "purchase and its tolerance, cliff, rate (<= 10,000 bps), minimum bonus. Pass the config as an " +
+      "array or object in a TIMELOCK_BATCH file",
   },
   setCampaignEnabled: {
     signature: "function setCampaignEnabled(bytes32 campaignId, bool enabled)",
