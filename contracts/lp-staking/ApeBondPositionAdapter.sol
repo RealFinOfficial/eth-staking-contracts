@@ -48,9 +48,23 @@ interface IApeBondEscrow {
     function vault() external view returns (address);
 }
 
-/// @dev The one pool read the adapter makes: the tick spacing a campaign's range must sit on.
+/// @dev The two pool reads the adapter makes: the tick spacing every band sits on, and the spot
+///      tick every band is placed around (the full Uniswap V3 `slot0` tuple).
 interface IApeBondPool {
     function tickSpacing() external view returns (int24);
+
+    function slot0()
+        external
+        view
+        returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            uint8 feeProtocol,
+            bool unlocked
+        );
 }
 
 /**
@@ -74,12 +88,33 @@ interface IApeBondPool {
  *  spot is outside the vault's TWAP bounds. Valuing at the TWAP means a price pushed inside the
  *  transaction cannot inflate the bonus (B.3 §5.1). Uncollected fees are not counted.
  *
- *  NO LIMIT OF ANY KIND (override O2, 2026-10-05). A campaign carries exactly four numbers: its
- *  exact range (`tickLower`/`tickUpper`), its cliff (`bonusCliffSeconds`), its rate (`bonusBps`,
- *  at most 10,000) and its minimum bonus (`minBonusAmount`, D6 — below it the position is staked
- *  normally and gets no reservation; nothing reverts). There is no per-purchase, per-campaign,
- *  daily or total cap, and the escrow records a bonus whatever its balance is; claims revert
- *  until the company funds it.
+ *  NO LIMIT OF ANY KIND (override O2, 2026-10-05). A campaign carries its band (two offsets and
+ *  a tolerance, below), its cliff (`bonusCliffSeconds`), its rate (`bonusBps`, at most 10,000)
+ *  and its minimum bonus (`minBonusAmount`, D6 — below it the position is staked normally and
+ *  gets no reservation; nothing reverts). There is no per-purchase, per-campaign, daily or total
+ *  cap, and the escrow records a bonus whatever its balance is; claims revert until the company
+ *  funds it.
+ *
+ *  THE BAND FOLLOWS THE PRICE AT THE PURCHASE (Vladimir's decision of 14 Oct 2026). A campaign
+ *  stores no range. It stores two offsets in $ASSET-price terms — `downTicks`, how far BELOW the
+ *  $ASSET price the band starts, and `upTicks`, how far ABOVE it the band ends (the deploy
+ *  scripts default to -50 % and +100 %) — and `toleranceTicks`. At each deposit the adapter reads
+ *  the pool's spot tick from `slot0()` and places the expected band around it
+ *  ({campaignRange}): the lower edge rounded DOWN and the upper edge rounded UP to the tick
+ *  spacing, both kept inside Uniswap's tick bounds. The NFT is accepted when each of its two
+ *  edges is at most `toleranceTicks` from the expected edge, so a purchase minted a few blocks
+ *  earlier, or one tick-spacing off, still passes. When the price moves, the band moves with it:
+ *  the timelock never has to re-centre a campaign.
+ *
+ *  TOKEN ORDER. A tick measures token1 per token0. When $ASSET is token0 its price RISES with the
+ *  tick, so the band is [spot - downTicks, spot + upTicks]. When $ASSET is token1 its price FALLS
+ *  as the tick rises, so the band is [spot - upTicks, spot + downTicks].
+ *
+ *  SPOT PLACES THE BAND, THE TWAP PAYS THE BONUS. The band has to sit where the purchase really
+ *  minted, and a mint happens at spot, so spot is the band's reference. Spot can be pushed inside
+ *  a transaction, but that only moves WHERE the accepted band sits, never WHAT the bonus pays:
+ *  the bonus is the position's value at the vault's TWAP, and the deposit reverts when spot is
+ *  outside the vault's TWAP bounds.
  *
  *  ONE FLOOR (audit C-14, 7 Oct 2026). A campaign's cliff is never below {minCliffSeconds}, an
  *  immutable set at deployment and never zero. With a zero cliff the bonus would unlock in the
@@ -128,10 +163,17 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
 
     /**
      * @notice What the timelock configures per campaign — and the only numbers a campaign has.
+     *         The band is not stored: it is placed around the pool's spot tick at each purchase
+     *         (see {campaignRange}). A campaign exists once `downTicks` and `upTicks` are both
+     *         above zero.
      * @param enabled True while deposits into the campaign are accepted.
-     * @param tickLower The campaign's exact range, lower tick: a multiple of the pool's tick
-     *        spacing inside Uniswap's bounds, below `tickUpper`.
-     * @param tickUpper The campaign's exact range, upper tick.
+     * @param downTicks How far below the $ASSET price at the purchase the band starts, in ticks
+     *        ("down" = a LOWER $ASSET price). Above zero.
+     * @param upTicks How far above the $ASSET price at the purchase the band ends, in ticks ("up"
+     *        = a HIGHER $ASSET price). Above zero; `downTicks + upTicks` is below the width of
+     *        Uniswap's whole tick range.
+     * @param toleranceTicks The largest accepted distance of each NFT edge from the expected
+     *        edge, in ticks. At least the pool's tick spacing.
      * @param bonusCliffSeconds Seconds from the deposit until the bonus can be claimed; at least
      *        {minCliffSeconds}.
      * @param bonusBps The bonus as a share of the position's value, in basis points (<= 10,000).
@@ -139,8 +181,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      */
     struct CampaignConfig {
         bool enabled;
-        int24 tickLower;
-        int24 tickUpper;
+        int24 downTicks;
+        int24 upTicks;
+        int24 toleranceTicks;
         uint64 bonusCliffSeconds;
         uint16 bonusBps;
         uint256 minBonusAmount;
@@ -177,12 +220,14 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     address public immutable token1;
     /// @notice The vault's pool fee tier, read from the vault at construction.
     uint24 public immutable fee;
-    /// @notice The vault's pool tick spacing; every campaign range sits on it.
+    /// @notice The vault's pool tick spacing; every campaign band sits on it.
     int24 public immutable tickSpacing;
     /// @notice True when the escrow's bonus token is token0; positions are valued in it.
     bool public immutable bonusIsToken0;
     /// @notice The shortest cliff {setCampaign} accepts, in seconds. Never zero (audit C-14).
     uint64 public immutable minCliffSeconds;
+    /// @dev The vault's pool, read once at construction: the spot tick every band is placed around.
+    IApeBondPool private immutable _pool;
 
     // ──────────────────────── State (configuration only) ───────
 
@@ -195,7 +240,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @notice True while `caller` may call {depositFor} at all (the global allowlist).
     mapping(address => bool) public soulZapCallers;
 
-    /// @notice Campaign id => its configuration. An unset campaign has `tickLower == tickUpper`.
+    /// @notice Campaign id => its configuration. An unset campaign has `downTicks == upTicks == 0`.
     mapping(bytes32 => CampaignConfig) public campaigns;
 
     /// @notice Campaign id => caller => true while that caller may deposit into that campaign.
@@ -226,8 +271,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     event CampaignSet(
         bytes32 indexed campaignId,
         bool enabled,
-        int24 tickLower,
-        int24 tickUpper,
+        int24 downTicks,
+        int24 upTicks,
+        int24 toleranceTicks,
         uint64 bonusCliffSeconds,
         uint16 bonusBps,
         uint256 minBonusAmount
@@ -281,9 +327,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev The campaign id is zero, which is reserved as "no campaign".
     error ZeroCampaignId();
 
-    /// @dev A campaign range that no Uniswap position can have: not lower < upper, outside the
-    ///      tick bounds, or off the pool's tick spacing.
-    error InvalidCampaignRange(int24 tickLower, int24 tickUpper, int24 tickSpacing);
+    /// @dev Campaign offsets no band can be built from: an offset at or below zero, a tolerance
+    ///      below the pool's tick spacing, or a band as wide as Uniswap's whole tick range.
+    error InvalidCampaignOffsets(int24 downTicks, int24 upTicks, int24 toleranceTicks, int24 tickSpacing);
 
     /// @dev `bonusBps` above 10,000 (more than the whole value).
     error BonusBpsTooHigh(uint16 bonusBps);
@@ -306,8 +352,11 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev The position is on a different pair or fee tier than the vault's.
     error PositionPoolMismatch(uint256 tokenId, address positionToken0, address positionToken1, uint24 positionFee);
 
-    /// @dev The position's range is not the campaign's exact range.
-    error TickRangeMismatch(int24 tickLower, int24 tickUpper, int24 expectedTickLower, int24 expectedTickUpper);
+    /// @dev An edge of the position is further than the campaign's tolerance from the edge of the
+    ///      band placed around the pool's spot tick.
+    error TickRangeOutsideTolerance(
+        int24 tickLower, int24 tickUpper, int24 expectedLower, int24 expectedUpper, int24 toleranceTicks
+    );
 
     /// @dev The position holds no liquidity.
     error EmptyPosition(uint256 tokenId);
@@ -395,7 +444,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         token0 = token0_;
         token1 = token1_;
         fee = IApeBondVault(_vault).fee();
-        tickSpacing = IApeBondPool(IApeBondVault(_vault).pool()).tickSpacing();
+        IApeBondPool pool_ = IApeBondPool(IApeBondVault(_vault).pool());
+        _pool = pool_;
+        tickSpacing = pool_.tickSpacing();
         minCliffSeconds = minCliffSeconds_;
 
         guardian = _guardian;
@@ -418,7 +469,8 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      *        3. the campaign exists and is enabled;
      *        4. the beneficiary is not zero, the adapter, the vault or the position manager;
      *        5. the caller owns the NFT and has approved this adapter for it;
-     *        6. the position is on the vault's pair and fee, on the campaign's EXACT range, with
+     *        6. the position is on the vault's pair and fee, each edge within the campaign's
+     *           tolerance of the band placed around the pool's spot tick ({campaignRange}), with
      *           liquidity above zero;
      *        7. the vault's TWAP; revert when spot is outside its bounds;
      *        8. value = valueAt(position, TWAP); bonus = value x bonusBps / 10,000, zero below
@@ -498,8 +550,28 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     // ──────────────────────── Views ────────────────────────────
 
     /**
-     * @notice The bonus {depositFor} would compute for `liquidity` on the campaign's range right
-     *         now, and the position value it is a share of. Zero bonus below the minimum.
+     * @notice The band a purchase into `campaignId` must match right now: the campaign's offsets
+     *         placed around the pool's spot tick, oriented by which pool token $ASSET is, the
+     *         lower edge rounded down and the upper edge rounded up to the tick spacing, both
+     *         kept inside Uniswap's tick bounds. A deposit accepts an NFT whose edges are each
+     *         within `toleranceTicks` of these two.
+     * @dev Reverts {UnknownCampaign} when no campaign is configured under `campaignId`.
+     * @return tickLower The expected lower edge.
+     * @return tickUpper The expected upper edge.
+     * @return currentTick The pool's spot tick the band was placed around.
+     */
+    function campaignRange(bytes32 campaignId)
+        external
+        view
+        returns (int24 tickLower, int24 tickUpper, int24 currentTick)
+    {
+        return _campaignRange(_existing(campaignId));
+    }
+
+    /**
+     * @notice The bonus {depositFor} would compute for `liquidity` on the band {campaignRange}
+     *         returns right now, and the position value it is a share of. Zero bonus below the
+     *         minimum.
      * @dev For quotes and tests. Reverts like {depositFor} when the campaign is unknown or spot is
      *      outside the TWAP bounds.
      */
@@ -508,14 +580,24 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         view
         returns (uint256 positionValue, uint256 bonus, int24 twapTick)
     {
-        CampaignConfig memory campaign = campaigns[campaignId];
-        if (campaign.tickLower == campaign.tickUpper) revert UnknownCampaign(campaignId);
-        Deposit memory d;
-        d.liquidity = liquidity;
-        d.tickLower = campaign.tickLower;
-        d.tickUpper = campaign.tickUpper;
-        _price(d, campaign);
-        return (d.positionValue, d.bonus, d.twapTick);
+        CampaignConfig memory campaign = _existing(campaignId);
+        (int24 tickLower, int24 tickUpper,) = _campaignRange(campaign);
+        return _preview(campaign, liquidity, tickLower, tickUpper);
+    }
+
+    /**
+     * @notice The bonus {depositFor} would compute for `liquidity` on the explicit range
+     *         [`tickLower`, `tickUpper`], and the position value it is a share of. A quote only:
+     *         the range is valued as given, with no tolerance check against the campaign's band.
+     * @dev Reverts like {previewBonus} when the campaign is unknown or spot is outside the TWAP
+     *      bounds.
+     */
+    function previewBonusAt(bytes32 campaignId, uint128 liquidity, int24 tickLower, int24 tickUpper)
+        external
+        view
+        returns (uint256 positionValue, uint256 bonus, int24 twapTick)
+    {
+        return _preview(_existing(campaignId), liquidity, tickLower, tickUpper);
     }
 
     // ──────────────────────── Owner functions (timelock) ───────
@@ -523,20 +605,23 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /**
      * @notice Creates or reconfigures one campaign. Affects only deposits made afterwards: a
      *         reservation already in the escrow keeps its amount and its unlock time.
-     * @dev Validates what can be validated at configuration time: a non-zero id, a range any
-     *      Uniswap position on the vault's pool could have, a rate no larger than the whole value,
-     *      and a cliff no shorter than {minCliffSeconds} (audit C-14). Nothing else: there is no
-     *      limit of any kind (override O2).
+     * @dev Validates what can be validated at configuration time: a non-zero id; offsets a band
+     *      can be built from (`downTicks` and `upTicks` above zero, together narrower than
+     *      Uniswap's whole tick range, and a tolerance of at least one tick spacing, since every
+     *      NFT edge sits on the spacing); a rate no larger than the whole value; and a cliff no
+     *      shorter than {minCliffSeconds} (audit C-14). Nothing else: there is no limit of any
+     *      kind (override O2).
      */
     function setCampaign(bytes32 campaignId, CampaignConfig calldata config) external onlyOwner {
         if (campaignId == bytes32(0)) revert ZeroCampaignId();
-        int24 lower = config.tickLower;
-        int24 upper = config.tickUpper;
+        int24 down = config.downTicks;
+        int24 up = config.upTicks;
+        int24 tolerance = config.toleranceTicks;
         if (
-            lower >= upper || lower < TickMath.MIN_TICK || upper > TickMath.MAX_TICK || lower % tickSpacing != 0
-                || upper % tickSpacing != 0
+            down <= 0 || up <= 0 || tolerance < tickSpacing
+                || int256(down) + int256(up) >= int256(TickMath.MAX_TICK) - int256(TickMath.MIN_TICK)
         ) {
-            revert InvalidCampaignRange(lower, upper, tickSpacing);
+            revert InvalidCampaignOffsets(down, up, tolerance, tickSpacing);
         }
         if (config.bonusBps > BPS) revert BonusBpsTooHigh(config.bonusBps);
         if (config.bonusCliffSeconds < minCliffSeconds) {
@@ -547,8 +632,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         emit CampaignSet(
             campaignId,
             config.enabled,
-            lower,
-            upper,
+            down,
+            up,
+            tolerance,
             config.bonusCliffSeconds,
             config.bonusBps,
             config.minBonusAmount
@@ -622,7 +708,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         if (!campaignCallers[campaignId][msg.sender]) revert NotCampaignCaller(campaignId, msg.sender);
 
         campaign = campaigns[campaignId];
-        if (campaign.tickLower == campaign.tickUpper) revert UnknownCampaign(campaignId);
+        if (campaign.downTicks <= 0 || campaign.upTicks <= 0) revert UnknownCampaign(campaignId);
         if (!campaign.enabled) revert CampaignDisabled(campaignId);
     }
 
@@ -638,7 +724,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     }
 
     /// @dev Steps 5-6: the NFT is the caller's, reachable by this adapter, and is a position on
-    ///      the vault's pool with the campaign's exact range and some liquidity.
+    ///      the vault's pool, within the campaign's tolerance of its band, with some liquidity.
     function _checkPosition(uint256 tokenId, CampaignConfig memory campaign)
         private
         view
@@ -662,12 +748,58 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         if (positionToken0 != token0 || positionToken1 != token1 || positionFee != fee) {
             revert PositionPoolMismatch(tokenId, positionToken0, positionToken1, positionFee);
         }
-        // EXACT, not "inside": the campaign is one range, and a wider or narrower position is a
-        // different product.
-        if (d.tickLower != campaign.tickLower || d.tickUpper != campaign.tickUpper) {
-            revert TickRangeMismatch(d.tickLower, d.tickUpper, campaign.tickLower, campaign.tickUpper);
-        }
+        _checkRange(d, campaign);
         if (d.liquidity == 0) revert EmptyPosition(tokenId);
+    }
+
+    /// @dev Step 6, the band: each NFT edge at most `toleranceTicks` from the matching edge of the
+    ///      band placed around the pool's spot tick right now.
+    function _checkRange(Deposit memory d, CampaignConfig memory campaign) private view {
+        (int24 expectedLower, int24 expectedUpper,) = _campaignRange(campaign);
+        int256 tolerance = campaign.toleranceTicks;
+        if (
+            _distance(d.tickLower, expectedLower) > tolerance || _distance(d.tickUpper, expectedUpper) > tolerance
+        ) {
+            revert TickRangeOutsideTolerance(
+                d.tickLower, d.tickUpper, expectedLower, expectedUpper, campaign.toleranceTicks
+            );
+        }
+    }
+
+    /**
+     * @dev The band for `campaign` around the pool's spot tick. $ASSET as token0: its price rises
+     *      with the tick, so "down" is below the tick. $ASSET as token1: its price falls as the
+     *      tick rises, so "down" is ABOVE the tick and the two offsets swap sides. The lower edge
+     *      is rounded down and the upper edge up to the spacing (the band only ever widens), then
+     *      both are clamped into the usable tick range. All arithmetic is int256: no int24 sum
+     *      can overflow on the way.
+     */
+    function _campaignRange(CampaignConfig memory campaign)
+        private
+        view
+        returns (int24 tickLower, int24 tickUpper, int24 currentTick)
+    {
+        (, currentTick,,,,,) = _pool.slot0();
+        (int256 below, int256 above) = bonusIsToken0
+            ? (int256(campaign.downTicks), int256(campaign.upTicks))
+            : (int256(campaign.upTicks), int256(campaign.downTicks));
+        int256 spacing = tickSpacing;
+        tickLower = _clampToUsable(_floorToSpacing(int256(currentTick) - below, spacing), spacing);
+        tickUpper = _clampToUsable(_ceilToSpacing(int256(currentTick) + above, spacing), spacing);
+    }
+
+    /// @dev Steps 7-8 for the two quote views: one hypothetical position, priced like a deposit.
+    function _preview(CampaignConfig memory campaign, uint128 liquidity, int24 tickLower, int24 tickUpper)
+        private
+        view
+        returns (uint256 positionValue, uint256 bonus, int24 twapTick)
+    {
+        Deposit memory d;
+        d.liquidity = liquidity;
+        d.tickLower = tickLower;
+        d.tickUpper = tickUpper;
+        _price(d, campaign);
+        return (d.positionValue, d.bonus, d.twapTick);
     }
 
     /// @dev Steps 7-8: the TWAP (reverting outside its bounds), the value at it, and the bonus.
@@ -686,6 +818,40 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev The stored campaign, reverting when none is configured under `campaignId`.
     function _existing(bytes32 campaignId) private view returns (CampaignConfig storage campaign) {
         campaign = campaigns[campaignId];
-        if (campaign.tickLower == campaign.tickUpper) revert UnknownCampaign(campaignId);
+        if (campaign.downTicks <= 0 || campaign.upTicks <= 0) revert UnknownCampaign(campaignId);
+    }
+
+    /// @dev `tick` rounded DOWN (towards negative infinity) to a multiple of `spacing`. Solidity's
+    ///      `%` keeps the sign of `tick`, so `tick - tick % spacing` rounds towards ZERO, which is
+    ///      UP for a negative tick; a negative tick off the grid therefore takes one more step
+    ///      down: -61 on a 60 grid is -120, not -60.
+    function _floorToSpacing(int256 tick, int256 spacing) private pure returns (int256 rounded) {
+        rounded = tick - tick % spacing;
+        if (rounded > tick) rounded -= spacing;
+    }
+
+    /// @dev `tick` rounded UP (towards positive infinity) to a multiple of `spacing`. Rounding
+    ///      towards zero is DOWN for a positive tick, so a positive tick off the grid takes one
+    ///      more step up: 61 on a 60 grid is 120, and -61 is -60.
+    function _ceilToSpacing(int256 tick, int256 spacing) private pure returns (int256 rounded) {
+        rounded = tick - tick % spacing;
+        if (rounded < tick) rounded += spacing;
+    }
+
+    /// @dev `tick` clamped into the usable range: Uniswap's [MIN_TICK, MAX_TICK] rounded INWARD to
+    ///      the spacing. Rounding towards zero is inward for both bounds (-887272 and 887272 on a
+    ///      60 grid give -887220 and 887220).
+    function _clampToUsable(int256 tick, int256 spacing) private pure returns (int24) {
+        int256 maxUsable = int256(TickMath.MAX_TICK) - int256(TickMath.MAX_TICK) % spacing;
+        int256 minUsable = int256(TickMath.MIN_TICK) - int256(TickMath.MIN_TICK) % spacing;
+        if (tick > maxUsable) return SafeCast.toInt24(maxUsable);
+        if (tick < minUsable) return SafeCast.toInt24(minUsable);
+        return SafeCast.toInt24(tick);
+    }
+
+    /// @dev |a - b| in int256, so no int24 difference can overflow.
+    function _distance(int24 a, int24 b) private pure returns (int256) {
+        int256 diff = int256(a) - int256(b);
+        return diff < 0 ? -diff : diff;
     }
 }

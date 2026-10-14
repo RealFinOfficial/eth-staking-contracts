@@ -48,6 +48,7 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-10-14 (the band follows the price: adapter lines 134 -> 169, branches 38 -> 41) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-29: adapter lines 132 -> 134, branches 37 -> 38) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-14: adapter lines 128 -> 132, branches 35 -> 37) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-13: vault lines 199 -> 203, branches 35 -> 37) ──
@@ -57,7 +58,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //
 // | file                        | lines             | branches        |
 // |-----------------------------|-------------------|-----------------|
-// | ApeBondPositionAdapter.sol  | 100.00% (134/134) | 100.00% (38/38) |
+// | ApeBondPositionAdapter.sol  | 100.00% (169/169) | 100.00% (41/41) |
 // | BonusEscrow.sol             |  97.30% (108/111) | 100.00% (23/23) |
 // | LPStakingVault.sol          |  98.03% (199/203) | 100.00% (37/37) |
 // | LPZapper.sol                |  96.08% (98/102)  | 100.00% (20/20) |
@@ -145,8 +146,8 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/ApeBondPositionAdapter.sol": {
-    lines: {found: 134, minHit: 134},
-    branches: {found: 38, minHit: 38},
+    lines: {found: 169, minHit: 169},
+    branches: {found: 41, minHit: 41},
   },
   "contracts/lp-staking/BonusEscrow.sol": {
     lines: {found: 111, minHit: 108},

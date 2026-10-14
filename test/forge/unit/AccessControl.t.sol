@@ -1334,8 +1334,9 @@ contract AccessControlTest is LocalHarness {
         (, ApeBondPositionAdapter adapter) = _apeBondRoute();
         ApeBondPositionAdapter.CampaignConfig memory config = ApeBondPositionAdapter.CampaignConfig({
             enabled: true,
-            tickLower: TICK_LOWER,
-            tickUpper: TICK_UPPER,
+            downTicks: 6932,
+            upTicks: 6932,
+            toleranceTicks: 500,
             bonusCliffSeconds: 1 days,
             bonusBps: 100,
             minBonusAmount: 0

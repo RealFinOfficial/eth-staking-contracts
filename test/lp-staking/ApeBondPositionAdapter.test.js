@@ -10,6 +10,7 @@ const {
   APEBOND_MIN_CLIFF_SECONDS,
 } = require("./helpers/constants");
 const { valueAt, bonusFor } = require("./helpers/positionValue");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 /**
  * ApeBondPositionAdapter — the gate between SoulZap and the vault, after the B.3 refactor
@@ -21,8 +22,12 @@ const { valueAt, bonusFor } = require("./helpers/positionValue");
  *     the vault's TWAP and takes the campaign's rate of it, zero below the campaign's minimum
  *     (D6). The expected figure is computed here, independently, from `helpers/positionValue.js`
  *     (a BigInt port of the Uniswap math), and cross-checked against `previewBonus`.
- *   - A campaign carries exactly range, cliff, rate and minimum — no cap of any kind (O2) — and
- *     the escrow records the bonus whatever its balance is.
+ *   - A campaign carries exactly its band (two offsets and a tolerance), cliff, rate and minimum —
+ *     no cap of any kind (O2) — and the escrow records the bonus whatever its balance is.
+ *   - THE BAND FOLLOWS THE PRICE AT PURCHASE (Vladimir's decision of 14 Oct 2026): `campaignRange`
+ *     places the offsets around the pool's spot tick, rounded outward to the grid (negative ticks
+ *     included), flipped when $ASSET is token1, clamped inside Uniswap's bounds; a deposit is
+ *     accepted exactly at the tolerance on each edge and refused one tick beyond it.
  *   - The order of the twelve steps: every rejection fires with the values its error names, and
  *     a failed purchase leaves nothing behind.
  *   - THE LOOP (P2): buy and unstake in one transaction forfeits the bonus.
@@ -31,7 +36,9 @@ const { valueAt, bonusFor } = require("./helpers/positionValue");
  *   - `depositFor` writes nothing to the adapter's own storage.
  *
  * The local stack is the repo's mocks: the pool mock's spot and TWAP are both tick 0 unless a
- * test moves them, and the position manager mock fabricates positions with `mintFake`.
+ * test moves them, and the position manager mock fabricates positions with `mintFake` — by
+ * default on the band `campaignRange` returns at that moment, the way SoulZap mints. The fixture
+ * campaign's offsets are 600 ticks each way, so at tick 0 its band is exactly [-600, 600].
  */
 describe("ApeBondPositionAdapter", function () {
   let adapter, vault, escrow, soulZap, nfpm, pool, router;
@@ -49,8 +56,12 @@ describe("ApeBondPositionAdapter", function () {
   const TICK_SPACING = 60;
   const TWAP_WINDOW = 600;
   const MAX_DEVIATION_TICKS = 500;
-  const TICK_LOWER = -600;
+  const TICK_LOWER = -600; // the fixture campaign's band at tick 0
   const TICK_UPPER = 600;
+  const DOWN_TICKS = 600;
+  const UP_TICKS = 600;
+  const TOLERANCE_TICKS = 120;
+  const MAX_USABLE_TICK = 887220; // 887272 rounded inward to the 60-tick grid
   const LIQUIDITY = 10n ** 24n; // worth ~5.9e22 token units at tick 0: a bonus well above the minimum
   const SMALL_LIQUIDITY = 10n ** 18n; // its bonus is far below the 1-token minimum
   const FAR_DEADLINE = 10n ** 12n;
@@ -70,13 +81,35 @@ describe("ApeBondPositionAdapter", function () {
   function campaignConfig(overrides = {}) {
     return {
       enabled: true,
-      tickLower: TICK_LOWER,
-      tickUpper: TICK_UPPER,
+      downTicks: DOWN_TICKS,
+      upTicks: UP_TICKS,
+      toleranceTicks: TOLERANCE_TICKS,
       bonusCliffSeconds: BigInt(APEBOND_CLIFF_SECONDS),
       bonusBps: APEBOND_BONUS_BPS,
       minBonusAmount: APEBOND_MIN_BONUS,
       ...overrides,
     };
+  }
+
+  /**
+   * The band the adapter must place, computed here independently: the offsets around `spot`,
+   * swapped when $ASSET is token1, the lower edge floored and the upper edge ceiled to the grid
+   * (Math.floor / Math.ceil round towards -inf / +inf for negatives too), then clamped inside
+   * Uniswap's bounds rounded inward.
+   */
+  function bandAt(spot, down, up, assetIsToken0) {
+    const [below, above] = assetIsToken0 ? [down, up] : [up, down];
+    const clamp = (t) => Math.min(MAX_USABLE_TICK, Math.max(-MAX_USABLE_TICK, t));
+    return [
+      clamp(Math.floor((spot - below) / TICK_SPACING) * TICK_SPACING),
+      clamp(Math.ceil((spot + above) / TICK_SPACING) * TICK_SPACING),
+    ];
+  }
+
+  /** The band `campaignRange` returns right now, as two numbers. */
+  async function liveBand(campaignId = CAMPAIGN, onAdapter = adapter) {
+    const [lower, upper] = await onAdapter.campaignRange(campaignId);
+    return [Number(lower), Number(upper)];
   }
 
   // ── deployment helpers ─────────────────────────────────────────
@@ -125,10 +158,12 @@ describe("ApeBondPositionAdapter", function () {
   }
 
   /// Fabricates a position NFT for `holder`; principal is funded so the vault's later paths work.
+  /// Unless the test names its ticks, it mints on the band `campaignRange` returns right now.
   async function createPosition(holder, opts = {}) {
+    const [bandLower, bandUpper] = await liveBand();
     const {
-      tickLower = TICK_LOWER,
-      tickUpper = TICK_UPPER,
+      tickLower = bandLower,
+      tickUpper = bandUpper,
       liquidity = LIQUIDITY,
       poolToken0 = token0Addr,
       poolToken1 = token1Addr,
@@ -165,9 +200,10 @@ describe("ApeBondPositionAdapter", function () {
     return { tx, tokenId };
   }
 
-  /// The bonus the adapter must compute for `liquidity` on the campaign range at `tick`.
-  function expected(liquidity = LIQUIDITY, tick = 0, config = campaignConfig()) {
-    const value = valueAt(liquidity, config.tickLower, config.tickUpper, tick, bonusIsToken0);
+  /// The bonus the adapter must compute for `liquidity` on [lower, upper] — by default the
+  /// campaign's band at tick 0 — valued at `tick`.
+  function expected(liquidity = LIQUIDITY, tick = 0, config = campaignConfig(), [lower, upper] = [TICK_LOWER, TICK_UPPER]) {
+    const value = valueAt(liquidity, lower, upper, tick, bonusIsToken0);
     return { value, bonus: bonusFor(value, config.bonusBps, config.minBonusAmount) };
   }
 
@@ -382,8 +418,10 @@ describe("ApeBondPositionAdapter", function () {
 
     it("values the position at the vault's TWAP, not at spot", async function () {
       await pool.setTicks(100, 50); // spot 100, TWAP 50: inside the 500-tick bound
-      const atTwap = expected(LIQUIDITY, 50);
-      const atSpot = expected(LIQUIDITY, 100);
+      const band = await liveBand(); // spot places the band: [-540, 720]
+      expect(band).to.deep.equal([-540, 720]);
+      const atTwap = expected(LIQUIDITY, 50, campaignConfig(), band);
+      const atSpot = expected(LIQUIDITY, 100, campaignConfig(), band);
       expect(atTwap.bonus).to.not.equal(atSpot.bonus);
 
       const { tx, tokenId } = await deposit();
@@ -616,11 +654,38 @@ describe("ApeBondPositionAdapter", function () {
         .withArgs(wrongFee.tokenId, token0Addr, token1Addr, OTHER_FEE);
     });
 
-    it("6b. refuses a range that is not the campaign's exact one, even a wider one", async function () {
-      const { tx } = await deposit({ position: { tickLower: TICK_LOWER - TICK_SPACING } });
-      await expect(tx)
-        .to.be.revertedWithCustomError(adapter, "TickRangeMismatch")
-        .withArgs(TICK_LOWER - TICK_SPACING, TICK_UPPER, TICK_LOWER, TICK_UPPER);
+    it("6b. refuses an edge more than the tolerance from the band, each edge on its own", async function () {
+      const T = TOLERANCE_TICKS;
+      const beyond = [
+        [TICK_LOWER - T - 1, TICK_UPPER], // lower edge one tick too low
+        [TICK_LOWER + T + 1, TICK_UPPER], // lower edge one tick too high
+        [TICK_LOWER, TICK_UPPER - T - 1], // upper edge one tick too low
+        [TICK_LOWER, TICK_UPPER + T + 1], // upper edge one tick too high
+      ];
+      for (const [tickLower, tickUpper] of beyond) {
+        const { tx } = await deposit({ position: { tickLower, tickUpper } });
+        await expect(tx)
+          .to.be.revertedWithCustomError(adapter, "TickRangeOutsideTolerance")
+          .withArgs(tickLower, tickUpper, TICK_LOWER, TICK_UPPER, T);
+      }
+    });
+
+    it("6b. accepts each edge exactly at the tolerance, and the event carries the NFT's own ticks", async function () {
+      const T = TOLERANCE_TICKS;
+      const atTolerance = [
+        [TICK_LOWER - T, TICK_UPPER],
+        [TICK_LOWER + T, TICK_UPPER],
+        [TICK_LOWER, TICK_UPPER - T],
+        [TICK_LOWER, TICK_UPPER + T],
+      ];
+      for (const [tickLower, tickUpper] of atTolerance) {
+        const { tx, tokenId } = await deposit({ position: { tickLower, tickUpper } });
+        const { value } = expected(LIQUIDITY, 0, campaignConfig(), [tickLower, tickUpper]);
+        await expect(tx)
+          .to.emit(adapter, "ApeBondPositionDeposited")
+          .withArgs(tokenId, CAMPAIGN, alice.address, LIQUIDITY, tickLower, tickUpper, 0, value, anyValue, anyValue);
+        expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
+      }
     });
 
     it("6c. refuses an empty position", async function () {
@@ -685,6 +750,145 @@ describe("ApeBondPositionAdapter", function () {
       expect(await nfpm.balanceOf(adapterAddr)).to.equal(0n);
       expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
       expect(await escrow.totalReserved()).to.equal(0n);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("The band around the price at purchase (decision of 14 Oct 2026)", function () {
+    it("places the offsets around the pool's spot tick and returns that tick", async function () {
+      const [lower, upper, currentTick] = await adapter.campaignRange(CAMPAIGN);
+      expect([lower, upper, currentTick]).to.deep.equal([-600n, 600n, 0n]);
+
+      await expect(adapter.campaignRange(OTHER_CAMPAIGN))
+        .to.be.revertedWithCustomError(adapter, "UnknownCampaign")
+        .withArgs(OTHER_CAMPAIGN);
+    });
+
+    it("rounds the lower edge down and the upper edge up to the grid, negative ticks included", async function () {
+      const cases = [
+        // spot, the band by hand
+        [-61, [-720, 540]], // -661 -> -720 (down, not -660), 539 -> 540
+        [61, [-540, 720]], // -539 -> -540, 661 -> 720
+        [-120, [-720, 480]], // on the grid: no rounding at all
+        [-1, [-660, 600]], // -601 -> -660, 599 -> 600
+        [1, [-600, 660]], // -599 -> -600, 601 -> 660
+        [-59, [-660, 600]], // -659 -> -660, 541 -> 600
+      ];
+      for (const [spot, band] of cases) {
+        await pool.setCurrentTick(spot);
+        const [lower, upper, currentTick] = await adapter.campaignRange(CAMPAIGN);
+        expect([Number(lower), Number(upper)], `spot ${spot}`).to.deep.equal(band);
+        expect([Number(lower), Number(upper)], `spot ${spot}`).to.deep.equal(
+          bandAt(spot, DOWN_TICKS, UP_TICKS, bonusIsToken0)
+        );
+        expect(currentTick).to.equal(BigInt(spot));
+      }
+    });
+
+    it("flips the offsets when $ASSET is token1, whose price falls as the tick rises", async function () {
+      // Two adapters on the same vault: one paying in token0, one in token1. "down" means a
+      // LOWER $ASSET price, which is a lower tick for token0 and a HIGHER tick for token1.
+      const adapters = {};
+      for (const [side, token] of [["token0", token0Addr], ["token1", token1Addr]]) {
+        const e = await deployEscrowProxy(token);
+        const a = await deployAdapter({ escrow: await e.getAddress() });
+        await a.setCampaign(CAMPAIGN, campaignConfig({ downTicks: 1200, upTicks: 3000 }));
+        adapters[side] = { escrow: e, adapter: a };
+      }
+      expect(await adapters.token0.adapter.bonusIsToken0()).to.equal(true);
+      expect(await adapters.token1.adapter.bonusIsToken0()).to.equal(false);
+
+      for (const spot of [0, -61, 61]) {
+        await pool.setCurrentTick(spot);
+        expect(await liveBand(CAMPAIGN, adapters.token0.adapter)).to.deep.equal(bandAt(spot, 1200, 3000, true));
+        expect(await liveBand(CAMPAIGN, adapters.token1.adapter)).to.deep.equal(bandAt(spot, 1200, 3000, false));
+      }
+      await pool.setCurrentTick(0);
+      expect(await liveBand(CAMPAIGN, adapters.token0.adapter)).to.deep.equal([-1200, 3000]);
+      expect(await liveBand(CAMPAIGN, adapters.token1.adapter)).to.deep.equal([-3000, 1200]);
+
+      // A purchase through the token1 adapter: linked like the fixture's, it accepts the flipped
+      // band and values the position in token1, and it refuses the token0 band.
+      const { escrow: e1, adapter: a1 } = adapters.token1;
+      const a1Addr = await a1.getAddress();
+      await vault.setBonusEscrow(await e1.getAddress()); // the fixture's escrow owes nothing yet
+      await vault.setStakeOperator(a1Addr, true);
+      await e1.setAdapter(a1Addr);
+      await a1.setSoulZapCaller(soulZapAddr, true);
+      await a1.setCampaignCaller(CAMPAIGN, soulZapAddr, true);
+
+      const flipped = await createPosition(soulZapAddr, { tickLower: -3000, tickUpper: 1200 });
+      const value = valueAt(LIQUIDITY, -3000, 1200, 0, false);
+      await expect(soulZap.deposit(a1Addr, nfpmAddr, flipped, CAMPAIGN, alice.address))
+        .to.emit(a1, "ApeBondPositionDeposited")
+        .withArgs(flipped, CAMPAIGN, alice.address, LIQUIDITY, -3000, 1200, 0, value, anyValue, anyValue);
+      expect((await e1.reservationOf(flipped)).amount).to.equal(
+        bonusFor(value, APEBOND_BONUS_BPS, APEBOND_MIN_BONUS)
+      );
+
+      const unflipped = await createPosition(soulZapAddr, { tickLower: -1200, tickUpper: 3000 });
+      await expect(soulZap.deposit(a1Addr, nfpmAddr, unflipped, CAMPAIGN, alice.address))
+        .to.be.revertedWithCustomError(a1, "TickRangeOutsideTolerance")
+        .withArgs(-1200, 3000, -3000, 1200, TOLERANCE_TICKS);
+    });
+
+    it("clamps a band that reaches past MIN_TICK or MAX_TICK to the grid inside the bounds", async function () {
+      await pool.setCurrentTick(-887000);
+      expect(await liveBand()).to.deep.equal([-MAX_USABLE_TICK, -886380]); // -887640 clamped
+      await pool.setCurrentTick(887000);
+      expect(await liveBand()).to.deep.equal([886380, MAX_USABLE_TICK]); // 887640 clamped
+
+      // The widest legal campaign reaches past both bounds from tick 0.
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ downTicks: 887272, upTicks: 887271 }));
+      await pool.setCurrentTick(0);
+      expect(await liveBand(OTHER_CAMPAIGN)).to.deep.equal([-MAX_USABLE_TICK, MAX_USABLE_TICK]);
+    });
+
+    it("moves with the price, so the campaign never needs re-centring", async function () {
+      const before = await createPosition(soulZapAddr); // on [-600, 600]
+      await pool.setTicks(480, 480);
+      expect(await liveBand()).to.deep.equal([-120, 1080]);
+
+      // The NFT minted on the old band is now 480 ticks off on each edge: refused.
+      await expect((await deposit({ tokenId: before })).tx)
+        .to.be.revertedWithCustomError(adapter, "TickRangeOutsideTolerance")
+        .withArgs(TICK_LOWER, TICK_UPPER, -120, 1080, TOLERANCE_TICKS);
+      // One minted on the band of the moment goes through, with no campaign change.
+      const { tx, tokenId } = await deposit();
+      await expect(tx)
+        .to.emit(adapter, "ApeBondPositionDeposited")
+        .withArgs(tokenId, CAMPAIGN, alice.address, LIQUIDITY, -120, 1080, 480, anyValue, anyValue, anyValue);
+    });
+
+    it("previewBonus values the live band; previewBonusAt values the ticks it is given", async function () {
+      await pool.setTicks(120, 0); // spot 120 places the band, the TWAP 0 values it
+      const band = await liveBand();
+      expect(band).to.deep.equal([-480, 720]);
+
+      const [value, bonus, twapTick] = await adapter.previewBonus(CAMPAIGN, LIQUIDITY);
+      const ref = expected(LIQUIDITY, 0, campaignConfig(), band);
+      expect([value, bonus, twapTick]).to.deep.equal([ref.value, ref.bonus, 0n]);
+
+      const [atValue, atBonus] = await adapter.previewBonusAt(CAMPAIGN, LIQUIDITY, band[0], band[1]);
+      expect([atValue, atBonus]).to.deep.equal([value, bonus]);
+
+      // An explicit range far outside the tolerance is valued as given: a quote, not a check.
+      const [farValue, farBonus, farTwap] = await adapter.previewBonusAt(CAMPAIGN, LIQUIDITY, -6000, 6000);
+      const far = expected(LIQUIDITY, 0, campaignConfig(), [-6000, 6000]);
+      expect([farValue, farBonus, farTwap]).to.deep.equal([far.value, far.bonus, 0n]);
+
+      await expect(adapter.previewBonusAt(OTHER_CAMPAIGN, LIQUIDITY, -600, 600))
+        .to.be.revertedWithCustomError(adapter, "UnknownCampaign")
+        .withArgs(OTHER_CAMPAIGN);
+      await pool.setTicks(MAX_DEVIATION_TICKS + 1, 0);
+      for (const call of [
+        adapter.previewBonus(CAMPAIGN, LIQUIDITY),
+        adapter.previewBonusAt(CAMPAIGN, LIQUIDITY, -600, 600),
+      ]) {
+        await expect(call)
+          .to.be.revertedWithCustomError(adapter, "PriceOutsideTwapBounds")
+          .withArgs(MAX_DEVIATION_TICKS + 1, 0, MAX_DEVIATION_TICKS);
+      }
     });
   });
 
@@ -794,15 +998,23 @@ describe("ApeBondPositionAdapter", function () {
   // ─────────────────────────────────────────────────────────────
   describe("Campaign administration (owner = timelock)", function () {
     it("stores a campaign and announces its full state", async function () {
-      const config = campaignConfig({ bonusBps: 750, minBonusAmount: TOKENS(5), bonusCliffSeconds: 86_400n });
+      const config = campaignConfig({
+        downTicks: 6932,
+        upTicks: 6931,
+        toleranceTicks: 500,
+        bonusBps: 750,
+        minBonusAmount: TOKENS(5),
+        bonusCliffSeconds: 86_400n,
+      });
       await expect(adapter.setCampaign(OTHER_CAMPAIGN, config))
         .to.emit(adapter, "CampaignSet")
-        .withArgs(OTHER_CAMPAIGN, true, TICK_LOWER, TICK_UPPER, 86_400n, 750, TOKENS(5));
+        .withArgs(OTHER_CAMPAIGN, true, 6932, 6931, 500, 86_400n, 750, TOKENS(5));
 
       const stored = await adapter.campaigns(OTHER_CAMPAIGN);
       expect(stored.enabled).to.equal(true);
-      expect(stored.tickLower).to.equal(TICK_LOWER);
-      expect(stored.tickUpper).to.equal(TICK_UPPER);
+      expect(stored.downTicks).to.equal(6932n);
+      expect(stored.upTicks).to.equal(6931n);
+      expect(stored.toleranceTicks).to.equal(500n);
       expect(stored.bonusCliffSeconds).to.equal(86_400n);
       expect(stored.bonusBps).to.equal(750n);
       expect(stored.minBonusAmount).to.equal(TOKENS(5));
@@ -818,24 +1030,27 @@ describe("ApeBondPositionAdapter", function () {
       ).to.be.revertedWithCustomError(adapter, "ZeroCampaignId");
     });
 
-    it("rejects a range no position on the vault's pool could have", async function () {
+    it("rejects offsets no band can be built from, each rule on its own", async function () {
       const bad = [
-        [TICK_UPPER, TICK_LOWER], // lower above upper
-        [TICK_LOWER, TICK_LOWER], // empty
-        [TICK_LOWER + 1, TICK_UPPER], // off the 60-tick grid
-        [TICK_LOWER, TICK_UPPER - 1],
-        [-887280, TICK_UPPER], // below MIN_TICK, on the grid
-        [TICK_LOWER, 887280], // above MAX_TICK, on the grid
+        [0, UP_TICKS, TOLERANCE_TICKS], // down offset zero
+        [-60, UP_TICKS, TOLERANCE_TICKS], // down offset negative
+        [DOWN_TICKS, 0, TOLERANCE_TICKS], // up offset zero
+        [DOWN_TICKS, -1, TOLERANCE_TICKS], // up offset negative
+        [DOWN_TICKS, UP_TICKS, TICK_SPACING - 1], // tolerance below one tick spacing
+        [DOWN_TICKS, UP_TICKS, 0],
+        [887272, 887272, TOLERANCE_TICKS], // down + up == MAX_TICK - MIN_TICK
+        [1_000_000, 1_000_000, TOLERANCE_TICKS], // wider still
       ];
-      for (const [lower, upper] of bad) {
-        await expect(
-          adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ tickLower: lower, tickUpper: upper }))
-        )
-          .to.be.revertedWithCustomError(adapter, "InvalidCampaignRange")
-          .withArgs(lower, upper, TICK_SPACING);
+      for (const [downTicks, upTicks, toleranceTicks] of bad) {
+        await expect(adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ downTicks, upTicks, toleranceTicks })))
+          .to.be.revertedWithCustomError(adapter, "InvalidCampaignOffsets")
+          .withArgs(downTicks, upTicks, toleranceTicks, TICK_SPACING);
       }
-      // The widest grid range inside the bounds is accepted.
-      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ tickLower: -887220, tickUpper: 887220 }));
+      // Each limit itself is legal: one tick each way, a tolerance of one spacing, and a band one
+      // tick narrower than the whole tick range.
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ downTicks: 1, upTicks: 1, toleranceTicks: TICK_SPACING }));
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ downTicks: 887272, upTicks: 887271 }));
+      expect((await adapter.campaigns(OTHER_CAMPAIGN)).upTicks).to.equal(887271n);
     });
 
     it("rejects a cliff below the adapter's floor — zero included — and accepts the floor (C-14)", async function () {

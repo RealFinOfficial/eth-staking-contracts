@@ -20,6 +20,11 @@ import {INonfungiblePositionManager} from "../../../contracts/lp-staking/interfa
  *         batch wires them (`vault.setBonusEscrow`, `vault.setStakeOperator`, `escrow.setAdapter`),
  *         one campaign, and a {MockSoulZapCaller} permitted for it.
  *
+ *  A campaign is two offsets around the pool's spot tick and a tolerance (Vladimir's decision of
+ *  14 Oct 2026), so every purchase here mints on the band `campaignRange` returns at that moment,
+ *  the way SoulZap mints. On each rung the offsets are chosen so the band at the rung's starting
+ *  price is exactly the range the rung was written for.
+ *
  *  Two rungs:
  *    * {_deployApeBond} — the local vault on {MockPositionManager} (fake liquidity math), the pool
  *      mock at tick 0. The branch tier: every revert, every boundary, every event.
@@ -37,9 +42,14 @@ abstract contract ApeBondHarness is LocalHarness {
 
     bytes32 internal constant CAMPAIGN = keccak256("apebond.campaign.1");
     bytes32 internal constant OTHER_CAMPAIGN = keccak256("apebond.campaign.2");
-    /// @dev Local rung: a range on the 60-tick grid around the pool mock's tick 0.
+    /// @dev Local rung: the campaign's band at the pool mock's tick 0, on the 60-tick grid.
     int24 internal constant CAMPAIGN_TICK_LOWER = -1200;
     int24 internal constant CAMPAIGN_TICK_UPPER = 1200;
+    /// @dev The offsets that put the band there: 1200 ticks below and above the $ASSET price.
+    int24 internal constant CAMPAIGN_DOWN_TICKS = 1200;
+    int24 internal constant CAMPAIGN_UP_TICKS = 1200;
+    /// @dev Each NFT edge may sit up to two grid steps from the band's edge.
+    int24 internal constant CAMPAIGN_TOLERANCE_TICKS = 120;
     uint16 internal constant BONUS_BPS = 1_000; // 10 % of the position's value
     uint64 internal constant CLIFF = 30 days;
     /// @dev The adapter's immutable cliff floor (audit C-14): the test stacks' 300 s.
@@ -56,6 +66,9 @@ abstract contract ApeBondHarness is LocalHarness {
     /// @dev 0.2000 - 0.3125 USDC per ASSET: 20,000 ASSET + 5,000 USDC = $10,000 at $0.25.
     int24 internal constant START_LOWER = -292419;
     int24 internal constant START_UPPER = -287956;
+    /// @dev The math rung's campaign offsets: its band at PRICE_TICK is exactly the start range.
+    int24 internal constant START_DOWN_TICKS = PRICE_TICK - START_LOWER; // 2231
+    int24 internal constant START_UP_TICKS = START_UPPER - PRICE_TICK; // 2232
     /// @dev Rebalance 1: 0.1368 - 0.25075, the upper bound 30 ticks ($0.00075) above the price.
     int24 internal constant R1_LOWER = -296217;
     int24 internal constant R1_UPPER = -290158;
@@ -97,7 +110,7 @@ abstract contract ApeBondHarness is LocalHarness {
         );
         soulZap = new MockSoulZapCaller();
         _link(vault, escrow, adapter);
-        _openCampaign(adapter, soulZap, CAMPAIGN, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        _openCampaign(adapter, soulZap, CAMPAIGN, CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
     }
 
     /// @notice The math rung, on top of the local one: a second vault on real liquidity math at
@@ -126,7 +139,7 @@ abstract contract ApeBondHarness is LocalHarness {
         );
         mathSoulZap = new MockSoulZapCaller();
         _link(mathVault, mathEscrow, mathAdapter);
-        _openCampaign(mathAdapter, mathSoulZap, CAMPAIGN, START_LOWER, START_UPPER);
+        _openCampaign(mathAdapter, mathSoulZap, CAMPAIGN, START_DOWN_TICKS, START_UP_TICKS);
 
         // Headroom for every amount the double may owe beyond what it pulled (price moves, fees).
         asset.transfer(address(mathNpm), 1_000_000e18);
@@ -141,23 +154,26 @@ abstract contract ApeBondHarness is LocalHarness {
         e.setAdapter(address(a));
     }
 
-    function _openCampaign(ApeBondPositionAdapter a, MockSoulZapCaller caller, bytes32 id, int24 lower, int24 upper)
+    function _openCampaign(ApeBondPositionAdapter a, MockSoulZapCaller caller, bytes32 id, int24 down, int24 up)
         internal
     {
         a.setSoulZapCaller(address(caller), true);
-        a.setCampaign(id, _campaignConfig(lower, upper));
+        a.setCampaign(id, _campaignConfig(down, up));
         a.setCampaignCaller(id, address(caller), true);
     }
 
-    function _campaignConfig(int24 lower, int24 upper)
+    /// @dev A campaign `down` ticks below and `up` ticks above the $ASSET price at the purchase,
+    ///      with the harness tolerance, cliff, rate and minimum.
+    function _campaignConfig(int24 down, int24 up)
         internal
         pure
         returns (ApeBondPositionAdapter.CampaignConfig memory)
     {
         return ApeBondPositionAdapter.CampaignConfig({
             enabled: true,
-            tickLower: lower,
-            tickUpper: upper,
+            downTicks: down,
+            upTicks: up,
+            toleranceTicks: CAMPAIGN_TOLERANCE_TICKS,
             bonusCliffSeconds: CLIFF,
             bonusBps: BONUS_BPS,
             minBonusAmount: MIN_BONUS
@@ -166,11 +182,11 @@ abstract contract ApeBondHarness is LocalHarness {
 
     // ──────────────────────── Local-rung purchases ─────────────
 
-    /// @notice A campaign-range position held by the SoulZap double, its principal funded.
+    /// @notice A position on the campaign's band of the moment (`campaignRange`, read right before
+    ///         the mint), held by the SoulZap double, its principal funded.
     function _mintForSoulZap(uint128 liquidity) internal returns (uint256 tokenId) {
-        return _createPositionOn(
-            address(soulZap), token0, token1, FEE, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER, liquidity, P_ASSET, P_USDC
-        );
+        (int24 lower, int24 upper,) = adapter.campaignRange(CAMPAIGN);
+        return _createPositionOn(address(soulZap), token0, token1, FEE, lower, upper, liquidity, P_ASSET, P_USDC);
     }
 
     /// @notice One purchase through the router: mint, then `depositFor(beneficiary)`.
@@ -179,9 +195,11 @@ abstract contract ApeBondHarness is LocalHarness {
         soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, beneficiary);
     }
 
-    /// @notice The bonus the adapter must compute for `liquidity` on the local campaign range.
+    /// @notice The bonus the adapter must compute for `liquidity` on the local campaign's band of
+    ///         the moment, valued at the pool mock's TWAP.
     function _expectedBonus(uint128 liquidity) internal view returns (uint256 value, uint256 bonus) {
-        value = PositionValue.valueAt(liquidity, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER, poolMock.twapTick(), true);
+        (int24 lower, int24 upper,) = adapter.campaignRange(CAMPAIGN);
+        value = PositionValue.valueAt(liquidity, lower, upper, poolMock.twapTick(), true);
         bonus = value * BONUS_BPS / 10_000;
         if (bonus < MIN_BONUS) bonus = 0;
     }

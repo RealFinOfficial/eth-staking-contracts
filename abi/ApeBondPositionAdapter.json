@@ -178,12 +178,17 @@
     "inputs": [
       {
         "internalType": "int24",
-        "name": "tickLower",
+        "name": "downTicks",
         "type": "int24"
       },
       {
         "internalType": "int24",
-        "name": "tickUpper",
+        "name": "upTicks",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "toleranceTicks",
         "type": "int24"
       },
       {
@@ -192,7 +197,7 @@
         "type": "int24"
       }
     ],
-    "name": "InvalidCampaignRange",
+    "name": "InvalidCampaignOffsets",
     "type": "error"
   },
   {
@@ -368,6 +373,22 @@
         "type": "uint8"
       },
       {
+        "internalType": "int256",
+        "name": "value",
+        "type": "int256"
+      }
+    ],
+    "name": "SafeCastOverflowedIntDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
         "internalType": "uint256",
         "name": "value",
         "type": "uint256"
@@ -395,16 +416,21 @@
       },
       {
         "internalType": "int24",
-        "name": "expectedTickLower",
+        "name": "expectedLower",
         "type": "int24"
       },
       {
         "internalType": "int24",
-        "name": "expectedTickUpper",
+        "name": "expectedUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "toleranceTicks",
         "type": "int24"
       }
     ],
-    "name": "TickRangeMismatch",
+    "name": "TickRangeOutsideTolerance",
     "type": "error"
   },
   {
@@ -594,13 +620,19 @@
       {
         "indexed": false,
         "internalType": "int24",
-        "name": "tickLower",
+        "name": "downTicks",
         "type": "int24"
       },
       {
         "indexed": false,
         "internalType": "int24",
-        "name": "tickUpper",
+        "name": "upTicks",
+        "type": "int24"
+      },
+      {
+        "indexed": false,
+        "internalType": "int24",
+        "name": "toleranceTicks",
         "type": "int24"
       },
       {
@@ -749,6 +781,35 @@
     "inputs": [
       {
         "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "campaignRange",
+    "outputs": [
+      {
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "currentTick",
+        "type": "int24"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
       }
@@ -762,12 +823,17 @@
       },
       {
         "internalType": "int24",
-        "name": "tickLower",
+        "name": "downTicks",
         "type": "int24"
       },
       {
         "internalType": "int24",
-        "name": "tickUpper",
+        "name": "upTicks",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "toleranceTicks",
         "type": "int24"
       },
       {
@@ -972,6 +1038,50 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "campaignId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint128",
+        "name": "liquidity",
+        "type": "uint128"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickLower",
+        "type": "int24"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickUpper",
+        "type": "int24"
+      }
+    ],
+    "name": "previewBonusAt",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "positionValue",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bonus",
+        "type": "uint256"
+      },
+      {
+        "internalType": "int24",
+        "name": "twapTick",
+        "type": "int24"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "renounceOwnership",
     "outputs": [],
@@ -994,12 +1104,17 @@
           },
           {
             "internalType": "int24",
-            "name": "tickLower",
+            "name": "downTicks",
             "type": "int24"
           },
           {
             "internalType": "int24",
-            "name": "tickUpper",
+            "name": "upTicks",
+            "type": "int24"
+          },
+          {
+            "internalType": "int24",
+            "name": "toleranceTicks",
             "type": "int24"
           },
           {

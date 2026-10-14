@@ -33,9 +33,12 @@ contract FakeEscrow {
  *         campaign minimum — is recomputed here with the same library and compared to the wei.
  *
  *  The local rung of {ApeBondHarness}: the adapter, the escrow and the vault are linked exactly as
- *  the deploy scripts' timelock batch links them, one campaign on [-1200, 1200] around the pool
- *  mock's tick 0 at 10 % with a 1 ASSET minimum and a 30-day cliff, and a {MockSoulZapCaller}
- *  permitted for it. The escrow holds NOTHING (override O2: a reservation needs no balance).
+ *  the deploy scripts' timelock batch links them, one campaign 1200 ticks below and above the
+ *  $ASSET price with a 120-tick tolerance (its band at the pool mock's tick 0 is [-1200, 1200]) at
+ *  10 % with a 1 ASSET minimum and a 30-day cliff, and a {MockSoulZapCaller} permitted for it.
+ *  The band is placed around the spot tick at each purchase (Vladimir's decision of 14 Oct 2026):
+ *  its rounding on negative ticks, its flip when $ASSET is token1, its clamp at Uniswap's bounds
+ *  and the tolerance on each edge are asserted here tick by tick. The escrow holds NOTHING (override O2: a reservation needs no balance).
  *  `alice` is the beneficiary throughout, so "the buyer got it" is never satisfied by the buyer
  *  happening to be the caller.
  */
@@ -136,42 +139,53 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     function test_SetCampaign_RejectsTheZeroId() public {
         vm.expectRevert(ApeBondPositionAdapter.ZeroCampaignId.selector);
-        adapter.setCampaign(bytes32(0), _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER));
+        adapter.setCampaign(bytes32(0), _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS));
     }
 
-    /// @dev Every range no Uniswap position on the vault's pool can have, each by name.
-    function test_SetCampaign_RejectsEveryImpossibleRange() public {
-        int24[2][6] memory bad = [
-            [int24(600), int24(600)], // lower == upper
-            [int24(1200), int24(-1200)], // lower > upper
-            [int24(-887280), int24(1200)], // below MIN_TICK (on the grid)
-            [int24(-1200), int24(887280)], // above MAX_TICK (on the grid)
-            [int24(-1230), int24(1200)], // lower off the 60-tick grid
-            [int24(-1200), int24(1230)] // upper off the grid
+    /// @dev Every set of offsets no band can be built from, each rule by name.
+    function test_SetCampaign_RejectsEveryImpossibleOffset() public {
+        int24[3][8] memory bad = [
+            [int24(0), int24(1200), int24(120)], // down offset zero
+            [int24(-60), int24(1200), int24(120)], // down offset negative
+            [int24(1200), int24(0), int24(120)], // up offset zero
+            [int24(1200), int24(-1), int24(120)], // up offset negative
+            [int24(1200), int24(1200), int24(59)], // tolerance one tick below the 60-tick spacing
+            [int24(1200), int24(1200), int24(0)], // no tolerance at all
+            [int24(887272), int24(887272), int24(120)], // down + up == MAX_TICK - MIN_TICK
+            [int24(type(int24).max), int24(type(int24).max), int24(120)] // the sum overflows int24
         ];
         for (uint256 i = 0; i < bad.length; ++i) {
+            ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(bad[i][0], bad[i][1]);
+            config.toleranceTicks = bad[i][2];
             vm.expectRevert(
                 abi.encodeWithSelector(
-                    ApeBondPositionAdapter.InvalidCampaignRange.selector, bad[i][0], bad[i][1], int24(60)
+                    ApeBondPositionAdapter.InvalidCampaignOffsets.selector, bad[i][0], bad[i][1], bad[i][2], int24(60)
                 )
             );
-            adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(bad[i][0], bad[i][1]));
+            adapter.setCampaign(OTHER_CAMPAIGN, config);
         }
     }
 
-    /// @dev The widest ranges the grid allows inside Uniswap's bounds are accepted.
-    function test_SetCampaign_AcceptsTheExtremeRangesOnTheGrid() public {
-        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(-887220, 887220));
-        (, int24 lower, int24 upper,,,) = adapter.campaigns(OTHER_CAMPAIGN);
-        assertEq(lower, -887220, "the lowest usable tick on the grid");
-        assertEq(upper, 887220, "the highest");
-        assertLe(TickMath.MIN_TICK, lower, "inside the bounds");
+    /// @dev Each limit itself is legal: one tick each way with a one-spacing tolerance, and a band
+    ///      one tick narrower than Uniswap's whole tick range.
+    function test_SetCampaign_AcceptsTheLimitOfEachRule() public {
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(1, 1);
+        config.toleranceTicks = 60;
+        adapter.setCampaign(OTHER_CAMPAIGN, config);
+        (, int24 down, int24 up, int24 tolerance,,,) = adapter.campaigns(OTHER_CAMPAIGN);
+        assertEq(down, 1, "one tick below");
+        assertEq(up, 1, "one tick above");
+        assertEq(tolerance, 60, "one tick spacing");
+
+        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(887272, 887271));
+        (, down, up,,,,) = adapter.campaigns(OTHER_CAMPAIGN);
+        assertEq(int256(down) + int256(up), int256(TickMath.MAX_TICK) - int256(TickMath.MIN_TICK) - 1, "the widest");
     }
 
     /// @dev Audit C-14: a cliff below the immutable floor is refused — a zero cliff would record a
     ///      bonus that no exit can forfeit — and the floor itself is legal.
     function test_SetCampaign_RefusesACliffBelowTheFloor() public {
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         config.bonusCliffSeconds = 0;
         vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.CliffBelowMinimum.selector, uint64(0), MIN_CLIFF));
         adapter.setCampaign(OTHER_CAMPAIGN, config);
@@ -184,20 +198,20 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
         config.bonusCliffSeconds = MIN_CLIFF;
         adapter.setCampaign(OTHER_CAMPAIGN, config);
-        (,,, uint64 cliff,,) = adapter.campaigns(OTHER_CAMPAIGN);
+        (,,,, uint64 cliff,,) = adapter.campaigns(OTHER_CAMPAIGN);
         assertEq(cliff, MIN_CLIFF, "the floor itself is accepted");
     }
 
     /// @dev A rate above the whole value is refused; exactly the whole value is legal.
     function test_SetCampaign_TheRateCeilingIsTheWholeValue() public {
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         config.bonusBps = 10_001;
         vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.BonusBpsTooHigh.selector, uint16(10_001)));
         adapter.setCampaign(OTHER_CAMPAIGN, config);
 
         config.bonusBps = 10_000;
         adapter.setCampaign(OTHER_CAMPAIGN, config);
-        (,,,, uint16 bps,) = adapter.campaigns(OTHER_CAMPAIGN);
+        (,,,,, uint16 bps,) = adapter.campaigns(OTHER_CAMPAIGN);
         assertEq(bps, 10_000, "100 % is accepted");
     }
 
@@ -209,21 +223,23 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
         ApeBondPositionAdapter.CampaignConfig memory config = ApeBondPositionAdapter.CampaignConfig({
             enabled: false,
-            tickLower: -2400,
-            tickUpper: 2400,
+            downTicks: 6932,
+            upTicks: 6931,
+            toleranceTicks: 500,
             bonusCliffSeconds: 7 days,
             bonusBps: 50,
             minBonusAmount: 5e18
         });
         vm.expectEmit(true, false, false, true, address(adapter));
-        emit ApeBondPositionAdapter.CampaignSet(CAMPAIGN, false, -2400, 2400, 7 days, 50, 5e18);
+        emit ApeBondPositionAdapter.CampaignSet(CAMPAIGN, false, 6932, 6931, 500, 7 days, 50, 5e18);
         adapter.setCampaign(CAMPAIGN, config);
 
-        (bool enabled, int24 lower, int24 upper, uint64 cliff, uint16 bps, uint256 minBonus) =
+        (bool enabled, int24 down, int24 up, int24 tolerance, uint64 cliff, uint16 bps, uint256 minBonus) =
             adapter.campaigns(CAMPAIGN);
         assertFalse(enabled, "every field is overwritten");
-        assertEq(lower, -2400, "lower");
-        assertEq(upper, 2400, "upper");
+        assertEq(down, 6932, "down");
+        assertEq(up, 6931, "up");
+        assertEq(tolerance, 500, "tolerance");
         assertEq(cliff, 7 days, "cliff");
         assertEq(bps, 50, "rate");
         assertEq(minBonus, 5e18, "minimum");
@@ -354,7 +370,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     ///      (audit C-29), so its refusal names that tier.
     function test_Admin_EveryConfigurationSetterIsOwnerOnly() public {
         address[3] memory refused = [apeGuardian, address(soulZap), stranger];
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         for (uint256 i = 0; i < refused.length; ++i) {
             bytes memory notOwner = abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]);
             vm.startPrank(refused[i]);
@@ -437,7 +453,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     }
 
     function test_DepositFor_AZeroRateReservesNothing() public {
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         config.bonusBps = 0;
         config.minBonusAmount = 0;
         adapter.setCampaign(CAMPAIGN, config);
@@ -451,7 +467,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     /// @dev Audit C-14: the shortest cliff a campaign can have is the floor, and a bonus behind
     ///      it is ACTIVE — forfeited by an exit — from the purchase block until the floor passes.
     function test_DepositFor_ACliffAtTheFloorKeepsTheBonusActive() public {
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         config.bonusCliffSeconds = MIN_CLIFF;
         adapter.setCampaign(CAMPAIGN, config);
 
@@ -518,7 +534,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     /// @dev Permitted for campaign A, used on campaign B: refused for B by name.
     function test_DepositFor_2_RevertsForACallerNotPermittedForTheCampaign() public {
-        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER));
+        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS));
         uint256 tokenId = _mintForSoulZap(BUY_LIQUIDITY);
         vm.expectRevert(
             abi.encodeWithSelector(ApeBondPositionAdapter.NotCampaignCaller.selector, OTHER_CAMPAIGN, address(soulZap))
@@ -613,20 +629,67 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         soulZap.deposit(adapter, address(npmMock), wrongFee, CAMPAIGN, alice);
     }
 
-    function test_DepositFor_6_RevertsForAnotherRange() public {
-        uint256 tokenId = _createPositionOn(
-            address(soulZap), token0, token1, FEE, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER + 60, BUY_LIQUIDITY, 0, 0
-        );
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ApeBondPositionAdapter.TickRangeMismatch.selector,
-                CAMPAIGN_TICK_LOWER,
-                CAMPAIGN_TICK_UPPER + 60,
-                CAMPAIGN_TICK_LOWER,
-                CAMPAIGN_TICK_UPPER
-            )
-        );
-        soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+    /// @dev One tick beyond the tolerance on ONE edge, the other edge exact: refused with the
+    ///      NFT's ticks, the band's and the tolerance — for each edge, from each side.
+    function test_DepositFor_6_RevertsOneTickBeyondTheToleranceOnEachEdge() public {
+        int24 t = CAMPAIGN_TOLERANCE_TICKS;
+        int24[2][4] memory beyond = [
+            [CAMPAIGN_TICK_LOWER - t - 1, CAMPAIGN_TICK_UPPER],
+            [CAMPAIGN_TICK_LOWER + t + 1, CAMPAIGN_TICK_UPPER],
+            [CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER - t - 1],
+            [CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER + t + 1]
+        ];
+        for (uint256 i = 0; i < beyond.length; ++i) {
+            uint256 tokenId = _createPositionOn(
+                address(soulZap), token0, token1, FEE, beyond[i][0], beyond[i][1], BUY_LIQUIDITY, 0, 0
+            );
+            vm.expectRevert(
+                abi.encodeWithSelector(
+                    ApeBondPositionAdapter.TickRangeOutsideTolerance.selector,
+                    beyond[i][0],
+                    beyond[i][1],
+                    CAMPAIGN_TICK_LOWER,
+                    CAMPAIGN_TICK_UPPER,
+                    t
+                )
+            );
+            soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+        }
+    }
+
+    /// @dev Exactly at the tolerance on one edge, the other edge exact: accepted, and the event and
+    ///      the bonus are the NFT's own range, not the band's.
+    function test_DepositFor_6_AcceptsExactlyAtTheToleranceOnEachEdge() public {
+        int24 t = CAMPAIGN_TOLERANCE_TICKS;
+        int24[2][4] memory atTolerance = [
+            [CAMPAIGN_TICK_LOWER - t, CAMPAIGN_TICK_UPPER],
+            [CAMPAIGN_TICK_LOWER + t, CAMPAIGN_TICK_UPPER],
+            [CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER - t],
+            [CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER + t]
+        ];
+        for (uint256 i = 0; i < atTolerance.length; ++i) {
+            int24 lower = atTolerance[i][0];
+            int24 upper = atTolerance[i][1];
+            uint256 tokenId =
+                _createPositionOn(address(soulZap), token0, token1, FEE, lower, upper, BUY_LIQUIDITY, 0, 0);
+            uint256 value = PositionValue.valueAt(BUY_LIQUIDITY, lower, upper, int24(0), true);
+            uint256 bonus = value * BONUS_BPS / 10_000;
+            vm.expectEmit(true, true, true, true, address(adapter));
+            emit ApeBondPositionAdapter.ApeBondPositionDeposited(
+                tokenId,
+                CAMPAIGN,
+                alice,
+                BUY_LIQUIDITY,
+                lower,
+                upper,
+                int24(0),
+                value,
+                bonus,
+                uint64(block.timestamp + CLIFF)
+            );
+            soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+            assertEq(vault.stakerOf(tokenId), alice, "accepted at the tolerance");
+        }
     }
 
     function test_DepositFor_6_RevertsForAnEmptyPosition() public {
@@ -784,39 +847,234 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     function test_PreviewBonus_RevertsLikeTheDeposit() public {
         vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.UnknownCampaign.selector, OTHER_CAMPAIGN));
         adapter.previewBonus(OTHER_CAMPAIGN, BUY_LIQUIDITY);
+        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.UnknownCampaign.selector, OTHER_CAMPAIGN));
+        adapter.previewBonusAt(OTHER_CAMPAIGN, BUY_LIQUIDITY, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
 
         poolMock.setTicks(-600, 0);
+        bytes memory outside = abi.encodeWithSelector(
+            ApeBondPositionAdapter.PriceOutsideTwapBounds.selector, int24(-600), int24(0), int24(500)
+        );
+        vm.expectRevert(outside);
+        adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        vm.expectRevert(outside);
+        adapter.previewBonusAt(CAMPAIGN, BUY_LIQUIDITY, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+    }
+
+    /// @dev Spot places the band, the TWAP values it: with spot at 310 and the TWAP at 0 the quote
+    ///      is the band [-900, 1560] valued at tick 0, and the explicit-ticks quote on that band
+    ///      agrees with it.
+    function test_PreviewBonus_ValuesTheLiveBandAtTheTwap() public {
+        poolMock.setTicks(310, 0);
+        (int24 lower, int24 upper, int24 spot) = adapter.campaignRange(CAMPAIGN);
+        assertEq(lower, -900, "-890 rounded down to the grid");
+        assertEq(upper, 1560, "1510 rounded up to the grid");
+        assertEq(spot, 310, "the spot it was placed around");
+
+        (uint256 value, uint256 bonus, int24 twapTick) = adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        uint256 expectedValue = PositionValue.valueAt(BUY_LIQUIDITY, -900, 1560, int24(0), true);
+        assertEq(value, expectedValue, "the band valued at the TWAP");
+        assertEq(bonus, expectedValue * BONUS_BPS / 10_000, "the rate of it");
+        assertEq(twapTick, int24(0), "at the TWAP");
+
+        (uint256 atValue, uint256 atBonus,) = adapter.previewBonusAt(CAMPAIGN, BUY_LIQUIDITY, lower, upper);
+        assertEq(atValue, value, "the same band, the same value");
+        assertEq(atBonus, bonus, "and the same bonus");
+    }
+
+    /// @dev The explicit-ticks quote checks nothing against the band: a range far outside the
+    ///      tolerance is valued as given.
+    function test_PreviewBonusAt_ValuesTheTicksItIsGiven() public view {
+        (uint256 value, uint256 bonus, int24 twapTick) = adapter.previewBonusAt(CAMPAIGN, BUY_LIQUIDITY, -6000, 6000);
+        uint256 expectedValue = PositionValue.valueAt(BUY_LIQUIDITY, -6000, 6000, int24(0), true);
+        assertEq(value, expectedValue, "valued as given");
+        assertEq(bonus, expectedValue * BONUS_BPS / 10_000, "the rate of it");
+        assertEq(twapTick, int24(0), "at the TWAP");
+    }
+
+    // ──────────────────────── campaignRange ────────────────────
+
+    function test_CampaignRange_IsTheOffsetsAroundSpot() public view {
+        (int24 lower, int24 upper, int24 spot) = adapter.campaignRange(CAMPAIGN);
+        assertEq(lower, CAMPAIGN_TICK_LOWER, "1200 below tick 0");
+        assertEq(upper, CAMPAIGN_TICK_UPPER, "1200 above tick 0");
+        assertEq(spot, int24(0), "the pool mock's spot");
+    }
+
+    function test_CampaignRange_RevertsForAnUnknownCampaign() public {
+        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.UnknownCampaign.selector, OTHER_CAMPAIGN));
+        adapter.campaignRange(OTHER_CAMPAIGN);
+    }
+
+    /// @dev The lower edge rounds DOWN and the upper edge UP, negative ticks included: Solidity's
+    ///      truncating division would round -1261 to -1260, the band must take -1320.
+    function test_CampaignRange_RoundsOutwardOnNegativeAndPositiveTicks() public {
+        int24[3][6] memory cases = [
+            // spot, lower, upper
+            [int24(-61), int24(-1320), int24(1140)], // -1261 -> -1320, 1139 -> 1140
+            [int24(61), int24(-1140), int24(1320)], // -1139 -> -1140, 1261 -> 1320
+            [int24(-120), int24(-1320), int24(1080)], // on the grid: unchanged
+            [int24(-1), int24(-1260), int24(1200)], // -1201 -> -1260, 1199 -> 1200
+            [int24(1), int24(-1200), int24(1260)], // -1199 -> -1200, 1201 -> 1260
+            [int24(-5000), int24(-6240), int24(-3780)] // -6200 -> -6240, -3800 -> -3780
+        ];
+        for (uint256 i = 0; i < cases.length; ++i) {
+            poolMock.setCurrentTick(cases[i][0]);
+            (int24 lower, int24 upper, int24 spot) = adapter.campaignRange(CAMPAIGN);
+            assertEq(lower, cases[i][1], "the lower edge, rounded down");
+            assertEq(upper, cases[i][2], "the upper edge, rounded up");
+            assertEq(spot, cases[i][0], "the spot");
+        }
+    }
+
+    /// @dev Past MIN_TICK or MAX_TICK the band is clamped to the last grid tick inside the bounds.
+    function test_CampaignRange_ClampsAtTheTickBounds() public {
+        poolMock.setCurrentTick(-887000);
+        (int24 lower, int24 upper,) = adapter.campaignRange(CAMPAIGN);
+        assertEq(lower, -887220, "-888200 clamped to MIN_TICK rounded inward");
+        assertEq(upper, -885780, "-885800 rounded up");
+
+        poolMock.setCurrentTick(887000);
+        (lower, upper,) = adapter.campaignRange(CAMPAIGN);
+        assertEq(lower, 885780, "885800 rounded down");
+        assertEq(upper, 887220, "888200 clamped to MAX_TICK rounded inward");
+
+        // The widest legal campaign reaches past both bounds from tick 0.
+        poolMock.setCurrentTick(0);
+        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(887272, 887271));
+        (lower, upper,) = adapter.campaignRange(OTHER_CAMPAIGN);
+        assertEq(lower, -887220, "clamped low");
+        assertEq(upper, 887220, "clamped high");
+    }
+
+    /// @dev A purchase at a clamped band goes through like any other: spot and TWAP both near
+    ///      MIN_TICK, the NFT minted on the band `campaignRange` returns.
+    function test_DepositFor_AcceptsAClampedBand() public {
+        poolMock.setTicks(-887000, -887000);
+        uint256 tokenId = _buy(alice, BUY_LIQUIDITY);
+        (,,,,, int24 lower, int24 upper,,,,,) = npmMock.positions(tokenId);
+        assertEq(lower, -887220, "the clamped lower edge");
+        assertEq(vault.stakerOf(tokenId), alice, "staked");
+    }
+
+    /// @dev $ASSET as token1: its price FALLS as the tick rises, so "down" sits above spot and the
+    ///      two offsets swap sides. A USDC-paying adapter on the same vault is that orientation; a
+    ///      purchase through it accepts the flipped band, values in token1, and refuses the
+    ///      unflipped one.
+    function test_CampaignRange_FlipsWhenTheBonusIsToken1() public {
+        (BonusEscrow usdcEscrow, ApeBondPositionAdapter usdcAdapter) = _usdcRoute();
+        assertFalse(usdcAdapter.bonusIsToken0(), "a USDC bonus is token1");
+        usdcAdapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(1200, 3000));
+        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(1200, 3000));
+
+        (int24 lower0, int24 upper0,) = adapter.campaignRange(OTHER_CAMPAIGN);
+        (int24 lower1, int24 upper1,) = usdcAdapter.campaignRange(OTHER_CAMPAIGN);
+        assertEq(lower0, -1200, "token0: down below spot");
+        assertEq(upper0, 3000, "token0: up above spot");
+        assertEq(lower1, -3000, "token1: up below spot");
+        assertEq(upper1, 1200, "token1: down above spot");
+
+        poolMock.setCurrentTick(-61);
+        (lower1, upper1,) = usdcAdapter.campaignRange(OTHER_CAMPAIGN);
+        assertEq(lower1, -3120, "-3061 rounded down");
+        assertEq(upper1, 1140, "1139 rounded up");
+        poolMock.setCurrentTick(0);
+
+        usdcAdapter.setCampaignCaller(OTHER_CAMPAIGN, address(soulZap), true);
+        uint256 flipped =
+            _createPositionOn(address(soulZap), token0, token1, FEE, -3000, 1200, BUY_LIQUIDITY, P_ASSET, P_USDC);
+        soulZap.deposit(usdcAdapter, address(npmMock), flipped, OTHER_CAMPAIGN, alice);
+        uint256 value = PositionValue.valueAt(BUY_LIQUIDITY, -3000, 1200, int24(0), false);
+        (address beneficiary, uint256 amount,,,) = usdcEscrow.reservationOf(flipped);
+        assertEq(beneficiary, alice, "the flipped band is accepted");
+        assertEq(amount, value * BONUS_BPS / 10_000, "valued in token1");
+
+        uint256 unflipped =
+            _createPositionOn(address(soulZap), token0, token1, FEE, -1200, 3000, BUY_LIQUIDITY, P_ASSET, P_USDC);
         vm.expectRevert(
             abi.encodeWithSelector(
-                ApeBondPositionAdapter.PriceOutsideTwapBounds.selector, int24(-600), int24(0), int24(500)
+                ApeBondPositionAdapter.TickRangeOutsideTolerance.selector,
+                int24(-1200),
+                int24(3000),
+                int24(-3000),
+                int24(1200),
+                CAMPAIGN_TOLERANCE_TICKS
             )
         );
-        adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        soulZap.deposit(usdcAdapter, address(npmMock), unflipped, OTHER_CAMPAIGN, alice);
+    }
+
+    /// @dev The band follows the price: an NFT minted on the old band is refused once spot has
+    ///      moved past the tolerance, and one minted on the new band passes with no campaign change.
+    function test_DepositFor_TheBandMovesWithThePrice() public {
+        uint256 old = _mintForSoulZap(BUY_LIQUIDITY); // [-1200, 1200]
+        poolMock.setTicks(480, 480);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ApeBondPositionAdapter.TickRangeOutsideTolerance.selector,
+                CAMPAIGN_TICK_LOWER,
+                CAMPAIGN_TICK_UPPER,
+                int24(-720),
+                int24(1680),
+                CAMPAIGN_TOLERANCE_TICKS
+            )
+        );
+        soulZap.deposit(adapter, address(npmMock), old, CAMPAIGN, alice);
+
+        uint256 fresh = _buy(alice, BUY_LIQUIDITY);
+        (,,,,, int24 lower, int24 upper,,,,,) = npmMock.positions(fresh);
+        assertEq(lower, -720, "minted on the band of the moment");
+        assertEq(upper, 1680, "both edges");
+        assertEq(vault.stakerOf(fresh), alice, "and accepted");
     }
 
     // ──────────────────────── Fuzz ─────────────────────────────
 
-    /// @dev EXACT, not "inside": any range other than the campaign's is refused.
-    function testFuzz_TickRange_OnlyTheExactCampaignRangeIsAccepted(int24 lowerSeed, int24 upperSeed) public {
-        int24 lower = int24(bound(lowerSeed, -1260, -1140));
-        int24 upper = int24(bound(upperSeed, 1140, 1260));
+    /// @dev A range is accepted exactly when BOTH edges are within the tolerance of the band.
+    function testFuzz_TickRange_AcceptedExactlyWithinTheTolerance(int24 lowerSeed, int24 upperSeed) public {
+        int24 lower = int24(bound(lowerSeed, -1500, -900));
+        int24 upper = int24(bound(upperSeed, 900, 1500));
         uint256 tokenId = _createPositionOn(address(soulZap), token0, token1, FEE, lower, upper, BUY_LIQUIDITY, 0, 0);
 
-        if (lower == CAMPAIGN_TICK_LOWER && upper == CAMPAIGN_TICK_UPPER) {
+        bool lowerOk = _abs(int256(lower) - CAMPAIGN_TICK_LOWER) <= int256(CAMPAIGN_TOLERANCE_TICKS);
+        bool upperOk = _abs(int256(upper) - CAMPAIGN_TICK_UPPER) <= int256(CAMPAIGN_TOLERANCE_TICKS);
+        if (lowerOk && upperOk) {
             soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
-            assertEq(vault.stakerOf(tokenId), alice, "the exact range is accepted");
+            assertEq(vault.stakerOf(tokenId), alice, "inside the tolerance is accepted");
         } else {
             vm.expectRevert(
                 abi.encodeWithSelector(
-                    ApeBondPositionAdapter.TickRangeMismatch.selector,
+                    ApeBondPositionAdapter.TickRangeOutsideTolerance.selector,
                     lower,
                     upper,
                     CAMPAIGN_TICK_LOWER,
-                    CAMPAIGN_TICK_UPPER
+                    CAMPAIGN_TICK_UPPER,
+                    CAMPAIGN_TOLERANCE_TICKS
                 )
             );
             soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
         }
+    }
+
+    /// @dev The band against a reference built a different way — floor and ceil through the
+    ///      non-negative remainder rather than truncation — for any spot, any offsets and both
+    ///      token orders. Every edge is on the grid, inside the bounds, and outward of the raw one.
+    function testFuzz_CampaignRange_MatchesAnIndependentRounding(int24 spotSeed, int24 downSeed, int24 upSeed) public {
+        int24 spot = int24(bound(spotSeed, TickMath.MIN_TICK, TickMath.MAX_TICK - 1));
+        int24 down = int24(bound(downSeed, 1, 300_000));
+        int24 up = int24(bound(upSeed, 1, 300_000));
+        poolMock.setCurrentTick(spot);
+        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(down, up));
+        (int24 lower, int24 upper,) = adapter.campaignRange(OTHER_CAMPAIGN);
+
+        int256 maxUsable = 887220;
+        int256 refLower = _refFloor(int256(spot) - down);
+        int256 refUpper = _refCeil(int256(spot) + up);
+        if (refLower < -maxUsable) refLower = -maxUsable;
+        if (refUpper > maxUsable) refUpper = maxUsable;
+        assertEq(int256(lower), refLower, "the lower edge");
+        assertEq(int256(upper), refUpper, "the upper edge");
+        assertEq(int256(lower) % 60, 0, "on the grid");
+        assertEq(int256(upper) % 60, 0, "on the grid");
     }
 
     /// @dev More liquidity on the same range never earns less.
@@ -832,7 +1090,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     /// @dev The minimum is inclusive: a bonus exactly AT it is reserved, one wei below it is not.
     function testFuzz_MinBonus_TheBoundaryIsInclusive(uint128 liquiditySeed) public {
         uint128 liquidity = uint128(bound(liquiditySeed, 1e20, 1e27));
-        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
         config.minBonusAmount = 0;
         adapter.setCampaign(CAMPAIGN, config);
         (, uint256 bonus,) = adapter.previewBonus(CAMPAIGN, liquidity);
@@ -866,6 +1124,34 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         a = new ApeBondPositionAdapter(address(npmMock), address(mv), address(e), address(this), apeGuardian, MIN_CLIFF);
         mv.setBonusEscrow(address(e));
         e.setAdapter(address(a));
-        _openCampaign(a, soulZap, CAMPAIGN, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        _openCampaign(a, soulZap, CAMPAIGN, CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
+    }
+
+    /// @dev A USDC-paying escrow and adapter on the local vault, linked in place of the ASSET pair
+    ///      (the ASSET escrow owes nothing yet, so the vault may move its link), with the SoulZap
+    ///      double allowlisted.
+    function _usdcRoute() private returns (BonusEscrow e, ApeBondPositionAdapter a) {
+        e = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), address(0));
+        a = new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(e), address(this), apeGuardian, MIN_CLIFF
+        );
+        _link(vault, e, a);
+        a.setSoulZapCaller(address(soulZap), true);
+    }
+
+    /// @dev Floor to the 60-tick grid through the non-negative remainder.
+    function _refFloor(int256 tick) private pure returns (int256) {
+        int256 rem = ((tick % 60) + 60) % 60;
+        return tick - rem;
+    }
+
+    /// @dev Ceil to the 60-tick grid through the non-negative remainder.
+    function _refCeil(int256 tick) private pure returns (int256) {
+        int256 rem = ((tick % 60) + 60) % 60;
+        return rem == 0 ? tick : tick + (60 - rem);
+    }
+
+    function _abs(int256 x) private pure returns (int256) {
+        return x < 0 ? -x : x;
     }
 }

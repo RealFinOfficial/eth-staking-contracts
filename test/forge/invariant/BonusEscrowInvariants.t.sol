@@ -348,12 +348,15 @@ contract BonusEscrowHandler is Test {
 
     // ──────────────────────── Helpers ──────────────────────────
 
+    /// @dev The campaign's settings, with its band of the moment (`campaignRange`) as the range a
+    ///      purchase mints on.
     function _campaign()
         internal
         view
         returns (bool enabled, uint64 cliff, int24 lower, int24 upper, uint16 bps, uint256 minBonus)
     {
-        (enabled, lower, upper, cliff, bps, minBonus) = adapter.campaigns(campaignId);
+        (enabled,,,, cliff, bps, minBonus) = adapter.campaigns(campaignId);
+        (lower, upper,) = adapter.campaignRange(campaignId);
     }
 
     /// @dev I5's bound: the position's value at the TWAP x the campaign rate.
