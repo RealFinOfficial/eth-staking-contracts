@@ -61,8 +61,8 @@
       "address": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "deployTx": "0xb03f61c5bced266621ff14325fc83cd5342aaf4fd15b197d521c6838874f8467",
       "block": 11854185,
-      "implementation": "0x4b0b58BD98683Ae2B2AA5Ad61BDd9B6516492109",
-      "implementationTx": "0xfd635286bbc8bc1c22d5a1d6827020abbdd2ce6e05dae2df57cc8b45ad7cc83b",
+      "implementation": "0x144806aC0bB6580B897885276F9d42C37EA12D30",
+      "implementationTx": "0x30e2e830ceb9eb68e02fdab8860659f4b1d92a0d70663840e28b2fc2f5b724a8",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
@@ -142,12 +142,12 @@
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "adapter": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148"
+      "adapter": "0x0043B79C98B3f294cF586E47f886FA1d3B3B602f"
     },
     "ApeBondPositionAdapter": {
-      "address": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148",
-      "deployTx": "0x3eebf191a3e1526087a0fabe627283193946b6ae5d169b868768e9d1e8208622",
-      "block": 11855970,
+      "address": "0x0043B79C98B3f294cF586E47f886FA1d3B3B602f",
+      "deployTx": "0x556742e2d6f31f4a9f7d3638e223fada33b777f1332515df4a53d12581d0d85e",
+      "block": 11912762,
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "escrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
       "positionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
@@ -156,6 +156,7 @@
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "fee": 3000,
       "tickSpacing": 60,
+      "minCliffSeconds": "300",
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "soulZapCallers": [
         "0xB4984AaEBa5BB73D5b9D78b93f0Aa9f863DC6FB9",
@@ -190,7 +191,8 @@
           ]
         }
       ],
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D"
+      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "previousAdapter": "0x624284B0CC617466FF7bd2bbf41dEFb75Bc75148"
     }
   }
 }
