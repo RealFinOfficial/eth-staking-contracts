@@ -657,7 +657,8 @@ describe("lp-timelock.js — batches", function () {
         vaultAddr,
         escrowAddr,
         timelockAddr,
-        guardian.address
+        guardian.address,
+        300 // the test stacks' cliff floor; CONFIG.bonusCliffSeconds sits on it
       );
       const apeAdapterAddr = await apeAdapter.getAddress();
 

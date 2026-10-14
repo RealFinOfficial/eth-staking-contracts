@@ -201,7 +201,7 @@ With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision docum
 7. `BonusEscrow` proxy: implementation `(bonusToken = LP_APEBOND_BONUS_TOKEN (LP_ASSET), vault)`,
    `initialize(owner = timelock, adapter = 0)` — born owned by the timelock, reserve path closed.
 8. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian =
-   LP_APEBOND_GUARDIAN (LP_GUARDIAN))`; then, from the deployer, `setSoulZapCaller` for every
+   LP_APEBOND_GUARDIAN (LP_GUARDIAN), minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS (86400, at least 86400 on mainnet; a campaign cliff below it is refused))`; then, from the deployer, `setSoulZapCaller` for every
    `LP_APEBOND_SOULZAP_CALLERS` entry, `setCampaign` for the `LP_APEBOND_CAMPAIGN_*` campaign (its
    exact range, cliff, rate and minimum — nothing else exists), `setCampaignCaller` for each
    caller, and `transferOwnership(timelock)`.

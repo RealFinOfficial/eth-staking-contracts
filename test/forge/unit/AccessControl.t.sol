@@ -1383,7 +1383,8 @@ contract AccessControlTest is LocalHarness {
     ///      in front of it (owner: this contract, guardian: `multisig`).
     function _apeBondRoute() internal returns (BonusEscrow escrow, ApeBondPositionAdapter adapter) {
         escrow = _deployBonusEscrowProxy(address(asset), address(vault), address(this), carol);
-        adapter = new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), multisig);
+        adapter =
+            new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), multisig, 300);
     }
 
     /// @dev The five contracts' proxy addresses, in deploy-script order.

@@ -25,6 +25,11 @@
         "internalType": "address",
         "name": "_guardian",
         "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "minCliffSeconds_",
+        "type": "uint64"
       }
     ],
     "stateMutability": "nonpayable",
@@ -71,6 +76,22 @@
       }
     ],
     "name": "CampaignDisabled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint64",
+        "name": "cliffSeconds",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "minCliffSeconds",
+        "type": "uint64"
+      }
+    ],
+    "name": "CliffBelowMinimum",
     "type": "error"
   },
   {
@@ -426,6 +447,11 @@
   {
     "inputs": [],
     "name": "ZeroCampaignId",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroMinCliff",
     "type": "error"
   },
   {
@@ -822,6 +848,19 @@
         "internalType": "address",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "minCliffSeconds",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
       }
     ],
     "stateMutability": "view",

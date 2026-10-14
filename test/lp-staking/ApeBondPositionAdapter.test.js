@@ -7,6 +7,7 @@ const {
   APEBOND_BONUS_BPS,
   APEBOND_MIN_BONUS,
   APEBOND_CLIFF_SECONDS,
+  APEBOND_MIN_CLIFF_SECONDS,
 } = require("./helpers/constants");
 const { valueAt, bonusFor } = require("./helpers/positionValue");
 
@@ -58,6 +59,7 @@ describe("ApeBondPositionAdapter", function () {
   const CAMPAIGN = APEBOND_CAMPAIGN_ID;
   const OTHER_CAMPAIGN = ethers.id("apebond.campaign.other");
   const TOKENS = (n) => ethers.parseEther(String(n));
+  const MIN_CLIFF = BigInt(APEBOND_MIN_CLIFF_SECONDS);
 
   // MockSoulZapCaller.Approval
   const APPROVE_FOR_ALL = 1;
@@ -108,10 +110,18 @@ describe("ApeBondPositionAdapter", function () {
       escrow: escrowAddr,
       initialOwner: owner.address,
       guardian: guardian.address,
+      minCliffSeconds: MIN_CLIFF,
       ...overrides,
     };
     const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
-    return Adapter.deploy(args.positionManager, args.vault, args.escrow, args.initialOwner, args.guardian);
+    return Adapter.deploy(
+      args.positionManager,
+      args.vault,
+      args.escrow,
+      args.initialOwner,
+      args.guardian,
+      args.minCliffSeconds
+    );
   }
 
   /// Fabricates a position NFT for `holder`; principal is funded so the vault's later paths work.
@@ -227,6 +237,7 @@ describe("ApeBondPositionAdapter", function () {
       expect(await adapter.owner()).to.equal(owner.address);
       expect(await adapter.guardian()).to.equal(guardian.address);
       expect(await adapter.depositsPaused()).to.equal(false);
+      expect(await adapter.minCliffSeconds()).to.equal(MIN_CLIFF);
     });
 
     it("announces the guardian and the open deposit switch from block one", async function () {
@@ -252,6 +263,11 @@ describe("ApeBondPositionAdapter", function () {
       await expect(deployAdapter({ initialOwner: ZERO }))
         .to.be.revertedWithCustomError(Adapter, "OwnableInvalidOwner")
         .withArgs(ZERO);
+    });
+
+    it("rejects a zero cliff floor, which would be zero forever (C-14)", async function () {
+      const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+      await expect(deployAdapter({ minCliffSeconds: 0n })).to.be.revertedWithCustomError(Adapter, "ZeroMinCliff");
     });
 
     it("rejects an escrow linked to a different vault", async function () {
@@ -426,12 +442,12 @@ describe("ApeBondPositionAdapter", function () {
       expect((await escrow.reservationOf(id2)).amount).to.equal(expected().value);
     });
 
-    it("unlocks at the deposit time when the cliff is zero — a bonus that can no longer be forfeited", async function () {
-      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusCliffSeconds: 0n }));
+    it("keeps a bonus behind the shortest legal cliff active from the purchase block (C-14)", async function () {
+      await adapter.setCampaign(CAMPAIGN, campaignConfig({ bonusCliffSeconds: MIN_CLIFF }));
       const { tx, tokenId } = await deposit();
       const ts = await txTimestamp(tx);
-      expect((await escrow.reservationOf(tokenId)).unlockAt).to.equal(ts);
-      expect(await escrow.isActive(tokenId)).to.equal(false);
+      expect((await escrow.reservationOf(tokenId)).unlockAt).to.equal(ts + MIN_CLIFF);
+      expect(await escrow.isActive(tokenId)).to.equal(true);
     });
 
     it("accepts an operator-for-all approval as well as a per-token one", async function () {
@@ -820,6 +836,16 @@ describe("ApeBondPositionAdapter", function () {
       }
       // The widest grid range inside the bounds is accepted.
       await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ tickLower: -887220, tickUpper: 887220 }));
+    });
+
+    it("rejects a cliff below the adapter's floor — zero included — and accepts the floor (C-14)", async function () {
+      for (const cliff of [0n, MIN_CLIFF - 1n]) {
+        await expect(adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ bonusCliffSeconds: cliff })))
+          .to.be.revertedWithCustomError(adapter, "CliffBelowMinimum")
+          .withArgs(cliff, MIN_CLIFF);
+      }
+      await adapter.setCampaign(OTHER_CAMPAIGN, campaignConfig({ bonusCliffSeconds: MIN_CLIFF }));
+      expect((await adapter.campaigns(OTHER_CAMPAIGN)).bonusCliffSeconds).to.equal(MIN_CLIFF);
     });
 
     it("rejects a rate above the whole value, and accepts exactly the whole value", async function () {

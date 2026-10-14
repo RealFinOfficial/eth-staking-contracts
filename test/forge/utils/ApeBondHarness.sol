@@ -42,6 +42,8 @@ abstract contract ApeBondHarness is LocalHarness {
     int24 internal constant CAMPAIGN_TICK_UPPER = 1200;
     uint16 internal constant BONUS_BPS = 1_000; // 10 % of the position's value
     uint64 internal constant CLIFF = 30 days;
+    /// @dev The adapter's immutable cliff floor (audit C-14): the test stacks' 300 s.
+    uint64 internal constant MIN_CLIFF = 300;
     uint256 internal constant MIN_BONUS = 1e18; // one whole $ASSET
     /// @dev Liquidity of a local-rung purchase: its value at tick 0 is ~1.2e23 ASSET wei.
     uint128 internal constant BUY_LIQUIDITY = 2e24;
@@ -90,8 +92,9 @@ abstract contract ApeBondHarness is LocalHarness {
         apeGuardian = makeAddr("apeGuardian");
 
         escrow = _deployBonusEscrowProxy(address(asset), address(vault), address(this), address(0));
-        adapter =
-            new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), apeGuardian);
+        adapter = new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF
+        );
         soulZap = new MockSoulZapCaller();
         _link(vault, escrow, adapter);
         _openCampaign(adapter, soulZap, CAMPAIGN, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
@@ -119,7 +122,7 @@ abstract contract ApeBondHarness is LocalHarness {
         mathVault = _deployVaultProxy(params);
         mathEscrow = _deployBonusEscrowProxy(address(asset), address(mathVault), address(this), address(0));
         mathAdapter = new ApeBondPositionAdapter(
-            address(mathNpm), address(mathVault), address(mathEscrow), address(this), apeGuardian
+            address(mathNpm), address(mathVault), address(mathEscrow), address(this), apeGuardian, MIN_CLIFF
         );
         mathSoulZap = new MockSoulZapCaller();
         _link(mathVault, mathEscrow, mathAdapter);

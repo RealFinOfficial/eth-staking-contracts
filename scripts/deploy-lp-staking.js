@@ -62,7 +62,7 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //   9. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6; mainnet deploys without it):
 //      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
 //      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
-//      guardian)`; its callers and campaign written by the deployer, then
+//      guardian, minCliffSeconds)`; its callers and campaign written by the deployer, then
 //      `transferOwnership(timelock)`; and the ONE timelock batch that activates the route —
 //      `vault.setBonusEscrow(escrow)`, `vault.setStakeOperator(adapter, true)`,
 //      `escrow.setAdapter(adapter)` — PRINTED and FILED, not sent (see the route's note below)
@@ -143,6 +143,8 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //   LP_APEBOND_GUARDIAN         — the adapter's pause key, setDepositsPaused only (LP_GUARDIAN)
 //   LP_APEBOND_SOULZAP_CALLERS  — comma-separated SoulZap contracts: the global allowlist, and
 //                                 the callers permitted for the campaign below (none)
+//   LP_APEBOND_MIN_CLIFF_SECONDS — the adapter's immutable floor under every campaign cliff, in
+//                                 seconds (86400); at least 1, and at least 86400 on mainnet
 //   LP_APEBOND_CAMPAIGN_ID and the campaign's four numbers — see `readCampaign` in
 //                                 scripts/lib/apebond.js (none: no campaign is configured)
 //   LP_APEBOND_BATCH_FILE       — where the link batch is filed (apebond-link-batch.json beside
@@ -340,6 +342,8 @@ async function main() {
   const bonusToken = apeBond ? readAddress("LP_APEBOND_BONUS_TOKEN", asset) : null;
   const apeBondGuardian = apeBond ? readAddress("LP_APEBOND_GUARDIAN", guardian) : null;
   const soulZapCallers = apeBond ? apebond.readAddressList("LP_APEBOND_SOULZAP_CALLERS") : [];
+  // The adapter's cliff floor (audit C-14): one day by default, never below one day on mainnet.
+  const apeBondMinCliff = apeBond ? apebond.readMinCliff(chainId) : null;
 
   // ──────────────────────── local validation ────────────────────────
 
@@ -537,11 +541,12 @@ async function main() {
       bonusDecimals: Number(await bonusErc20.decimals()),
       bonusSymbol: await bonusErc20.symbol(),
     };
-    apeBondCampaign = apebond.readCampaign(apeBondFacts);
+    apeBondCampaign = apebond.readCampaign(apeBondFacts, apeBondMinCliff);
     console.log(`ApeBond route:      ENABLED (LP_APEBOND_ENABLED=1)`);
     console.log(`  bonus token:      ${bonusToken}${bonusToken === asset ? " (= ASSET)" : ""}`);
     console.log(`  guardian:         ${apeBondGuardian}${apeBondGuardian === guardian ? " (= LP_GUARDIAN)" : ""}`);
     console.log(`  SoulZap callers:  ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`);
+    console.log(`  cliff floor:      ${apeBondMinCliff}s (the adapter's immutable minCliffSeconds)`);
     console.log(`  campaign:         ${apebond.describeCampaign(apeBondCampaign, apeBondFacts)}`);
   }
 
@@ -807,6 +812,7 @@ async function main() {
       positionManager,
       bonusToken,
       guardian: apeBondGuardian,
+      minCliffSeconds: apeBondMinCliff,
     });
     await apebond.wireAdapter({
       chainId,

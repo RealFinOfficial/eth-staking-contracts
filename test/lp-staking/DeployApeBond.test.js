@@ -6,6 +6,7 @@ const ethers = require("ethers");
 
 const runner = require("./helpers/scripts");
 const lpTimelock = require("../../scripts/lp-timelock");
+const apebond = require("../../scripts/lib/apebond");
 const { CHAIN_ID, campaignEnv, startWorld, withTimePump } = require("./helpers/apebondWorld");
 
 /**
@@ -103,6 +104,49 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
     it("refuses a flag that is neither 1 nor 0", async function () {
       await refused({ LP_APEBOND_ENABLED: "true" }, /LP_APEBOND_ENABLED must be 1, 0 or unset — got true/);
     });
+
+    it("refuses a campaign cliff below the adapter's floor, naming both variables (C-14)", async function () {
+      await refused(
+        { LP_APEBOND_MIN_CLIFF_SECONDS: "301" },
+        /LP_APEBOND_CLIFF_SECONDS 300 is below LP_APEBOND_MIN_CLIFF_SECONDS 301/
+      );
+    });
+
+    it("applies the one-day default floor when LP_APEBOND_MIN_CLIFF_SECONDS is unset (C-14)", async function () {
+      await refused(
+        { LP_APEBOND_MIN_CLIFF_SECONDS: "" },
+        /LP_APEBOND_CLIFF_SECONDS 300 is below LP_APEBOND_MIN_CLIFF_SECONDS 86400/
+      );
+    });
+
+    it("refuses a zero floor in both scripts, before either sends anything (C-14)", async function () {
+      await refused({ LP_APEBOND_MIN_CLIFF_SECONDS: "0" }, /LP_APEBOND_MIN_CLIFF_SECONDS must be >= 1 — got 0/);
+
+      const nonce = await nonceOf(w.deployer.address);
+      const result = await world.run("deploy-apebond.js", apebondEnv({ LP_APEBOND_MIN_CLIFF_SECONDS: "0" }));
+      expect(result.code).to.not.equal(0);
+      expect(result.stderr + result.stdout).to.match(/LP_APEBOND_MIN_CLIFF_SECONDS must be >= 1 — got 0/);
+      expect(await nonceOf(w.deployer.address), "not one transaction was sent").to.equal(nonce);
+    });
+
+    it("refuses a floor below one day on mainnet, and only there (C-14)", function () {
+      const saved = process.env.LP_APEBOND_MIN_CLIFF_SECONDS;
+      try {
+        process.env.LP_APEBOND_MIN_CLIFF_SECONDS = "86399";
+        expect(() => apebond.readMinCliff(1)).to.throw(
+          /LP_APEBOND_MIN_CLIFF_SECONDS is 86399 — on mainnet the adapter's cliff floor must be at least 86400 s/
+        );
+        expect(apebond.readMinCliff(11155111)).to.equal(86_399n);
+        expect(apebond.readMinCliff(CHAIN_ID)).to.equal(86_399n);
+        process.env.LP_APEBOND_MIN_CLIFF_SECONDS = "86400";
+        expect(apebond.readMinCliff(1)).to.equal(86_400n);
+        delete process.env.LP_APEBOND_MIN_CLIFF_SECONDS;
+        expect(apebond.readMinCliff(1)).to.equal(86_400n);
+      } finally {
+        if (saved === undefined) delete process.env.LP_APEBOND_MIN_CLIFF_SECONDS;
+        else process.env.LP_APEBOND_MIN_CLIFF_SECONDS = saved;
+      }
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -194,6 +238,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
           "escrow",
           "fee",
           "guardian",
+          "minCliffSeconds",
           "owner",
           "positionManager",
           "soulZapCallers",
@@ -205,6 +250,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       );
       expect(a.owner).to.equal(timelockAddr);
       expect(a.tickSpacing).to.equal(60);
+      expect(a.minCliffSeconds).to.equal("300");
       expect(a.soulZapCallers).to.deep.equal([w.soulZapCaller.address, w.signer2.address]);
       expect(a.campaigns).to.deep.equal([
         {
@@ -372,6 +418,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(a).to.not.have.property("pendingAdapter");
       expect(a.soulZapCallers).to.deep.equal([w.carol.address]);
       expect(a.campaigns.map((c) => c.id)).to.deep.equal([CAMPAIGN_ID]);
+      expect(a.minCliffSeconds).to.equal("300");
       const receipt = await provider.getTransactionReceipt(a.deployTx);
       expect(receipt.contractAddress).to.equal(newAdapter);
       expect(receipt.blockNumber).to.equal(a.block);

@@ -79,6 +79,11 @@ interface IApeBondPool {
  *  daily or total cap, and the escrow records a bonus whatever its balance is; claims revert
  *  until the company funds it.
  *
+ *  ONE FLOOR (audit C-14, 7 Oct 2026). A campaign's cliff is never below {minCliffSeconds}, an
+ *  immutable set at deployment and never zero. With a zero cliff the bonus would unlock in the
+ *  purchase's own block, the vault's exit report would find nothing left to forfeit, and a buyer
+ *  could stake, unstake and keep the bonus in one transaction.
+ *
  *  THE BONUS IS CONDITIONAL (D1-D3). Once reserved, it is the escrow's: the vault reports every
  *  `unstake` and `rebalance` to it, an exit before the cliff forfeits the bonus, and a rebalance
  *  before the cliff moves it to the new NFT scaled by the share of value that stayed staked.
@@ -122,7 +127,8 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      * @param tickLower The campaign's exact range, lower tick: a multiple of the pool's tick
      *        spacing inside Uniswap's bounds, below `tickUpper`.
      * @param tickUpper The campaign's exact range, upper tick.
-     * @param bonusCliffSeconds Seconds from the deposit until the bonus can be claimed.
+     * @param bonusCliffSeconds Seconds from the deposit until the bonus can be claimed; at least
+     *        {minCliffSeconds}.
      * @param bonusBps The bonus as a share of the position's value, in basis points (<= 10,000).
      * @param minBonusAmount Below this computed bonus the position is staked without a bonus.
      */
@@ -170,6 +176,8 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     int24 public immutable tickSpacing;
     /// @notice True when the escrow's bonus token is token0; positions are valued in it.
     bool public immutable bonusIsToken0;
+    /// @notice The shortest cliff {setCampaign} accepts, in seconds. Never zero (audit C-14).
+    uint64 public immutable minCliffSeconds;
 
     // ──────────────────────── State (configuration only) ───────
 
@@ -275,6 +283,12 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev `bonusBps` above 10,000 (more than the whole value).
     error BonusBpsTooHigh(uint16 bonusBps);
 
+    /// @dev The constructor was given a zero cliff floor.
+    error ZeroMinCliff();
+
+    /// @dev A campaign cliff below {minCliffSeconds}.
+    error CliffBelowMinimum(uint64 cliffSeconds, uint64 minCliffSeconds);
+
     /// @dev The beneficiary is zero, or an address that would strand the position.
     error InvalidBeneficiary(address beneficiary);
 
@@ -327,16 +341,25 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      * @param _initialOwner Owner: the deploying key while the campaigns are configured, then the
      *        `TimelockController` (one `transferOwnership`, no acceptance step).
      * @param _guardian Guardian: the pause key.
+     * @param minCliffSeconds_ The shortest campaign cliff {setCampaign} will accept, in seconds.
+     *        Immutable and never zero; the deploy scripts default it to one day and refuse less on
+     *        mainnet (`LP_APEBOND_MIN_CLIFF_SECONDS`).
      * @dev The pool's token pair, fee and tick spacing are READ, never configured: a campaign can
      *      only ever be about the vault's own pool, so a configured copy could only be wrong.
      */
-    constructor(address _positionManager, address _vault, address _escrow, address _initialOwner, address _guardian)
-        Ownable(_initialOwner)
-    {
+    constructor(
+        address _positionManager,
+        address _vault,
+        address _escrow,
+        address _initialOwner,
+        address _guardian,
+        uint64 minCliffSeconds_
+    ) Ownable(_initialOwner) {
         if (_positionManager == address(0) || _vault == address(0) || _escrow == address(0)) {
             revert ZeroAddress();
         }
         if (_guardian == address(0)) revert ZeroAddress();
+        if (minCliffSeconds_ == 0) revert ZeroMinCliff();
 
         address escrowVault = IApeBondEscrow(_escrow).vault();
         if (escrowVault != _vault) revert EscrowVaultMismatch(escrowVault, _vault);
@@ -357,6 +380,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         token1 = token1_;
         fee = IApeBondVault(_vault).fee();
         tickSpacing = IApeBondPool(IApeBondVault(_vault).pool()).tickSpacing();
+        minCliffSeconds = minCliffSeconds_;
 
         guardian = _guardian;
         emit GuardianSet(address(0), _guardian);
@@ -484,8 +508,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      * @notice Creates or reconfigures one campaign. Affects only deposits made afterwards: a
      *         reservation already in the escrow keeps its amount and its unlock time.
      * @dev Validates what can be validated at configuration time: a non-zero id, a range any
-     *      Uniswap position on the vault's pool could have, and a rate no larger than the whole
-     *      value. Nothing else: there is no limit of any kind (override O2).
+     *      Uniswap position on the vault's pool could have, a rate no larger than the whole value,
+     *      and a cliff no shorter than {minCliffSeconds} (audit C-14). Nothing else: there is no
+     *      limit of any kind (override O2).
      */
     function setCampaign(bytes32 campaignId, CampaignConfig calldata config) external onlyOwner {
         if (campaignId == bytes32(0)) revert ZeroCampaignId();
@@ -498,6 +523,9 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
             revert InvalidCampaignRange(lower, upper, tickSpacing);
         }
         if (config.bonusBps > BPS) revert BonusBpsTooHigh(config.bonusBps);
+        if (config.bonusCliffSeconds < minCliffSeconds) {
+            revert CliffBelowMinimum(config.bonusCliffSeconds, minCliffSeconds);
+        }
 
         campaigns[campaignId] = config;
         emit CampaignSet(

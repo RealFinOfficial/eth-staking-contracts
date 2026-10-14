@@ -48,7 +48,8 @@ const {
 //      `isStakeOperator` — probed with a call, because the question is about CODE.
 //   3. ESCROW + ADAPTER, unless the registry already records both with code on chain.
 //      `BonusEscrow(bonusToken, vault)` + LPProxy `initialize(timelock, adapter = 0)`, then
-//      `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian)`.
+//      `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian,
+//      minCliffSeconds)`.
 //   4. WIRING while the deployer owns the adapter: callers, the campaign, the callers permitted
 //      for it, then `transferOwnership(timelock)`.
 //   5. THE BATCH, built from only the calls whose effect is not on chain yet (a resumed run
@@ -80,6 +81,8 @@ const {
 //                                (the vault's token0, read from the proxy)
 //   LP_APEBOND_GUARDIAN          the adapter's pause key (the vault's guardian())
 //   LP_APEBOND_SOULZAP_CALLERS   comma-separated SoulZap contracts (none)
+//   LP_APEBOND_MIN_CLIFF_SECONDS a new adapter's immutable floor under every campaign cliff, in
+//                                seconds (86400); at least 1, and at least 86400 on mainnet
 //   LP_APEBOND_CAMPAIGN_ID …     the campaign: see `readCampaign` in scripts/lib/apebond.js
 //   LP_APEBOND_ASSERT_POSITIONS  comma-separated token ids whose staker must read the same
 //                                before and after (none)
@@ -238,6 +241,8 @@ async function main() {
   const mainnet = pools.isMainnet(chainId);
   const network = hre.network.name;
   const mode = readMode();
+  // The adapter's cliff floor (audit C-14), refused before anything is deployed.
+  const minCliffSeconds = apebond.readMinCliff(chainId);
   const readOnly = mode === "verify";
   const deployer = readOnly ? null : await pools.getSigner();
 
@@ -303,7 +308,7 @@ async function main() {
   const apeBondGuardian = apebond.readAddress("LP_APEBOND_GUARDIAN", before.guardian);
   const soulZapCallers = apebond.readAddressList("LP_APEBOND_SOULZAP_CALLERS");
   const facts = await apebond.readPoolFacts(vaultAddress, bonusToken);
-  const campaign = apebond.readCampaign(facts);
+  const campaign = apebond.readCampaign(facts, minCliffSeconds);
 
   const minDelay = await timelock.getMinDelay();
   const waitPollMs = Number(process.env.LP_APEBOND_WAIT_POLL_MS || DEFAULT_WAIT_POLL_MS);
@@ -320,6 +325,7 @@ async function main() {
   console.log(`Bonus token:        ${bonusToken} (${facts.bonusSymbol})`);
   console.log(`Adapter guardian:   ${apeBondGuardian}${sameValue(apeBondGuardian, before.guardian) ? " (= the vault's guardian)" : ""}`);
   console.log(`SoulZap callers:    ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`);
+  console.log(`Cliff floor:        ${minCliffSeconds}s (minCliffSeconds of an adapter this run deploys)`);
   console.log(`Campaign:           ${apebond.describeCampaign(campaign, facts)}`);
   console.log(`Positions asserted: ${assertPositions.length > 0 ? assertPositions.join(", ") : "none"}`);
 
@@ -417,7 +423,7 @@ async function main() {
       console.log(`\n──────── phase 3: a replacement adapter for ${previousAdapter} ────────`);
       const replacement = await deployContract(
         ADAPTER_KIND,
-        [positionManager, vaultAddress, escrowAddress, deployer.address, apeBondGuardian],
+        [positionManager, vaultAddress, escrowAddress, deployer.address, apeBondGuardian, minCliffSeconds],
         deployer
       );
       adapterAddress = replacement.address;
@@ -457,6 +463,7 @@ async function main() {
         positionManager,
         bonusToken,
         guardian: apeBondGuardian,
+        minCliffSeconds,
       });
       escrowAddress = deployed.escrowDeploy.address;
       adapterAddress = deployed.adapterDeploy.address;
@@ -717,6 +724,7 @@ async function recordReplacement({ chainId, adapterAddress, previousAdapter, sou
     token1: hre.ethers.getAddress(await adapter.token1()),
     fee: Number(await adapter.fee()),
     tickSpacing: Number(await adapter.tickSpacing()),
+    minCliffSeconds: (await adapter.minCliffSeconds()).toString(),
     guardian: hre.ethers.getAddress(await adapter.guardian()),
     soulZapCallers: callers,
     campaigns,

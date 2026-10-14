@@ -32,12 +32,22 @@ const CHAIN_ID = 31337;
 const FEE = 3000;
 const TWAP_WINDOW = 300;
 
-/** A campaign every suite can configure: ±1200 ticks around the pool's tick 0, 10 %, 1 ASSET. */
-function campaignEnv({ id = "apebond.suite.campaign", cliffSeconds = 600, bps = 1000, minBonus = "1" } = {}) {
+/**
+ * A campaign every suite can configure: ±1200 ticks around the pool's tick 0, 10 %, 1 ASSET, and
+ * the test stacks' 300 s cliff floor (audit C-14; the scripts' default is one day).
+ */
+function campaignEnv({
+  id = "apebond.suite.campaign",
+  cliffSeconds = 600,
+  bps = 1000,
+  minBonus = "1",
+  minCliffSeconds = 300,
+} = {}) {
   return {
     LP_APEBOND_CAMPAIGN_ID: id,
     LP_APEBOND_HALF_WIDTH_TICKS: "1200",
     LP_APEBOND_CLIFF_SECONDS: String(cliffSeconds),
+    LP_APEBOND_MIN_CLIFF_SECONDS: String(minCliffSeconds),
     LP_APEBOND_BONUS_BPS: String(bps),
     LP_APEBOND_MIN_BONUS: minBonus,
   };

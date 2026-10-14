@@ -51,15 +51,25 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     function test_Constructor_RejectsEveryZeroReference() public {
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(0), address(vault), address(escrow), address(this), apeGuardian);
+        new ApeBondPositionAdapter(address(0), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF);
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(0), address(escrow), address(this), apeGuardian);
+        new ApeBondPositionAdapter(address(npmMock), address(0), address(escrow), address(this), apeGuardian, MIN_CLIFF);
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(0), address(this), apeGuardian);
+        new ApeBondPositionAdapter(address(npmMock), address(vault), address(0), address(this), apeGuardian, MIN_CLIFF);
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), address(0));
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), address(0), MIN_CLIFF
+        );
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(0), apeGuardian);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(0), apeGuardian, MIN_CLIFF
+        );
+    }
+
+    /// @dev Audit C-14: the cliff floor is immutable, so a zero floor would be a zero floor forever.
+    function test_Constructor_RejectsAZeroCliffFloor() public {
+        vm.expectRevert(ApeBondPositionAdapter.ZeroMinCliff.selector);
+        new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), apeGuardian, 0);
     }
 
     /// @dev The escrow must take its notifications from the very vault this adapter deposits
@@ -69,7 +79,9 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         vm.expectRevert(
             abi.encodeWithSelector(ApeBondPositionAdapter.EscrowVaultMismatch.selector, address(vault), address(other))
         );
-        new ApeBondPositionAdapter(address(npmMock), address(other), address(escrow), address(this), apeGuardian);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(other), address(escrow), address(this), apeGuardian, MIN_CLIFF
+        );
     }
 
     function test_Constructor_RejectsABonusTokenOutsideThePool() public {
@@ -79,7 +91,9 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
                 ApeBondPositionAdapter.BonusTokenNotInPool.selector, address(overture), token0, token1
             )
         );
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(fake), address(this), apeGuardian);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(fake), address(this), apeGuardian, MIN_CLIFF
+        );
     }
 
     /// @dev Everything about the pool is READ from the vault, never configured.
@@ -96,12 +110,13 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertEq(adapter.owner(), address(this), "the owner");
         assertFalse(adapter.depositsPaused(), "open");
         assertEq(adapter.BPS(), 10_000, "the basis-point denominator");
+        assertEq(adapter.minCliffSeconds(), MIN_CLIFF, "the cliff floor");
     }
 
     function test_Constructor_ValuesInToken1WhenTheBonusIsToken1() public {
         BonusEscrow usdcEscrow = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), address(0));
         ApeBondPositionAdapter usdcAdapter = new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(usdcEscrow), address(this), apeGuardian
+            address(npmMock), address(vault), address(usdcEscrow), address(this), apeGuardian, MIN_CLIFF
         );
         assertFalse(usdcAdapter.bonusIsToken0(), "a USDC bonus values in token1");
     }
@@ -112,7 +127,9 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         emit ApeBondPositionAdapter.GuardianSet(address(0), apeGuardian);
         vm.expectEmit(false, false, false, true);
         emit ApeBondPositionAdapter.DepositsPausedSet(false);
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), apeGuardian);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF
+        );
     }
 
     // ──────────────────────── setCampaign ──────────────────────
@@ -149,6 +166,26 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertEq(lower, -887220, "the lowest usable tick on the grid");
         assertEq(upper, 887220, "the highest");
         assertLe(TickMath.MIN_TICK, lower, "inside the bounds");
+    }
+
+    /// @dev Audit C-14: a cliff below the immutable floor is refused — a zero cliff would record a
+    ///      bonus that no exit can forfeit — and the floor itself is legal.
+    function test_SetCampaign_RefusesACliffBelowTheFloor() public {
+        ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
+        config.bonusCliffSeconds = 0;
+        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.CliffBelowMinimum.selector, uint64(0), MIN_CLIFF));
+        adapter.setCampaign(OTHER_CAMPAIGN, config);
+
+        config.bonusCliffSeconds = MIN_CLIFF - 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.CliffBelowMinimum.selector, MIN_CLIFF - 1, MIN_CLIFF)
+        );
+        adapter.setCampaign(OTHER_CAMPAIGN, config);
+
+        config.bonusCliffSeconds = MIN_CLIFF;
+        adapter.setCampaign(OTHER_CAMPAIGN, config);
+        (,,, uint64 cliff,,) = adapter.campaigns(OTHER_CAMPAIGN);
+        assertEq(cliff, MIN_CLIFF, "the floor itself is accepted");
     }
 
     /// @dev A rate above the whole value is refused; exactly the whole value is legal.
@@ -386,17 +423,17 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertEq(beneficiary, address(0), "a zero bonus skips the escrow");
     }
 
-    /// @dev A cliff of zero is legal: the bonus unlocks in the deposit's own block, so it is
-    ///      already matured — and therefore beyond the reach of the vault's notifications.
-    function test_DepositFor_AZeroCliffUnlocksAtOnce() public {
+    /// @dev Audit C-14: the shortest cliff a campaign can have is the floor, and a bonus behind
+    ///      it is ACTIVE — forfeited by an exit — from the purchase block until the floor passes.
+    function test_DepositFor_ACliffAtTheFloorKeepsTheBonusActive() public {
         ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
-        config.bonusCliffSeconds = 0;
+        config.bonusCliffSeconds = MIN_CLIFF;
         adapter.setCampaign(CAMPAIGN, config);
 
         uint256 tokenId = _buy(alice, BUY_LIQUIDITY);
         (,, uint64 unlockAt,,) = escrow.reservationOf(tokenId);
-        assertEq(unlockAt, block.timestamp, "unlocks now");
-        assertFalse(escrow.isActive(tokenId), "so it is already matured");
+        assertEq(unlockAt, block.timestamp + MIN_CLIFF, "unlocks one floor after the purchase");
+        assertTrue(escrow.isActive(tokenId), "so an exit in the purchase block still forfeits it");
     }
 
     function test_DepositFor_AcceptsAnOperatorForAllApproval() public {
@@ -801,7 +838,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     function _misreportingRoute() private returns (MisreportingVault mv, ApeBondPositionAdapter a) {
         mv = _misreportingVault();
         BonusEscrow e = _deployBonusEscrowProxy(address(asset), address(mv), address(this), address(0));
-        a = new ApeBondPositionAdapter(address(npmMock), address(mv), address(e), address(this), apeGuardian);
+        a = new ApeBondPositionAdapter(address(npmMock), address(mv), address(e), address(this), apeGuardian, MIN_CLIFF);
         mv.setBonusEscrow(address(e));
         e.setAdapter(address(a));
         _openCampaign(a, soulZap, CAMPAIGN, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);

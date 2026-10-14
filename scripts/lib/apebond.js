@@ -14,7 +14,9 @@ const { deployContract, deployProxyPair } = require("./proxies");
 //
 //   1. `BonusEscrow` implementation(bonusToken, vault) + `LPProxy`, `initialize(owner = timelock,
 //      adapter = address(0))` — born owned by the timelock, reserve path CLOSED;
-//   2. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER, guardian)`;
+//   2. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER, guardian,
+//      minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS)` — the immutable floor under every campaign
+//      cliff (audit C-14; default one day, never below one day on mainnet);
 //   3. wiring while the deployer still owns the adapter: `setSoulZapCaller` per caller,
 //      `setCampaign`, `setCampaignCaller` per caller — then `transferOwnership(timelock)` (plain
 //      `Ownable`, effective at once);
@@ -38,6 +40,12 @@ const ADAPTER_KIND = "ApeBondPositionAdapter";
 const MIN_TICK = -887272;
 const MAX_TICK = 887272;
 const MAX_BPS = 10_000;
+const MAX_UINT64 = (1n << 64n) - 1n;
+
+/** The adapter's cliff floor when LP_APEBOND_MIN_CLIFF_SECONDS is unset: one day. */
+const DEFAULT_MIN_CLIFF_SECONDS = 86_400n;
+/** The lowest cliff floor a mainnet adapter may be deployed with (audit C-14): one day. */
+const MAINNET_MIN_CLIFF_SECONDS = 86_400n;
 
 /** The view surface the route's checks read. Nothing else is called on these contracts. */
 const VAULT_LINK_ABI = [
@@ -73,6 +81,7 @@ const ADAPTER_ABI = [
   "function soulZapCallers(address caller) view returns (bool)",
   "function campaignCallers(bytes32 campaignId, address caller) view returns (bool)",
   "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 tickLower, int24 tickUpper, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
+  "function minCliffSeconds() view returns (uint64)",
 ];
 const POOL_ABI = [
   "function tickSpacing() view returns (int24)",
@@ -147,6 +156,26 @@ function readInteger(name, { min, max, required = true, fallback } = {}) {
   return value;
 }
 
+/**
+ * LP_APEBOND_MIN_CLIFF_SECONDS: the adapter's immutable floor under every campaign cliff, in
+ * seconds (audit C-14, 7 Oct 2026). Default one day. Never zero — a zero cliff records a bonus
+ * no exit can forfeit — and never below one day on mainnet. Read before anything is deployed.
+ */
+function readMinCliff(chainId) {
+  const value = readInteger("LP_APEBOND_MIN_CLIFF_SECONDS", {
+    min: 1,
+    max: MAX_UINT64,
+    fallback: DEFAULT_MIN_CLIFF_SECONDS,
+  });
+  if (pools.isMainnet(chainId) && value < MAINNET_MIN_CLIFF_SECONDS) {
+    throw new Error(
+      `LP_APEBOND_MIN_CLIFF_SECONDS is ${value} — on mainnet the adapter's cliff floor must be at least ` +
+        `${MAINNET_MIN_CLIFF_SECONDS} s (one day)`
+    );
+  }
+  return value;
+}
+
 /** A campaign id: a 32-byte hex value as given, or keccak256 of any other label. */
 function campaignIdFrom(raw) {
   const value = raw.trim();
@@ -163,15 +192,17 @@ function campaignIdFrom(raw) {
  *   LP_APEBOND_CAMPAIGN_ID        32-byte hex, or a label hashed with keccak256 (required)
  *   LP_APEBOND_TICK_LOWER/UPPER   the exact range; or LP_APEBOND_HALF_WIDTH_TICKS around the
  *                                 pool's CURRENT tick, aligned down to the tick spacing
- *   LP_APEBOND_CLIFF_SECONDS      seconds from the deposit to the unlock (required)
+ *   LP_APEBOND_CLIFF_SECONDS      seconds from the deposit to the unlock (required); at least
+ *                                 `minCliffSeconds` (LP_APEBOND_MIN_CLIFF_SECONDS, see readMinCliff)
  *   LP_APEBOND_BONUS_BPS          the bonus as basis points of the position's value, <= 10,000
  *   LP_APEBOND_MIN_BONUS          whole bonus tokens (decimals allowed); below it a purchase is
  *                                 staked without a bonus (0)
  *   LP_APEBOND_CAMPAIGN_ENABLED   1 to accept deposits at once, 0 to configure it switched off (1)
  *
  * @param {{currentTick: number, tickSpacing: number, bonusDecimals: number}} pool
+ * @param {bigint} minCliffSeconds the adapter's cliff floor, from {@link readMinCliff}
  */
-function readCampaign({ currentTick, tickSpacing, bonusDecimals }) {
+function readCampaign({ currentTick, tickSpacing, bonusDecimals }, minCliffSeconds) {
   const rawId = process.env.LP_APEBOND_CAMPAIGN_ID;
   if (!rawId || rawId.trim() === "") return null;
   const id = campaignIdFrom(rawId);
@@ -199,6 +230,12 @@ function readCampaign({ currentTick, tickSpacing, bonusDecimals }) {
   }
 
   const bonusCliffSeconds = readInteger("LP_APEBOND_CLIFF_SECONDS", { min: 0, max: (1n << 64n) - 1n });
+  if (bonusCliffSeconds < minCliffSeconds) {
+    throw new Error(
+      `LP_APEBOND_CLIFF_SECONDS ${bonusCliffSeconds} is below LP_APEBOND_MIN_CLIFF_SECONDS ${minCliffSeconds}: ` +
+        `the adapter refuses a campaign cliff below its floor (audit C-14)`
+    );
+  }
   const bonusBps = readInteger("LP_APEBOND_BONUS_BPS", { min: 0, max: MAX_BPS });
   const minRaw = process.env.LP_APEBOND_MIN_BONUS;
   const minBonusAmount =
@@ -265,7 +302,16 @@ async function readPoolFacts(vaultAddress, bonusToken) {
  * adapter (owned by the deployer until the wiring is done). Both are recorded in
  * `deployments.json` as soon as each exists, so a later failure never loses an address.
  */
-async function deployEscrowAndAdapter({ chainId, deployer, vaultAddress, timelockAddress, positionManager, bonusToken, guardian }) {
+async function deployEscrowAndAdapter({
+  chainId,
+  deployer,
+  vaultAddress,
+  timelockAddress,
+  positionManager,
+  bonusToken,
+  guardian,
+  minCliffSeconds,
+}) {
   const escrowDeploy = await deployProxyPair(
     ESCROW_KIND,
     [bonusToken, vaultAddress],
@@ -285,7 +331,7 @@ async function deployEscrowAndAdapter({ chainId, deployer, vaultAddress, timeloc
 
   const adapterDeploy = await deployContract(
     ADAPTER_KIND,
-    [positionManager, vaultAddress, escrowDeploy.address, deployer.address, guardian],
+    [positionManager, vaultAddress, escrowDeploy.address, deployer.address, guardian, minCliffSeconds],
     deployer
   );
   const adapter = new hre.ethers.Contract(adapterDeploy.address, ADAPTER_ABI, hre.ethers.provider);
@@ -300,6 +346,7 @@ async function deployEscrowAndAdapter({ chainId, deployer, vaultAddress, timeloc
     token1: hre.ethers.getAddress(await adapter.token1()),
     fee: Number(await adapter.fee()),
     tickSpacing: Number(await adapter.tickSpacing()),
+    minCliffSeconds: (await adapter.minCliffSeconds()).toString(),
     guardian,
     soulZapCallers: [],
     campaigns: [],
@@ -514,6 +561,7 @@ module.exports = {
   ADAPTER_ABI,
   sameValue,
   readApeBondFlag,
+  readMinCliff,
   readAddress,
   readAddressList,
   readCampaign,

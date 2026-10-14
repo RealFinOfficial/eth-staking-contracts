@@ -191,6 +191,12 @@ const APEBOND_ESCROW_FUNDING = ASSET(1_000);
  * NFT and cannot be split into time-released parts (vikinatora, 2026-09-15).
  */
 const APEBOND_CLIFF_SECONDS = 300;
+/**
+ * The adapter's immutable cliff floor on the test stacks (audit C-14): `setCampaign` refuses a
+ * shorter cliff, so the 300 s campaign above sits exactly on it. The scripts read it from
+ * LP_APEBOND_MIN_CLIFF_SECONDS, default one day, and refuse less than one day on mainnet.
+ */
+const APEBOND_MIN_CLIFF_SECONDS = 300;
 /** Half-width of the campaign's range around the pool's tick, in ticks. Deposits match it exactly. */
 const APEBOND_HALF_WIDTH_TICKS = 1200;
 /** The position the SoulZap caller mints for the buyer, in the same shape mintFor takes. */
@@ -332,6 +338,7 @@ module.exports = {
   APEBOND_MIN_BONUS,
   APEBOND_ESCROW_FUNDING,
   APEBOND_CLIFF_SECONDS,
+  APEBOND_MIN_CLIFF_SECONDS,
   APEBOND_HALF_WIDTH_TICKS,
   APEBOND_MINT_ASSET,
   APEBOND_MINT_USDC,

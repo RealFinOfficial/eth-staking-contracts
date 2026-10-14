@@ -2981,6 +2981,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         LP_APEBOND_CAMPAIGN_ID: CAMPAIGN_LABEL,
         LP_APEBOND_HALF_WIDTH_TICKS: String(HALF_WIDTH),
         LP_APEBOND_CLIFF_SECONDS: String(CLIFF),
+        LP_APEBOND_MIN_CLIFF_SECONDS: String(C.APEBOND_MIN_CLIFF_SECONDS),
         LP_APEBOND_BONUS_BPS: String(BONUS_BPS),
         LP_APEBOND_MIN_BONUS: MIN_BONUS_WHOLE,
         ...extra,
