@@ -133,9 +133,10 @@ const ethers = require("ethers");
 const PROXY_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper"];
 
 /**
- * The ApeBond contracts (Sepolia test stack #6 only until ApeBond goes to mainnet). `BonusEscrow`
- * is a sixth UUPS proxy, Ownable2Step like the five above; `ApeBondPositionAdapter` is a plain
- * `Ownable` contract with no upgrade path — it is replaced, not upgraded.
+ * The ApeBond contracts (on Sepolia test stack #6 since 6 Oct, and part of the mainnet launch
+ * deploy since the decision of 14 Oct 2026). `BonusEscrow` is a sixth UUPS proxy, Ownable2Step
+ * like the five above; `ApeBondPositionAdapter` is a plain `Ownable` contract with no upgrade
+ * path — it is replaced, not upgraded.
  */
 const ESCROW_KIND = "BonusEscrow";
 const ADAPTER_KIND = "ApeBondPositionAdapter";

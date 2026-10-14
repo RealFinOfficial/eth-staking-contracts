@@ -55,7 +55,9 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
   `setGuardian`, `setOperator`; **guardian** (a hot key, no delay): the two pauses and nothing
   else; **operator** (a multisig, no delay): `setTwapParams`, `rescuePosition` (the NFT goes to
   the operator), `setGuardian`, and the two pauses as the cold fallback. **Bonus-escrow
-  notifications** (`bonusEscrow`, zero = off, zero at mainnet launch; audit notes item 15):
+  notifications** (`bonusEscrow`, zero = off; born zero on every deploy and set to the escrow by
+  the ApeBond route's link batch, part of the mainnet launch deploy since the decision of 14 Oct
+  2026; audit notes item 15):
   `unstake` calls `onUnstake(tokenId)` FAIL OPEN (inside `try`, 100,000 gas, a 106,587 gas
   floor, `BonusHookFailed` on revert); `rebalance` calls `onRebalance(old, new, oldSnapshot,
   newSnapshot)` FAIL CLOSED (no `try`)
@@ -105,8 +107,9 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
 
 The ApeBond route (B.3 decision document 2026-10-01, overrides 2026-10-05) is two more contracts
 and three libraries beside the stack above, deployed only when `LP_APEBOND_ENABLED=1` (or later
-by `scripts/deploy-apebond.js`) — on **Sepolia test stack #6 only** until ApeBond goes to mainnet.
-An un-flagged run is byte-for-byte the stack above, and mainnet launches with `bonusEscrow = 0`:
+by `scripts/deploy-apebond.js`). Sepolia test stack #6 carries it since 6 Oct, and it is part of
+the **mainnet launch deploy** since the decision of 14 Oct 2026 (path (a), `LP_APEBOND_ENABLED=1`).
+An un-flagged run is byte-for-byte the stack above, with `bonusEscrow = 0`:
 
 - **`BonusEscrow.sol`** — the whole life of a bonus, behind a **UUPS proxy**: reserve, move,
   scale, forfeit, pay. Reservations are keyed by the position's `tokenId` (no purchase id);
@@ -140,9 +143,10 @@ An un-flagged run is byte-for-byte the stack above, and mainnet launches with `b
   branches, GPL-2.0-or-later headers kept — open item O6) and **`libraries/PositionValue.sol`**
   (ours): the ONE valuation the adapter and the escrow share
 
-The vault's side (lane 1, present on mainnet but switched off) is item 15 of the audit notes;
-lane 2 adds the **stake-operator allowlist** (`setStakeOperator`, owner tier), appended after
-`bonusEscrow` in the vault's namespace, which is what lets the adapter call `stakeFor`.
+The vault's side (lane 1; on mainnet it is switched on by the route's link batch, part of the
+launch deploy since the decision of 14 Oct 2026) is item 15 of the audit notes; lane 2 adds the
+**stake-operator allowlist** (`setStakeOperator`, owner tier), appended after `bonusEscrow` in the
+vault's namespace, which is what lets the adapter call `stakeFor`.
 
 Both `LPStakingVault` and `LPZapper` inherit `TwapGuard`: a swap leg reverts when spot
 deviates from the pool TWAP by more than `maxTwapDeviationTicks`. The guard's `pool` is
@@ -258,9 +262,10 @@ contracts/           — Solidity source files
                                 pre-funded reward tokens; UUPS
     LPEpochRegistry.sol       — The on-chain emission schedule, operator-run; UUPS
     BonusEscrow.sol           — ApeBond bonuses keyed by tokenId: reserve, forfeit, scale, pay;
-                                UUPS (lane 2, Sepolia #6 only)
+                                UUPS (lane 2; stack #6 and the mainnet launch deploy)
     ApeBondPositionAdapter.sol — The SoulZap gate; computes the bonus at the vault's TWAP;
-                                plain Ownable, replaceable (lane 2, Sepolia #6 only)
+                                plain Ownable, replaceable (lane 2; stack #6 and the
+                                mainnet launch deploy)
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the five proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool),
@@ -328,7 +333,9 @@ docs/                — Design and review notes
                               the ApeBond route's two contracts (items 17 and 18)
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
-                              mainnet CONFIRM guard, Ledger nonce workaround
+                              mainnet CONFIRM guard, explicit-nonce workaround for the
+                              mainnet signer (the hardhat-ledger path: the mainnet network's
+                              current tooling, which the launch runbook will revisit)
   lib/uniswap.js            — Per-chain Uniswap V3 addresses (factory, positionManager,
                               swapRouter02) for chain 1 and 11155111; imported by
                               deploy-lp-staking.js and create-sepolia-pool.js so they cannot
@@ -622,8 +629,10 @@ resets to.
 ## ApeBond activation on a live stack
 
 `test/lp-staking/integration/ApeBondUpgradeInPlace.test.js` rehearses the day ApeBond reaches a
-stack that is ALREADY live — mainnet as it launches on 7 Oct, with lane 1's vault: the escrow
-hooks present, `bonusEscrow = 0`, and no stake-operator allowlist. It runs on a plain spawned
+stack that is ALREADY live — a vault deployed before the route existed (lane 1's vault): the
+escrow hooks present, `bonusEscrow = 0`, and no stake-operator allowlist. Mainnet does not take
+this path: the route is part of its launch deploy since the decision of 14 Oct 2026, and stack #6
+carries it since 6 Oct. It runs on a plain spawned
 `hardhat node` (no fork, no RPC), so it is part of `npx hardhat test`. It deploys the core stack
 with `LP_VAULT_CONTRACT=LPStakingVaultLane1Mock` (lane 1's vault verbatim, a test-only copy),
 stakes a position, and runs `scripts/deploy-apebond.js` unmodified as a child process: a new

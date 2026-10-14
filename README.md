@@ -231,7 +231,7 @@ resolving from the registry; it defaults to `WeightedStakingPool`.
 | `recover-excess.js` | both | Owner: sweep unclaimed rewards after the pool ends |
 | `status.js` | both | Read-only overview; `USERS=0x…,0x…` adds per-user detail |
 | `post-deploy-check.js` | both | Assert every constructor-set value after deploying |
-| `token-check.js` / `ledger-check.js` | — | Pre-deploy checks for token addresses, epochs and the Ledger |
+| `token-check.js` / `ledger-check.js` | — | Pre-deploy checks for token addresses, epochs and the Ledger path (the mainnet network's current tooling, which the launch runbook will revisit) |
 
 Scripts that send a transaction refuse to run on mainnet unless `CONFIRM=yes` is
 set, after printing what they are about to do.
@@ -339,7 +339,8 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   claim whose token balance is short reverts `InsufficientFunds` until it is funded, and there is
   no cap of any kind. Operating the
   timelock is `scripts/lp-timelock.js`; the runbook and the reasoning are in
-  `docs/lp-staking-audit-notes.md` item 14. On Sepolia test stack #6 only, the ApeBond route
+  `docs/lp-staking-audit-notes.md` item 14. On Sepolia test stack #6 since 6 Oct, and in the
+  mainnet launch deploy since the decision of 14 Oct 2026, the ApeBond route
   adds a sixth proxy, `BonusEscrow` (bonuses keyed by the position's `tokenId`, recorded with no
   balance check and paid only when funded; forfeited by an exit before the cliff and scaled by a
   rebalance before it, through the vault's notifications), and the plain, replaceable

@@ -14,11 +14,12 @@ voucher type; the emission schedule moved on-chain into `LPEpochRegistry`; all f
 contracts are UUPS proxies owned by the timelock; the vault gained the bonus-escrow
 notifications, OFF at launch (item 15). Items 1, 3, 5, 6, 10 and 14 were rewritten for it.
 
-Revision 2026-10-05, lane 2 (the B.3 ApeBond refactor, Sepolia test stack #6 only): the adapter
-computes the bonus from the position (no signature), the escrow keys reservations by `tokenId`,
-records them with no balance check and forfeits or scales them through the vault's
-notifications, and the vault gained the stake-operator allowlist after `bonusEscrow`. Items 17 and
-18 were rewritten for it.
+Revision 2026-10-05, lane 2 (the B.3 ApeBond refactor; on Sepolia test stack #6 since 6 Oct, and
+part of the mainnet launch deploy since the decision of 14 Oct 2026): the adapter computes the
+bonus from the position (no signature), the escrow keys reservations by `tokenId`, records them
+with no balance check and forfeits or scales them through the vault's notifications, and the
+vault gained the stake-operator allowlist after `bonusEscrow`. Items 17 and 18 were rewritten for
+it.
 
 Revision 2026-10-07: the Overture token's minter is the `RewardsDistributor` PROXY, and the
 operator mints through the distributor's new operator-only `mintRewardToken(token, to, amount)`
@@ -966,15 +967,21 @@ contracts under `contracts/lp-staking/mocks/`.
 ## 15. Bonus-escrow notifications in the vault (B.3 P2/P3 vault side; OFF at launch)
 
 `LPStakingVault` reports every exit and every re-range to a bonus escrow, so the ApeBond bonus
-(lane 2: `BonusEscrow`, `ApeBondPositionAdapter`, Sepolia only for now) can be forfeited on an
-exit before its cliff (P2) and scaled when a rebalance takes value out of the position (P3). The
-vault knows nothing else about bonuses (decision A3 of the B.3 document).
+(lane 2: `BonusEscrow`, `ApeBondPositionAdapter`; on stack #6 since 6 Oct, and part of the
+mainnet launch deploy since the decision of 14 Oct 2026) can be forfeited on an exit before its
+cliff (P2) and scaled when a rebalance takes value out of the position (P3). The vault knows
+nothing else about bonuses (decision A3 of the B.3 document).
 
 - **Off at launch.** `bonusEscrow` is a storage field appended at the end of the vault's
   namespace, zero by default, announced at `initialize` (`BonusEscrowSet(0, 0)`), and changed
   only by the owner (the timelock) with `setBonusEscrow(address)`, which rejects a non-zero
-  address without code. Mainnet deploys with zero: no notification is sent, and the only cost is
-  one storage read per `unstake` / `rebalance`.
+  address without code. It also refuses to unlink or replace an escrow whose `totalReserved()` is
+  above zero (`EscrowHasReservations`, audit C-13), so an escrow with live reservations is
+  permanent until they are claimed or forfeited. Every deploy, mainnet included, creates the
+  vault with zero; the ApeBond route's link batch, scheduled through the timelock after the
+  deploy, then sets the escrow (the route is part of the mainnet launch deploy since the decision
+  of 14 Oct 2026). While it is zero no notification is sent, and the only cost is one storage
+  read per `unstake` / `rebalance`.
 - **`unstake` fails OPEN** (A4: the exit stays unconditional). After `delete stakers[tokenId]`
   and before the NFT leaves, the vault requires `gasleft() >= BONUS_HOOK_GAS_FLOOR` (106,587) —
   else `InsufficientGasForBonusHook()` — and calls `onUnstake(tokenId)` inside `try` with
@@ -1074,10 +1081,11 @@ Hardhat: the `mintRewardToken` block and the timelock migration in
 `test/lp-staking/DeployImplementation.test.js`, and S9 / A29 of both integration suites (funding
 through `lp-fund-rewards.js` and `lp-mint-reward.js`).
 
-## 17. `ApeBondPositionAdapter` — the gate that computes the bonus (B.3, Sepolia only)
+## 17. `ApeBondPositionAdapter` — the gate that computes the bonus (B.3, stack #6 and the mainnet launch)
 
-Lane 2, from the B.3 decision document (2026-10-01) with the overrides of 2026-10-05. Deployed on
-Sepolia test stack #6 only; mainnet gets it later, with ApeBond (open items O3–O8, Thursday).
+Lane 2, from the B.3 decision document (2026-10-01) with the overrides of 2026-10-05. Sepolia test
+stack #6 carries it since 6 Oct, and it is part of the mainnet launch deploy since the decision of
+14 Oct 2026 (path (a), `LP_APEBOND_ENABLED=1`).
 
 **The contract computes the bonus (P1, A1).** SoulZap arrives with a finished Uniswap V3 position
 and calls `depositFor(tokenId, campaignId, beneficiary)`. There is no signature, no `purchaseId`
@@ -1137,7 +1145,9 @@ callers, then ONE timelock batch `vault.setStakeOperator(new, true)`, `vault.set
 false)`, `escrow.setAdapter(new)` (`scripts/deploy-apebond.js LP_APEBOND_MODE=replace-adapter`).
 
 **Two tiers.** Owner (the timelock): `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`,
-`setSoulZapCaller`, `setGuardian`. Guardian (a pause key, `LP_APEBOND_GUARDIAN`, default the
+`setSoulZapCaller`, `setGuardian`. `setGuardian` also accepts the vault's operator, read live from
+`vault.operator()` (audit C-29; `NotOwnerOrOperator` for anyone else), so a leaked pause key is
+replaced without the timelock delay. Guardian (a pause key, `LP_APEBOND_GUARDIAN`, default the
 stack's `LP_GUARDIAN`): `setDepositsPaused` only — narrower than the vault's deposit pause, which
 stops every staker. With the signer gone, the guardian holds nothing but the pause.
 
@@ -1152,7 +1162,7 @@ custody assertion through `MisreportingVault`), `test/forge/unit/BonusEscrowHook
 the real vault), `test/lp-staking/ApeBondPositionAdapter.test.js` (a BigInt port of the contract
 math, `test/lp-staking/helpers/positionValue.js`), and the integration suites.
 
-## 18. `BonusEscrow` — the whole life of a bonus (B.3, Sepolia only)
+## 18. `BonusEscrow` — the whole life of a bonus (B.3, stack #6 and the mainnet launch)
 
 **A clean version-1 layout.** Reservations are keyed by the position's `tokenId` (A5, D4) —
 `Reservation{beneficiary, unlockAt, claimed, forfeited, amount}` in `mapping(uint256 =>

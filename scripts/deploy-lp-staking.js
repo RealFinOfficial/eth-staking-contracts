@@ -332,8 +332,8 @@ async function main() {
   // timelock `setClaimsEnabled(ASSET, true)`. The flag exists for rehearsals that need them open.
   const assetClaimsEnabled = readFlag("LP_ASSET_CLAIMS_ENABLED", false);
   // The vault implementation's artifact. Production never sets it. The ApeBond activation suite
-  // sets `LPStakingVaultLane1Mock` — lane 1's vault as mainnet deploys it, without the
-  // stake-operator allowlist — to rehearse activating the route on a live mainnet-shaped stack.
+  // sets `LPStakingVaultLane1Mock` — a vault deployed before the route existed, without the
+  // stake-operator allowlist — to rehearse activating the route on a stack that is already live.
   const vaultContract = process.env.LP_VAULT_CONTRACT || "LPStakingVault";
   if (mainnet && vaultContract !== "LPStakingVault") {
     throw new Error(`LP_VAULT_CONTRACT=${vaultContract} is a test hook and is refused on mainnet`);

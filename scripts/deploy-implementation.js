@@ -417,7 +417,7 @@ async function deployImplementation(options) {
   }
 
   pools.requireConfirmation(chainId, `deploy a new ${kind} implementation`);
-  if (pools.isMainnet(chainId)) log("\nThe implementation deploy needs a Ledger confirmation.");
+  if (pools.isMainnet(chainId)) log("\nThe implementation deploy is signed by the mainnet deployer.");
 
   const Factory = await hre.ethers.getContractFactory(contractName, deployer);
 

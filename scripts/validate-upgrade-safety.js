@@ -80,9 +80,9 @@ const CONTRACTS = [
   },
   {
     name: "BonusEscrow",
-    // (bonusToken, vault) — the ApeBond escrow (Sepolia test stack #6 only until ApeBond's
-    // mainnet deploy). The constructor reads the vault's pool tokens, which only matters when
-    // it runs; `validateImplementation` never runs it.
+    // (bonusToken, vault) — the ApeBond escrow (on Sepolia test stack #6 since 6 Oct, and part
+    // of the mainnet launch deploy since the decision of 14 Oct 2026). The constructor reads the
+    // vault's pool tokens, which only matters when it runs; `validateImplementation` never runs it.
     constructorArgs: [DUMMY.address, "0x0000000000000000000000000000000000000002"],
   },
   {

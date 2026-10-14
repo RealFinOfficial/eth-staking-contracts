@@ -3,9 +3,9 @@ const path = require("path");
 const hre = require("hardhat");
 
 // Shared plumbing for every interaction script: address resolution, pool-kind
-// detection, mainnet guards and the Ledger nonce workaround. Nothing here is
-// network- or pool-specific, so the same script runs on sepolia and mainnet
-// against either StakingPool or WeightedStakingPool.
+// detection, mainnet guards and the explicit-nonce workaround for the mainnet
+// signer. Nothing here is network- or pool-specific, so the same script runs on
+// sepolia and mainnet against either StakingPool or WeightedStakingPool.
 
 // The tracked registry, unless DEPLOYMENTS_FILE points somewhere else. The override
 // exists for the local-fork integration suite: those runs deploy throwaway contracts on
