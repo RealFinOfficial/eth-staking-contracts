@@ -2738,11 +2738,14 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await next.hasRole(await next.DEFAULT_ADMIN_ROLE(), newTimelockAddr)).to.equal(true);
     });
 
-    it("moves all five proxies with ONE batch through the old timelock", async function () {
-      const [schedule] = await sendPayloads(
-        await runScript("scripts/lp-switch-timelock.js", switchEnv("schedule")),
-        1
-      );
+    it("moves all five proxies and the reward token with ONE batch through the old timelock", async function () {
+      // This stack carries no ApeBond route, so the escrow and the adapter are skipped by name;
+      // RewardToken:TRW (A29) is owned by the old timelock, so it moves with the five (C-15).
+      const scheduleRun = await runScript("scripts/lp-switch-timelock.js", switchEnv("schedule"));
+      expect(scheduleRun.stdout).to.include("skip  BonusEscrow: not in deployments.json for chain 31337");
+      expect(scheduleRun.stdout).to.include("skip  ApeBondPositionAdapter: not in deployments.json for chain 31337");
+      expect(scheduleRun.stdout).to.include(`RewardToken:TRW.transferOwnership(${newTimelockAddr}) on ${thirdTokenAddr}`);
+      const [schedule] = await sendPayloads(scheduleRun, 1);
       expect(schedule.to).to.equal(timelockAddr);
 
       // Mined, not only shifted: the script reads `isOperationReady` with a view call.
@@ -2754,18 +2757,18 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(execute.to).to.equal(timelockAddr);
 
       // Ownable2Step: the old timelock is still the owner; the new one is the nominee.
-      for (const contract of [overture, distributor, registry, vault, zapper]) {
+      for (const contract of [overture, distributor, registry, vault, zapper, thirdToken]) {
         expect(await contract.owner()).to.equal(timelockAddr);
         expect(await contract.pendingOwner()).to.equal(newTimelockAddr);
       }
     });
 
-    it("accepts all five from the new timelock, then raises its delay", async function () {
+    it("accepts all six from the new timelock, then raises its delay", async function () {
       // `accept` schedules the acceptOwnership batch on the NEW timelock; its delay is still
       // 0, so a second run finds it ready and prints the execute.
       await sendPayloads(await runScript("scripts/lp-switch-timelock.js", switchEnv("accept")), 1);
       await sendPayloads(await runScript("scripts/lp-switch-timelock.js", switchEnv("accept")), 1);
-      for (const contract of [overture, distributor, registry, vault, zapper]) {
+      for (const contract of [overture, distributor, registry, vault, zapper, thirdToken]) {
         expect(await contract.owner()).to.equal(newTimelockAddr);
         expect(await contract.pendingOwner()).to.equal(C.ZERO_ADDRESS);
       }
@@ -2777,9 +2780,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await next.getMinDelay()).to.equal(BigInt(FINAL_DELAY));
     });
 
-    it("verifies the five owners and rewrites the registry entries", async function () {
+    it("verifies the six owners and rewrites the registry entries", async function () {
       const run = await runScript("scripts/lp-switch-timelock.js", switchEnv("verify"));
-      expect(run.stdout).to.include(`All five proxies are owned by ${newTimelockAddr}`);
+      expect(run.stdout).to.include(`All 6 moved contracts are owned by ${newTimelockAddr}`);
+      expect(run.stdout).to.include(`OK    RewardToken:TRW.owner ${newTimelockAddr} pendingOwner ${C.ZERO_ADDRESS}`);
       expect(run.stdout).to.not.include("FAIL");
 
       const entries = runner.readRegistry(registryFile)["31337"];
@@ -2787,7 +2791,14 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(entries.TimelockController.minDelay).to.equal(FINAL_DELAY);
       expect(entries.TimelockControllerRetired.address).to.equal(timelockAddr);
       expect(entries).to.not.have.property("TimelockControllerNext");
-      for (const kind of ["TokenOverture", "RewardsDistributor", "LPEpochRegistry", "LPStakingVault", "LPZapper"]) {
+      for (const kind of [
+        "TokenOverture",
+        "RewardsDistributor",
+        "LPEpochRegistry",
+        "LPStakingVault",
+        "LPZapper",
+        "RewardToken:TRW",
+      ]) {
         expect(entries[kind].owner, kind).to.equal(newTimelockAddr);
       }
 
@@ -3240,6 +3251,87 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         escrow.interface,
         "NoSurplus"
       );
+    });
+
+    /**
+     * Audit C-15: the switch moves EVERY contract the old timelock owns. On this stack that is
+     * the five proxies, the escrow (Ownable2Step: nominated, then accepted), the adapter (plain
+     * Ownable: one transfer, nothing to accept) and a reward token deployed by add-reward-token.js.
+     * A reward token added BY ADDRESS is someone else's contract: skipped by name. The deploying
+     * key holds both roles on both timelocks here (LP_MULTISIG = the deployer, delays 0), so the
+     * script sends every step itself.
+     */
+    it("E7 lp-switch-timelock.js moves the escrow, the adapter and a reward token with the five", async function () {
+      const apeScriptEnv = (extra = {}) => ({ ...baseScriptEnv(), DEPLOYMENTS_FILE: apeRegistryFile, ...extra });
+      await runScript(
+        "scripts/add-reward-token.js",
+        apeScriptEnv({
+          REWARD_TOKEN_NAME: "Fourth Reward",
+          REWARD_TOKEN_SYMBOL: "FRW",
+          REWARD_TOKEN_CONDITIONAL: "0",
+          REWARD_TOKEN_CLAIMS_ENABLED: "1",
+        })
+      );
+      await runScript(
+        "scripts/add-reward-token.js",
+        apeScriptEnv({ REWARD_TOKEN_ADDRESS: usdcAddr, REWARD_TOKEN_CONDITIONAL: "0", REWARD_TOKEN_CLAIMS_ENABLED: "0" })
+      );
+      const recorded = runner.readRegistry(apeRegistryFile)["31337"];
+      const frwAddr = recorded["RewardToken:FRW"].address;
+      const frw = await contractAt("TokenOverture", frwAddr);
+      expect(await frw.owner()).to.equal(apeTimelockAddr);
+      const foreignKind = Object.keys(recorded).find(
+        (kind) => kind.startsWith("RewardToken:") && recorded[kind].address === usdcAddr
+      );
+      expect(recorded[foreignKind]).to.not.have.property("owner");
+
+      const switchRun = (action) =>
+        runScript(
+          "scripts/lp-switch-timelock.js",
+          apeScriptEnv({ SWITCH_ACTION: action, LP_MULTISIG: w.deployer.address, NEW_TIMELOCK_FINAL_DELAY: "120" })
+        );
+      await switchRun("deploy");
+      const nextAddr = runner.registryEntry(apeRegistryFile, 31337, "TimelockControllerNext").address;
+
+      const scheduled = await switchRun("schedule");
+      expect(scheduled.stdout).to.include(`BonusEscrow.transferOwnership(${nextAddr}) on ${escrowAddr}`);
+      expect(scheduled.stdout).to.include(
+        `ApeBondPositionAdapter.transferOwnership(${nextAddr}) on ${adapterAddr} (plain Ownable`
+      );
+      expect(scheduled.stdout).to.include(`RewardToken:FRW.transferOwnership(${nextAddr}) on ${frwAddr}`);
+      expect(scheduled.stdout).to.include(
+        `skip  ${foreignKind} ${usdcAddr}: the registry records owner (none), not the old timelock`
+      );
+
+      await switchRun("execute");
+      // The Ownable2Step pair names the new timelock as nominee; the adapter is already moved.
+      expect(await escrow.owner()).to.equal(apeTimelockAddr);
+      expect(await escrow.pendingOwner()).to.equal(nextAddr);
+      expect(await frw.pendingOwner()).to.equal(nextAddr);
+      expect(await adapter.owner()).to.equal(nextAddr);
+
+      const accepted = await switchRun("accept");
+      expect(accepted.stdout).to.include("acceptOwnership x7 on the NEW timelock");
+      await switchRun("raise-delay");
+      for (const contract of [escrow, frw, apeVault]) {
+        expect(await contract.owner()).to.equal(nextAddr);
+        expect(await contract.pendingOwner()).to.equal(C.ZERO_ADDRESS);
+      }
+
+      const verified = await switchRun("verify");
+      expect(verified.stdout).to.include(`OK    BonusEscrow.owner ${nextAddr} pendingOwner ${C.ZERO_ADDRESS}`);
+      expect(verified.stdout).to.include(`OK    ApeBondPositionAdapter.owner ${nextAddr} (plain Ownable, nothing to accept)`);
+      expect(verified.stdout).to.include(`OK    RewardToken:FRW.owner ${nextAddr} pendingOwner ${C.ZERO_ADDRESS}`);
+      expect(verified.stdout).to.include(`All 8 moved contracts are owned by ${nextAddr}`);
+      expect(verified.stdout).to.not.include("FAIL");
+
+      const entries = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(entries.TimelockController.address).to.equal(nextAddr);
+      expect(entries.TimelockControllerRetired.address).to.equal(apeTimelockAddr);
+      for (const kind of ["BonusEscrow", "ApeBondPositionAdapter", "RewardToken:FRW", "LPStakingVault"]) {
+        expect(entries[kind].owner, kind).to.equal(nextAddr);
+      }
+      expect(entries[foreignKind]).to.not.have.property("owner");
     });
   });
 

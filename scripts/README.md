@@ -149,7 +149,7 @@ ApeBond route adds a sixth proxy, `BonusEscrow`, and one plain contract,
 | `lp-epoch.js` | Drive the emission schedule in `LPEpochRegistry`: `EPOCH_ACTION=show\|schedule\|set-amount\|update-bounds\|cancel`. Quantities in whole tokens per symbol (`EPOCH_AMOUNTS="OVTR=1000000,ASSET=3000"`); the grid, the 30-minute margin and the overlap rule are checked against chain time before anything is proposed. Sends when the signer is the registry operator; prints the Safe transaction otherwise |
 | `add-reward-token.js` | Prepare a NEW reward token: deploy an Overture-shaped token proxy (or take `REWARD_TOKEN_ADDRESS`), record `RewardToken:<SYMBOL>` in `deployments.json`, and print the `addRewardToken(token, conditional, claimsEnabled)` timelock operation and the follow-ups. Sends nothing to the timelock |
 | `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending`. Also exports the operation and batch builders the other scripts and the suites use |
-| `lp-switch-timelock.js` | Move all five proxies to a NEW timelock (planned switch): `SWITCH_ACTION=deploy\|schedule\|execute\|accept\|raise-delay\|verify`. See "Replacing the timelock" below |
+| `lp-switch-timelock.js` | Move everything the old timelock owns — the five proxies, and the escrow, the adapter and every reward token when recorded — to a NEW timelock (planned switch): `SWITCH_ACTION=deploy\|schedule\|execute\|accept\|raise-delay\|verify`. See "Replacing the timelock" below |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor\|LPEpochRegistry\|TokenOverture\|LPZapper\|BonusEscrow`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `validate-upgrade-safety.js` | UUPS implementation safety for the six (the five and `BonusEscrow`; network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
 | `deploy-apebond.js` | The ApeBond route on a stack that is ALREADY live. `LP_APEBOND_MODE=activate` (default): a new vault implementation when the live vault lacks the route (a lane-1 vault), the escrow and the adapter unless already recorded, the adapter's callers and campaign, then ONE timelock batch (`[upgradeToAndCall]`, `setBonusEscrow`, `setStakeOperator`, `setAdapter`) — driven end to end when the deploying key holds both timelock roles on a test chain, printed as Safe calldata otherwise — and the post-checks, of which `vault.bonusEscrow() == escrow` and `escrow.vault() == vault` are mandatory. `replace-adapter`, `upgrade-vault`, and the read-only `verify` |
@@ -494,17 +494,23 @@ distributor's own 70,000 `$OVTR` were not touched. The test server's
 ### Replacing the timelock
 
 **Case 1 — the timelock works, the switch is planned.** No contract stores the timelock address
-immutably; each proxy's owner is Ownable2Step storage. `lp-switch-timelock.js` performs the
-switch in six runs:
+immutably; every owner is storage. `lp-switch-timelock.js` moves everything the old timelock
+owns (audit row C-15): the five proxies (Ownable2Step), `BonusEscrow` (a UUPS proxy,
+Ownable2Step), `ApeBondPositionAdapter` (plain `Ownable`: the transfer is the whole handover,
+effective at `execute`, nothing to accept) and every `RewardToken:<SYMBOL>` entry (Overture-shaped
+proxies, Ownable2Step). The escrow, the adapter and a reward token move only when
+`deployments.json` records them for the chain with the old timelock as owner; otherwise the run
+prints a `skip` line naming the entry (a stack without the ApeBond route, a reward token added by
+address). The switch takes six runs:
 
 ```bash
 SWITCH_ACTION=deploy      npx hardhat run scripts/lp-switch-timelock.js --network <net>  # new LPTimelock, delay 0
-SWITCH_ACTION=schedule    npx hardhat run scripts/lp-switch-timelock.js --network <net>  # OLD timelock: one batch, transferOwnership(new) x5
+SWITCH_ACTION=schedule    npx hardhat run scripts/lp-switch-timelock.js --network <net>  # OLD timelock: one batch, transferOwnership(new) on each
 #   … wait the OLD timelock's minDelay (48 h on mainnet) …
-SWITCH_ACTION=execute     npx hardhat run scripts/lp-switch-timelock.js --network <net>  # pendingOwner = new on all five
-SWITCH_ACTION=accept      npx hardhat run scripts/lp-switch-timelock.js --network <net>  # NEW timelock: acceptOwnership x5
+SWITCH_ACTION=execute     npx hardhat run scripts/lp-switch-timelock.js --network <net>  # pendingOwner = new on the two-step ones; the adapter moved
+SWITCH_ACTION=accept      npx hardhat run scripts/lp-switch-timelock.js --network <net>  # NEW timelock: acceptOwnership on each two-step one
 SWITCH_ACTION=raise-delay npx hardhat run scripts/lp-switch-timelock.js --network <net>  # NEW timelock: updateDelay(48 h) on itself
-SWITCH_ACTION=verify      npx hardhat run scripts/lp-switch-timelock.js --network <net>  # owner() x5, minDelay; updates deployments.json
+SWITCH_ACTION=verify      npx hardhat run scripts/lp-switch-timelock.js --network <net>  # owner() of each moved contract, minDelay; updates deployments.json
 ```
 
 The new timelock is deployed with delay 0 so the acceptances and the delay increase run at once,
