@@ -10,14 +10,16 @@ pragma solidity 0.8.28;
  *      only defence against a wrong one, and an assertion nothing can trip is untested.
  *
  *      It answers the pool reads the adapter's constructor and `depositFor` make (`token0`,
- *      `token1`, `fee`, `pool`, `previewTwap`) from values a test sets, and has two levers that
- *      produce the same rejection from different directions:
+ *      `token1`, `fee`, `pool`, `previewTwap`, `bonusEscrow`) from values a test sets, and has
+ *      two levers that produce the same rejection from different directions:
  *        * `takeCustody` false — `stakeFor` returns without pulling the NFT;
  *        * `reportedStaker` — custody moves, but `stakerOf` names somebody else.
  */
 contract MisreportingVault {
     bool public takeCustody = true;
     address public reportedStaker;
+    /// @dev What the adapter's escrow-link check (audit C-12) reads; a test links it.
+    address public bonusEscrow;
 
     address public immutable positionManager;
     address public immutable token0;
@@ -41,6 +43,10 @@ contract MisreportingVault {
 
     function setReportedStaker(address v) external {
         reportedStaker = v;
+    }
+
+    function setBonusEscrow(address v) external {
+        bonusEscrow = v;
     }
 
     /// @dev Spot == TWAP == tick 0, inside any bound.

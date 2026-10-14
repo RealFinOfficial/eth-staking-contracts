@@ -114,6 +114,22 @@
     "inputs": [
       {
         "internalType": "address",
+        "name": "vaultEscrow",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "escrow",
+        "type": "address"
+      }
+    ],
+    "name": "EscrowNotLinked",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
         "name": "escrowVault",
         "type": "address"
       },

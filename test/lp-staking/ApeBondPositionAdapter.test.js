@@ -480,6 +480,30 @@ describe("ApeBondPositionAdapter", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("depositFor — the rejections, in order", function () {
+    it("0. refuses unless the vault reports to this adapter's escrow — none or another one (C-12)", async function () {
+      // Unlinked: the vault would report no exit, so this bonus could never be forfeited. The
+      // link is checked first — before the adapter's own pause, which is step 1.
+      await vault.setBonusEscrow(ZERO);
+      await asGuardian().setDepositsPaused(true);
+      const position = await createPosition(soulZapAddr);
+      let { tx } = await deposit({ tokenId: position });
+      await expect(tx).to.be.revertedWithCustomError(adapter, "EscrowNotLinked").withArgs(ZERO, escrowAddr);
+      await asGuardian().setDepositsPaused(false);
+
+      // Linked to another escrow for the same vault: that one would forfeit nothing of ours.
+      const other = await deployEscrowProxy();
+      const otherAddr = await other.getAddress();
+      await vault.setBonusEscrow(otherAddr);
+      ({ tx } = await deposit({ tokenId: position }));
+      await expect(tx).to.be.revertedWithCustomError(adapter, "EscrowNotLinked").withArgs(otherAddr, escrowAddr);
+
+      // Linked back: the same purchase goes through and its bonus is reserved.
+      await vault.setBonusEscrow(escrowAddr);
+      ({ tx } = await deposit({ tokenId: position }));
+      await expect(tx).to.emit(escrow, "BonusReserved");
+      expect(await vault.stakerOf(position)).to.equal(alice.address);
+    });
+
     it("1. refuses while the adapter's own deposits are paused", async function () {
       await asGuardian().setDepositsPaused(true);
       const { tx } = await deposit();

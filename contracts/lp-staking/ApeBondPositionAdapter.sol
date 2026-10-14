@@ -32,6 +32,8 @@ interface IApeBondVault {
         external
         view
         returns (int24 currentTick, int24 twapTick, int24 maxDeviationTicks, bool withinBounds);
+
+    function bonusEscrow() external view returns (address);
 }
 
 /// @dev The calls the adapter makes into the escrow. {BonusEscrow} is the implementation behind
@@ -244,6 +246,10 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev The escrow is linked to a different vault than this adapter deposits into.
     error EscrowVaultMismatch(address escrowVault, address vault);
 
+    /// @dev The vault does not report its exits and re-ranges to this adapter's escrow (it reports
+    ///      to `vaultEscrow`, zero meaning nobody), so a bonus reserved now could never be forfeited.
+    error EscrowNotLinked(address vaultEscrow, address escrow);
+
     /// @dev New deposits are switched off.
     error DepositsArePaused();
 
@@ -363,7 +369,10 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      * @notice Accepts one freshly minted position from SoulZap, stakes it in the vault for its
      *         buyer, and records the bonus this contract computes for it.
      *
-     * @dev The order of B.3 §5.4, and no other:
+     * @dev Step 0 (audit C-12, 7 Oct 2026), then the order of B.3 §5.4, and no other:
+     *        0. the vault reports to this adapter's escrow: `vault.bonusEscrow() == escrow`.
+     *           A vault that reports to no escrow, or to another one, never forfeits the bonus
+     *           of an early exit, so a reservation made then would be unconditional;
      *        1. deposits are not paused;
      *        2. the caller is on the global allowlist AND permitted for the campaign;
      *        3. the campaign exists and is enabled;
@@ -552,8 +561,10 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
 
     // ──────────────────────── Internal helpers ─────────────────
 
-    /// @dev Steps 1-3: the pause, the two allowlists, the campaign.
+    /// @dev Steps 0-3: the vault-escrow link, the pause, the two allowlists, the campaign.
     function _checkCaller(bytes32 campaignId) private view returns (CampaignConfig memory campaign) {
+        address vaultEscrow = vault.bonusEscrow();
+        if (vaultEscrow != address(escrow)) revert EscrowNotLinked(vaultEscrow, address(escrow));
         if (depositsPaused) revert DepositsArePaused();
         if (!soulZapCallers[msg.sender]) revert NotSoulZapCaller(msg.sender);
         if (!campaignCallers[campaignId][msg.sender]) revert NotCampaignCaller(campaignId, msg.sender);

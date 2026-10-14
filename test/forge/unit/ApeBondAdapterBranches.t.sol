@@ -407,6 +407,35 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     // ──────────────────────── depositFor: the checklist, in order ───
 
+    /// @dev Audit C-12: a vault that reports to no escrow, or to another one, would never forfeit
+    ///      this bonus on an early exit, so the purchase is refused — before the pause is read.
+    function test_DepositFor_0_RevertsUnlessTheVaultReportsToThisEscrow() public {
+        uint256 tokenId = _mintForSoulZap(BUY_LIQUIDITY);
+
+        vault.setBonusEscrow(address(0));
+        vm.prank(apeGuardian);
+        adapter.setDepositsPaused(true);
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.EscrowNotLinked.selector, address(0), address(escrow))
+        );
+        soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+        vm.prank(apeGuardian);
+        adapter.setDepositsPaused(false);
+
+        BonusEscrow other = _deployBonusEscrowProxy(address(asset), address(vault), address(this), address(0));
+        vault.setBonusEscrow(address(other));
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.EscrowNotLinked.selector, address(other), address(escrow))
+        );
+        soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+
+        vault.setBonusEscrow(address(escrow));
+        soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
+        assertEq(vault.stakerOf(tokenId), alice, "linked again, the same purchase goes through");
+        (, uint256 amount,,,) = escrow.reservationOf(tokenId);
+        assertGt(amount, 0, "and its bonus is reserved");
+    }
+
     function test_DepositFor_1_RevertsWhileTheAdaptersDepositsArePaused() public {
         vm.prank(apeGuardian);
         adapter.setDepositsPaused(true);
@@ -773,6 +802,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         mv = _misreportingVault();
         BonusEscrow e = _deployBonusEscrowProxy(address(asset), address(mv), address(this), address(0));
         a = new ApeBondPositionAdapter(address(npmMock), address(mv), address(e), address(this), apeGuardian);
+        mv.setBonusEscrow(address(e));
         e.setAdapter(address(a));
         _openCampaign(a, soulZap, CAMPAIGN, CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
     }
