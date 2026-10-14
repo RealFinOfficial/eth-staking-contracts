@@ -307,6 +307,30 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertTrue(adapter.depositsPaused(), "the new guardian paused");
     }
 
+    /// @dev Audit C-29: the vault's operator replaces a leaked guardian with no timelock delay —
+    ///      zero still refused — while a stranger and the standing guardian are refused. The
+    ///      owner keeps the same right (test_SetGuardian_RotationMovesThePause).
+    function test_SetGuardian_TheVaultOperatorRotatesItWithoutTheTimelock() public {
+        // The local vault starts with this contract in every seat; the operator gets its own key.
+        vault.setOperator(operatorSafe);
+        address[2] memory refused = [stranger, apeGuardian];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotOwnerOrOperator.selector, refused[i]));
+            adapter.setGuardian(refused[i]);
+        }
+
+        vm.prank(operatorSafe);
+        vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
+        adapter.setGuardian(address(0));
+
+        vm.expectEmit(false, false, false, true, address(adapter));
+        emit ApeBondPositionAdapter.GuardianSet(apeGuardian, bob);
+        vm.prank(operatorSafe);
+        adapter.setGuardian(bob);
+        assertEq(adapter.guardian(), bob, "the operator moved the seat");
+    }
+
     /// @dev The timelock holds no undelayed switch: the owner is refused on the pause, and so is
     ///      a stranger.
     function test_SetDepositsPaused_IsGuardianOnly() public {
@@ -326,7 +350,8 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     }
 
     /// @dev Every configuration setter is owner (timelock) tier: the guardian, a caller and a
-    ///      stranger are refused on each.
+    ///      stranger are refused on each. The guardian seat also takes the vault's operator
+    ///      (audit C-29), so its refusal names that tier.
     function test_Admin_EveryConfigurationSetterIsOwnerOnly() public {
         address[3] memory refused = [apeGuardian, address(soulZap), stranger];
         ApeBondPositionAdapter.CampaignConfig memory config = _campaignConfig(CAMPAIGN_TICK_LOWER, CAMPAIGN_TICK_UPPER);
@@ -341,7 +366,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
             adapter.setCampaignCaller(CAMPAIGN, refused[i], true);
             vm.expectRevert(notOwner);
             adapter.setSoulZapCaller(refused[i], true);
-            vm.expectRevert(notOwner);
+            vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotOwnerOrOperator.selector, refused[i]));
             adapter.setGuardian(refused[i]);
             vm.stopPrank();
         }

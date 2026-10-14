@@ -272,6 +272,17 @@
         "type": "address"
       }
     ],
+    "name": "NotOwnerOrOperator",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
     "name": "NotSoulZapCaller",
     "type": "error"
   },

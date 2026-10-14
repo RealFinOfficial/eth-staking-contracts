@@ -1328,7 +1328,8 @@ contract AccessControlTest is LocalHarness {
     }
 
     /// @dev The adapter's owner tier — campaigns, callers, the guardian seat — is refused to the
-    ///      guardian (whose one right is the pause) and to a stranger.
+    ///      guardian (whose one right is the pause) and to a stranger. The guardian seat also takes
+    ///      the vault's operator (audit C-29), so its refusal names that tier.
     function test_ApeBond_TheAdapterOwnerTierRefusesTheGuardianAndAStranger() public {
         (, ApeBondPositionAdapter adapter) = _apeBondRoute();
         ApeBondPositionAdapter.CampaignConfig memory config = ApeBondPositionAdapter.CampaignConfig({
@@ -1353,7 +1354,7 @@ contract AccessControlTest is LocalHarness {
             adapter.setCampaignCaller(keccak256("existing"), refused[i], true);
             vm.expectRevert(notOwner);
             adapter.setSoulZapCaller(refused[i], true);
-            vm.expectRevert(notOwner);
+            vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotOwnerOrOperator.selector, refused[i]));
             adapter.setGuardian(refused[i]);
             vm.expectRevert(notOwner);
             adapter.transferOwnership(refused[i]);

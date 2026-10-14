@@ -901,7 +901,6 @@ describe("ApeBondPositionAdapter", function () {
           as.setCampaignEnabled(CAMPAIGN, false),
           as.setCampaignCaller(CAMPAIGN, caller.address, true),
           as.setSoulZapCaller(caller.address, true),
-          as.setGuardian(caller.address),
         ];
         for (const call of calls) {
           await expect(call)
@@ -926,6 +925,26 @@ describe("ApeBondPositionAdapter", function () {
           .to.be.revertedWithCustomError(adapter, "NotGuardian")
           .withArgs(caller.address, guardian.address);
       }
+    });
+
+    it("is rotated by the vault's operator with no delay; a stranger and the guardian are refused (C-29)", async function () {
+      // The fixture's vault names the owner as its operator; give the operator seat its own key.
+      await vault.setOperator(keeper.address);
+      for (const caller of [stranger, guardian]) {
+        await expect(adapter.connect(caller).setGuardian(caller.address))
+          .to.be.revertedWithCustomError(adapter, "NotOwnerOrOperator")
+          .withArgs(caller.address);
+      }
+      await expect(adapter.connect(keeper).setGuardian(ZERO)).to.be.revertedWithCustomError(adapter, "ZeroAddress");
+      await expect(adapter.connect(keeper).setGuardian(bob.address))
+        .to.emit(adapter, "GuardianSet")
+        .withArgs(guardian.address, bob.address);
+
+      // The owner keeps the same right.
+      await expect(adapter.setGuardian(alice.address))
+        .to.emit(adapter, "GuardianSet")
+        .withArgs(bob.address, alice.address);
+      expect(await adapter.guardian()).to.equal(alice.address);
     });
 
     it("is rotated by the owner, non-zero, both sides logged, and the switch moves with it", async function () {

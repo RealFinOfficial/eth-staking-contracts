@@ -173,7 +173,8 @@ const OWNER_TIER = {
     kinds: ["LPStakingVault", "RewardsDistributor", ADAPTER_KIND],
     note: "moves the undelayed pause tier to another hot key; on the two proxies it takes "
       + "address(0) to revoke and is owner OR operator since 2026-09-14 (the operator can also "
-      + "send it directly), on the adapter it is owner-only and zero is rejected",
+      + "send it directly), on the adapter it is owner OR the vault's operator since audit C-29 "
+      + "and zero is rejected",
   },
   setOperator: {
     signature: "function setOperator(address newOperator)",
