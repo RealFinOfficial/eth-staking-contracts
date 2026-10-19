@@ -193,10 +193,13 @@ when `LP_TIMELOCK_MIN_DELAY` is not 172800, the schedule and execute commands of
 `updateDelay(172800)` (`lp-timelock.js`), which the multisig sends.
 
 Three role variables are read and all three are printed before anything is deployed.
-`LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B — it mints `$OVTR` through the
-distributor's `mintRewardToken`, and it is the registry's scheduler) are both REQUIRED and have no defaults; the script THROWS when they
-are equal and WARNS when either collapses onto `LP_MULTISIG` or onto the deploying key, which is
-what staging deliberately does.
+`LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (a multisig that mints `$OVTR` through the
+distributor's `mintRewardToken` and is the registry's scheduler) are both REQUIRED and have no
+defaults. The script THROWS when they are equal and WARNS when either collapses onto
+`LP_MULTISIG` or onto the deploying key, which is what staging deliberately does. On mainnet one
+Safe is both `LP_MULTISIG` (the timelock's proposer and executor) and `LP_OPERATOR` (decision of
+14 Oct 2026), so the deploy script's "staging arrangement" warning for the two being equal is
+expected there.
 
 ### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 and the mainnet launch)
 
