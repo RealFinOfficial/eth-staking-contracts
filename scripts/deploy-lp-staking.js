@@ -70,7 +70,8 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //  10. `increaseObservationCardinalityNext` on the pool (permissionless)
 //  11. post-deploy verification of all five proxies + the timelock (and the ApeBond pair), the
 //      address summary, the verify commands, and the operator's next steps (fund the
-//      distributor, schedule epoch 1, run the ApeBond link batch)
+//      distributor, schedule epoch 1, set the timelock delay to 48 h with `updateDelay` when
+//      LP_TIMELOCK_MIN_DELAY was not 172800, run the ApeBond link batch)
 //
 // Every proxy goes through `deployProxyPair`: `validateImplementation`, the implementation
 // deploy, the `LPProxy` deploy with the `initialize` calldata, and `forceImport` into the
@@ -1149,7 +1150,15 @@ async function main() {
       "   Claims of a token revert with InsufficientFunds until its balance covers them.\n" +
       "2. Schedule epoch 1 on the registry, at least 30 minutes before it starts:\n" +
       `   EPOCH_ACTION=schedule EPOCH_ID=1 EPOCH_STARTS_AT=… EPOCH_ENDS_AT=… npx hardhat run scripts/lp-epoch.js --network ${network}\n` +
-      "3. Register the five proxies with the indexer module and the backend (scripts/README.md)."
+      "3. Register the five proxies with the indexer module and the backend (scripts/README.md)." +
+      (timelockMinDelay !== DEFAULT_TIMELOCK_MIN_DELAY
+        ? `\n4. Set the timelock delay to ${DEFAULT_TIMELOCK_MIN_DELAY}s (48 h, the mainnet default). This run deployed it with ${timelockMinDelay}s.\n` +
+          "   Schedule the change:\n" +
+          `   TIMELOCK_ACTION=schedule TIMELOCK_TARGET=${TIMELOCK_KIND} TIMELOCK_FN=updateDelay TIMELOCK_ARGS=${DEFAULT_TIMELOCK_MIN_DELAY} npx hardhat run scripts/lp-timelock.js --network ${network}\n` +
+          `   then, after the current delay of ${timelockMinDelay}s has passed, execute it:\n` +
+          `   TIMELOCK_ACTION=execute TIMELOCK_TARGET=${TIMELOCK_KIND} TIMELOCK_FN=updateDelay TIMELOCK_ARGS=${DEFAULT_TIMELOCK_MIN_DELAY} npx hardhat run scripts/lp-timelock.js --network ${network}\n` +
+          `   The multisig (${multisig}) is the timelock's proposer and executor, so on mainnet the Safe sends these two.`
+        : "")
   );
 
   if (apeBond) {

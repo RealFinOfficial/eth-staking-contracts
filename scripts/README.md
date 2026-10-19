@@ -188,8 +188,9 @@ slot, `owner == timelock` and `pendingOwner == 0`; the Overture token's name, sy
 (`== the distributor proxy`) and zero supply; the distributor's `asset() == LP_ASSET`,
 `rewardTokens()` and each token's flags and decimals, and `REWARD_CLAIM_TYPEHASH`; the registry's distributor, operator, `epochCount == 0`, `INTERVAL` and
 `SCHEDULE_MARGIN`; `vault.bonusEscrow() == 0`; the zapper's operator. The run ends by printing
-the two operator steps it does not do: funding (`lp-fund-rewards.js`) and epoch 1
-(`lp-epoch.js`).
+the operator steps it does not do: funding (`lp-fund-rewards.js`), epoch 1 (`lp-epoch.js`) and,
+when `LP_TIMELOCK_MIN_DELAY` is not 172800, the schedule and execute commands of the timelock's
+`updateDelay(172800)` (`lp-timelock.js`), which the multisig sends.
 
 Three role variables are read and all three are printed before anything is deployed.
 `LP_GUARDIAN` (the hot pause key) and `LP_OPERATOR` (multisig B — it mints `$OVTR` through the
