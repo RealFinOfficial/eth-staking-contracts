@@ -785,10 +785,9 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
 ### Operator notes
 
 - The deploy script deploys implementation + `LPProxy` as two nonce-controlled transactions
-  rather than `upgrades.deployProxy`, because mainnet signs through a Ledger and every
-  transaction in that script carries an explicit nonce. The proxy's `initialize` runs in the
-  proxy's deployment transaction — an uninitialized proxy is one `initialize` race away from
-  belonging to whoever calls it first.
+  rather than `upgrades.deployProxy`, because every transaction in that script carries an
+  explicit nonce. The proxy's `initialize` runs in the proxy's deployment transaction — an
+  uninitialized proxy is one `initialize` race away from belonging to whoever calls it first.
 - Before each implementation deploy the script runs `upgrades.validateImplementation` (proxy
   safety, from the build info alone), and after each proxy deploy `upgrades.forceImport`, which
   writes the storage layout into the `hardhat-upgrades` manifest. On a named network that is

@@ -231,7 +231,7 @@ resolving from the registry; it defaults to `WeightedStakingPool`.
 | `recover-excess.js` | both | Owner: sweep unclaimed rewards after the pool ends |
 | `status.js` | both | Read-only overview; `USERS=0x…,0x…` adds per-user detail |
 | `post-deploy-check.js` | both | Assert every constructor-set value after deploying |
-| `token-check.js` / `ledger-check.js` | — | Pre-deploy checks for token addresses, epochs and the Ledger path (the mainnet network's current tooling, which the launch runbook will revisit) |
+| `token-check.js` / `deployer-check.js` | — | Pre-deploy checks for token addresses, epochs and the deployer account (on mainnet the one `MAINNET_PRIVATE_KEY` controls) |
 
 Scripts that send a transaction refuse to run on mainnet unless `CONFIRM=yes` is
 set, after printing what they are about to do.

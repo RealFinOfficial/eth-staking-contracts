@@ -27,10 +27,16 @@ Every script that sends a transaction refuses to run on chain 1 unless
 `CONFIRM=yes` is set. The parameters are printed before the check, so the
 intended flow is to run once without it, read the summary, then re-run with it.
 
-Transactions supply their own nonce. `hardhat-ledger` resolves the nonce with
-the `pending` block tag without retrying, and Infura returns an intermittent
-`-32603` for that tag, which aborts the transaction before it reaches the
-device. `lib/pools.js` resolves it with retries and a `latest` fallback.
+On mainnet the deployer signs with the private key in `MAINNET_PRIVATE_KEY`
+(decision of 2026-10-19). It is set on the operator's machine only and never
+printed. It is a separate variable from the Sepolia `PRIVATE_KEY`, so the Sepolia
+key that a repo `.env` holds can never become the mainnet deployer. The Safe needs
+no signer here, the scripts print its calldata.
+
+Transactions supply their own nonce. Hardhat's local-accounts signer resolves the
+nonce with the `pending` block tag without retrying, and Infura returns an
+intermittent `-32603` for that tag, which aborts the transaction before it is
+signed. `lib/pools.js` resolves it with retries and a `latest` fallback.
 
 ## Running against a local fork
 
@@ -119,11 +125,11 @@ decimals — the sepolia mUSDC mock reports 18 but is used as a 6-decimal token.
 | `post-deploy-check.js` | Read a deployment back and assert every constructor value |
 | `status.js` | Read-only pool overview; `USERS=0x…,0x…` adds per-user detail. Needs no signer |
 | `token-check.js` | Confirm token addresses and epochs before deploying |
-| `ledger-check.js` | Mainnet preflight: address, balance, gas estimate. `LEDGER_PING=1` also signs a throwaway message to exercise the USB channel |
+| `deployer-check.js` | Preflight: deployer address, balance, gas estimate. On mainnet the address is the one `MAINNET_PRIVATE_KEY` controls, the key itself is never printed |
 
 ```bash
 npx hardhat run scripts/token-check.js --network mainnet
-LEDGER_PING=1 npx hardhat run scripts/ledger-check.js --network mainnet
+npx hardhat run scripts/deployer-check.js --network mainnet
 CONFIRM=yes npx hardhat run scripts/deploy-weighted.js --network mainnet
 DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 ```

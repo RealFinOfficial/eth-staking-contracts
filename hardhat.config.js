@@ -1,5 +1,4 @@
 require("@nomicfoundation/hardhat-toolbox");
-require("@nomicfoundation/hardhat-ledger");
 require("@openzeppelin/hardhat-upgrades");
 require("dotenv").config();
 
@@ -35,13 +34,20 @@ module.exports = {
       chainId: 11155111,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
-    // Mainnet signs through a Ledger only — no PRIVATE_KEY is ever loaded here.
+    // Mainnet signs with the deployer's private key from MAINNET_PRIVATE_KEY, set on the
+    // operator's machine only and never printed (decision of 2026-10-19). It is a separate
+    // variable from the sepolia PRIVATE_KEY on purpose. dotenv fills every variable the shell
+    // left unset from the repo .env, and that .env holds the Sepolia key under PRIVATE_KEY.
+    // Reading PRIVATE_KEY here would let that Sepolia key become the mainnet deployer without
+    // anyone setting it. With MAINNET_PRIVATE_KEY unset this network has no signer and every
+    // state-changing script stops in pools.getSigner(). The Safe needs no signer here, the
+    // scripts print its calldata.
     mainnet: {
       url:
         process.env.MAINNET_RPC_URL ||
         `https://mainnet.infura.io/v3/${process.env.INFURA_API_KEY}`,
       chainId: 1,
-      ledgerAccounts: process.env.LEDGER_ACCOUNT ? [process.env.LEDGER_ACCOUNT] : [],
+      accounts: process.env.MAINNET_PRIVATE_KEY ? [process.env.MAINNET_PRIVATE_KEY] : [],
     },
   },
   etherscan: {

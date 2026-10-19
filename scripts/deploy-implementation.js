@@ -421,9 +421,9 @@ async function deployImplementation(options) {
 
   const Factory = await hre.ethers.getContractFactory(contractName, deployer);
 
-  // Explicit nonce, like every other transaction in this repo: hardhat-ledger resolves the
-  // nonce with the "pending" block tag and does not retry, and Infura returns an intermittent
-  // -32603 for that tag. `txOverrides` is handed straight to `factory.deploy`.
+  // Explicit nonce, like every other transaction in this repo: Hardhat's local-accounts signer
+  // resolves the nonce with the "pending" block tag and does not retry, and Infura returns an
+  // intermittent -32603 for that tag. `txOverrides` is handed straight to `factory.deploy`.
   const nonce = await pools.resolveNonce(deployer.address);
   const nonceBefore = await hre.ethers.provider.getTransactionCount(deployer.address, "latest");
 

@@ -188,10 +188,10 @@ function requireConfirmation(id, action) {
 
 // ──────────────────────── transactions ────────────────────────
 
-// hardhat-ledger resolves the nonce with the "pending" block tag and does not
-// retry; Infura returns an intermittent -32603 for that tag, which aborts the
-// transaction before it reaches the device. Supplying the nonce ourselves makes
-// the plugin skip its own lookup.
+// Hardhat's local-accounts signer (the `accounts` key of the sepolia and mainnet
+// networks) resolves the nonce with the "pending" block tag and does not retry.
+// Infura returns an intermittent -32603 for that tag, which aborts the transaction
+// before it is signed. Supplying the nonce ourselves makes Hardhat skip its own lookup.
 async function resolveNonce(address) {
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
@@ -288,7 +288,8 @@ async function impersonatedSignerFromEnv(envName) {
  *
  * `LP_DEPLOYER_IMPERSONATE` comes first and is honoured on chain 31337 only — see
  * {@link impersonatedSignerFromEnv}. Unset, which is every real run, this is exactly what it
- * has always been: the first signer the network config produces.
+ * has always been: the first signer the network config produces. hardhat.config.js builds
+ * that signer from PRIVATE_KEY on sepolia and from MAINNET_PRIVATE_KEY on mainnet (chain 1).
  */
 async function getSigner() {
   const impersonated = await impersonatedSignerFromEnv(DEPLOYER_IMPERSONATE_ENV);
@@ -297,7 +298,7 @@ async function getSigner() {
   const signers = await hre.ethers.getSigners();
   if (signers.length === 0) {
     throw new Error(
-      "No signer for this network — set PRIVATE_KEY (testnet) or LEDGER_ACCOUNT (mainnet)"
+      "No signer for this network — set PRIVATE_KEY (testnet) or MAINNET_PRIVATE_KEY (mainnet)"
     );
   }
   return signers[0];
