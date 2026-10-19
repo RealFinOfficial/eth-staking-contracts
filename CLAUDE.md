@@ -334,8 +334,8 @@ docs/                — Design and review notes
 scripts/             — Deployment and interaction scripts (see scripts/README.md)
   lib/pools.js              — Shared: address resolution, pool-kind detection,
                               mainnet CONFIRM guard, explicit-nonce workaround for the
-                              mainnet signer (the hardhat-ledger path: the mainnet network's
-                              current tooling, which the launch runbook will revisit)
+                              mainnet signer (the nonce workaround for Hardhat's local-accounts
+                              signer, which never retries a pending-nonce lookup)
   lib/uniswap.js            — Per-chain Uniswap V3 addresses (factory, positionManager,
                               swapRouter02) for chain 1 and 11155111; imported by
                               deploy-lp-staking.js and create-sepolia-pool.js so they cannot

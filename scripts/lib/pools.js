@@ -313,7 +313,7 @@ async function send(label, signer, build) {
   const id = await chainId();
   const nonce = await resolveNonce(signer.address);
   console.log(`${label}... (nonce ${nonce})`);
-  if (isMainnet(id)) console.log("  confirm on the mainnet signer");
+  if (isMainnet(id)) console.log("  signing with MAINNET_PRIVATE_KEY and sending");
 
   const tx = await build({ nonce });
   const receipt = await tx.wait();
