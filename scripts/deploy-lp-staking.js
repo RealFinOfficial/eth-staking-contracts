@@ -1125,13 +1125,20 @@ async function main() {
     console.log(
       `npx hardhat verify --network ${network} ${apeBondDeploy.adapterDeploy.address} ` +
         `${positionManager} ${vaultDeploy.address} ${apeBondDeploy.escrowDeploy.address} ` +
-        `${deployer.address} ${apeBondGuardian}`
+        `${deployer.address} ${apeBondGuardian} ${apeBondMinCliff}`
     );
   }
-  // The timelock's proposer/executor arrays are address[]; hardhat-verify wants them as JSON.
+  // The timelock's proposer/executor arguments are address[]. hardhat-verify hands every
+  // positional argument to the ABI coder as a plain string, and a string cannot encode an
+  // address[] ("cannot be encoded for the parameter proposers"), so the four arguments go
+  // through a --constructor-args module, written by the first printed line.
+  const timelockArgsFile = "lp-timelock-verify-args.js";
   console.log(
-    `npx hardhat verify --network ${network} ${timelockDeploy.address} ` +
-      `${timelockMinDelay} '["${multisig}"]' '["${multisig}"]' ${hre.ethers.ZeroAddress}`
+    `echo 'module.exports = [${timelockMinDelay}, ["${multisig}"], ["${multisig}"], "${hre.ethers.ZeroAddress}"]' ` +
+      `> ${timelockArgsFile}`
+  );
+  console.log(
+    `npx hardhat verify --network ${network} --constructor-args ${timelockArgsFile} ${timelockDeploy.address}`
   );
 
   console.log(
