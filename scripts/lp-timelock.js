@@ -641,7 +641,9 @@ async function main() {
 
   if (action === "schedule-batch" || action === "execute-batch") {
     // schedule-batch / execute-batch — same file, same operation, same rules as the single
-    // pair above: print the operands and the calldata a Safe would sign, then send.
+    // pair above: print the operands and the calldata a Safe would sign, then send when the
+    // signer holds the timelock role the action needs, or print the Safe transaction and stop
+    // when it does not.
     const batch = buildBatch(
       readBatchFile().map((entry, index) => resolveBatchEntry(pools, chainId, entry, index)),
       process.env.TIMELOCK_SALT_TAG || ""
@@ -662,7 +664,17 @@ async function main() {
 
     if (action === "schedule-batch") {
       const delay = resolveDelay(minDelay);
-      console.log(`  scheduleBatch calldata: ${encodeScheduleBatch(batch, delay)}`);
+      const scheduleBatchData = encodeScheduleBatch(batch, delay);
+      console.log(`  scheduleBatch calldata: ${scheduleBatchData}`);
+      const canSchedule = await signerHoldsRole({
+        timelock,
+        timelockAddress,
+        roleName: "PROPOSER_ROLE",
+        signer: batchSigner,
+        fn: "scheduleBatch",
+        data: scheduleBatchData,
+      });
+      if (!canSchedule) return;
       pools.requireConfirmation(chainId, `schedule batch ${batch.id}`);
       await pools.send(
         `Scheduling a batch of ${batch.calls.length} (delay ${delay}s)`,
@@ -684,8 +696,18 @@ async function main() {
       return;
     }
 
-    console.log(`  executeBatch calldata:  ${encodeExecuteBatch(batch)}`);
+    const executeBatchData = encodeExecuteBatch(batch);
+    console.log(`  executeBatch calldata:  ${executeBatchData}`);
     await reportStatus(timelock, batch.id, minDelay);
+    const canExecuteBatch = await signerHoldsRole({
+      timelock,
+      timelockAddress,
+      roleName: "EXECUTOR_ROLE",
+      signer: batchSigner,
+      fn: "executeBatch",
+      data: executeBatchData,
+    });
+    if (!canExecuteBatch) return;
     pools.requireConfirmation(chainId, `execute batch ${batch.id}`);
     await pools.send(`Executing a batch of ${batch.calls.length}`, batchSigner, (o) =>
       timelock
@@ -713,7 +735,17 @@ async function main() {
 
   if (action === "schedule") {
     const delay = resolveDelay(minDelay);
-    console.log(`  schedule calldata: ${encodeSchedule(op, delay)}`);
+    const scheduleData = encodeSchedule(op, delay);
+    console.log(`  schedule calldata: ${scheduleData}`);
+    const canSchedule = await signerHoldsRole({
+      timelock,
+      timelockAddress,
+      roleName: "PROPOSER_ROLE",
+      signer,
+      fn: "schedule",
+      data: scheduleData,
+    });
+    if (!canSchedule) return;
     pools.requireConfirmation(chainId, `schedule ${describeOperation(op)}`);
     await pools.send(`Scheduling ${op.fn} (delay ${delay}s)`, signer, (o) =>
       timelock.connect(signer).schedule(op.target, op.value, op.data, op.predecessor, op.salt, delay, o)
@@ -722,8 +754,18 @@ async function main() {
     return;
   }
 
-  console.log(`  execute calldata:  ${encodeExecute(op)}`);
+  const executeData = encodeExecute(op);
+  console.log(`  execute calldata:  ${executeData}`);
   await reportStatus(timelock, op.id, minDelay);
+  const canExecute = await signerHoldsRole({
+    timelock,
+    timelockAddress,
+    roleName: "EXECUTOR_ROLE",
+    signer,
+    fn: "execute",
+    data: executeData,
+  });
+  if (!canExecute) return;
   pools.requireConfirmation(chainId, `execute ${describeOperation(op)}`);
   await pools.send(`Executing ${op.fn}`, signer, (o) =>
     timelock.connect(signer).execute(op.target, op.value, op.data, op.predecessor, op.salt, o)
@@ -745,6 +787,26 @@ function requireFunction() {
     throw new Error(`TIMELOCK_FN ${fn} is not owner-tier — one of ${Object.keys(OWNER_TIER).join(", ")}`);
   }
   return fn;
+}
+
+/**
+ * The role check in front of every schedule and execute this script sends. The timelock takes a
+ * schedule only from a PROPOSER_ROLE holder and an execute only from an EXECUTOR_ROLE holder, and
+ * on mainnet both roles belong to the multisig Safe, never to the key this script runs with. A
+ * send from that key would revert on chain. So when the signer lacks the role, the transaction is
+ * printed for the Safe and nothing is sent, the same way `lp-fund-rewards.js` and `lp-epoch.js`
+ * treat a signer that is not the operator. Returns true when the signer holds the role.
+ */
+async function signerHoldsRole({ timelock, timelockAddress, roleName, signer, fn, data }) {
+  const role = await timelock[roleName]();
+  if (await timelock.hasRole(role, signer.address)) return true;
+  const holder = roleName === "PROPOSER_ROLE" ? "proposer" : "executor";
+  console.log(
+    `\nThe signer ${signer.address} does not hold ${roleName} on the timelock: nothing sent.\n` +
+      `Safe transaction for the ${holder} (LPTimelock.${fn}):\n` +
+      `    to:    ${timelockAddress}\n    value: 0\n    data:  ${data}`
+  );
+  return false;
 }
 
 /** The delay a schedule asks for: the timelock's own minimum unless told otherwise, never less. */
