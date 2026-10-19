@@ -342,8 +342,11 @@ REWARD_TOKEN_NAME="Test Reward" REWARD_TOKEN_SYMBOL=TRW REWARD_TOKEN_CONDITIONAL
 MINT_TOKEN=TRW MINT_TO=distributor MINT_AMOUNT=… npx hardhat run scripts/lp-mint-reward.js --network sepolia
 ```
 
-Then hand the five proxy addresses, the timelock and the block numbers to the indexer module
-and the backend (`deployments.json` holds them all), and check one `$OVTR` claim end to end.
+Then hand the nine targets and their block numbers to the indexer module and the backend: the
+vault, distributor, registry and Overture proxies, the timelock, the pool, and when set the
+position manager, the escrow and the adapter. `deployments.json` holds them, and the position
+manager is the chain's Uniswap V3 `NonfungiblePositionManager`. Then check one `$OVTR` claim end
+to end.
 
 Stack #6 also carries the ApeBond route (lane 2's head), and the mainnet launch deploys it too
 (path (a), decision of 14 Oct 2026). Steps 0 and 1 replace step 1 above:

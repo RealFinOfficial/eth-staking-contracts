@@ -890,13 +890,9 @@ async function main() {
 
   if (cardinality <= 1) {
     console.log(
-      `\nNOTE: the pool still stores ${cardinality} observation. Growing the array only\n` +
-        `      allocates slots — they fill one per block that trades. Until the oracle holds\n` +
-        `      at least ${twapWindow}s of history, pool.observe() reverts with 'OLD' and every\n` +
-        `      TWAP-guarded path (zapIn, and any rebalance with a swap leg) reverts with it.\n` +
-        `      Unguarded paths (stake, unstake, swap-free rebalance) work from block one.\n` +
-        `      On a fresh pool: seed liquidity, trade it for ~${twapWindow}s, then re-check\n` +
-        `      with pool.observe([${twapWindow}, 0]).`
+      `\nNOTE: increaseObservationCardinalityNext(${observationCardinality}) only pre-pays the slots. The new size takes effect at the\n` +
+        `      pool's next write. pool.observe([${twapWindow}, 0]) reverts 'OLD' only while the pool's single observation\n` +
+        `      is younger than ${twapWindow}s, and zapIn and a rebalance with a swap leg revert with it.`
     );
   }
 
@@ -1150,7 +1146,9 @@ async function main() {
       "   Claims of a token revert with InsufficientFunds until its balance covers them.\n" +
       "2. Schedule epoch 1 on the registry, at least 30 minutes before it starts:\n" +
       `   EPOCH_ACTION=schedule EPOCH_ID=1 EPOCH_STARTS_AT=… EPOCH_ENDS_AT=… npx hardhat run scripts/lp-epoch.js --network ${network}\n` +
-      "3. Register the five proxies with the indexer module and the backend (scripts/README.md)." +
+      "3. Register the nine targets with the indexer module and the backend (scripts/README.md): the\n" +
+      "   vault, distributor, registry and Overture proxies, the timelock, the pool, and when set the\n" +
+      "   position manager, the escrow and the adapter." +
       (timelockMinDelay !== DEFAULT_TIMELOCK_MIN_DELAY
         ? `\n4. Set the timelock delay to ${DEFAULT_TIMELOCK_MIN_DELAY}s (48 h, the mainnet default). This run deployed it with ${timelockMinDelay}s.\n` +
           "   Schedule the change:\n" +
