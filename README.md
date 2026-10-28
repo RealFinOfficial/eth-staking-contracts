@@ -310,7 +310,7 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
 
 ## Tech Stack
 
-- **Solidity** — pragma `^0.8.20`, compiled with 0.8.28 (optimizer on, 200 runs, cancun)
+- **Solidity** — the LP stack pinned to `pragma 0.8.38` (audit I-02), compiled with 0.8.38 (optimizer on, 200 runs, cancun)
 - **Hardhat** 2.x — unit suites, the fork suites, the 48-step scenario, the deploy scripts
 - **Foundry** 1.7 — the adversarial tier: fork, unit, fuzz and invariant, plus the coverage gate
 - **OpenZeppelin Contracts** v5.6 — `Ownable2Step`, IERC20, SafeERC20, ReentrancyGuard, EIP712,

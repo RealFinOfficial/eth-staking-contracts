@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 /**
  * @notice A vault that accepts a `stakeFor` and then reports the wrong thing about it.

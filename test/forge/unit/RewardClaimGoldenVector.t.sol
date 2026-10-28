@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {BaseForge} from "../utils/BaseForge.sol";
 import {RewardsDistributor} from "../../../contracts/lp-staking/RewardsDistributor.sol";

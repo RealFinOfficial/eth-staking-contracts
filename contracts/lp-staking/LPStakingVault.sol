@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-pragma solidity ^0.8.20;
+pragma solidity 0.8.38;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -139,8 +139,9 @@ contract LPStakingVault is
 
     /// @dev NFT-receipt guard states. Non-zero sentinels keep the slot warm and avoid the
     ///      20k gas of a 0 -> 1 store on every stake, mirroring OZ's ReentrancyGuard trick.
-    ///      A plain storage flag is used rather than 0.8.28 `transient` so the file keeps
-    ///      compiling under its declared `pragma ^0.8.20`.
+    ///      A plain storage flag is used rather than `transient` storage: the file was written
+    ///      under `pragma ^0.8.20`, and moving the flag to transient storage now would change
+    ///      the proxy's storage layout.
     uint256 private constant NOT_RECEIVING = 1;
     uint256 private constant RECEIVING = 2;
 

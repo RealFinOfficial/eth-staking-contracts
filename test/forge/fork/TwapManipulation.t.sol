@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {ForkHarness} from "../utils/ForkHarness.sol";
 import {TwapGuard, SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";

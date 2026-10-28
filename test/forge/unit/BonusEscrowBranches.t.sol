@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {ApeBondHarness} from "../utils/ApeBondHarness.sol";
 import {BonusEscrow} from "../../../contracts/lp-staking/BonusEscrow.sol";

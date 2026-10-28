@@ -657,7 +657,8 @@ paid once `fund-escrow.js` covers the reservation (`InsufficientFunds` before).
 
 ## Tech Stack
 
-- Solidity pragma ^0.8.20, compiled with 0.8.28 (optimizer 200 runs, cancun)
+- Solidity 0.8.38: the LP stack pins `pragma solidity 0.8.38` (audit I-02; the vendored `TickMath`
+  and Uniswap interfaces keep their ranges), compiled with 0.8.38 (optimizer 200 runs, cancun)
 - Hardhat 2.x — unit suites, the fork suites, the 45-step scenario, the deploy scripts
 - Foundry 1.7 — fork, unit, fuzz and invariant tiers, plus the blocking coverage gate
 - OpenZeppelin Contracts v5 (Ownable, IERC20, SafeERC20, ReentrancyGuard, EIP712, ECDSA)

@@ -1152,7 +1152,7 @@ forfeited ones included, and refuses a duplicate.
 
 **Writes nothing.** `depositFor` changes no storage of the adapter: the reentrancy lock
 (`ReentrancyGuardTransient`) and the NFT receive window are EIP-1153 transient storage, so the
-contract's storage is configuration set by the timelock and nothing else (pragma `^0.8.28`).
+contract's storage is configuration set by the timelock and nothing else (pragma `0.8.38` since audit I-02).
 
 **Pool facts are read, never configured.** `token0`, `token1`, `fee` and `tickSpacing` are read
 from the vault (and its pool) at construction; `bonusIsToken0` from `escrow.bonusToken()`, which

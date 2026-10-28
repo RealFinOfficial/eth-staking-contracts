@@ -16,7 +16,7 @@
 # the two suites are testing different bytecode.
 
 [profile.default]
-solc = "0.8.28"
+solc = "0.8.38"
 evm_version = "cancun"
 src = "contracts"
 test = "test/forge"

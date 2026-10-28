@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 /**
  * @notice Test-side interfaces for the parts of live Uniswap V3 the production contracts
@@ -8,7 +8,7 @@ pragma solidity 0.8.28;
  *  `contracts/**` is frozen for this tier, so everything the harness needs beyond the
  *  production surface is declared here: pool creation, tick spacing, the position manager's
  *  EIP-4494 domain and `increaseLiquidity`, and a fuller ERC-20 view. Signatures are the
- *  canonical periphery's, re-declared under 0.8.28 (the packages are pinned to 0.7.6).
+ *  canonical periphery's, re-declared under 0.8.38 (the packages are pinned to 0.7.6).
  */
 
 interface IUniswapV3FactoryLike {
