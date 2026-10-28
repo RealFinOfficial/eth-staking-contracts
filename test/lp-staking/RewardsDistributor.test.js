@@ -140,7 +140,8 @@ describe("RewardsDistributor", function () {
   const claimOverture = (user, cumulativeAmount, opts) => claim(overtureAddr, user, cumulativeAmount, opts);
   const claimAsset = (user, cumulativeAmount, opts) => claim(assetAddr, user, cumulativeAmount, opts);
 
-  /// Opens the $ASSET claims, as the timelock will after maturity.
+  /// Opens the $ASSET claims, as the timelock will 90 days after the mainnet launch (opened by
+  /// the timelock on order).
   async function openAssetClaims() {
     await distributor.setClaimsEnabled(assetAddr, true);
   }

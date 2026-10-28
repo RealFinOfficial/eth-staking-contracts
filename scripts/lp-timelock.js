@@ -199,7 +199,9 @@ const OWNER_TIER = {
   setClaimsEnabled: {
     signature: "function setClaimsEnabled(address token, bool enabled)",
     kinds: ["RewardsDistributor"],
-    note: "opens or closes the claims of one reward token (e.g. $ASSET after maturity)",
+    note:
+      "opens or closes the claims of one reward token (e.g. $ASSET, 90 days after the mainnet launch " +
+      "(opened by the timelock on order))",
   },
   setMinter: {
     signature: "function setMinter(address newMinter)",

@@ -347,8 +347,9 @@ async function main() {
 
   const overtureName = process.env.LP_OVERTURE_NAME || DEFAULT_OVERTURE_NAME;
   const overtureSymbol = process.env.LP_OVERTURE_SYMBOL || DEFAULT_OVERTURE_SYMBOL;
-  // $ASSET claims are CLOSED at launch (Q-e): they open later, after maturity, through a
-  // timelock `setClaimsEnabled(ASSET, true)`. The flag exists for rehearsals that need them open.
+  // $ASSET claims are CLOSED at launch (Q-e): they open later, 90 days after the mainnet launch
+  // (opened by the timelock on order), through a timelock `setClaimsEnabled(ASSET, true)`. The
+  // flag exists for rehearsals that need them open.
   const assetClaimsEnabled = readFlag("LP_ASSET_CLAIMS_ENABLED", false);
   // The vault implementation's artifact. Production never sets it. The ApeBond activation suite
   // sets `LPStakingVaultLane1Mock` — a vault deployed before the route existed, without the

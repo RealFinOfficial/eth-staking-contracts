@@ -18,7 +18,8 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
  *  Every property is asserted against the observable ledger (`claimed(token, user)`) AND against
  *  the token balance, because those are the two numbers that must never disagree: the ledger is
  *  what stops the next claim, the balance is what the user actually got. Both launch tokens are
- *  claimable here ($ASSET's claims are opened in `setUp`, as the timelock will after maturity).
+ *  claimable here ($ASSET's claims are opened in `setUp`, as the timelock will 90 days after
+ *  the mainnet launch (opened by the timelock on order)).
  */
 contract CumulativeClaimFuzzTest is LocalHarness {
     /// @dev Far inside the {DISTRIBUTOR_FUNDING} each token is pre-funded with, so the balance

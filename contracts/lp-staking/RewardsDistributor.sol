@@ -415,8 +415,9 @@ contract RewardsDistributor is
     }
 
     /// @notice Opens or closes the claims of one registered token.
-    /// @dev Owner tier: opening a token's claims (e.g. $ASSET after maturity) is a program
-    ///      decision. The incident switch for ALL tokens is {pause}, which needs no delay.
+    /// @dev Owner tier: opening a token's claims is a program decision. $ASSET claims open
+    ///      90 days after the mainnet launch (opened by the timelock on order). The incident
+    ///      switch for ALL tokens is {pause}, which needs no delay.
     function setClaimsEnabled(address token, bool enabled) external onlyOwner {
         RewardToken storage t = _requireRegistered(token);
         t.claimsEnabled = enabled;

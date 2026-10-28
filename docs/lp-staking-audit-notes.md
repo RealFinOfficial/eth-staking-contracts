@@ -822,6 +822,9 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   unowned upgrade path. Each proxy needs TWO `hardhat verify` commands — implementation, then
   proxy (implementation address + the `initialize` calldata) — and the script prints both,
   plus one for the timelock's four constructor arguments.
+- **Escrow upgrades (audit I-01, 27 Oct 2026):** before scheduling an escrow upgrade, run the hook gas tests (`test/forge/unit/VaultBonusHooks.t.sol` `test_HookGas_*`) against the new escrow and confirm the forfeiture figure is under `BONUS_HOOK_GAS` (100,000); if not, raise the vault constant in a vault upgrade first. The vault's
+  `onUnstake` call is fail-open inside that allowance (item 15), so a heavier forfeiture would
+  silently keep every bonus an early exit should forfeit; the backend alerts on `BonusHookFailed`.
 - **The proxies have no bootstrap at all** since 2026-09-10 (finding N-7): `initialize` names
   the timelock as the owner inside each proxy's own deployment transaction, so no key ever
   holds the owner tier on a proxy, not for one block, and the run schedules nothing. What made

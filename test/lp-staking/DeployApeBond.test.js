@@ -555,6 +555,57 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
   });
 
   // ─────────────────────────────────────────────────────────────
+  describe("post-launch-check.js — krumbgf's item 12 (read-only)", function () {
+    const checkEnv = (extra = {}) => world.baseEnv({ LP_EXPECTED_MIN_DELAY: MIN_DELAY, ...extra });
+
+    it("passes for a key that holds nothing, with no pending operation and the expected delay", async function () {
+      const nonce = await nonceOf(w.deployer.address);
+      const result = await world.runOk("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.alice.address }));
+      expect(result.stdout).to.match(/OK    every CallScheduled id has a CallExecuted or a Cancelled \(0 open\)/);
+      expect(result.stdout).to.include(`OK    getMinDelay() == ${MIN_DELAY} (is ${MIN_DELAY})`);
+      expect(result.stdout).to.include("OK    LPTimelock.PROPOSER_ROLE not held by the deployer");
+      expect(result.stdout).to.include(`OK    ApeBondPositionAdapter.owner() is not the deployer (${timelockAddr})`);
+      expect(result.stdout).to.include("All post-launch checks passed.");
+      expect(await nonceOf(w.deployer.address), "read-only").to.equal(nonce);
+    });
+
+    it("fails on a key that still holds timelock roles, and on a delay other than 48 h", async function () {
+      // Here the deploying key IS the multisig: proposer, executor and canceller.
+      const result = await world.run("post-launch-check.js", world.baseEnv({ LP_DEPLOYER: w.deployer.address }));
+      expect(result.code).to.not.equal(0);
+      expect(result.stdout).to.include("FAIL  LPTimelock.PROPOSER_ROLE not held by the deployer");
+      expect(result.stdout).to.include("FAIL  LPTimelock.EXECUTOR_ROLE not held by the deployer");
+      expect(result.stdout).to.include("FAIL  LPTimelock.CANCELLER_ROLE not held by the deployer");
+      expect(result.stdout).to.include(`FAIL  getMinDelay() == 172800 (is ${MIN_DELAY})`);
+      expect(result.stderr + result.stdout).to.match(/The post-launch check failed for \d+ item\(s\)/);
+    });
+
+    it("fails on a key that is still a seat holder of an LP contract", async function () {
+      // The vault's operator is a seat the check reads on every LP contract that has one.
+      const result = await world.run("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.operator.address }));
+      expect(result.code).to.not.equal(0);
+      expect(result.stdout).to.include(`FAIL  LPStakingVault.operator() is not the deployer (${w.operator.address})`);
+    });
+
+    it("fails while an operation is scheduled and neither executed nor cancelled", async function () {
+      const asMultisig = timelock.connect(w.deployer);
+      const salt = ethers.id("post-launch-check-pending");
+      await (await asMultisig.schedule(vaultAddr, 0, "0x", ethers.ZeroHash, salt, BigInt(MIN_DELAY))).wait();
+      const id = await asMultisig.hashOperation(vaultAddr, 0, "0x", ethers.ZeroHash, salt);
+      try {
+        const result = await world.run("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.alice.address }));
+        expect(result.code).to.not.equal(0);
+        expect(result.stdout).to.include(`open: ${id} (isOperationPending true`);
+        expect(result.stdout).to.include("FAIL  every CallScheduled id has a CallExecuted or a Cancelled (1 open)");
+      } finally {
+        await (await asMultisig.cancel(id)).wait();
+      }
+      const cleared = await world.runOk("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.alice.address }));
+      expect(cleared.stdout).to.include("All post-launch checks passed.");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
   describe("deploy-apebond.js verify", function () {
     it("passes read-only on the linked pair", async function () {
       const nonce = await nonceOf(w.deployer.address);

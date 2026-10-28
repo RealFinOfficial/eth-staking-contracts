@@ -24,9 +24,10 @@ import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.s
  *
  *  The harness registers the launch list: $ASSET conditional with claims CLOSED (as at launch)
  *  and $OVTR (the Overture token) with claims open, both pre-funded. Tests that pay $ASSET open
- *  its claims first, exactly as the timelock will after maturity. The distributor proxy is the
- *  Overture token's minter, so every top-up of $OVTR here goes through `mintRewardToken`, which
- *  this contract may call as the distributor's operator.
+ *  its claims first, exactly as the timelock will 90 days after the mainnet launch (opened by
+ *  the timelock on order). The distributor proxy is the Overture token's minter, so every
+ *  top-up of $OVTR here goes through `mintRewardToken`, which this contract may call as the
+ *  distributor's operator.
  */
 contract DistributorBranchesTest is LocalHarness {
     uint256 internal constant AWARD = 1_000e18;

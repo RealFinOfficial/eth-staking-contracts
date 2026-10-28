@@ -237,6 +237,29 @@ LP_ORACLE_TARGET=301 npx hardhat run scripts/grow-oracle.js --network sepolia  #
 From 150 slots it takes up to 150 forced writes (about 30 minutes at 12 s blocks), fewer when the
 pool trades meanwhile. Mainnet: grow at least a day before the deployment; `CONFIRM=yes`.
 
+### The checks before launch (`scripts/post-launch-check.js`, krumbgf's item 12)
+
+The mainnet timelock may be deployed with a short `LP_TIMELOCK_MIN_DELAY`, every batch run in
+minutes, and `updateDelay(172800)` executed LAST. Before the frontend points to mainnet, before
+the ApeBond route goes live and before any announcement, this read-only script asserts three facts
+and exits non-zero when one fails:
+
+1. **No pending timelock operation:** every `CallScheduled` id has a `CallExecuted` or a
+   `Cancelled`. OpenZeppelin operations never expire and keep their short ready time after
+   `updateDelay`, so a leftover one could execute later without 48 h notice. The logs are scanned
+   from the timelock's recorded deployment block in chunks of at most 10,000 blocks
+   (`LP_LOG_CHUNK_BLOCKS`), and each open id is printed with `isOperationPending` and its ready time.
+2. **`getMinDelay() == 172800`** (`LP_EXPECTED_MIN_DELAY`). The last `MinDelayChange` event is
+   printed: it is the proof for ApeBond.
+3. **The deployer key holds nothing:** no timelock role (proposer, executor, canceller, admin), and
+   it is not `owner`, `pendingOwner`, `guardian` or `operator` of the five proxies, the escrow, the
+   adapter or any recorded reward token. `LP_DEPLOYER` names the key's address (default: the
+   configured signer's).
+
+```bash
+LP_DEPLOYER=0x… npx hardhat run scripts/post-launch-check.js --network mainnet
+```
+
 ### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 and the mainnet launch)
 
 With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision document, overrides of
@@ -641,6 +664,10 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
    ```bash
    npx hardhat run scripts/validate-upgrade-safety.js --network sepolia
    ```
+
+   - For a `BonusEscrow` upgrade (audit I-01): before scheduling an escrow upgrade, run the hook gas tests (`test/forge/unit/VaultBonusHooks.t.sol` `test_HookGas_*`) against the new escrow and confirm the forfeiture figure is under `BONUS_HOOK_GAS` (100,000); if not, raise the vault constant in a vault upgrade first. The vault calls
+     `onUnstake` inside `try` with exactly that allowance, so an escrow whose forfeiture costs
+     more fails open on every exit and keeps every bonus it should have forfeited.
 
 3. **Schedule both upgrades.** Paste the command each run of step 1 printed, or write it out:
 
