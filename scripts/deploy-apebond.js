@@ -1013,7 +1013,7 @@ async function recordReplacement({ chainId, adapterAddress, previousAdapter, sou
     soulZapCallers: callers,
     campaigns,
     owner: hre.ethers.getAddress(await adapter.owner()),
-    pendingOwner: (await apebond.adapterOwnership(adapterAddress, { timelock: hre.ethers.ZeroAddress })).pendingOwner,
+    pendingOwner: hre.ethers.getAddress(await adapter.pendingOwner()),
     previousAdapter,
   });
 }

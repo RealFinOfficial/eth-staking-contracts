@@ -661,8 +661,13 @@ async function main() {
   }
   // The pool is not deployed by this script, but the size the stack was armed with is a
   // deployment fact of the same kind as the guard parameters, so it goes in the registry
-  // beside them. The other three keys are the ones create-sepolia-pool.js writes.
+  // beside them. The other three keys are the ones create-sepolia-pool.js writes. Any other key
+  // already on the entry (grow-oracle.js's `oracleWarmupTokenId`) is kept.
+  const poolEntry = (pools.readRegistry()[String(chainId)] || {}).UniswapV3Pool;
+  const { address: _poolAddress, ...poolExtra } =
+    poolEntry && poolEntry.address.toLowerCase() === poolAddress.toLowerCase() ? poolEntry : {};
   pools.recordDeployment(chainId, "UniswapV3Pool", poolAddress, {
+    ...poolExtra,
     token0,
     token1,
     fee,

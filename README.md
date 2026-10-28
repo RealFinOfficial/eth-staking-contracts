@@ -491,10 +491,12 @@ and, on a first run, records the deployment in the **tracked** `deployments.json
 | `LP_SIGNER_KEY` | optional: redeems a real 1-wei `$OVTR` voucher. Without it the suite proves a foreign voucher is refused, by static call, costing no gas |
 
 **Known precondition, not a bug:** a freshly created Uniswap V3 pool stores one observation, so
-`pool.observe([twapWindow, 0])` reverts `OLD` and every TWAP-guarded path reverts with it. The
-suite detects this and asserts that `zapIn` reverts rather than pretending the zap succeeded.
-Seed liquidity and trade the pool for at least `LP_TWAP_WINDOW` seconds before expecting the
-zap leg to pass. This is item 7 (SEC-01) in `docs/lp-staking-audit-notes.md`.
+`pool.observe([twapWindow, 0])` reverts `OLD`. Since audit L-04 the stack cannot even be deployed
+on such a pool: the vault's and the zapper's `initialize` refuse it (`CardinalityTooLow` /
+`HistoryTooShort`) and `deploy-lp-staking.js` stops before sending anything. The order is
+therefore: seed liquidity, grow and fill the oracle with `scripts/grow-oracle.js`, wait until the
+pool holds the longest configured window of history, then deploy. This is item 7 (SEC-01) in
+`docs/lp-staking-audit-notes.md`.
 
 Growing the array is a separate step from filling it. Since audit L-04 the contracts refuse a
 window the pool cannot serve forever (`libraries/OracleHistory.sol`): the CURRENT

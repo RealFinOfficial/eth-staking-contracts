@@ -3405,6 +3405,25 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await provider.getTransactionCount(w.deployer.address)).to.equal(nonce);
     });
 
+    it("G1b refuses a seed the signer does not hold, or one too small, before sending anything", async function () {
+      const nonce = await provider.getTransactionCount(w.deployer.address);
+      const tooMuch = await runner.runHardhatScript(
+        "scripts/grow-oracle.js",
+        growEnv({ LP_ORACLE_SEED_AMOUNT0: (10n ** 40n).toString() }),
+        { logFile: path.join(scratchDir, "scripts.log") }
+      );
+      expect(tooMuch.code).to.not.equal(0);
+      expect(tooMuch.stderr + tooMuch.stdout).to.include("less than the warm-up seed");
+      const tooSmall = await runner.runHardhatScript(
+        "scripts/grow-oracle.js",
+        growEnv({ LP_ORACLE_SEED_AMOUNT0: "1", LP_ORACLE_SEED_AMOUNT1: "1" }),
+        { logFile: path.join(scratchDir, "scripts.log") }
+      );
+      expect(tooSmall.code).to.not.equal(0);
+      expect(tooSmall.stderr + tooSmall.stdout).to.match(/gives about 0 unit\(s\) of liquidity, fewer than the \d+ forced writes/);
+      expect(await provider.getTransactionCount(w.deployer.address), "nothing was sent").to.equal(nonce);
+    });
+
     it("G2 grows next, forces one write per block until the CURRENT size is the target", async function () {
       const before = await pool.slot0();
       expect(before.observationCardinality).to.equal(BigInt(C.OBSERVATION_CARDINALITY));

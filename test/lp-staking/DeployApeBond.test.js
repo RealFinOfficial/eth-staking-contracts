@@ -322,6 +322,12 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
   // ─────────────────────────────────────────────────────────────
   describe("a fresh stack with the route (deploy-lp-staking.js)", function () {
     before(async function () {
+      // A key another script left on the pool's entry (grow-oracle.js records its warm-up
+      // position there): the deploy must keep it when it records the pool's size.
+      const seeded = fs.existsSync(world.registryFile) ? JSON.parse(fs.readFileSync(world.registryFile, "utf8")) : {};
+      seeded[String(CHAIN_ID)] = seeded[String(CHAIN_ID)] || {};
+      seeded[String(CHAIN_ID)].UniswapV3Pool = { address: world.poolAddr, oracleWarmupTokenId: "4242" };
+      fs.writeFileSync(world.registryFile, JSON.stringify(seeded, null, 2) + "\n");
       fresh = await world.runOk(
         "deploy-lp-staking.js",
         world.coreEnv({
@@ -455,6 +461,9 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
         },
       ]);
       expect(registry.LPStakingVault.bonusEscrow).to.equal(ethers.ZeroAddress);
+      // The pool's entry keeps the key grow-oracle.js wrote, beside the size the deploy records.
+      expect(registry.UniswapV3Pool.oracleWarmupTokenId).to.equal("4242");
+      expect(registry.UniswapV3Pool.observationCardinality).to.be.a("number");
     });
 
     it("filed the ONE link batch, in order, and printed its Safe calldata", function () {
@@ -650,6 +659,14 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(result.stderr + result.stdout).to.match(/The post-launch check failed for \d+ item\(s\)/);
     });
 
+    it("fails on a key left as the distributor's voucher signer, which could sign away every funded token", async function () {
+      const result = await world.run("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.backOffice.address }));
+      expect(result.code).to.not.equal(0);
+      expect(result.stdout).to.include(`FAIL  RewardsDistributor.signer() is not the deployer (${w.backOffice.address})`);
+      // The Overture token's minter is read too: the distributor proxy here, not the key.
+      expect(result.stdout).to.match(/OK {4}TokenOverture\.minter\(\) is not the deployer/);
+    });
+
     it("fails on a key that is still a seat holder of an LP contract", async function () {
       // The vault's operator is a seat the check reads on every LP contract that has one.
       const result = await world.run("post-launch-check.js", checkEnv({ LP_DEPLOYER: w.operator.address }));
@@ -834,6 +851,57 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(await vault.bonusEscrow()).to.equal(escrowAddr);
       expect(await vault.isStakeOperator(adapterAddr)).to.equal(true);
       expect(await escrow.adapter()).to.equal(adapterAddr);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("lp-switch-timelock.js with a legacy plain-Ownable adapter (Sepolia stack #6's shape)", function () {
+    it("moves it in one step: no acceptOwnership for it in the accept batch, and verify reads no pendingOwner", async function () {
+      const snapshot = await provider.send("evm_snapshot", []);
+      const scratch = path.join(world.scratchDir, "legacy-adapter-registry.json");
+      try {
+        // A plain-Ownable contract stands in for an adapter deployed before audit L-03.
+        const legacy = await world.deployArtifact("StakingPool", [world.assetAddr, w.alice.address, 1, 2]);
+        const legacyAddr = await legacy.getAddress();
+        await (await legacy.connect(w.deployer).transferOwnership(timelockAddr)).wait();
+
+        const registry = JSON.parse(fs.readFileSync(world.registryFile, "utf8"));
+        registry[String(CHAIN_ID)].ApeBondPositionAdapter = { address: legacyAddr, owner: timelockAddr };
+        fs.writeFileSync(scratch, JSON.stringify(registry, null, 2) + "\n");
+        const switchRun = (action) =>
+          world.runOk(
+            "lp-switch-timelock.js",
+            world.baseEnv({
+              DEPLOYMENTS_FILE: scratch,
+              SWITCH_ACTION: action,
+              LP_MULTISIG: w.deployer.address,
+              NEW_TIMELOCK_FINAL_DELAY: "60",
+            })
+          );
+
+        await switchRun("deploy");
+        const nextAddr = JSON.parse(fs.readFileSync(scratch, "utf8"))[String(CHAIN_ID)].TimelockControllerNext.address;
+        const scheduled = await switchRun("schedule");
+        expect(scheduled.stdout).to.include(
+          `ApeBondPositionAdapter.transferOwnership(${nextAddr}) on ${legacyAddr} (plain Ownable: effective at execute, nothing to accept)`
+        );
+        await provider.send("evm_increaseTime", [Number(MIN_DELAY) + 1]);
+        await provider.send("evm_mine", []);
+        await switchRun("execute");
+        expect(await legacy.owner()).to.equal(nextAddr);
+
+        // The five proxies and the escrow accept; the legacy adapter is not in the batch, so the
+        // batch does not revert on a missing acceptOwnership.
+        const accepted = await switchRun("accept");
+        expect(accepted.stdout).to.include("acceptOwnership x6 on the NEW timelock");
+        await switchRun("raise-delay");
+        const verified = await switchRun("verify");
+        expect(verified.stdout).to.include(`OK    ApeBondPositionAdapter.owner ${nextAddr} (plain Ownable, nothing to accept)`);
+        expect(verified.stdout).to.not.include("FAIL");
+      } finally {
+        await provider.send("evm_revert", [snapshot]);
+        fs.rmSync(scratch, { force: true });
+      }
     });
   });
 

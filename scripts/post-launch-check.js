@@ -17,8 +17,10 @@ const pools = require("./lib/pools");
 //   2. `getMinDelay() == LP_EXPECTED_MIN_DELAY` (172800 = 48 h). The `MinDelayChange` event is the
 //      proof for ApeBond; the script prints the last one.
 //   3. THE DEPLOYER KEY HOLDS NOTHING. It has no timelock role (proposer, executor, canceller,
-//      admin), and it is not `owner`, `pendingOwner`, `guardian` or `operator` of any LP contract:
-//      the five proxies, the escrow, the adapter and every recorded reward token.
+//      admin), and it is not `owner`, `pendingOwner`, `guardian`, `operator`, `signer` (the
+//      distributor's voucher signer, which could sign away every funded token) or `minter` (the
+//      Overture token's) of any LP contract: the five proxies, the escrow, the adapter and every
+//      recorded reward token. A contract without one of these seats is skipped for it.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -51,7 +53,7 @@ const TIMELOCK_ABI = [
   "event Cancelled(bytes32 indexed id)",
   "event MinDelayChange(uint256 oldDuration, uint256 newDuration)",
 ];
-const ROLE_GETTERS = ["owner", "pendingOwner", "guardian", "operator"];
+const ROLE_GETTERS = ["owner", "pendingOwner", "guardian", "operator", "signer", "minter"];
 const ROLE_ABI = ROLE_GETTERS.map((name) => `function ${name}() view returns (address)`);
 
 function readBig(name, fallback) {

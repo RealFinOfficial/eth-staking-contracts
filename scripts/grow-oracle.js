@@ -19,8 +19,9 @@ const uniswapByChain = require("./lib/uniswap");
 //      liquidity change of an in-range position. From index i in a buffer of c slots that takes
 //      (c - i) more writes, each in its own block.
 //
-// This script does both: it sends the growth when `observationCardinalityNext` is below the
-// target, then forces the writes itself, one per block, with the cheapest write the signer can
+// This script does both: it settles a warm-up position (refusing, before anything is sent, a seed
+// the signer does not hold or one that would give too little liquidity), sends the growth when
+// `observationCardinalityNext` is below the target, then forces the writes itself, one per block, with the cheapest write the signer can
 // make without moving the price — `decreaseLiquidity` by ONE unit of liquidity on a tiny in-range
 // position it owns (minted once, recorded as `oracleWarmupTokenId` on the pool's registry entry,
 // and reused on every later run). It stops as soon as `observationCardinality` reaches the target.
@@ -93,6 +94,21 @@ function floorToSpacing(tick, spacing) {
 /** Writes still needed before the pool's index wraps its current buffer of `cardinality`. */
 function writesToWrap(slot0) {
   return Number(slot0.observationCardinality) - Number(slot0.observationIndex);
+}
+
+/**
+ * The liquidity an in-range mint of `amount0` and `amount1` on [lower, upper) gets at the current
+ * price, as Uniswap's LiquidityAmounts computes it (the smaller of the two sides), in floating
+ * point: an estimate good enough to refuse a seed that gives none.
+ */
+function seedLiquidity(sqrtPriceX96, lower, upper, amount0, amount1) {
+  const q96 = 2 ** 96;
+  const sqrtP = Number(sqrtPriceX96) / q96;
+  const sqrtA = Math.pow(1.0001, lower / 2);
+  const sqrtB = Math.pow(1.0001, upper / 2);
+  const l0 = (Number(amount0) * sqrtP * sqrtB) / (sqrtB - sqrtP);
+  const l1 = Number(amount1) / (sqrtP - sqrtA);
+  return Math.floor(Math.min(l0, l1));
 }
 
 async function observeAnswers(pool, window) {
@@ -169,20 +185,13 @@ async function main() {
   const signer = await pools.getSigner();
   const npm = new hre.ethers.Contract(npmAddress, NPM_ABI, signer);
 
-  if (needsGrowth) {
-    await pools.send(`increaseObservationCardinalityNext(${target})`, signer, (o) =>
-      pool.connect(signer).increaseObservationCardinalityNext(target, o)
-    );
-    slot0 = await pool.slot0();
-  }
-
   // The warm-up position: reused when recorded, minted (dust, in range) otherwise.
   let tokenId = await recordedWarmup(npm, chainId, poolAddress, signer.address, slot0);
   if (tokenId === null) {
     const token0 = await pool.token0();
     const token1 = await pool.token1();
-    // Dust, but never zero: the position must hold liquidity, and both amounts depend on which
-    // token is which, so the default is a share of what the signer holds of each.
+    // Dust: both amounts depend on which token is which, so the default is a share of what the
+    // signer holds of each.
     const balance0 = await new hre.ethers.Contract(token0, ERC20_ABI, hre.ethers.provider).balanceOf(signer.address);
     const balance1 = await new hre.ethers.Contract(token1, ERC20_ABI, hre.ethers.provider).balanceOf(signer.address);
     const seed0 = readInt("LP_ORACLE_SEED_AMOUNT0", balance0 / DEFAULT_SEED_DIVISOR + 1n);
@@ -190,6 +199,25 @@ async function main() {
     const spacing = Number(await pool.tickSpacing());
     const lower = floorToSpacing(Number(slot0.tick), spacing) - halfWidth * spacing;
     const upper = floorToSpacing(Number(slot0.tick), spacing) + (halfWidth + 1) * spacing;
+    // Refused BEFORE any approval is paid: the signer must hold the seed, and the seed must give
+    // the position at least one unit of liquidity per write still needed (each forced write
+    // removes one), or the pool would reject the mint with an opaque revert.
+    if (balance0 < seed0 || balance1 < seed1) {
+      throw new Error(
+        `The signer holds ${balance0} of token0 and ${balance1} of token1, less than the warm-up seed ` +
+          `(${seed0} and ${seed1}). Fund the signer with both pool tokens, or set LP_ORACLE_SEED_AMOUNT0 / ` +
+          `LP_ORACLE_SEED_AMOUNT1 to amounts it holds.`
+      );
+    }
+    const liquidity = seedLiquidity(slot0.sqrtPriceX96, lower, upper, seed0, seed1);
+    const writesNeeded = writesToWrap(slot0);
+    if (liquidity < writesNeeded) {
+      throw new Error(
+        `The warm-up seed (${seed0} of token0, ${seed1} of token1 on [${lower}, ${upper})) gives about ` +
+          `${liquidity} unit(s) of liquidity, fewer than the ${writesNeeded} forced writes still needed (one ` +
+          `unit each). Set LP_ORACLE_SEED_AMOUNT0 and LP_ORACLE_SEED_AMOUNT1 higher.`
+      );
+    }
     for (const [address, amount] of [
       [token0, seed0],
       [token1, seed1],
@@ -231,6 +259,15 @@ async function main() {
     slot0 = await pool.slot0();
   }
   console.log(`Warm-up position:   #${tokenId} (decreaseLiquidity by 1 per forced write)`);
+
+  // The growth comes after the warm-up position is settled, so a seed that cannot work is
+  // refused with nothing sent at all.
+  if (needsGrowth) {
+    await pools.send(`increaseObservationCardinalityNext(${target})`, signer, (o) =>
+      pool.connect(signer).increaseObservationCardinalityNext(target, o)
+    );
+    slot0 = await pool.slot0();
+  }
 
   // One write per block until the grown size took effect.
   let forced = 0;

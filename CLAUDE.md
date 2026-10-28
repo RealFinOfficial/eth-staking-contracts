@@ -237,11 +237,14 @@ operation, then funding and `lp-epoch.js set-amount`.
   to it and schedule again
 - **`$ASSET` claims are closed at launch** and opened by the timelock
   (`setClaimsEnabled(ASSET, true)`, 48 h). `$OVTR` claims are open from the deploy
-- **Grow the oracle, then wait.** `increaseObservationCardinalityNext` only allocates
-  observation slots; they fill one per block that trades. Until the pool holds `twapWindow`
-  seconds of history, `observe()` reverts with `OLD` and every TWAP-guarded path (`zapIn`,
-  and any `rebalance` carrying a swap leg) reverts with it. Paths without a swap work from
-  block one
+- **Grow the oracle, then wait, then deploy.** `increaseObservationCardinalityNext` only
+  allocates observation slots; the pool switches to the grown size when its index wraps, one
+  write per block (`scripts/grow-oracle.js` forces those writes). Since audit L-04 a vault or a
+  zapper cannot be born on a pool that does not yet hold its window's history: `initialize`
+  reverts `CardinalityTooLow` or `HistoryTooShort`, and `deploy-lp-staking.js` stops before
+  sending anything. So the order is seed liquidity, grow and fill the oracle, wait out the
+  longest window, then deploy. After that, `observe()` can no longer revert `OLD` for a
+  configured window. `stake`, `unstake` and a swap-free `rebalance` never read the oracle
 - **The oracle is sized, not guessed (audit L-04).** Every window setter (the vault's and the
   zapper's `initialize` and `setTwapParams`) reverts unless the pool's CURRENT
   `observationCardinality` is at least `ceil(window / 6) + 1` and `observe([window, 0])` succeeds

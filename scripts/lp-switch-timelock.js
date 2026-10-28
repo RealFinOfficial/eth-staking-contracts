@@ -25,7 +25,9 @@ const {
 //   - the five LP proxies (vault, distributor, registry, Overture token, zapper) — required;
 //   - `BonusEscrow`, a UUPS proxy, Ownable2Step like the five;
 //   - `ApeBondPositionAdapter`, Ownable2Step since audit L-03 (not a proxy): nominated by the old
-//     timelock's batch and accepted by the new timelock's, like the others;
+//     timelock's batch and accepted by the new timelock's, like the others. An adapter deployed
+//     BEFORE L-03 (plain `Ownable`, Sepolia test stack #6) is detected by probing `pendingOwner()`
+//     and moves in one step: its `transferOwnership` is the whole handover, nothing to accept;
 //   - every `RewardToken:<SYMBOL>` entry, Overture-shaped UUPS proxies, Ownable2Step.
 //
 // An optional entry (the escrow, the adapter, a reward token) moves when it is in the registry
@@ -46,8 +48,9 @@ const {
 //                its canceller. Recorded as `TimelockControllerNext` in deployments.json.
 //   schedule     ONE batch on the OLD timelock: transferOwnership(new) on every contract that
 //                moves, scheduled with the old timelock's minDelay (48 h on mainnet).
-//   execute      after that delay: execute the batch. Every contract that moves now names the
-//                new timelock as pendingOwner (the old timelock is still its owner).
+//   execute      after that delay: execute the batch. Every two-step contract that moves now
+//                names the new timelock as pendingOwner (the old timelock is still its owner);
+//                a legacy plain-Ownable adapter is the new timelock's already.
 //   accept       on the NEW timelock: one batch acceptOwnership() on every Ownable2Step contract
 //                that moves, scheduled and — because its delay is still 0 — executed in the same
 //                run. With a non-zero delay the run schedules it and a second `accept` run
@@ -90,8 +93,8 @@ function confirmMainnet(chainId, action) {
 /**
  * Every contract this switch moves, in batch order — the five proxies, then the escrow, the
  * adapter and the reward tokens the registry records as owned by the old timelock — and one
- * line per optional entry it skips, saying why. Every one of them is `twoStep` (Ownable2Step):
- * the adapter joined the list with audit L-03.
+ * line per optional entry it skips, saying why. Every one is `twoStep` (Ownable2Step) except a
+ * legacy plain-Ownable adapter, which {probeTwoStep} detects on chain.
  */
 function contractsToMove(entries, chainId, oldAddress) {
   const move = PROXY_KINDS.map((kind) => {
@@ -119,6 +122,24 @@ function contractsToMove(entries, chainId, oldAddress) {
   }
   if (rewardKinds.length === 0) skipped.push(`${REWARD_TOKEN_PREFIX}*: none in deployments.json for chain ${chainId}`);
   return { move, skipped };
+}
+
+/**
+ * Whether the ApeBond adapter on chain is two-step. Since audit L-03 it is `Ownable2Step`; one
+ * deployed before (plain `Ownable`, Sepolia test stack #6) has no `pendingOwner()`, and an
+ * `acceptOwnership()` for it would revert the whole accept batch. Every other kind stays two-step.
+ */
+async function probeTwoStep(move) {
+  for (const m of move) {
+    if (m.kind !== ADAPTER_KIND) continue;
+    try {
+      await new hre.ethers.Contract(m.address, OWNABLE_ABI, hre.ethers.provider).pendingOwner();
+      m.twoStep = true;
+    } catch {
+      m.twoStep = false;
+    }
+  }
+  return move;
 }
 
 /** Sends `data` to `to` when `signer` holds `role` on `timelock`; prints the Safe payload otherwise. */
@@ -162,6 +183,7 @@ async function main() {
   const old = entries[TIMELOCK_KIND];
   if (!old) throw new Error(`No ${TIMELOCK_KIND} for chain ${chainId} in deployments.json`);
   const { move, skipped } = contractsToMove(entries, chainId, old.address);
+  await probeTwoStep(move);
   const signer = await pools.getSigner();
   const tag = process.env.TIMELOCK_SALT_TAG || "";
   const oldTimelock = new hre.ethers.Contract(old.address, TIMELOCK_INTERFACE, signer);
@@ -242,9 +264,10 @@ async function main() {
   for (const m of move) {
     const c = new hre.ethers.Contract(m.address, OWNABLE_ABI, hre.ethers.provider);
     const owner = await c.owner();
-    const pending = await c.pendingOwner();
+    // A legacy plain-Ownable adapter has no pendingOwner to read.
+    const pending = m.twoStep ? await c.pendingOwner() : hre.ethers.ZeroAddress;
     const ok = owner.toLowerCase() === newAddress.toLowerCase() && pending === hre.ethers.ZeroAddress;
-    const detail = `pendingOwner ${pending}`;
+    const detail = m.twoStep ? `pendingOwner ${pending}` : "(plain Ownable, nothing to accept)";
     console.log(`${ok ? "OK  " : "FAIL"}  ${m.kind}.owner ${owner} ${detail}`);
     if (!ok) failures.push(m.kind);
   }

@@ -207,13 +207,16 @@ async function main() {
   pools.recordDeployment(chainId, "UniswapV3Pool", created, { token0, token1, fee });
 
   console.log(
-    `\nNext:\n` +
-      `  1. LP_POOL=${created} npx hardhat run scripts/deploy-lp-staking.js --network ${hre.network.name}\n` +
-      `     (it first checks that the pool's CURRENT cardinality is at least ceil(window / 6) + 1\n` +
-      `     and that observe([window, 0]) answers, audit L-04: grow and fill the pool before it)\n` +
-      `  2. Seed liquidity and trade the pool for at least LP_TWAP_WINDOW seconds (default\n` +
-      `     300) — a brand-new pool stores one observation, so pool.observe() reverts with\n` +
-      `     'OLD' and every TWAP-guarded path reverts with it until the window fills.`
+    `\nNext, in this order (audit L-04: the stack cannot be deployed on a pool without history):\n` +
+      `  1. Seed liquidity in range of the current price.\n` +
+      `  2. LP_POOL=${created} LP_ORACLE_TARGET=<ceil(window / 6) + 1, 301 for the ApeBond route> \\\n` +
+      `       npx hardhat run scripts/grow-oracle.js --network ${hre.network.name}\n` +
+      `     grows the oracle and forces the writes that make the new size take effect.\n` +
+      `  3. Wait until the pool holds the longest window's worth of history (LP_TWAP_WINDOW, and\n` +
+      `     LP_APEBOND_VALUATION_WINDOW with the route): grow-oracle.js reports when\n` +
+      `     observe([window, 0]) answers.\n` +
+      `  4. LP_POOL=${created} npx hardhat run scripts/deploy-lp-staking.js --network ${hre.network.name}\n` +
+      `     (it checks the CURRENT cardinality and observe() first and stops, sending nothing, otherwise).`
   );
 }
 
