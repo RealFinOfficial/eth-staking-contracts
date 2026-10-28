@@ -30,6 +30,11 @@
         "internalType": "uint64",
         "name": "minCliffSeconds_",
         "type": "uint64"
+      },
+      {
+        "internalType": "uint32",
+        "name": "valuationWindow_",
+        "type": "uint32"
       }
     ],
     "stateMutability": "nonpayable",
@@ -76,6 +81,22 @@
       }
     ],
     "name": "CampaignDisabled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint16",
+        "name": "cardinality",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint256",
+        "name": "needed",
+        "type": "uint256"
+      }
+    ],
+    "name": "CardinalityTooLow",
     "type": "error"
   },
   {
@@ -166,6 +187,17 @@
   {
     "inputs": [
       {
+        "internalType": "uint32",
+        "name": "window",
+        "type": "uint32"
+      }
+    ],
+    "name": "HistoryTooShort",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "beneficiary",
         "type": "address"
@@ -198,6 +230,27 @@
       }
     ],
     "name": "InvalidCampaignOffsets",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint32",
+        "name": "window",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "min",
+        "type": "uint32"
+      },
+      {
+        "internalType": "uint32",
+        "name": "max",
+        "type": "uint32"
+      }
+    ],
+    "name": "InvalidValuationWindow",
     "type": "error"
   },
   {
@@ -773,6 +826,25 @@
     "type": "event"
   },
   {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "previous",
+        "type": "uint32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint32",
+        "name": "next",
+        "type": "uint32"
+      }
+    ],
+    "name": "ValuationWindowSet",
+    "type": "event"
+  },
+  {
     "inputs": [],
     "name": "BPS",
     "outputs": [
@@ -780,6 +852,32 @@
         "internalType": "uint16",
         "name": "",
         "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_VALUATION_WINDOW",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MIN_VALUATION_WINDOW",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
       }
     ],
     "stateMutability": "view",
@@ -1290,6 +1388,19 @@
   {
     "inputs": [
       {
+        "internalType": "uint32",
+        "name": "window",
+        "type": "uint32"
+      }
+    ],
+    "name": "setValuationWindow",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "",
         "type": "address"
@@ -1363,6 +1474,19 @@
     "name": "unpauseDeposits",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "valuationWindow",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

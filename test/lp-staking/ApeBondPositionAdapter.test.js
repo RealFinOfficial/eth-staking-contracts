@@ -144,6 +144,7 @@ describe("ApeBondPositionAdapter", function () {
       initialOwner: owner.address,
       guardian: guardian.address,
       minCliffSeconds: MIN_CLIFF,
+      valuationWindow: 1800,
       ...overrides,
     };
     const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
@@ -153,7 +154,8 @@ describe("ApeBondPositionAdapter", function () {
       args.escrow,
       args.initialOwner,
       args.guardian,
-      args.minCliffSeconds
+      args.minCliffSeconds,
+      args.valuationWindow
     );
   }
 
@@ -1239,6 +1241,38 @@ describe("ApeBondPositionAdapter", function () {
         .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
         .withArgs(stranger.address);
       expect(await adapter.owner()).to.equal(owner.address);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("The valuation window (audit L-02)", function () {
+    it("is set at construction, owner-only afterwards, bounded 300..3600 s, both sides logged", async function () {
+      expect(await adapter.valuationWindow()).to.equal(1800n);
+      await expect(adapter.connect(stranger).setValuationWindow(900))
+        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
+        .withArgs(stranger.address);
+      await expect(adapter.setValuationWindow(299))
+        .to.be.revertedWithCustomError(adapter, "InvalidValuationWindow")
+        .withArgs(299, 300, 3600);
+      await expect(adapter.setValuationWindow(3601))
+        .to.be.revertedWithCustomError(adapter, "InvalidValuationWindow")
+        .withArgs(3601, 300, 3600);
+      await expect(adapter.setValuationWindow(900)).to.emit(adapter, "ValuationWindowSet").withArgs(1800, 900);
+      expect(await adapter.valuationWindow()).to.equal(900n);
+    });
+
+    it("refuses a window the pool cannot serve, in the constructor and the setter (L-04)", async function () {
+      await pool.setObservationCardinality(300);
+      const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
+      await expect(deployAdapter()).to.be.revertedWithCustomError(Adapter, "CardinalityTooLow").withArgs(300, 301);
+      await expect(adapter.setValuationWindow(1800))
+        .to.be.revertedWithCustomError(adapter, "CardinalityTooLow")
+        .withArgs(300, 301);
+      await pool.setObservationCardinality(65535);
+      await pool.setHistorySeconds(1799);
+      await expect(adapter.setValuationWindow(1800))
+        .to.be.revertedWithCustomError(adapter, "HistoryTooShort")
+        .withArgs(1800);
     });
   });
 });

@@ -128,8 +128,9 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       await (await world.pool.setObservationCardinality(50)).wait();
       await (await world.pool.increaseObservationCardinalityNext(1000)).wait();
       try {
+        // Without the route the longest window is the vault's own 300 s.
         await refused(
-          {},
+          { LP_APEBOND_ENABLED: "0" },
           /CURRENT observationCardinality is 50, below the 51 slots a 300s window needs .*nothing was sent/
         );
       } finally {
@@ -140,9 +141,27 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
     it("refuses a pool whose history is shorter than the window, before sending anything (L-04)", async function () {
       await (await world.pool.setHistorySeconds(299)).wait();
       try {
-        await refused({}, /pool\.observe\(\[300, 0\]\) reverts: the pool's stored history is shorter than 300s/);
+        await refused(
+          { LP_APEBOND_ENABLED: "0" },
+          /pool\.observe\(\[300, 0\]\) reverts: the pool's stored history is shorter than 300s/
+        );
       } finally {
         await (await world.pool.setHistorySeconds(4294967295n)).wait();
+      }
+    });
+
+    it("refuses a valuation window outside 300..3600 s, before sending anything (L-02)", async function () {
+      await refused({ LP_APEBOND_VALUATION_WINDOW: "299" }, /LP_APEBOND_VALUATION_WINDOW must be >= 300 — got 299/);
+      await refused({ LP_APEBOND_VALUATION_WINDOW: "3601" }, /LP_APEBOND_VALUATION_WINDOW must be <= 3600 — got 3601/);
+    });
+
+    it("refuses a pool that cannot serve the valuation window, the longer of the two (L-04)", async function () {
+      // The vault's 300 s needs 51 slots; the adapter's default 1800 s needs 301.
+      await (await world.pool.setObservationCardinality(300)).wait();
+      try {
+        await refused({}, /CURRENT observationCardinality is 300, below the 301 slots a 1800s window needs/);
+      } finally {
+        await (await world.pool.setObservationCardinality(65535)).wait();
       }
     });
 
@@ -409,9 +428,11 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
           "tickSpacing",
           "token0",
           "token1",
+          "valuationWindow",
           "vault",
         ].sort()
       );
+      expect(a.valuationWindow).to.equal(1800);
       expect(a.owner).to.equal(w.deployer.address);
       expect(a.pendingOwner).to.equal(timelockAddr);
       expect(a.tickSpacing).to.equal(60);
@@ -459,6 +480,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       const result = await world.runOk("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
       expect(result.stdout).to.include("activation PENDING (nominated to the timelock, not accepted)");
       expect(result.stdout).to.include(`guardian():                     ${w.guardian.address}`);
+      expect(result.stdout).to.include("valuationWindow():              1800");
       expect(result.stdout).to.include(`soulZapCallers(${w.soulZapCaller.address}): true`);
       expect(result.stdout).to.include(`campaigns(${CAMPAIGN_ID}):`);
       expect(result.stdout).to.include(`campaignCallers(${CAMPAIGN_ID}, ${w.soulZapCaller.address}): true`);

@@ -1494,16 +1494,18 @@ contract AccessControlTest is LocalHarness {
     ///      in front of it (owner: this contract, guardian: `multisig`).
     function _apeBondRoute() internal returns (BonusEscrow escrow, ApeBondPositionAdapter adapter) {
         escrow = _deployBonusEscrowProxy(address(asset), address(vault), address(this), carol);
-        adapter =
-            new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), multisig, 300);
+        adapter = new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), multisig, 300, 1800
+        );
     }
 
     /// @dev An adapter in front of the three-tier vault twin `v`: owner = this contract, guardian
     ///      = {multisig}; its operator tier is `v.operator()`, which is {operatorSafe}.
     function _threeTierAdapter(LPStakingVault v) internal returns (ApeBondPositionAdapter adapter) {
         BonusEscrow escrow = _deployBonusEscrowProxy(address(asset), address(v), address(this), carol);
-        adapter =
-            new ApeBondPositionAdapter(address(npmMock), address(v), address(escrow), address(this), multisig, 300);
+        adapter = new ApeBondPositionAdapter(
+            address(npmMock), address(v), address(escrow), address(this), multisig, 300, 1800
+        );
     }
 
     /// @dev One call from `caller` that must succeed.

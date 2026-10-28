@@ -69,8 +69,8 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //      too — decision of 14 Oct 2026, path (a)):
 //      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
 //      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
-//      guardian, minCliffSeconds)`; its callers and campaign written by the deployer, then
-//      `transferOwnership(timelock)`, which only NOMINATES the timelock (the adapter is
+//      guardian, minCliffSeconds, valuationWindow)`; its callers and campaign written by the
+//      deployer, then `transferOwnership(timelock)`, which only NOMINATES the timelock (the adapter is
 //      `Ownable2Step`, audit L-03: owner = deployer, pendingOwner = timelock until the batch);
 //      and the ONE timelock batch that activates the route — `adapter.acceptOwnership()`,
 //      `vault.setBonusEscrow(escrow)`, `vault.setStakeOperator(adapter, true)`,
@@ -157,6 +157,9 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //                                 the callers permitted for the campaign below (none)
 //   LP_APEBOND_MIN_CLIFF_SECONDS — the adapter's immutable floor under every campaign cliff, in
 //                                 seconds (86400); at least 1, and at least 86400 on mainnet
+//   LP_APEBOND_VALUATION_WINDOW — the adapter's valuation window, in seconds (1800), 300..3600
+//                                 (audit L-02). It counts in the oracle check of step 2: the pool
+//                                 must serve the LONGER of it and LP_TWAP_WINDOW (1800 s: 301 slots)
 //   LP_APEBOND_CAMPAIGN_ID      — the campaign to configure (none). Its band is placed around the
 //                                 $ASSET price at each purchase, not fixed (decision of 14 Oct 2026):
 //   LP_APEBOND_DOWN_PCT         — how far below that price the band starts, in percent (50)
@@ -333,8 +336,10 @@ async function main() {
     process.env.LP_TWAP_MAX_DEVIATION_BPS || DEFAULT_TWAP_MAX_DEVIATION_BPS
   );
   const twapMaxDeviationTicks = bpsToTicks(twapMaxDeviationBps);
-  // The longest window this run configures on chain: the vault's and the zapper's TWAP window.
-  const oracleWindow = twapWindow;
+  // The longest window this run configures on chain: the vault's and the zapper's TWAP window,
+  // and with the ApeBond route the adapter's valuation window (audit L-02, default 1800 s).
+  const apeBondValuationWindow = apebond.readApeBondFlag() ? apebond.readValuationWindow() : null;
+  const oracleWindow = Math.max(twapWindow, apeBondValuationWindow || 0);
   const observationCardinality = Number(
     process.env.LP_OBSERVATION_CARDINALITY ||
       Math.max(DEFAULT_OBSERVATION_CARDINALITY, requiredCardinality(oracleWindow))
@@ -571,6 +576,7 @@ async function main() {
     console.log(`  guardian:         ${apeBondGuardian}${apeBondGuardian === guardian ? " (= LP_GUARDIAN)" : ""}`);
     console.log(`  SoulZap callers:  ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`);
     console.log(`  cliff floor:      ${apeBondMinCliff}s (the adapter's immutable minCliffSeconds)`);
+    console.log(`  valuation window: ${apeBondValuationWindow}s (the adapter's valuationWindow, audit L-02)`);
     console.log(`  campaign:         ${apebond.describeCampaign(apeBondCampaign, apeBondFacts)}`);
   }
 
@@ -904,6 +910,7 @@ async function main() {
       bonusToken,
       guardian: apeBondGuardian,
       minCliffSeconds: apeBondMinCliff,
+      valuationWindow: apeBondValuationWindow,
     });
     await apebond.wireAdapter({
       chainId,
@@ -1110,6 +1117,7 @@ async function main() {
       soulZapCallers,
       campaign: apeBondCampaign,
       expectLinked: false,
+      valuationWindow: apeBondValuationWindow,
     });
     check(
       "BonusEscrow.implementation (ERC-1967 slot)",
@@ -1164,7 +1172,7 @@ async function main() {
     console.log(
       `npx hardhat verify --network ${network} ${apeBondDeploy.adapterDeploy.address} ` +
         `${positionManager} ${vaultDeploy.address} ${apeBondDeploy.escrowDeploy.address} ` +
-        `${deployer.address} ${apeBondGuardian} ${apeBondMinCliff}`
+        `${deployer.address} ${apeBondGuardian} ${apeBondMinCliff} ${apeBondValuationWindow}`
     );
   }
   // The timelock's proposer/executor arguments are address[]. hardhat-verify hands every

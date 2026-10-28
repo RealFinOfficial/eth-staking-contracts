@@ -7,6 +7,7 @@ import {BonusEscrow} from "../../../contracts/lp-staking/BonusEscrow.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {PositionValue} from "../../../contracts/lp-staking/libraries/PositionValue.sol";
 import {TickMath} from "../../../contracts/lp-staking/libraries/TickMath.sol";
+import {OracleHistory} from "../../../contracts/lp-staking/libraries/OracleHistory.sol";
 import {MockSoulZapCaller} from "../../../contracts/lp-staking/mocks/MockSoulZapCaller.sol";
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
 import {MisreportingVault} from "../utils/attackers/MisreportingVault.sol";
@@ -55,25 +56,33 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     function test_Constructor_RejectsEveryZeroReference() public {
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(0), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF);
-        vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(0), address(escrow), address(this), apeGuardian, MIN_CLIFF);
-        vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(0), address(this), apeGuardian, MIN_CLIFF);
+        new ApeBondPositionAdapter(
+            address(0), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF, 1800
+        );
         vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
         new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(escrow), address(this), address(0), MIN_CLIFF
+            address(npmMock), address(0), address(escrow), address(this), apeGuardian, MIN_CLIFF, 1800
+        );
+        vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(0), address(this), apeGuardian, MIN_CLIFF, 1800
+        );
+        vm.expectRevert(ApeBondPositionAdapter.ZeroAddress.selector);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), address(0), MIN_CLIFF, 1800
         );
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableInvalidOwner.selector, address(0)));
         new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(escrow), address(0), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(escrow), address(0), apeGuardian, MIN_CLIFF, 1800
         );
     }
 
     /// @dev Audit C-14: the cliff floor is immutable, so a zero floor would be a zero floor forever.
     function test_Constructor_RejectsAZeroCliffFloor() public {
         vm.expectRevert(ApeBondPositionAdapter.ZeroMinCliff.selector);
-        new ApeBondPositionAdapter(address(npmMock), address(vault), address(escrow), address(this), apeGuardian, 0);
+        new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, 0, 1800
+        );
     }
 
     /// @dev The escrow must take its notifications from the very vault this adapter deposits
@@ -84,7 +93,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
             abi.encodeWithSelector(ApeBondPositionAdapter.EscrowVaultMismatch.selector, address(vault), address(other))
         );
         new ApeBondPositionAdapter(
-            address(npmMock), address(other), address(escrow), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(other), address(escrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
     }
 
@@ -96,7 +105,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
             )
         );
         new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(fake), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(fake), address(this), apeGuardian, MIN_CLIFF, 1800
         );
     }
 
@@ -120,7 +129,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     function test_Constructor_ValuesInToken1WhenTheBonusIsToken1() public {
         BonusEscrow usdcEscrow = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), address(0));
         ApeBondPositionAdapter usdcAdapter = new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(usdcEscrow), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(usdcEscrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
         assertFalse(usdcAdapter.bonusIsToken0(), "a USDC bonus values in token1");
     }
@@ -132,7 +141,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         vm.expectEmit(false, false, false, true);
         emit ApeBondPositionAdapter.DepositsPausedSet(false);
         new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
     }
 
@@ -298,6 +307,169 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         emit ApeBondPositionAdapter.SoulZapCallerSet(bob, true);
         adapter.setSoulZapCaller(bob, true);
         assertTrue(adapter.soulZapCallers(bob), "allowlisted");
+    }
+
+    // ──────────────────────── Valuation window (audit L-02) ───
+
+    /// @dev A new adapter on the local vault and escrow with the given valuation window.
+    function _adapterWith(uint32 window) internal returns (ApeBondPositionAdapter) {
+        return new ApeBondPositionAdapter(
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF, window
+        );
+    }
+
+    /// @dev The constructor stores the window and announces it with both sides (zero before).
+    function test_ValuationWindow_TheConstructorSetsAndAnnouncesIt() public {
+        vm.expectEmit(false, false, false, true);
+        emit ApeBondPositionAdapter.ValuationWindowSet(0, 1800);
+        ApeBondPositionAdapter fresh = _adapterWith(1800);
+        assertEq(fresh.valuationWindow(), 1800, "the constructor stores the window");
+        assertEq(adapter.valuationWindow(), 1800, "the harness adapter runs the deploy default");
+        assertEq(fresh.MIN_VALUATION_WINDOW(), 300, "the floor mirrors the vault's TWAP floor");
+        assertEq(fresh.MAX_VALUATION_WINDOW(), 3600, "the ceiling mirrors the vault's TWAP ceiling");
+    }
+
+    /// @dev Bounded to 300..3600 s, at construction and in the setter; both bounds accepted.
+    function test_ValuationWindow_IsBoundedTo300Through3600() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.InvalidValuationWindow.selector, uint32(299), 300, 3600)
+        );
+        _adapterWith(299);
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.InvalidValuationWindow.selector, uint32(3601), 300, 3600)
+        );
+        _adapterWith(3601);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.InvalidValuationWindow.selector, uint32(299), 300, 3600)
+        );
+        adapter.setValuationWindow(299);
+        vm.expectRevert(
+            abi.encodeWithSelector(ApeBondPositionAdapter.InvalidValuationWindow.selector, uint32(3601), 300, 3600)
+        );
+        adapter.setValuationWindow(3601);
+
+        adapter.setValuationWindow(300);
+        assertEq(adapter.valuationWindow(), 300, "the floor itself is accepted");
+        adapter.setValuationWindow(3600);
+        assertEq(adapter.valuationWindow(), 3600, "the ceiling itself is accepted");
+    }
+
+    /// @dev Owner tier (the timelock): the guardian, the vault's operator and a stranger are refused.
+    function test_ValuationWindow_TheSetterIsOwnerOnlyAndAnnouncesBothSides() public {
+        vault.setOperator(operatorSafe);
+        address[3] memory refused = [apeGuardian, operatorSafe, stranger];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]));
+            adapter.setValuationWindow(900);
+        }
+        vm.expectEmit(false, false, false, true, address(adapter));
+        emit ApeBondPositionAdapter.ValuationWindowSet(1800, 900);
+        adapter.setValuationWindow(900);
+        assertEq(adapter.valuationWindow(), 900, "the owner moved the window");
+    }
+
+    /// @dev The history check (audit L-04) runs in the constructor and in the setter: 1800 s needs
+    ///      ceil(1800 / 6) + 1 = 301 current slots, and 1800 s of history.
+    function test_ValuationWindow_TheHistoryCheckRunsInTheConstructorAndTheSetter() public {
+        poolMock.setObservationCardinality(300);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
+        _adapterWith(1800);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
+        adapter.setValuationWindow(1800);
+
+        poolMock.setObservationCardinality(301);
+        poolMock.setHistorySeconds(1799);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.HistoryTooShort.selector, uint32(1800)));
+        _adapterWith(1800);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.HistoryTooShort.selector, uint32(1800)));
+        adapter.setValuationWindow(1800);
+
+        poolMock.setHistorySeconds(1800);
+        assertEq(_adapterWith(1800).valuationWindow(), 1800, "a pool that serves the window takes the adapter");
+        adapter.setValuationWindow(1800);
+    }
+
+    /// @dev The valuation tick is the mean over the adapter's OWN window, not the vault's TWAP:
+    ///      the pool sat at -1000 for the last 300 s and at 0 before, so the vault's 300 s TWAP
+    ///      reads -1000 while the adapter's 1800 s mean reads floor(-1000 x 300 / 1800) = -167.
+    function test_ValuationWindow_TheBonusIsValuedAtTheAdaptersOwnMean() public {
+        poolMock.setTicks(-1000, 0);
+        poolMock.setRecentTick(-1000, 300);
+        (, int24 vaultTwap,, bool withinBounds) = vault.previewTwap();
+        assertEq(vaultTwap, -1000, "the vault's 300 s TWAP sees the held price");
+        assertTrue(withinBounds, "spot sits on the vault's TWAP");
+
+        (,, int24 valuedAt) = adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        assertEq(valuedAt, -167, "the bonus is valued at the 1800 s mean, rounded down");
+
+        adapter.setValuationWindow(300);
+        (,, valuedAt) = adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        assertEq(valuedAt, -1000, "a 300 s valuation window would see the held price in full");
+    }
+
+    /// @dev The mean is rounded toward negative infinity, like the vault's TWAP: a negative delta
+    ///      with a remainder takes one more step down (raw cumulatives: -1 over 1800 s is -1, not 0).
+    function test_ValuationWindow_TheMeanRoundsTowardNegativeInfinity() public {
+        poolMock.setCurrentTick(-1);
+        poolMock.setTickCumulatives([int56(0), int56(-1)]);
+        (,, int24 valuedAt) = adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        assertEq(valuedAt, -1, "a negative remainder floors");
+
+        poolMock.setTickCumulatives([int56(0), int56(-3600)]);
+        (,, valuedAt) = adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+        assertEq(valuedAt, -2, "an exact negative quotient is not floored twice");
+    }
+
+    /// @dev Krum's addition 2.1: the deposit still reverts when spot is outside the VAULT's TWAP
+    ///      bounds, whatever the valuation window reads. Spot 600 ticks off a 0 TWAP, ceiling 500.
+    function test_ValuationWindow_TheSpotCheckStillUsesTheVaultsTwap() public {
+        poolMock.setTicks(600, 0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ApeBondPositionAdapter.PriceOutsideTwapBounds.selector, int24(600), int24(0), int24(500)
+            )
+        );
+        adapter.previewBonus(CAMPAIGN, BUY_LIQUIDITY);
+    }
+
+    /**
+     * @dev Audit L-02's proof of concept, inverted. A buyer holds the $ASSET price 5 % down
+     *      (513 ticks, ASSET is token0 on the math rung) for 5 minutes, spot included, so the
+     *      vault's 300 s spot check passes. Valued over the adapter's 1800 s window the bonus
+     *      rises by at most about 0.4 %; valued over 300 s it would rise by about 2.5 % (krumbgf's
+     *      sensitivity table, band -50 % / +100 %).
+     */
+    function test_ValuationWindow_AHeldPriceMovesTheBonusByItsShareOfTheWindow() public {
+        _deployMathRung();
+        int24 lower = PRICE_TICK - 6932; // -50 %
+        int24 upper = PRICE_TICK + 6932; // +100 %
+        uint128 liquidity = 1e18;
+
+        (, uint256 fair,) = mathAdapter.previewBonusAt(CAMPAIGN, liquidity, lower, upper);
+
+        int24 held = PRICE_TICK - 513;
+        mathPool.setTicks(held, PRICE_TICK);
+        mathPool.setRecentTick(held, 300);
+        (,,, bool withinBounds) = mathVault.previewTwap();
+        assertTrue(withinBounds, "the held price passes the vault's own spot check");
+
+        (, uint256 at1800,) = mathAdapter.previewBonusAt(CAMPAIGN, liquidity, lower, upper);
+        mathAdapter.setValuationWindow(300);
+        (, uint256 at300,) = mathAdapter.previewBonusAt(CAMPAIGN, liquidity, lower, upper);
+
+        // In basis points of the fair bonus.
+        uint256 gain1800 = (at1800 - fair) * 10_000 / fair;
+        uint256 gain300 = (at300 - fair) * 10_000 / fair;
+        emit log_named_uint("bonus gain at 1800 s, bps", gain1800);
+        emit log_named_uint("bonus gain at 300 s, bps", gain300);
+        assertGt(at1800, fair, "a lower valuation price raises the bonus");
+        // Measured: +42 bps at 1800 s and +251 bps at 300 s (krumbgf's table: +0.4 % and +2.5 %).
+        assertGe(gain1800, 35, "1800 s: about +0.4 %");
+        assertLe(gain1800, 50, "1800 s: about +0.4 %");
+        assertGe(gain300, 240, "300 s: about +2.5 %");
+        assertLe(gain300, 260, "300 s: about +2.5 %");
     }
 
     // ──────────────────────── Ownership (audit L-03) ───────────
@@ -1222,7 +1394,9 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     function _misreportingRoute() private returns (MisreportingVault mv, ApeBondPositionAdapter a) {
         mv = _misreportingVault();
         BonusEscrow e = _deployBonusEscrowProxy(address(asset), address(mv), address(this), address(0));
-        a = new ApeBondPositionAdapter(address(npmMock), address(mv), address(e), address(this), apeGuardian, MIN_CLIFF);
+        a = new ApeBondPositionAdapter(
+            address(npmMock), address(mv), address(e), address(this), apeGuardian, MIN_CLIFF, 1800
+        );
         mv.setBonusEscrow(address(e));
         e.setAdapter(address(a));
         _openCampaign(a, soulZap, CAMPAIGN, CAMPAIGN_DOWN_TICKS, CAMPAIGN_UP_TICKS);
@@ -1234,7 +1408,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     function _usdcRoute() private returns (BonusEscrow e, ApeBondPositionAdapter a) {
         e = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), address(0));
         a = new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(e), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(e), address(this), apeGuardian, MIN_CLIFF, 1800
         );
         _link(vault, e, a);
         a.setSoulZapCaller(address(soulZap), true);

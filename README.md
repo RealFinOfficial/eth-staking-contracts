@@ -345,7 +345,7 @@ Renouncing ownership permanently disables new stakes (`Staking disabled`) and dr
   balance check and paid only when funded; forfeited by an exit before the cliff and scaled by a
   rebalance before it, through the vault's notifications), and the plain, replaceable
   `ApeBondPositionAdapter`, which computes each bonus itself from the position's value at the
-  vault's TWAP — no signature, no purchase id, no limit of any kind (audit notes items 17-18)
+  mean tick of its own valuation window (1800 s, audit L-02) — no signature, no purchase id, no limit of any kind (audit notes items 17-18)
 - **Ethers.js** v6
 
 ## Development

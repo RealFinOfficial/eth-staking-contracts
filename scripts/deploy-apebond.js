@@ -51,7 +51,7 @@ const {
 //   3. ESCROW + ADAPTER, unless the registry already records both with code on chain.
 //      `BonusEscrow(bonusToken, vault)` + LPProxy `initialize(timelock, adapter = 0)`, then
 //      `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian,
-//      minCliffSeconds)`.
+//      minCliffSeconds, valuationWindow)`.
 //   4. WIRING while the deployer owns the adapter: callers, the campaign, the callers permitted
 //      for it, then `transferOwnership(timelock)`. The adapter is `Ownable2Step` (audit L-03),
 //      so this only nominates the timelock: from here until the batch executes the adapter is in
@@ -95,6 +95,8 @@ const {
 //   LP_APEBOND_SOULZAP_CALLERS   comma-separated SoulZap contracts (none)
 //   LP_APEBOND_MIN_CLIFF_SECONDS a new adapter's immutable floor under every campaign cliff, in
 //                                seconds (86400); at least 1, and at least 86400 on mainnet
+//   LP_APEBOND_VALUATION_WINDOW  a new adapter's valuation window, in seconds (1800), 300..3600
+//                                (audit L-02); the pool must already serve it
 //   LP_APEBOND_CAMPAIGN_ID       the campaign to configure (none). Its band is placed around the
 //                                $ASSET price at each purchase, not fixed (decision of 14 Oct 2026):
 //   LP_APEBOND_DOWN_PCT          how far below that price the band starts, in percent (50)
@@ -264,6 +266,8 @@ async function main() {
   const mode = readMode();
   // The adapter's cliff floor (audit C-14), refused before anything is deployed.
   const minCliffSeconds = apebond.readMinCliff(chainId);
+  // The adapter's valuation window (audit L-02), refused before anything is deployed.
+  const valuationWindow = apebond.readValuationWindow();
   const readOnly = mode === "verify";
   const deployer = readOnly ? null : await pools.getSigner();
 
@@ -347,6 +351,7 @@ async function main() {
   console.log(`Adapter guardian:   ${apeBondGuardian}${sameValue(apeBondGuardian, before.guardian) ? " (= the vault's guardian)" : ""}`);
   console.log(`SoulZap callers:    ${soulZapCallers.length > 0 ? soulZapCallers.join(", ") : "none"}`);
   console.log(`Cliff floor:        ${minCliffSeconds}s (minCliffSeconds of an adapter this run deploys)`);
+  console.log(`Valuation window:   ${valuationWindow}s (valuationWindow of an adapter this run deploys)`);
   console.log(`Campaign:           ${apebond.describeCampaign(campaign, facts)}`);
   console.log(`Positions asserted: ${assertPositions.length > 0 ? assertPositions.join(", ") : "none"}`);
 
@@ -467,7 +472,7 @@ async function main() {
       console.log(`\n──────── phase 3: a replacement adapter for ${previousAdapter} ────────`);
       const replacement = await deployContract(
         ADAPTER_KIND,
-        [positionManager, vaultAddress, escrowAddress, deployer.address, apeBondGuardian, minCliffSeconds],
+        [positionManager, vaultAddress, escrowAddress, deployer.address, apeBondGuardian, minCliffSeconds, valuationWindow],
         deployer
       );
       adapterAddress = replacement.address;
@@ -508,6 +513,7 @@ async function main() {
         bonusToken,
         guardian: apeBondGuardian,
         minCliffSeconds,
+        valuationWindow,
       });
       escrowAddress = deployed.escrowDeploy.address;
       adapterAddress = deployed.adapterDeploy.address;
@@ -747,6 +753,7 @@ async function printAdapterConfig(adapterAddress, { campaignIds, callers }) {
   const adapter = new hre.ethers.Contract(adapterAddress, ADAPTER_ABI, hre.ethers.provider);
   console.log("\n  — the adapter's configuration, read from the chain —");
   console.log(`  guardian():                     ${await adapter.guardian()}`);
+  console.log(`  valuationWindow():              ${await adapter.valuationWindow()}`);
   const ids = [...new Set(campaignIds.map((id) => id.toLowerCase()))];
   const routers = [...new Set(callers.map((c) => hre.ethers.getAddress(c)))];
   for (const router of routers) {
@@ -811,6 +818,7 @@ async function recordReplacement({ chainId, adapterAddress, previousAdapter, sou
     fee: Number(await adapter.fee()),
     tickSpacing: Number(await adapter.tickSpacing()),
     minCliffSeconds: (await adapter.minCliffSeconds()).toString(),
+    valuationWindow: Number(await adapter.valuationWindow()),
     guardian: hre.ethers.getAddress(await adapter.guardian()),
     soulZapCallers: callers,
     campaigns,

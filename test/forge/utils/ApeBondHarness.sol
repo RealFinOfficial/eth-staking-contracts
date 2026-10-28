@@ -106,7 +106,7 @@ abstract contract ApeBondHarness is LocalHarness {
 
         escrow = _deployBonusEscrowProxy(address(asset), address(vault), address(this), address(0));
         adapter = new ApeBondPositionAdapter(
-            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF
+            address(npmMock), address(vault), address(escrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
         soulZap = new MockSoulZapCaller();
         _link(vault, escrow, adapter);
@@ -135,7 +135,7 @@ abstract contract ApeBondHarness is LocalHarness {
         mathVault = _deployVaultProxy(params);
         mathEscrow = _deployBonusEscrowProxy(address(asset), address(mathVault), address(this), address(0));
         mathAdapter = new ApeBondPositionAdapter(
-            address(mathNpm), address(mathVault), address(mathEscrow), address(this), apeGuardian, MIN_CLIFF
+            address(mathNpm), address(mathVault), address(mathEscrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
         mathSoulZap = new MockSoulZapCaller();
         _link(mathVault, mathEscrow, mathAdapter);

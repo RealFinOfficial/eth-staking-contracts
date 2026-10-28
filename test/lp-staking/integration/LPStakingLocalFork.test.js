@@ -2906,6 +2906,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         LP_APEBOND_CAMPAIGN_ID: CAMPAIGN_LABEL,
         LP_APEBOND_CLIFF_SECONDS: String(CLIFF),
         LP_APEBOND_MIN_CLIFF_SECONDS: String(C.APEBOND_MIN_CLIFF_SECONDS),
+        // The adapter's valuation window (audit L-02) on the vault's own window: the suite's
+        // pool holds 150 slots, which serve at most 894 s, and an equal window keeps every
+        // bonus this section asserts valued at the same tick as the vault's TWAP.
+        LP_APEBOND_VALUATION_WINDOW: String(C.TWAP_WINDOW),
         LP_APEBOND_BONUS_BPS: String(BONUS_BPS),
         LP_APEBOND_MIN_BONUS: MIN_BONUS_WHOLE,
         ...extra,
@@ -3379,6 +3383,47 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         expect(entries[kind].owner, kind).to.equal(nextAddr);
       }
       expect(entries[foreignKind]).to.not.have.property("owner");
+    });
+  });
+  // ─────────────────────────────────────────────────────────────
+  describe("9. scripts/grow-oracle.js grows the real pool and makes the size take effect (L-04)", function () {
+    const target = C.OBSERVATION_CARDINALITY + 10;
+    const growEnv = (extra = {}) => ({
+      ...baseScriptEnv(),
+      LP_POOL: poolAddr,
+      LP_NPM: C.NPM_ADDR,
+      LP_ORACLE_TARGET: String(target),
+      LP_ORACLE_WINDOW: String(C.TWAP_WINDOW),
+      ...extra,
+    });
+
+    it("G1 a dry run prints the plan and sends nothing", async function () {
+      const nonce = await provider.getTransactionCount(w.deployer.address);
+      const run = await runScript("scripts/grow-oracle.js", growEnv({ LP_ORACLE_DRY_RUN: "1" }));
+      expect(run.stdout).to.include(`increaseObservationCardinalityNext(${target}), then up to`);
+      expect(run.stdout).to.include("LP_ORACLE_DRY_RUN=1: nothing was sent.");
+      expect(await provider.getTransactionCount(w.deployer.address)).to.equal(nonce);
+    });
+
+    it("G2 grows next, forces one write per block until the CURRENT size is the target", async function () {
+      const before = await pool.slot0();
+      expect(before.observationCardinality).to.equal(BigInt(C.OBSERVATION_CARDINALITY));
+      const run = await runScript("scripts/grow-oracle.js", growEnv());
+      const after = await pool.slot0();
+      expect(after.observationCardinality).to.equal(BigInt(target));
+      expect(after.observationCardinalityNext).to.equal(BigInt(target));
+      expect(run.stdout).to.include(`Done: cardinality ${target} (target ${target})`);
+      expect(run.stdout).to.include(`observe([${C.TWAP_WINDOW}, 0]): answers`);
+      const entry = runner.registryEntry(registryFile, 31337, "UniswapV3Pool");
+      expect(entry.oracleWarmupTokenId).to.be.a("string");
+      expect(await npm.ownerOf(BigInt(entry.oracleWarmupTokenId))).to.equal(w.deployer.address);
+    });
+
+    it("G3 is idempotent: a pool at the target sends nothing", async function () {
+      const nonce = await provider.getTransactionCount(w.deployer.address);
+      const run = await runScript("scripts/grow-oracle.js", growEnv());
+      expect(run.stdout).to.include(`Already at ${target} >= ${target}: nothing to send.`);
+      expect(await provider.getTransactionCount(w.deployer.address)).to.equal(nonce);
     });
   });
 

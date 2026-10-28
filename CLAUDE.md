@@ -131,7 +131,8 @@ An un-flagged run is byte-for-byte the stack above, with `bonusEscrow = 0`:
   `adapter.acceptOwnership()` while it is nominated, `vault.setStakeOperator(new, true)`,
   `vault.setStakeOperator(old, false)`, `escrow.setAdapter(new)`). **It computes the bonus**:
   `depositFor(tokenId, campaignId, beneficiary)` values the position with
-  `PositionValue.valueAt` at the vault's TWAP (reverting when spot is outside the TWAP bounds),
+  `PositionValue.valueAt` at the mean tick of its own `valuationWindow` (1800 s, owner-set,
+  300..3600 s, audit L-02; reverting when spot is outside the vault's TWAP bounds),
   takes the campaign's `bonusBps` of it, and reserves nothing below the campaign's
   `minBonusAmount` (the purchase is still staked). **No signature, no purchase id, no limit of any
   kind**: a campaign is its two price offsets (`downTicks`, `upTicks`) and its `toleranceTicks`
@@ -270,7 +271,7 @@ contracts/           — Solidity source files
     LPEpochRegistry.sol       — The on-chain emission schedule, operator-run; UUPS
     BonusEscrow.sol           — ApeBond bonuses keyed by tokenId: reserve, forfeit, scale, pay;
                                 UUPS (lane 2; stack #6 and the mainnet launch deploy)
-    ApeBondPositionAdapter.sol — The SoulZap gate; computes the bonus at the vault's TWAP;
+    ApeBondPositionAdapter.sol — The SoulZap gate; computes the bonus at its own valuation window;
                                 Ownable2Step, replaceable (lane 2; stack #6 and the
                                 mainnet launch deploy)
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
@@ -697,7 +698,8 @@ paid once `fund-escrow.js` covers the reservation (`InsufficientFunds` before).
   timelock batch — `vault.setStakeOperator(new, true)`, `vault.setStakeOperator(old, false)`,
   `escrow.setAdapter(new)`. The vault's `stakeFor` allowlist exists so that never takes the
   zapper's slot
-- **The contract computes the bonus** (B.3 P1): value of the position at the vault's TWAP ×
+- **The contract computes the bonus** (B.3 P1): value of the position at the mean tick of the
+  adapter's `valuationWindow` (1800 s, audit L-02; spot must still sit inside the vault's TWAP bounds) ×
   `bonusBps`, nothing below `minBonusAmount`. No signature, no purchase id, no backend number; the
   backend's `bonus-quote` is an estimate of this formula
 - **No limit of any kind** (override O2, 2026-10-05): reserve now, fund later. No per-purchase,

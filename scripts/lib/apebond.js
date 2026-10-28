@@ -15,8 +15,10 @@ const { deployContract, deployProxyPair } = require("./proxies");
 //   1. `BonusEscrow` implementation(bonusToken, vault) + `LPProxy`, `initialize(owner = timelock,
 //      adapter = address(0))` — born owned by the timelock, reserve path CLOSED;
 //   2. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER, guardian,
-//      minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS)` — the immutable floor under every campaign
-//      cliff (audit C-14; default one day, never below one day on mainnet);
+//      minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS, valuationWindow = LP_APEBOND_VALUATION_WINDOW)`
+//      — the immutable floor under every campaign cliff (audit C-14; default one day, never below
+//      one day on mainnet) and the window whose mean tick values every bonus (audit L-02; default
+//      1800 s, bounded 300..3600 s, and the pool must already serve it);
 //   3. wiring while the deployer still owns the adapter: `setSoulZapCaller` per caller,
 //      `setCampaign`, `setCampaignCaller` per caller — then `transferOwnership(timelock)`.
 //      The adapter is `Ownable2Step` (audit L-03), so that call only NOMINATES the timelock:
@@ -55,6 +57,12 @@ const DEFAULT_TOLERANCE_TICKS = 500n;
 const LN_TICK_BASE = Math.log(1.0001);
 const MAX_INT24 = (1n << 23n) - 1n;
 const MAX_UINT64 = (1n << 64n) - 1n;
+
+/** The adapter's valuation window when LP_APEBOND_VALUATION_WINDOW is unset (audit L-02). */
+const DEFAULT_VALUATION_WINDOW = 1800n;
+/** The adapter's MIN_VALUATION_WINDOW / MAX_VALUATION_WINDOW (the vault's TWAP bounds). */
+const MIN_VALUATION_WINDOW = 300;
+const MAX_VALUATION_WINDOW = 3600;
 
 /** The adapter's cliff floor when LP_APEBOND_MIN_CLIFF_SECONDS is unset: one day. */
 const DEFAULT_MIN_CLIFF_SECONDS = 86_400n;
@@ -98,6 +106,7 @@ const ADAPTER_ABI = [
   "function campaigns(bytes32 campaignId) view returns (bool enabled, int24 downTicks, int24 upTicks, int24 toleranceTicks, uint64 bonusCliffSeconds, uint16 bonusBps, uint256 minBonusAmount)",
   "function campaignRange(bytes32 campaignId) view returns (int24 tickLower, int24 tickUpper, int24 currentTick)",
   "function minCliffSeconds() view returns (uint64)",
+  "function valuationWindow() view returns (uint32)",
 ];
 const POOL_ABI = [
   "function tickSpacing() view returns (int24)",
@@ -234,6 +243,22 @@ function readMinCliff(chainId) {
     );
   }
   return value;
+}
+
+/**
+ * LP_APEBOND_VALUATION_WINDOW: the adapter's valuation window, in seconds (audit L-02): the window
+ * whose arithmetic-mean tick values every position and so every bonus. Default 1800, bounded to
+ * the adapter's 300..3600. The pool must already serve it (ceil(w / 6) + 1 current slots and w
+ * seconds of history), or the adapter's constructor reverts. Read before anything is deployed.
+ */
+function readValuationWindow() {
+  return Number(
+    readInteger("LP_APEBOND_VALUATION_WINDOW", {
+      min: MIN_VALUATION_WINDOW,
+      max: MAX_VALUATION_WINDOW,
+      fallback: DEFAULT_VALUATION_WINDOW,
+    })
+  );
 }
 
 /**
@@ -440,6 +465,7 @@ async function deployEscrowAndAdapter({
   bonusToken,
   guardian,
   minCliffSeconds,
+  valuationWindow,
 }) {
   const escrowDeploy = await deployProxyPair(
     ESCROW_KIND,
@@ -460,7 +486,7 @@ async function deployEscrowAndAdapter({
 
   const adapterDeploy = await deployContract(
     ADAPTER_KIND,
-    [positionManager, vaultAddress, escrowDeploy.address, deployer.address, guardian, minCliffSeconds],
+    [positionManager, vaultAddress, escrowDeploy.address, deployer.address, guardian, minCliffSeconds, valuationWindow],
     deployer
   );
   const adapter = new hre.ethers.Contract(adapterDeploy.address, ADAPTER_ABI, hre.ethers.provider);
@@ -476,6 +502,7 @@ async function deployEscrowAndAdapter({
     fee: Number(await adapter.fee()),
     tickSpacing: Number(await adapter.tickSpacing()),
     minCliffSeconds: (await adapter.minCliffSeconds()).toString(),
+    valuationWindow: Number(await adapter.valuationWindow()),
     guardian,
     soulZapCallers: [],
     campaigns: [],
@@ -650,7 +677,7 @@ function batchFileContents(calls) {
  * nominated, not owned, so the check is `pendingOwner() == timelock` (the pre-execute check of
  * audit L-03). With `expectLinked = true` it is `owner() == timelock` and nothing pending.
  */
-async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, timelockAddress, bonusToken, guardian, soulZapCallers = [], campaign = null, expectLinked = true }) {
+async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, timelockAddress, bonusToken, guardian, soulZapCallers = [], campaign = null, expectLinked = true, valuationWindow = null }) {
   const vault = new hre.ethers.Contract(vaultAddress, VAULT_LINK_ABI, hre.ethers.provider);
   const escrow = new hre.ethers.Contract(escrowAddress, ESCROW_ABI, hre.ethers.provider);
   const adapter = new hre.ethers.Contract(adapterAddress, ADAPTER_ABI, hre.ethers.provider);
@@ -689,6 +716,9 @@ async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, 
     );
   }
   if (guardian) check("ApeBondPositionAdapter.guardian", await adapter.guardian(), guardian);
+  if (valuationWindow !== null) {
+    check("ApeBondPositionAdapter.valuationWindow", await adapter.valuationWindow(), valuationWindow);
+  }
   for (const caller of soulZapCallers) {
     check(`ApeBondPositionAdapter.soulZapCallers[${caller}]`, await adapter.soulZapCallers(caller), true);
   }
@@ -734,6 +764,7 @@ module.exports = {
   acceptOwnershipOp,
   readApeBondFlag,
   readMinCliff,
+  readValuationWindow,
   readAddress,
   readAddressList,
   readCampaign,

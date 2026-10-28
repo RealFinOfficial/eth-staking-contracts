@@ -149,6 +149,9 @@ async function startWorld(prefix) {
       LP_OVERTURE_SYMBOL: "OVTR",
       LP_TIMELOCK_MIN_DELAY: "0",
       LP_TWAP_WINDOW: String(TWAP_WINDOW),
+      // Explicit, so the repo's own .env (a Sepolia figure) never sizes this world's oracle:
+      // the adapter's 1800 s valuation window needs ceil(1800 / 6) + 1 = 301 slots (audit L-04).
+      LP_OBSERVATION_CARDINALITY: "301",
       ...extra,
     });
 

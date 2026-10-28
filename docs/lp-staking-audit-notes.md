@@ -860,7 +860,7 @@ proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardia
 `updateDelay` (the timelock) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
 `acceptOwnership`, `transferOwnership`, `setAdapter` and `recoverSurplus` (escrow) and
 `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian`,
-`acceptOwnership` and `transferOwnership` (adapter). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
+`setValuationWindow`, `acceptOwnership` and `transferOwnership` (adapter). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
 but since 2026-09-14 it is owner OR operator, so a guardian revocation or replacement that
 cannot wait is sent DIRECTLY by the operator multisig instead of being scheduled here. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
 now, sent directly by the multisig, and scheduling it here would revert
@@ -1107,7 +1107,16 @@ bonusIsToken0)` — and takes the campaign's rate of it, `bonus = value × bonus
 when below the campaign's `minBonusAmount` (D6: such a purchase is staked normally and gets no
 reservation; nothing reverts). The deposit reverts when spot is outside the vault's TWAP bounds
 (`PriceOutsideTwapBounds`), so a price pushed inside the transaction cannot be the valuation
-price; and valuing at the TWAP is conservative whatever spot is (B.3 §5.1). Uncollected fees are
+price; and valuing at the TWAP is conservative whatever spot is (B.3 §5.1). **Since audit L-02
+(27 Oct 2026) the valuation tick is the adapter's own:** the arithmetic-mean tick over
+`valuationWindow` (`pool.observe([valuationWindow, 0])`, floored like the vault's TWAP; 1800 s at
+deployment, owner-set through `setValuationWindow`, bounded 300..3600 s and checked against the
+pool's history like every window setter). The spot check above stays on the vault's TWAP
+(`vault.previewTwap()`), which keeps spot, and so the band, near the real price. A price HELD down
+moves the bonus by its share of the window: a -5 % price for 5 minutes raises it by about 0.4 % at
+1800 s against about 2.5 % at 300 s (measured: +42 and +251 bps,
+`test_ValuationWindow_AHeldPriceMovesTheBonusByItsShareOfTheWindow`). There is no cap.
+`BonusEscrow._scaled` stays on the vault's TWAP: it is a ratio of two values at one price. Uncollected fees are
 not counted (L7). Removed with the signature: `EIP712`, `ECDSA`, the purchase struct and typehash,
 `purchaseSigner` / `setPurchaseSigner`, the spent-id and nonce books, six errors and four
 constructor arguments; the backend holds no purchase-signing key.
@@ -1175,8 +1184,9 @@ L-01), so a leaked guardian key cannot lift a pause set during an incident.
 
 **What still rests on trust (P6).** The caller allowlists decide who can earn a bonus; after D1 a
 compromised caller gains nothing unless real capital stays staked through the cliff. The
-beneficiary is the router's word. The vault's TWAP parameters (operator-tier, no delay, 300..3600 s
-and ≤ 1823 ticks) set the valuation price.
+beneficiary is the router's word. The valuation window (owner-tier, the timelock, 300..3600 s) sets
+the valuation price; the vault's TWAP parameters (operator-tier, no delay, 300..3600 s and ≤ 1823
+ticks) bound spot at each deposit.
 
 Tests: `test/forge/unit/ApeBondAdapterBranches.t.sol` (every revert by selector and arguments, the
 order of the checks, the formula against `PositionValue`, the minimum's inclusive boundary, the

@@ -172,6 +172,13 @@ launch deploy runs with `LP_APEBOND_ENABLED=1` and the production campaign —
 
 ### What `deploy-lp-staking.js` deploys, in order
 
+0. Before anything: the oracle check (audit L-04). The pool's CURRENT `observationCardinality` must
+   be at least `ceil(w / 6) + 1` and `observe([w, 0])` must answer, where `w` is the longer of
+   `LP_TWAP_WINDOW` and, with the ApeBond route, `LP_APEBOND_VALUATION_WINDOW` (1800 s: 301
+   slots). Otherwise the run stops with nothing sent, because the vault's and the zapper's
+   `initialize` (and the adapter's constructor) would revert. Then
+   `increaseObservationCardinalityNext(LP_OBSERVATION_CARDINALITY)` when the next size is below it.
+   Grow the pool first with `scripts/grow-oracle.js` (below).
 1. `LPTimelock(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))`.
 2. `TokenOverture` proxy, `initialize(LP_OVERTURE_NAME ("Overture"), LP_OVERTURE_SYMBOL ("OVTR"), owner = timelock, minter = the PREDICTED RewardsDistributor proxy)`.
 3. `RewardsDistributor` proxy, `initialize(owner = timelock, guardian, operator, signer, asset = LP_ASSET, [{ASSET, conditional, claims = LP_ASSET_CLAIMS_ENABLED (default closed)}, {OVTR, unconditional, claims open}])`; the run stops if the proxy did not land on the predicted address.
@@ -207,6 +214,29 @@ Safe is both `LP_MULTISIG` (the timelock's proposer and executor) and `LP_OPERAT
 14 Oct 2026), so the deploy script's "staging arrangement" warning for the two being equal is
 expected there.
 
+### Growing the pool oracle (`scripts/grow-oracle.js`, audit L-04)
+
+Every window setter refuses a window the pool cannot serve forever: the CURRENT
+`observationCardinality` must be at least `ceil(w / 6) + 1` (300 s: 51, 1800 s: 301, 3600 s: 601)
+and `observe([w, 0])` must answer. `increaseObservationCardinalityNext` only pre-pays slots; the
+pool switches to the grown size when its write index wraps the current buffer, one write per block.
+`grow-oracle.js` does both: it grows the next size to `LP_ORACLE_TARGET` (default 301) when needed,
+then forces one observation write per block with `decreaseLiquidity` of ONE unit of liquidity on a
+dust in-range position it mints once (recorded as `oracleWarmupTokenId` on the `UniswapV3Pool`
+entry, reused on later runs), until `observationCardinality == LP_ORACLE_TARGET`. It prints its
+progress, is idempotent (a pool at the target sends nothing; an interrupted run resumes), and
+`LP_ORACLE_DRY_RUN=1` prints the plan and sends nothing. At the end it reports whether
+`observe([LP_ORACLE_WINDOW (1800), 0])` answers: the size is in place, but the pool must still
+hold that many seconds of history.
+
+```bash
+LP_ORACLE_DRY_RUN=1 npx hardhat run scripts/grow-oracle.js --network sepolia   # the plan only
+LP_ORACLE_TARGET=301 npx hardhat run scripts/grow-oracle.js --network sepolia  # operator or deployer key
+```
+
+From 150 slots it takes up to 150 forced writes (about 30 minutes at 12 s blocks), fewer when the
+pool trades meanwhile. Mainnet: grow at least a day before the deployment; `CONFIRM=yes`.
+
 ### The ApeBond route (`LP_APEBOND_ENABLED=1`; Sepolia test stack #6 and the mainnet launch)
 
 With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision document, overrides of
@@ -215,10 +245,11 @@ With the flag, after the zapper, `deploy-lp-staking.js` adds (B.3 decision docum
 7. `BonusEscrow` proxy: implementation `(bonusToken = LP_APEBOND_BONUS_TOKEN (LP_ASSET), vault)`,
    `initialize(owner = timelock, adapter = 0)` — born owned by the timelock, reserve path closed.
 8. `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian =
-   LP_APEBOND_GUARDIAN (LP_GUARDIAN), minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS (86400, at least 86400 on mainnet; a campaign cliff below it is refused))`; then, from the deployer, `setSoulZapCaller` for every
+   LP_APEBOND_GUARDIAN (LP_GUARDIAN), minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS (86400, at least 86400 on mainnet; a campaign cliff below it is refused), valuationWindow = LP_APEBOND_VALUATION_WINDOW (1800, 300..3600, audit L-02: the window whose mean tick values every bonus; the pool must already serve it))`; then, from the deployer, `setSoulZapCaller` for every
    `LP_APEBOND_SOULZAP_CALLERS` entry, `setCampaign` for the `LP_APEBOND_CAMPAIGN_*` campaign (its
    band, cliff, rate and minimum — nothing else exists), `setCampaignCaller` for each caller, and
-   `transferOwnership(timelock)`.
+   `transferOwnership(timelock)`, which only nominates the timelock (`Ownable2Step`, audit L-03):
+   the link batch opens with `adapter.acceptOwnership()`.
 
    The campaign's band is not a fixed range (Vladimir's decision of 14 Oct 2026). At each purchase
    the adapter places it around the $ASSET price of that moment (the pool's spot tick) and accepts
@@ -301,7 +332,7 @@ Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` an
 `updateDelay` (the timelock itself); with the ApeBond route also `setStakeOperator` (vault),
 `upgradeToAndCall` / `acceptOwnership` / `transferOwnership` / `setAdapter` / `recoverSurplus`
 (escrow) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
-`setGuardian` / `acceptOwnership` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
+`setGuardian` / `setValuationWindow` / `acceptOwnership` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
 pauses (`pauseDeposits`, `pauseRebalance`, `pause`), sent directly by the hot key; the operator
 tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper), `setSigner`,

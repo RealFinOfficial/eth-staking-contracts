@@ -46,6 +46,11 @@ contract MockUniswapV3Pool {
     uint16 public observationCardinality = type(uint16).max;
     /// @notice The oldest `secondsAgo` `observe` can serve; beyond it `observe` reverts `OLD`.
     uint32 public historySeconds = type(uint32).max;
+    /// @notice The tick the pool sat at during the last {recentSeconds} (zero seconds: never).
+    ///         Before that it sat at {twapTick}, so two windows can see two different means.
+    int24 public recentTick;
+    /// @notice How long the pool has sat at {recentTick}, in seconds.
+    uint32 public recentSeconds;
     /// @notice When true, `observe` reverts the way an under-provisioned pool does.
     bool public observeReverts;
     /// @notice When true, `observe` returns {rawTickCumulatives} verbatim instead of the
@@ -109,6 +114,17 @@ contract MockUniswapV3Pool {
     /// @notice Sets how far back `observe` can see; older `secondsAgo` values revert `OLD`.
     function setHistorySeconds(uint32 historySeconds_) external {
         historySeconds = historySeconds_;
+    }
+
+    /**
+     * @notice A price HELD for the last `seconds_`: the pool sat at `tick_` for that long and at
+     *         {twapTick} before. The mean over a window `w` is then
+     *         `(tick_ * min(w, seconds_) + twapTick * max(0, w - seconds_)) / w`, so a short
+     *         window and a long one see different means (audit L-02). Zero seconds switches it off.
+     */
+    function setRecentTick(int24 tick_, uint32 seconds_) external {
+        recentTick = tick_;
+        recentSeconds = seconds_;
     }
 
     /**
@@ -197,7 +213,13 @@ contract MockUniswapV3Pool {
 
         for (uint256 i = 0; i < secondsAgos.length; i++) {
             int56 age = int56(uint56(secondsAgos[i]));
-            tickCumulatives[i] = int56(twapTick) * (ANCHOR - age);
+            // The tick integral over the last `age` seconds: {recentTick} for the most recent
+            // {recentSeconds} of them, {twapTick} for the rest. With no recent period this is
+            // the plain series `twapTick * (ANCHOR - age)`.
+            int56 recent = int56(uint56(recentSeconds));
+            int56 recentPart = age < recent ? age : recent;
+            int56 integral = int56(recentTick) * recentPart + int56(twapTick) * (age - recentPart);
+            tickCumulatives[i] = int56(twapTick) * ANCHOR - integral;
             secondsPerLiquidityCumulativeX128s[i] = uint160(uint56(ANCHOR - age));
         }
     }

@@ -3003,6 +3003,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         LP_APEBOND_CAMPAIGN_ID: CAMPAIGN_LABEL,
         LP_APEBOND_CLIFF_SECONDS: String(CLIFF),
         LP_APEBOND_MIN_CLIFF_SECONDS: String(C.APEBOND_MIN_CLIFF_SECONDS),
+        // The adapter's valuation window (audit L-02) on the vault's own window: the suite's
+        // pool holds 150 slots, which serve at most 894 s, and an equal window keeps every
+        // bonus this section asserts valued at the same tick as the vault's TWAP.
+        LP_APEBOND_VALUATION_WINDOW: String(P.twapWindow),
         LP_APEBOND_BONUS_BPS: String(BONUS_BPS),
         LP_APEBOND_MIN_BONUS: MIN_BONUS_WHOLE,
         ...extra,
