@@ -48,6 +48,12 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-10-28 (Doublo's audit L-01..L-04 and I-02, solc 0.8.38) ──
+//    adapter lines 169 -> 197, branches 41 -> 44 (the pause split, Ownable2Step, the valuation
+//    window and its mean tick); vault lines 203 -> 209 and distributor 138 -> 141 (the pause
+//    split, no new branch); TwapGuard lines 43 -> 44 (the OracleHistory call); the new
+//    libraries/OracleHistory.sol 9 lines and 3 branches, all covered. The uncovered line COUNTS
+//    are unchanged (the same `--ir-minimum` artefacts below, at moved line numbers).
 // ── Pinned floors, re-measured 2026-10-14 (the band follows the price: adapter lines 134 -> 169, branches 38 -> 41) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-29: adapter lines 132 -> 134, branches 37 -> 38) ──
 // ── Pinned floors, re-measured 2026-10-14 (audit C-14: adapter lines 128 -> 132, branches 35 -> 37) ──
@@ -58,14 +64,15 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //
 // | file                        | lines             | branches        |
 // |-----------------------------|-------------------|-----------------|
-// | ApeBondPositionAdapter.sol  | 100.00% (169/169) | 100.00% (41/41) |
+// | ApeBondPositionAdapter.sol  | 100.00% (197/197) | 100.00% (44/44) |
 // | BonusEscrow.sol             |  97.30% (108/111) | 100.00% (23/23) |
-// | LPStakingVault.sol          |  98.03% (199/203) | 100.00% (37/37) |
+// | LPStakingVault.sol          |  98.09% (205/209) | 100.00% (37/37) |
 // | LPZapper.sol                |  96.08% (98/102)  | 100.00% (20/20) |
-// | RewardsDistributor.sol      |  97.83% (135/138) | 100.00% (22/22) |
+// | RewardsDistributor.sol      |  97.87% (138/141) | 100.00% (22/22) |
 // | LPEpochRegistry.sol         |  96.46% (109/113) | 100.00% (21/21) |
 // | TokenOverture.sol           |  84.62% (22/26)   | 100.00% (2/2)   |
-// | libraries/TwapGuard.sol     |  97.67% (42/43)   | 100.00% (7/7)   |
+// | libraries/TwapGuard.sol     |  97.73% (43/44)   | 100.00% (7/7)   |
+// | libraries/OracleHistory.sol | 100.00% (9/9)     | 100.00% (3/3)   |
 // | libraries/TickMath.sol      | 100.00% (25/25)   | 100.00% (21/21) |
 // | libraries/LiquidityAmounts.sol | 100.00% (15/15) | 100.00% (7/7)  |
 // | libraries/PositionValue.sol | 100.00% (4/4)     | (0/0 — the ternary is not instrumented) |
@@ -146,15 +153,15 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // contrived tests that could not move them.
 export const PER_FILE_FLOORS = {
   "contracts/lp-staking/ApeBondPositionAdapter.sol": {
-    lines: {found: 169, minHit: 169},
-    branches: {found: 41, minHit: 41},
+    lines: {found: 197, minHit: 197},
+    branches: {found: 44, minHit: 44},
   },
   "contracts/lp-staking/BonusEscrow.sol": {
     lines: {found: 111, minHit: 108},
     branches: {found: 23, minHit: 23},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 203, minHit: 199},
+    lines: {found: 209, minHit: 205},
     branches: {found: 37, minHit: 37},
   },
   "contracts/lp-staking/LPZapper.sol": {
@@ -162,7 +169,7 @@ export const PER_FILE_FLOORS = {
     branches: {found: 20, minHit: 20},
   },
   "contracts/lp-staking/RewardsDistributor.sol": {
-    lines: {found: 138, minHit: 135},
+    lines: {found: 141, minHit: 138},
     branches: {found: 22, minHit: 22},
   },
   "contracts/lp-staking/LPEpochRegistry.sol": {
@@ -174,8 +181,12 @@ export const PER_FILE_FLOORS = {
     branches: {found: 2, minHit: 2},
   },
   "contracts/lp-staking/libraries/TwapGuard.sol": {
-    lines: {found: 43, minHit: 42},
+    lines: {found: 44, minHit: 43},
     branches: {found: 7, minHit: 7},
+  },
+  "contracts/lp-staking/libraries/OracleHistory.sol": {
+    lines: {found: 9, minHit: 9},
+    branches: {found: 3, minHit: 3},
   },
   "contracts/lp-staking/libraries/TickMath.sol": {
     lines: {found: 25, minHit: 25},
