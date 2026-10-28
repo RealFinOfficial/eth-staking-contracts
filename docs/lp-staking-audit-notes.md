@@ -315,9 +315,22 @@ Note what this does NOT fix: allocating slots is not filling them. A swap-free `
 and every custody path still work from block one, and the swap legs still need the pool to
 have been traded for a window.
 
-Tests: `test/forge/fork/TwapManipulation.t.sol`, `TwapColdOracleTest` — five `test_SEC01_*`
-cases including the working-paths arm (`…ColdOracleLeavesStakeUnstakeAndSwapFreeRebalanceWorking`)
-and the warm-up remedy (`…GrowingAndWarmingTheOracleMakesTheGuardReadable`).
+**Closed on chain by audit L-04 (27 Oct 2026).** Every place that sets a window now calls
+`OracleHistory.requireServes(pool, window)` (`libraries/OracleHistory.sol`): `TwapGuard._setTwapParams`
+(so `initialize` and `setTwapParams` of the vault and the zapper) and the ApeBond adapter's
+valuation window. It reverts `CardinalityTooLow(cardinality, needed)` unless the CURRENT
+`observationCardinality` (not `observationCardinalityNext`) is at least `ceil(window / 6) + 1`, and
+`HistoryTooShort(window)` unless `observe([window, 0])` succeeds. A pool's cardinality never
+decreases and it writes at most one observation per block, so a window that passes can never
+revert `OLD` afterwards. The cold state above is therefore unreachable for a stack: a vault cannot
+be born on a fresh pool. The derived floor of the deploy script is that same rule (it replaced
+`2 * ceil(twapWindow / 12)`), and the script checks it before it sends anything. The read paths are
+unchanged and fail closed: there is no fallback on any of them.
+
+Tests: `test/forge/fork/TwapManipulation.t.sol`, `TwapColdOracleTest` — five `test_L04_*` cases on
+the real pool (the cold pool refused at `initialize`, a grown-but-unwrapped pool refused, the real
+`OLD` turned into `HistoryTooShort`, a warmed pool accepting the stack, and `setTwapParams` refusing
+a window the real pool cannot serve), and `test/forge/unit/OracleHistory.t.sol` on the mock.
 
 ## 8. SEC-02 — the TWAP guard is pre-trade only, and is skipped when `amountIn == 0`
 

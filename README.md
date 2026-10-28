@@ -496,10 +496,12 @@ suite detects this and asserts that `zapIn` reverts rather than pretending the z
 Seed liquidity and trade the pool for at least `LP_TWAP_WINDOW` seconds before expecting the
 zap leg to pass. This is item 7 (SEC-01) in `docs/lp-staking-audit-notes.md`.
 
-Growing the array is a separate step from filling it, and the deploy script sizes it rather
-than guessing: `LP_OBSERVATION_CARDINALITY` defaults to 150 and the run fails before spending
-gas if it is below `2 × ceil(LP_TWAP_WINDOW / 12)` — one observation per 12-second block in
-the worst case, doubled for margin. The guard defaults are deliberately wide: 300 s of
+Growing the array is a separate step from filling it. Since audit L-04 the contracts refuse a
+window the pool cannot serve forever (`libraries/OracleHistory.sol`): the CURRENT
+`observationCardinality` must be at least `ceil(window / 6) + 1` and `observe([window, 0])` must
+succeed, at `initialize` and at every `setTwapParams`. The deploy script runs the same check before
+it sends anything, and `LP_OBSERVATION_CARDINALITY` (default the larger of 150 and that minimum)
+is refused below it. The guard defaults are deliberately wide: 300 s of
 lookback and 1000 bps (= 953 ticks) of tolerance, so a fast move never locks a staker out of
 re-ranging.
 

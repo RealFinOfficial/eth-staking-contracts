@@ -63,6 +63,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint16",
+        "name": "cardinality",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint256",
+        "name": "needed",
+        "type": "uint256"
+      }
+    ],
+    "name": "CardinalityTooLow",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "DepositsArePaused",
     "type": "error"
@@ -113,6 +129,17 @@
   {
     "inputs": [],
     "name": "FailedCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint32",
+        "name": "window",
+        "type": "uint32"
+      }
+    ],
+    "name": "HistoryTooShort",
     "type": "error"
   },
   {

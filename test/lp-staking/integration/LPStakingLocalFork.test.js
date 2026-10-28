@@ -31,8 +31,8 @@
  *   S4     MaxUint256 approvals to the position manager and the router
  *   S5     create + initialize the pool at 0.50 tUSDC per tASSET   [pool script]
  *   S6     deployer seeds a wide position, 1e24 tASSET / 5e11 tUSDC
- *   S7     deploy the whole stack, five proxies born owned by the timelock [deploy script]
- *   S8     warm the oracle: 8 round trips, 60 s apart
+ *   S7     grow the oracle, then warm it: 8 round trips, 60 s apart (before the stack: audit L-04)
+ *   S8     deploy the whole stack, five proxies born owned by the timelock [deploy script]
  *   S9     fund the distributor: 10000 tASSET + 2,000,000 $OVTR   [lp-fund-rewards.js]
  *   S10    the operator schedules epoch 1 on the registry          [lp-epoch.js]
  *
@@ -127,6 +127,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
   let poolRun = null; // first `create-sepolia-pool.js` run
   let deployRun = null; // `deploy-lp-staking.js` run
+  let growFromBlock = null; // S7, the oracle growth
   let deployFromBlock = null;
   let deployToBlock = null;
   let seedTokenId = null;
@@ -398,7 +399,39 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     seedTokenId = seed.tokenId;
     ledger.record("S6", "seed the pool with liquidity", seed.receipt);
 
-    // S7 — deploy the whole stack and grow the oracle, by the repo's own script. All five
+    // S7 — grow the oracle and warm it up past the TWAP window with real, small round trips,
+    //      BEFORE the stack exists. The vault's and the zapper's `initialize` refuse a pool
+    //      whose CURRENT cardinality or stored history cannot serve the window (audit L-04),
+    //      and the deploy script asserts the same before it deploys anything. The first
+    //      write after the growth switches the pool to the grown size (its one-slot buffer
+    //      wraps at once), and the round trips leave more than the window of history.
+    growFromBlock = (await head()) + 1;
+    ledger.record(
+      "S7",
+      "grow the oracle",
+      await chain.send(pool.connect(w.deployer).increaseObservationCardinalityNext(C.OBSERVATION_CARDINALITY))
+    );
+    for (let i = 0; i < C.WARMUP_ROUNDS; i++) {
+      await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
+      const tickBefore = await uni.currentTick(pool);
+      const assetBefore = await asset.balanceOf(w.deployer.address);
+      ledger.record("S7", `warm-up buy ${i}`, await swapUsdcForAsset("deployer", C.WARMUP_SWAP_USDC));
+      const tickMid = await uni.currentTick(pool);
+      expect(tickMid, `warm-up buy ${i} did not move the tick`).to.not.equal(tickBefore);
+
+      const gained = (await asset.balanceOf(w.deployer.address)) - assetBefore;
+      expect(gained).to.be.greaterThan(0n);
+
+      await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
+      ledger.record("S7", `warm-up sell ${i}`, await swapAssetForUsdc("deployer", gained));
+      const tickAfter = await uni.currentTick(pool);
+      expect(tickAfter, `warm-up sell ${i} did not move the tick`).to.not.equal(tickMid);
+    }
+
+    await pool.observe([C.TWAP_WINDOW, 0]);
+
+    // S8 — deploy the whole stack by the repo's own script; the oracle it checks is already
+    //      grown and warm. All five
     //      proxies come out of it owned by the timelock already: `initialize` names the
     //      timelock inside each proxy's own deployment transaction, the Overture token is born
     //      with the distributor PROXY as its minter (its address predicted from the deployer's
@@ -446,24 +479,6 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     deployToBlock = await head();
 
     voucherDomain = await signing.readEip712Domain(distributor);
-
-    // S8 — warm the oracle up past the TWAP window with real, small round trips.
-    for (let i = 0; i < C.WARMUP_ROUNDS; i++) {
-      await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
-      const tickBefore = await uni.currentTick(pool);
-      const assetBefore = await asset.balanceOf(w.deployer.address);
-      ledger.record("S8", `warm-up buy ${i}`, await swapUsdcForAsset("deployer", C.WARMUP_SWAP_USDC));
-      const tickMid = await uni.currentTick(pool);
-      expect(tickMid, `warm-up buy ${i} did not move the tick`).to.not.equal(tickBefore);
-
-      const gained = (await asset.balanceOf(w.deployer.address)) - assetBefore;
-      expect(gained).to.be.greaterThan(0n);
-
-      await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
-      ledger.record("S8", `warm-up sell ${i}`, await swapAssetForUsdc("deployer", gained));
-      const tickAfter = await uni.currentTick(pool);
-      expect(tickAfter, `warm-up sell ${i} did not move the tick`).to.not.equal(tickMid);
-    }
 
     // The oracle now holds enough history for the guard to read on both contracts.
     await pool.observe([C.TWAP_WINDOW, 0]);
@@ -938,15 +953,19 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await zapper.usdcIsToken0()).to.equal(zeroForOne);
     });
 
-    it("grew the oracle to the configured cardinality", async function () {
+    it("grew the oracle to the configured cardinality, before the stack (audit L-04)", async function () {
       const slot0 = await pool.slot0();
       expect(slot0.observationCardinalityNext).to.equal(BigInt(C.OBSERVATION_CARDINALITY));
-      expect(slot0.observationCardinality).to.be.greaterThan(1n);
+      // The growth took effect at the first warm-up write: the CURRENT size is the grown one.
+      expect(slot0.observationCardinality).to.equal(BigInt(C.OBSERVATION_CARDINALITY));
+      // S7 grew it, so the deploy script found nothing to grow and checked what it needs.
+      expect(deployRun.stdout).to.include("Skipping increaseObservationCardinalityNext");
+      expect(deployRun.stdout).to.match(/oracle: current cardinality \d+ >= \d+, observe\(\[\d+, 0\]\) answers/);
 
       const logs = chain.decodeLogs(
         await rpc.getLogs(provider, {
           address: poolAddr,
-          fromBlock: deployFromBlock,
+          fromBlock: growFromBlock,
           toBlock: deployToBlock,
           topics: [ethers.id("IncreaseObservationCardinalityNext(uint16,uint16)")],
         }),
@@ -2357,7 +2376,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       for (const entry of ledger.entries) {
         if (entry.kind === "revert" || entry.step === "A40") continue;
         const block = await rpc.getBlockByNumber(provider, entry.blockNumber);
-        timestamps.push({ step: entry.step, ts: Number(block.timestamp) });
+        timestamps.push({ step: entry.step, label: entry.label, ts: Number(block.timestamp) });
       }
       for (let i = 1; i < timestamps.length; i++) {
         expect(
@@ -2367,7 +2386,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
 
       // The warm-up round trips are at least 60 s apart, which is what fills the oracle.
-      const warmup = timestamps.filter((t) => t.step === "S8").map((t) => t.ts);
+      const warmup = timestamps.filter((t) => t.step === "S7" && t.label !== "grow the oracle").map((t) => t.ts);
       expect(warmup.length).to.equal(C.WARMUP_ROUNDS * 2);
       for (let i = 1; i < warmup.length; i++) {
         expect(warmup[i] - warmup[i - 1]).to.be.at.least(C.WARMUP_STEP_SECONDS);

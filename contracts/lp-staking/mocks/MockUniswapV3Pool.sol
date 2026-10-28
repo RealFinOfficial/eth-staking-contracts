@@ -16,6 +16,11 @@ pragma solidity ^0.8.20;
  *  `slot0().tick` is settable independently, so a test can put spot at any distance from
  *  the TWAP and drive {TwapGuard} to either side of its bound.
  *
+ *  The history is settable too (audit L-04): `slot0()` reports {observationCardinality}
+ *  (65,535 unless a test lowers it, so a pool serves every window by default), and `observe`
+ *  reverts `OLD`, as the real pool does, for any `secondsAgo` beyond {historySeconds}
+ *  (unlimited by default). {OracleHistory} reads both when a window is set.
+ *
  *  That synthetic series always divides the window exactly, so it can never hand the guard
  *  a remainder. {setTickCumulatives} is the escape hatch: it switches `observe` into a raw
  *  mode that returns two caller-chosen cumulatives verbatim, which is the only way to reach
@@ -36,6 +41,11 @@ contract MockUniswapV3Pool {
     uint160 public sqrtPriceX96 = 79228162514264337593543950336;
     /// @notice Last value passed to `increaseObservationCardinalityNext`.
     uint16 public observationCardinalityNext = 1;
+    /// @notice The CURRENT observation count `slot0()` reports (field 4). Settable; it does not
+    ///         follow {observationCardinalityNext}, exactly like a real pool before its wrap.
+    uint16 public observationCardinality = type(uint16).max;
+    /// @notice The oldest `secondsAgo` `observe` can serve; beyond it `observe` reverts `OLD`.
+    uint32 public historySeconds = type(uint32).max;
     /// @notice When true, `observe` reverts the way an under-provisioned pool does.
     bool public observeReverts;
     /// @notice When true, `observe` returns {rawTickCumulatives} verbatim instead of the
@@ -91,6 +101,16 @@ contract MockUniswapV3Pool {
         observeReverts = value;
     }
 
+    /// @notice Sets the CURRENT observation count `slot0()` reports.
+    function setObservationCardinality(uint16 cardinality_) external {
+        observationCardinality = cardinality_;
+    }
+
+    /// @notice Sets how far back `observe` can see; older `secondsAgo` values revert `OLD`.
+    function setHistorySeconds(uint32 historySeconds_) external {
+        historySeconds = historySeconds_;
+    }
+
     /**
      * @notice Pins the two tick cumulatives `observe` returns, and switches the oracle into
      *         raw mode in the same call.
@@ -144,13 +164,13 @@ contract MockUniswapV3Pool {
             uint160 sqrtPriceX96_,
             int24 tick,
             uint16 observationIndex,
-            uint16 observationCardinality,
+            uint16 observationCardinality_,
             uint16 observationCardinalityNext_,
             uint8 feeProtocol,
             bool unlocked
         )
     {
-        return (sqrtPriceX96, currentTick, 0, 2, observationCardinalityNext, 0, true);
+        return (sqrtPriceX96, currentTick, 0, observationCardinality, observationCardinalityNext, 0, true);
     }
 
     function observe(uint32[] calldata secondsAgos)
@@ -159,6 +179,9 @@ contract MockUniswapV3Pool {
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)
     {
         if (observeReverts) revert("OLD");
+        for (uint256 i = 0; i < secondsAgos.length; i++) {
+            if (secondsAgos[i] > historySeconds) revert("OLD");
+        }
 
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);

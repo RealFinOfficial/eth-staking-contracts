@@ -241,8 +241,11 @@ operation, then funding and `lp-epoch.js set-amount`.
   seconds of history, `observe()` reverts with `OLD` and every TWAP-guarded path (`zapIn`,
   and any `rebalance` carrying a swap leg) reverts with it. Paths without a swap work from
   block one
-- **The oracle is sized, not guessed.** `LP_OBSERVATION_CARDINALITY` defaults to 150 and the
-  deploy script refuses anything below `2 × ceil(LP_TWAP_WINDOW / 12)`
+- **The oracle is sized, not guessed (audit L-04).** Every window setter (the vault's and the
+  zapper's `initialize` and `setTwapParams`) reverts unless the pool's CURRENT
+  `observationCardinality` is at least `ceil(window / 6) + 1` and `observe([window, 0])` succeeds
+  (`libraries/OracleHistory.sol`). The deploy script checks the same before it sends anything, so
+  the pool must be grown AND wrapped first (`scripts/grow-oracle.js`)
 - **Guard defaults are wide on purpose.** `LP_TWAP_WINDOW=300`, `LP_TWAP_MAX_DEVIATION_BPS=1000`
   (= 953 ticks). A narrow guard locks `rebalance` out exactly when a position has fallen out
   of range and needs re-ranging; the caller's own minimums are the primary protection

@@ -123,6 +123,29 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       );
     });
 
+    it("refuses a pool whose CURRENT cardinality cannot serve the window, before sending anything (L-04)", async function () {
+      // 300 s needs ceil(300 / 6) + 1 = 51 slots. A grown next size does not count.
+      await (await world.pool.setObservationCardinality(50)).wait();
+      await (await world.pool.increaseObservationCardinalityNext(1000)).wait();
+      try {
+        await refused(
+          {},
+          /CURRENT observationCardinality is 50, below the 51 slots a 300s window needs .*nothing was sent/
+        );
+      } finally {
+        await (await world.pool.setObservationCardinality(65535)).wait();
+      }
+    });
+
+    it("refuses a pool whose history is shorter than the window, before sending anything (L-04)", async function () {
+      await (await world.pool.setHistorySeconds(299)).wait();
+      try {
+        await refused({}, /pool\.observe\(\[300, 0\]\) reverts: the pool's stored history is shorter than 300s/);
+      } finally {
+        await (await world.pool.setHistorySeconds(4294967295n)).wait();
+      }
+    });
+
     it("refuses a zero floor in both scripts, before either sends anything (C-14)", async function () {
       await refused({ LP_APEBOND_MIN_CLIFF_SECONDS: "0" }, /LP_APEBOND_MIN_CLIFF_SECONDS must be >= 1 — got 0/);
 

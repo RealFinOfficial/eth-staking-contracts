@@ -41,25 +41,31 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 // The order, in full:
 //
 //   1. config, local validation and the on-chain checks (pool triple, decimals, factory)
-//   2. `LPTimelock(minDelay, [multisig], [multisig], address(0))` — depends on nothing,
+//   2. THE ORACLE, before anything is deployed (audit L-04): first the assertion the contracts
+//      make on chain — the CURRENT `observationCardinality` is at least `ceil(w / 6) + 1` and
+//      `observe([w, 0])` succeeds, for the longest window this run configures. The vault's and
+//      the zapper's `initialize` revert otherwise, so the run stops HERE, with nothing sent,
+//      instead of half-way through the stack. Then `increaseObservationCardinalityNext` on the
+//      pool (permissionless) when its next size is below LP_OBSERVATION_CARDINALITY
+//   3. `LPTimelock(minDelay, [multisig], [multisig], address(0))` — depends on nothing,
 //      and everything below names it, so it goes first
-//   3. predict the distributor PROXY's address from the deployer's nonce + 3, then
+//   4. predict the distributor PROXY's address from the deployer's nonce + 3, then
 //      TokenOverture implementation + LPProxy,
 //      `initialize(name, symbol, owner = timelock, minter = the predicted distributor proxy)`
-//   4. RewardsDistributor implementation + LPProxy,
+//   5. RewardsDistributor implementation + LPProxy,
 //      `initialize(owner = timelock, guardian, operator, signer, asset = LP_ASSET,
 //                  [{ASSET, conditional, claims LP_ASSET_CLAIMS_ENABLED}, {OVTR, unconditional, claims open}])`
 //      — `asset` marks the registered token `mintRewardToken` refuses by address;
 //      record it, then assert the proxy address matches the prediction (fatal on a miss)
-//   5. LPEpochRegistry implementation (bound to the distributor) + LPProxy,
+//   6. LPEpochRegistry implementation (bound to the distributor) + LPProxy,
 //      `initialize(owner = timelock, operator)`
-//   6. predict the zapper PROXY's address from the deployer's nonce + 3
-//   7. LPStakingVault implementation + LPProxy,
+//   7. predict the zapper PROXY's address from the deployer's nonce + 3
+//   8. LPStakingVault implementation + LPProxy,
 //      `initialize(owner = timelock, guardian, operator, zapper = predicted, window, ticks)` —
 //      `bonusEscrow` stays zero (the ApeBond escrow is not part of this stack)
-//   8. LPZapper implementation + LPProxy, `initialize(owner = timelock, operator, window, ticks)`;
+//   9. LPZapper implementation + LPProxy, `initialize(owner = timelock, operator, window, ticks)`;
 //      record it, then assert the proxy address matches the prediction
-//   9. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6, and the mainnet launch deploy
+//  10. ONLY with LP_APEBOND_ENABLED=1 (Sepolia test stack #6, and the mainnet launch deploy
 //      too — decision of 14 Oct 2026, path (a)):
 //      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
 //      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
@@ -69,7 +75,6 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //      and the ONE timelock batch that activates the route — `adapter.acceptOwnership()`,
 //      `vault.setBonusEscrow(escrow)`, `vault.setStakeOperator(adapter, true)`,
 //      `escrow.setAdapter(adapter)` — PRINTED and FILED, not sent (see the route's note below)
-//  10. `increaseObservationCardinalityNext` on the pool (permissionless)
 //  11. post-deploy verification of all five proxies + the timelock (and the ApeBond pair), the
 //      address summary, the verify commands, and the operator's next steps (fund the
 //      distributor, schedule epoch 1, set the timelock delay to 48 h with `updateDelay` when
@@ -133,10 +138,12 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //   LP_VAULT_CONTRACT         — TEST HOOK, refused on mainnet: the vault implementation's artifact
 //                               (LPStakingVault). The ApeBond activation suite deploys the lane-1
 //                               vault (LPStakingVaultLane1Mock) to rehearse the in-place upgrade
-//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (150). Must be at least
-//                               2 * ceil(LP_TWAP_WINDOW / 12): one slot per block in the
-//                               worst case, doubled for margin. 300 s needs >= 50, 3600 s
-//                               needs >= 600
+//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (the larger of 150 and the
+//                               minimum below). Must be at least the on-chain rule
+//                               ceil(w / 6) + 1 (OracleHistory, audit L-04), where w is the
+//                               longest window this run configures: 300 s needs >= 51,
+//                               1800 s >= 301, 3600 s >= 601. The pool's CURRENT cardinality
+//                               must already reach that minimum when the run starts
 //
 // Optional env — the ApeBond route (B.3 decision document; Sepolia test stack #6, and the mainnet
 // launch deploy too — decision of 14 Oct 2026, path (a)). OFF unless LP_APEBOND_ENABLED=1; with it
@@ -205,16 +212,16 @@ const MAX_TWAP_DEVIATION_TICKS = 1823; // TwapGuard.MAX_TWAP_DEVIATION_TICKS
 const DEFAULT_TWAP_WINDOW = 300;
 const DEFAULT_TWAP_MAX_DEVIATION_BPS = 1000;
 
-// Observation slots. A pool fills at most one per block, so `window / 12` seconds of history
-// is `ceil(window / 12)` slots in the worst case (every block trading); doubling that leaves
-// room for the burst of activity a crash produces, which is exactly when the guard is read.
+// Observation slots. The rule is the one the contracts enforce on chain when a window is set
+// (`libraries/OracleHistory.sol`, audit L-04): a pool writes at most one observation per block
+// and blocks are at least 12 s apart, halved to 6 s as headroom for a future slot-time cut, so
+// `ceil(window / 6) + 1` slots always span `window` seconds. 150 stays the floor of the default.
 const DEFAULT_OBSERVATION_CARDINALITY = 150;
-const SECONDS_PER_BLOCK = 12;
-const CARDINALITY_MARGIN = 2;
+const MIN_SECONDS_PER_SLOT = 6; // OracleHistory.MIN_SECONDS_PER_SLOT
 
-/** Smallest cardinality that can hold `window` seconds of history with margin. */
+/** The cardinality `OracleHistory.requireServes` requires for `window`: ceil(window / 6) + 1. */
 function requiredCardinality(window) {
-  return CARDINALITY_MARGIN * Math.ceil(window / SECONDS_PER_BLOCK);
+  return Math.ceil(window / MIN_SECONDS_PER_SLOT) + 1;
 }
 
 /**
@@ -326,8 +333,11 @@ async function main() {
     process.env.LP_TWAP_MAX_DEVIATION_BPS || DEFAULT_TWAP_MAX_DEVIATION_BPS
   );
   const twapMaxDeviationTicks = bpsToTicks(twapMaxDeviationBps);
+  // The longest window this run configures on chain: the vault's and the zapper's TWAP window.
+  const oracleWindow = twapWindow;
   const observationCardinality = Number(
-    process.env.LP_OBSERVATION_CARDINALITY || DEFAULT_OBSERVATION_CARDINALITY
+    process.env.LP_OBSERVATION_CARDINALITY ||
+      Math.max(DEFAULT_OBSERVATION_CARDINALITY, requiredCardinality(oracleWindow))
   );
 
   const overtureName = process.env.LP_OVERTURE_NAME || DEFAULT_OVERTURE_NAME;
@@ -399,15 +409,15 @@ async function main() {
         `${process.env.LP_TIMELOCK_MIN_DELAY}`
     );
   }
-  // Sizing the oracle is a liveness dependency, not a nicety: a buffer too small for the
-  // window makes `observe()` revert `OLD` and takes both swap legs down with it, and a burst
-  // of trading wraps a small buffer fastest.
-  const minimumCardinality = requiredCardinality(twapWindow);
+  // Sizing the oracle is a liveness dependency, not a nicety: the contracts refuse a window
+  // the pool cannot serve forever (OracleHistory, audit L-04), so the target must reach the
+  // on-chain rule.
+  const minimumCardinality = requiredCardinality(oracleWindow);
   if (observationCardinality < minimumCardinality) {
     throw new Error(
-      `LP_OBSERVATION_CARDINALITY ${observationCardinality} is too small for a ${twapWindow}s ` +
-        `window: at one observation per 12s block it needs at least ` +
-        `${CARDINALITY_MARGIN} * ceil(${twapWindow} / ${SECONDS_PER_BLOCK}) = ${minimumCardinality} slots`
+      `LP_OBSERVATION_CARDINALITY ${observationCardinality} is too small for a ${oracleWindow}s ` +
+        `window: the contracts require ceil(${oracleWindow} / ${MIN_SECONDS_PER_SLOT}) + 1 = ` +
+        `${minimumCardinality} slots`
     );
   }
 
@@ -454,7 +464,7 @@ async function main() {
     `TWAP max deviation: ${twapMaxDeviationBps} bps = ${twapMaxDeviationTicks} ticks (what the contract stores)`
   );
   console.log(
-    `Observation target: ${observationCardinality} (>= ${minimumCardinality} for a ${twapWindow}s window)`
+    `Observation target: ${observationCardinality} (the contracts need >= ${minimumCardinality} for a ${oracleWindow}s window)`
   );
   if (!apeBond) console.log(`ApeBond route:      not deployed (set LP_APEBOND_ENABLED=1 to add it)`);
 
@@ -593,6 +603,69 @@ async function main() {
   if (mainnet) {
     console.log(
       "\nEvery transaction below is signed by the mainnet deployer. Owner-tier operations go through the Safe."
+    );
+  }
+
+  // ──────────────────────── the oracle, before anything is deployed ────────────────────────
+  // The vault's and the zapper's `initialize` check that the pool serves the window now and
+  // forever (OracleHistory, audit L-04). The same check runs HERE, read-only and before a single
+  // transaction: a pool that cannot serve the window stops the run with nothing sent and nothing
+  // deployed. Growing `observationCardinalityNext` cannot fix it within this run, because grown
+  // slots count only after the pool's index wraps its current buffer.
+
+  console.log("\nThe pool oracle...");
+  if (cardinality < minimumCardinality) {
+    throw new Error(
+      `The pool's CURRENT observationCardinality is ${cardinality}, below the ${minimumCardinality} ` +
+        `slots a ${oracleWindow}s window needs (ceil(${oracleWindow} / ${MIN_SECONDS_PER_SLOT}) + 1, audit L-04). ` +
+        `The vault's and the zapper's initialize would revert CardinalityTooLow, so nothing was sent. ` +
+        `Grow the pool and let the new size take effect first (scripts/grow-oracle.js, LP_ORACLE_TARGET), ` +
+        `then re-run.`
+    );
+  }
+  try {
+    await pool.observe([oracleWindow, 0]);
+  } catch {
+    throw new Error(
+      `pool.observe([${oracleWindow}, 0]) reverts: the pool's stored history is shorter than ${oracleWindow}s. ` +
+        `The vault's and the zapper's initialize would revert HistoryTooShort, so nothing was sent. ` +
+        `Wait until the pool holds ${oracleWindow}s of history (or force writes with scripts/grow-oracle.js), ` +
+        `then re-run.`
+    );
+  }
+  console.log(
+    `  oracle: current cardinality ${cardinality} >= ${minimumCardinality}, ` +
+      `observe([${oracleWindow}, 0]) answers — the window is served`
+  );
+
+  // Permissionless: any key may grow the oracle. Growing beyond the minimum is margin for later
+  // windows; it takes effect at the pool's next wrap.
+  if (cardinalityNext >= observationCardinality) {
+    console.log(
+      `Skipping increaseObservationCardinalityNext — already ${cardinalityNext} >= ${observationCardinality}.`
+    );
+  } else {
+    const poolAsDeployer = await hre.ethers.getContractAt("IUniswapV3Pool", poolAddress, deployer);
+    await pools.send(
+      `increaseObservationCardinalityNext(${observationCardinality})`,
+      deployer,
+      (o) => poolAsDeployer.increaseObservationCardinalityNext(observationCardinality, o)
+    );
+  }
+  // The pool is not deployed by this script, but the size the stack was armed with is a
+  // deployment fact of the same kind as the guard parameters, so it goes in the registry
+  // beside them. The other three keys are the ones create-sepolia-pool.js writes.
+  pools.recordDeployment(chainId, "UniswapV3Pool", poolAddress, {
+    token0,
+    token1,
+    fee,
+    observationCardinality: Math.max(observationCardinality, cardinalityNext),
+  });
+  if (cardinality < observationCardinality) {
+    console.log(
+      `\nNOTE: increaseObservationCardinalityNext(${observationCardinality}) only pre-pays the slots. The new size takes\n` +
+        `      effect when the pool's index wraps its current buffer of ${cardinality}; until then the old buffer\n` +
+        `      keeps overwriting itself. scripts/grow-oracle.js forces the writes that get it there.`
     );
   }
 
@@ -864,41 +937,6 @@ async function main() {
 
   // Nothing to wire and nothing to hand over: every proxy was born with its final owner, its
   // final roles and its final links.
-
-  // ──────────────────────── oracle warm-up ────────────────────────
-  // Permissionless: any key may grow the oracle.
-
-  console.log("\nGrowing the pool oracle...");
-  if (cardinalityNext >= observationCardinality) {
-    console.log(
-      `Skipping increaseObservationCardinalityNext — already ${cardinalityNext} >= ${observationCardinality}.`
-    );
-  } else {
-    const poolAsDeployer = await hre.ethers.getContractAt("IUniswapV3Pool", poolAddress, deployer);
-    await pools.send(
-      `increaseObservationCardinalityNext(${observationCardinality})`,
-      deployer,
-      (o) => poolAsDeployer.increaseObservationCardinalityNext(observationCardinality, o)
-    );
-  }
-
-  // The pool is not deployed by this script, but the size the stack was armed with is a
-  // deployment fact of the same kind as the guard parameters, so it goes in the registry
-  // beside them. The other three keys are the ones create-sepolia-pool.js writes.
-  pools.recordDeployment(chainId, "UniswapV3Pool", poolAddress, {
-    token0,
-    token1,
-    fee,
-    observationCardinality: Math.max(observationCardinality, cardinalityNext),
-  });
-
-  if (cardinality <= 1) {
-    console.log(
-      `\nNOTE: increaseObservationCardinalityNext(${observationCardinality}) only pre-pays the slots. The new size takes effect at the\n` +
-        `      pool's next write. pool.observe([${twapWindow}, 0]) reverts 'OLD' only while the pool's single observation\n` +
-        `      is younger than ${twapWindow}s, and zapIn and a rebalance with a swap leg revert with it.`
-    );
-  }
 
   // ──────────────────────── verification ────────────────────────
 

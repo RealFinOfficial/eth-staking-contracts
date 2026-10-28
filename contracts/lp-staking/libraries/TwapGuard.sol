@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../interfaces/IUniswapV3Pool.sol";
+import "./OracleHistory.sol";
 
 // ──────────────────────── Shared types ─────────────────────────
 
@@ -167,7 +168,12 @@ abstract contract TwapGuard {
     // ──────────────────────── Internal helpers ─────────────────
 
     /// @dev Bounds-checks and stores the TWAP parameters. Access control is the
-    ///      inheriting contract's responsibility.
+    ///      inheriting contract's responsibility. After the bounds, the pool must be able to
+    ///      serve the window now and forever after ({OracleHistory-requireServes}, audit L-04):
+    ///      the current observation cardinality is at least `ceil(window / 6) + 1` and
+    ///      `observe([window, 0])` succeeds, else {OracleHistory-CardinalityTooLow} or
+    ///      {OracleHistory-HistoryTooShort}. This runs inside `initialize` too, so a vault or a
+    ///      zapper cannot be born on a pool that cannot serve its window.
     function _setTwapParams(uint32 _window, uint24 _maxDeviationTicks) internal {
         if (_window < MIN_TWAP_WINDOW || _window > MAX_TWAP_WINDOW) {
             revert InvalidTwapWindow(_window, MIN_TWAP_WINDOW, MAX_TWAP_WINDOW);
@@ -175,6 +181,7 @@ abstract contract TwapGuard {
         if (_maxDeviationTicks == 0 || _maxDeviationTicks > MAX_TWAP_DEVIATION_TICKS) {
             revert InvalidTwapDeviation(_maxDeviationTicks, MAX_TWAP_DEVIATION_TICKS);
         }
+        OracleHistory.requireServes(pool, _window);
         TwapGuardStorage storage $ = _twapGuardStorage();
         $.twapWindow = _window;
         $.maxTwapDeviationTicks = _maxDeviationTicks;

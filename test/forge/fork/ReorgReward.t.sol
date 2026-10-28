@@ -138,8 +138,9 @@ contract ReorgRewardTest is ForkHarness {
         uint256 snap = vm.snapshotState();
 
         vm.prank(multisig);
-        vault.setTwapParams(1200, 111);
-        assertEq(vault.twapWindow(), 1200, "anti-vacuity: the parameter change must really have landed");
+        // 450 s: a window the warmed harness pool serves (76 slots of its 150, audit L-04).
+        vault.setTwapParams(450, 111);
+        assertEq(vault.twapWindow(), 450, "anti-vacuity: the parameter change must really have landed");
 
         vm.revertToState(snap);
 

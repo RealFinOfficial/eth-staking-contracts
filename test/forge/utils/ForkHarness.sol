@@ -29,10 +29,14 @@ import {ISwapRouter02} from "../../../contracts/lp-staking/interfaces/ISwapRoute
  *  with real liquidity. Everything after that point is genuine Uniswap behaviour.
  *
  *  ── Two rungs, because the oracle's coldness is itself a finding ──────────────────────
- *  `_forkAndDeploy()` stops with a **cold** oracle (cardinality 1, no history) — the state a
- *  freshly deployed stack is really in, and the one SEC-01 asserts against.
- *  `_deployForkedStack()` continues into `_warmOracle()` (grow to 100 slots, then 8 warp +
- *  round-trip-swap rounds) and is what every other file uses.
+ *  `_forkMarket()` stops with the market made and the pool oracle still **cold** (cardinality
+ *  1, no history) and NO stack: since audit L-04 the vault's and the zapper's `initialize`
+ *  refuse a pool that cannot serve their window ({OracleHistory}), so the cold state is the
+ *  subject of the tests that assert that refusal on the real pool. `_forkAndDeploy()` warms
+ *  the pool's oracle first ({_warmPoolOracle}: grow to {OBSERVATION_CARDINALITY} slots, then 8
+ *  warp + round-trip-swap rounds) and deploys the stack on it, exactly in the order the deploy
+ *  script now requires; `_deployForkedStack()` adds the readable-guard check and is what every
+ *  other file uses.
  *
  *  Harness-local parameter divergences from production are annotated inline.
  */
@@ -103,8 +107,8 @@ abstract contract ForkHarness is BaseForge {
     uint256 internal constant WARMUP_SWAP_USDC = 25e6;
 
     /// @dev Oracle slots the deploy script grows the pool into (LP_OBSERVATION_CARDINALITY).
-    ///      Its rule is 2 * ceil(window / 12); a 300 s window needs 50, and 150 is the
-    ///      default that leaves margin for a burst of trading.
+    ///      The on-chain rule is ceil(window / 6) + 1 ({OracleHistory}, audit L-04); a 300 s
+    ///      window needs 51, and 150 is the deploy script's default floor.
     uint16 internal constant OBSERVATION_CARDINALITY = 150;
 
     // ──────────────────────── EIP-712 constants ────────────────
@@ -115,14 +119,14 @@ abstract contract ForkHarness is BaseForge {
     bytes32 internal constant NFT_PERMIT_TYPEHASH =
         keccak256("Permit(address spender,uint256 tokenId,uint256 nonce,uint256 deadline)");
 
-    // ──────────────────────── Rung 1: cold stack ───────────────
+    // ──────────────────────── Rung 1: cold market ──────────────
 
     /**
-     * @dev Forks, makes a market, deploys and wires the stack, funds the actors — and stops
-     *      with the pool oracle still cold (cardinality 1, no history). Use directly only
-     *      when the coldness is the subject; otherwise call {_deployForkedStack}.
+     * @dev Forks, makes a market and funds the actors — and stops with the pool oracle still
+     *      cold (cardinality 1, no history) and no stack deployed. Use directly only when the
+     *      coldness is the subject; otherwise call {_deployForkedStack}.
      */
-    function _forkAndDeploy() internal {
+    function _forkMarket() internal {
         _loadProfile();
         vm.createSelectFork(_resolveForkRpc(), profile.pinnedBlock);
         assertEq(block.chainid, profile.chainId, "fork must report the profile's real chain id");
@@ -131,13 +135,23 @@ abstract contract ForkHarness is BaseForge {
         _bindMarket();
         _fundActors();
         _seedPoolLiquidity();
+    }
+
+    /**
+     * @dev The cold market, its oracle warmed, then the stack deployed and wired on it. The
+     *      warm-up comes FIRST because `initialize` checks the pool can serve the window.
+     */
+    function _forkAndDeploy() internal {
+        _forkMarket();
+        _warmPoolOracle();
         _deployStack();
     }
 
-    /// @dev The full rung: cold stack, then a usable oracle.
+    /// @dev The full rung: a warm oracle, the stack on it, and a guard that reads.
     function _deployForkedStack() internal {
         _forkAndDeploy();
-        _warmOracle();
+        (,,, bool withinBounds) = vault.previewTwap();
+        assertTrue(withinBounds, "warm-up must leave spot inside the vault's TWAP guard");
     }
 
     // ──────────────────────── Setup steps ──────────────────────
@@ -252,7 +266,7 @@ abstract contract ForkHarness is BaseForge {
     ///      then ownership of all five proxies to the multisig. The script names the timelock as
     ///      owner inside each proxy's own deployment transaction; here the deployer (this
     ///      contract) owns them first so it can wire `setZapper`, and then hands them over.
-    function _deployStack() private {
+    function _deployStack() internal {
         address predictedDistributor = _predictDistributorProxy();
         overture = _deployOvertureProxy(OVERTURE_NAME, OVERTURE_SYMBOL, address(this), predictedDistributor);
         distributor = _deployDistributorProxy(
@@ -331,12 +345,14 @@ abstract contract ForkHarness is BaseForge {
     }
 
     /**
-     * @dev The permissionless half of the deploy script's tail, plus the history the script
-     *      can only tell an operator to go and create: growing the array allocates slots,
-     *      but they fill one per block that trades.
+     * @dev The permissionless step the deploy script runs before anything is deployed, plus the
+     *      history the script can only tell an operator to go and create: growing the array
+     *      allocates slots, the first write after it switches a one-slot pool to the grown size,
+     *      and the slots then fill one per block that trades.
      */
-    function _warmOracle() internal {
+    function _warmPoolOracle() internal {
         poolRef.increaseObservationCardinalityNext(OBSERVATION_CARDINALITY);
+        _forceObservationWrite();
 
         for (uint256 i = 0; i < WARMUP_ROUNDS; ++i) {
             _advance(WARMUP_STEP_SECONDS);
@@ -346,9 +362,18 @@ abstract contract ForkHarness is BaseForge {
             _swap(whale, profile.asset, profile.usdc, out, 0);
         }
         _advance(WARMUP_STEP_SECONDS);
+    }
 
-        (,,, bool withinBounds) = vault.previewTwap();
-        assertTrue(withinBounds, "warm-up must leave spot inside the vault's TWAP guard");
+    /**
+     * @dev One observation write, in a later block: a small in-range mint. A pool writes an
+     *      observation on an in-range liquidity change and on a swap that moves the tick, at most
+     *      once per block; the warm-up round trips are too small to move the tick on this depth,
+     *      so the mint is the write that switches a one-slot pool to its grown size.
+     */
+    function _forceObservationWrite() internal {
+        _advance(WARMUP_STEP_SECONDS);
+        (, int24 tick,,,,,) = poolRef.slot0();
+        _mintPositionFor(whale, _alignDown(tick) - 600, _alignUp(tick) + 600, 1_000e18, 1_000e6);
     }
 
     // ──────────────────────── Market helpers ───────────────────

@@ -41,6 +41,11 @@ contract TwapTickFuzzTest is LocalHarness {
         _deployLocalStack();
 
         rawPool = new RawTickPool(token0, token1, FEE);
+        // The vault's `initialize` and `setTwapParams` check the pool can serve the window (audit
+        // L-04): a history long enough for every window, and cumulatives `observe` can answer.
+        rawPool.setObservationCardinality(type(uint16).max);
+        int56[] memory seed = new int56[](2);
+        rawPool.setTickCumulatives(seed);
         guard = _deployVaultProxy(
             _vaultParams(
                 address(npmMock),

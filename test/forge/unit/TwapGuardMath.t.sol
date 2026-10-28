@@ -35,6 +35,10 @@ contract TwapGuardMathTest is BaseForge {
         (address t0, address t1) = address(a) < address(b) ? (address(a), address(b)) : (address(b), address(a));
 
         pool = new RawTickPool(t0, t1, FEE);
+        // The vault's `initialize` checks the pool can serve the window (audit L-04): a history
+        // long enough for every window, and cumulatives `observe` can answer with.
+        pool.setObservationCardinality(type(uint16).max);
+        _setCumulatives(0, 0);
         // The guard is abstract; the vault is the smallest concrete carrier of it, and using
         // the real contract keeps the test honest about which code path is measured — as a
         // proxy, because that is the only shape in which the parameters are ever seeded.

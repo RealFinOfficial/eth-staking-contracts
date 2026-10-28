@@ -5,6 +5,8 @@ import {ForkHarness} from "../utils/ForkHarness.sol";
 import {TwapGuard, SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
 import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
+import {OracleHistory} from "../../../contracts/lp-staking/libraries/OracleHistory.sol";
+import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 
 /**
  * @notice Why this file exists: the spot-vs-TWAP guard is the only on-chain manipulation
@@ -13,94 +15,103 @@ import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
  *         property of the REAL pool oracle, not of a mock that returns a chosen tick.
  *
  *  Two contracts, because the oracle's state is the subject:
- *    * {TwapColdOracleTest} runs on a freshly deployed stack whose pool still stores ONE
- *      observation. That is the state every production deployment starts in, and SEC-01
- *      lives there.
+ *    * {TwapColdOracleTest} runs on a freshly made market whose pool still stores ONE
+ *      observation. SEC-01 lived there: a vault born on such a pool reverted a bare `OLD` on
+ *      every guarded path. Since audit L-04 the vault cannot be born there at all
+ *      ({OracleHistory}): this contract asserts that refusal against the real pool, and the
+ *      real `OLD` behind it.
  *    * {TwapManipulationTest} runs on a warmed oracle and pushes real money through the real
  *      router to move spot away from the TWAP.
  */
 contract TwapColdOracleTest is ForkHarness {
-    /// @dev Deliberately the COLD rung: no `increaseObservationCardinalityNext`, no history.
+    uint32 internal constant WINDOW = 300;
+
+    /// @dev Deliberately the COLD rung: a market and funded actors, no growth, no history, no stack.
     function setUp() public {
-        _forkAndDeploy();
+        _forkMarket();
+    }
+
+    /// @dev A vault proxy on the real pool, the implementation deployed first so the expected
+    ///      revert binds to the proxy's construction, which runs `initialize`.
+    function _expectVaultRefused(bytes memory reason) internal {
+        LPStakingVault impl = new LPStakingVault(profile.npm, address(poolRef), token0, token1, FEE, profile.router);
+        bytes memory init =
+            abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, multisig, address(0), WINDOW, 953));
+        vm.expectRevert(reason);
+        new LPProxy(address(impl), init);
     }
 
     /**
-     * @dev FINDING SEC-01 (O-01/O-15, deploy blocker): a Uniswap V3 pool stores ONE
-     *      observation until someone grows the array AND blocks trade past it. Until then
-     *      `pool.observe([twapWindow, 0])` reverts with the bare string `OLD`, which the
-     *      guard does not catch and does not translate — so every swap-bearing rebalance
-     *      reverts with an error no caller can interpret. Asserted as the CURRENT behaviour;
-     *      the fix is operational (grow the array and warm it before announcing the program),
-     *      not a contract change.
+     * @dev SEC-01, closed by audit L-04: a freshly created pool stores exactly one observation,
+     *      and `initialize` refuses it — the CURRENT cardinality 1 is below ceil(300 / 6) + 1.
      */
-    function test_SEC01_RebalanceWithSwapRevertsBareOldOnAColdOracle() public {
-        uint256 tokenId = _mintAndStake(alice, 600);
-
-        (,,,, uint16 cardinality,,) = poolRef.slot0();
+    function test_L04_AColdPoolRefusesTheVaultAtInitialize() public {
+        (,,, uint16 cardinality,,,) = poolRef.slot0();
         assertEq(cardinality, 1, "a freshly created pool stores exactly one observation");
-
-        SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
-        // Read the tick BEFORE arming the cheatcode: `vm.expectRevert` binds to the very
-        // next external call, and `_currentTick()` is one.
-        int24 tick = _currentTick();
-
-        vm.prank(alice);
-        vm.expectRevert(bytes("OLD"));
-        vault.rebalance(tokenId, _alignDown(tick) - 600, _alignUp(tick) + 600, swap, FAR_DEADLINE);
+        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
     }
 
-    /// @dev FINDING SEC-01, zap leg: the same cold oracle blocks every zap-in that swaps.
-    function test_SEC01_ZapInRevertsBareOldOnAColdOracle() public {
-        int24 tick = _currentTick();
-        SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
-
-        vm.startPrank(alice);
-        usdcToken.approve(address(zapper), 1_000e6);
-        vm.expectRevert(bytes("OLD"));
-        zapper.zapIn(1_000e6, _alignDown(tick) - 600, _alignUp(tick) + 600, swap, FAR_DEADLINE);
-        vm.stopPrank();
+    /// @dev Growing `observationCardinalityNext` alone does not count: the grown slots are used
+    ///      only after the pool's index wraps, so the CURRENT cardinality is what is read.
+    function test_L04_GrowingNextAloneDoesNotSatisfyTheCheck() public {
+        poolRef.increaseObservationCardinalityNext(OBSERVATION_CARDINALITY);
+        (,,, uint16 cardinality, uint16 cardinalityNext,,) = poolRef.slot0();
+        assertEq(cardinalityNext, OBSERVATION_CARDINALITY, "next is grown");
+        assertEq(cardinality, 1, "current is not, until the next write");
+        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
     }
 
-    /// @dev The other half of the finding: only the GUARDED paths are blocked. Custody and
-    ///      exits work from block one, which is what makes the finding operational.
-    function test_SEC01_ColdOracleLeavesStakeUnstakeAndSwapFreeRebalanceWorking() public {
-        uint256 tokenId = _mintAndStake(alice, 600);
-        assertEq(vault.stakerOf(tokenId), alice, "stake must work with no oracle history");
+    /**
+     * @dev The real `OLD`: the pool is grown and written once, so its current cardinality is
+     *      the grown one, but its history is only a minute old. `observe([300, 0])` reverts
+     *      `OLD` on the real pool, and `initialize` turns that into {OracleHistory-HistoryTooShort}.
+     */
+    function test_L04_AGrownPoolWithShortHistoryRevertsHistoryTooShort() public {
+        poolRef.increaseObservationCardinalityNext(OBSERVATION_CARDINALITY);
+        _forceObservationWrite();
+        (,,, uint16 cardinality,,,) = poolRef.slot0();
+        assertEq(cardinality, OBSERVATION_CARDINALITY, "the first write after the growth switched the size");
 
-        int24 tick = _currentTick();
-        vm.prank(alice);
-        uint256 newTokenId =
-            vault.rebalance(tokenId, _alignDown(tick) - 1200, _alignUp(tick) + 1200, _noSwap(), FAR_DEADLINE);
-        assertEq(vault.stakerOf(newTokenId), alice, "a swap-free rebalance must work with no oracle history");
-
-        vm.prank(alice);
-        vault.unstake(newTokenId);
-        assertEq(npm.ownerOf(newTokenId), alice, "unstake must work with no oracle history");
-    }
-
-    /// @dev The frontend pre-check inherits the same coldness, so a user is told before
-    ///      submitting rather than by a bare `OLD` in a failed transaction.
-    function test_SEC01_PreviewTwapAlsoRevertsOnAColdOracle() public {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = WINDOW;
         vm.expectRevert(bytes("OLD"));
-        vault.previewTwap();
+        poolRef.observe(secondsAgos);
 
-        vm.expectRevert(bytes("OLD"));
-        zapper.previewTwap();
+        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.HistoryTooShort.selector, WINDOW));
     }
 
     /// @dev And the operational fix really is sufficient: grow the array, trade past the
-    ///      window, and the same call becomes readable.
-    function test_SEC01_GrowingAndWarmingTheOracleMakesTheGuardReadable() public {
-        _warmOracle();
+    ///      window, and the stack is born with a guard that reads.
+    function test_L04_AGrownAndWarmedPoolAcceptsTheStack() public {
+        _warmPoolOracle();
+        _deployStack();
 
-        (,,,, uint16 cardinality,,) = poolRef.slot0();
-        assertGt(cardinality, 1, "warm-up must have grown the stored observation count");
-
+        (,,, uint16 cardinality,,,) = poolRef.slot0();
+        assertEq(cardinality, OBSERVATION_CARDINALITY, "warm-up must have switched the stored observation count");
         (,,, bool withinBounds) = vault.previewTwap();
         assertTrue(withinBounds, "a warmed oracle must give the guard a readable, passing answer");
+        (,,, bool zapperWithin) = zapper.previewTwap();
+        assertTrue(zapperWithin, "and the zapper's too");
+    }
+
+    /// @dev On a live stack the setter applies the same rule against the real pool: 150 slots
+    ///      serve 300 s, not 1800 s (301 needed) and not 3600 s (601 needed).
+    function test_L04_SetTwapParamsRefusesAWindowTheRealPoolCannotServe() public {
+        _warmPoolOracle();
+        _deployStack();
+
+        vm.startPrank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(301))
+        );
+        vault.setTwapParams(1800, 953);
+        vm.expectRevert(
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(601))
+        );
+        zapper.setTwapParams(3600, 953);
+        vault.setTwapParams(WINDOW, 953);
+        vm.stopPrank();
+        assertEq(vault.twapWindow(), WINDOW, "a window the pool serves is accepted");
     }
 }
 
@@ -302,10 +313,16 @@ contract TwapManipulationTest is ForkHarness {
 
         assertEq(vault.twapWindow(), before_, "a refused window must leave the stored one untouched");
 
-        // and the boundary itself is accepted, so the bound is exactly where it claims to be
+        // and the boundary itself passes the bounds, so the bound is exactly where it claims to
+        // be: what refuses it on this pool is the history check that follows (audit L-04),
+        // since 150 slots cannot serve 3600 s (601 needed). The unit tier accepts it on a mock
+        // pool that can.
         vm.prank(multisig);
+        vm.expectRevert(
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(601))
+        );
         vault.setTwapParams(MAX_TWAP_WINDOW, 500);
-        assertEq(vault.twapWindow(), MAX_TWAP_WINDOW, "the maximum window itself must be accepted");
+        assertEq(vault.twapWindow(), before_, "a window the pool cannot serve must leave the stored one untouched");
     }
 
     /// @dev SEC-03's consequence, now unreachable: the owner cannot brick either swap leg
