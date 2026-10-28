@@ -84,7 +84,13 @@ const {
 //                                    campaign, caller and campaign caller). While the activation
 //                                    is PENDING (the adapter nominated, not accepted) it asserts
 //                                    `pendingOwner() == timelock` instead of the link: the check
-//                                    to run right before the Safe executes the batch.
+//                                    to run right before the Safe executes the batch. It also
+//                                    scans the adapter's configuration and ownership EVENTS from
+//                                    its deployment block (chunks of at most 10,000 blocks),
+//                                    prints them, and fails on a configuration event inside the
+//                                    pending-owner window, a caller or campaign outside the
+//                                    expected ones, or a live value that differs from the record
+//                                    (see `checkAdapterHistory`).
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -107,6 +113,9 @@ const {
 //                                least the pool's tick spacing (500)
 //   LP_APEBOND_CLIFF_SECONDS …   cliff, rate, minimum, switch: see `readCampaign` in
 //                                scripts/lib/apebond.js
+//   LP_LOG_FROM_BLOCK            verify: first block of the adapter's event scan (its recorded
+//                                deployment block)
+//   LP_LOG_CHUNK_BLOCKS          verify: event-scan chunk, at most 10,000 (10000)
 //   LP_APEBOND_ASSERT_POSITIONS  comma-separated token ids whose staker must read the same
 //                                before and after (none)
 //   LP_APEBOND_BATCH_FILE        where the batch is filed (apebond-<mode>-batch.json beside the
@@ -385,6 +394,17 @@ async function main() {
     });
     const failures = [];
     const check = reporter(failures);
+    await checkAdapterHistory(check, {
+      adapterAddress: verifyAdapter,
+      timelockAddress,
+      record: expectedAdapterRecord(adapterEntry, {
+        pendingReplacement: Boolean(adapterEntry.pendingAdapter),
+        guardian: apeBondGuardian,
+        valuationWindow,
+        soulZapCallers,
+        campaign,
+      }),
+    });
     await apebond.checkRoute(check, {
       vaultAddress,
       escrowAddress: hre.ethers.getAddress(escrowEntry.address),
@@ -771,6 +791,176 @@ async function printAdapterConfig(adapterAddress, { campaignIds, callers }) {
     }
   }
   if (ids.length === 0) console.log("  campaigns: none recorded and none configured by this run");
+}
+
+// ──────────────────────── verify: the adapter's event history ────────────────────────
+
+/** The adapter configuration events the pre-execute check reads, and the nomination events. */
+const ADAPTER_CONFIG_EVENTS = [
+  "SoulZapCallerSet",
+  "CampaignCallerSet",
+  "CampaignSet",
+  "CampaignEnabledSet",
+  "GuardianSet",
+  "ValuationWindowSet",
+];
+const ADAPTER_HISTORY_EVENTS = [...ADAPTER_CONFIG_EVENTS, "OwnershipTransferStarted", "OwnershipTransferred"];
+/** Infura caps `eth_getLogs` at 10,000 blocks per call. */
+const MAX_LOG_CHUNK = 10_000;
+
+/**
+ * What the adapter must hold, from the deployment record (or, for a replacement still pending,
+ * from this run's environment, because the record describes the adapter being replaced): the
+ * deployment block the event scan starts at, the guardian, the valuation window, the campaigns
+ * with every field, and the callers (the router(s)) that may appear as allowed.
+ */
+function expectedAdapterRecord(entry, { pendingReplacement, guardian, valuationWindow, soulZapCallers, campaign }) {
+  if (pendingReplacement) {
+    return {
+      block: entry.pendingAdapterBlock,
+      guardian,
+      valuationWindow,
+      campaigns: campaign ? [apebond.campaignRecord(campaign, soulZapCallers)] : [],
+      callers: [...soulZapCallers],
+    };
+  }
+  const campaigns = entry.campaigns || [];
+  return {
+    block: entry.block,
+    guardian: entry.guardian,
+    valuationWindow: entry.valuationWindow,
+    campaigns,
+    callers: [
+      ...soulZapCallers,
+      ...(entry.soulZapCallers || []),
+      ...campaigns.flatMap((c) => c.callers || []),
+    ],
+  };
+}
+
+/** Every log of the adapter's history events in [from, to], in chunks of at most 10,000 blocks. */
+async function scanAdapterHistory(adapterAddress, iface, from, to) {
+  const requested = Number(process.env.LP_LOG_CHUNK_BLOCKS || MAX_LOG_CHUNK);
+  const chunk = Math.min(Math.max(1, requested), MAX_LOG_CHUNK);
+  const topics = [ADAPTER_HISTORY_EVENTS.map((name) => iface.getEvent(name).topicHash)];
+  const logs = [];
+  for (let start = from; start <= to; start += chunk) {
+    const end = Math.min(start + chunk - 1, to);
+    logs.push(...(await hre.ethers.provider.getLogs({ address: adapterAddress, topics, fromBlock: start, toBlock: end })));
+  }
+  return logs
+    .map((log) => ({ log, parsed: iface.parseLog(log) }))
+    .sort((a, b) => a.log.blockNumber - b.log.blockNumber || a.log.index - b.log.index);
+}
+
+/** True when log `a` comes after log `b` on chain. */
+function after(a, b) {
+  return a.blockNumber > b.blockNumber || (a.blockNumber === b.blockNumber && a.index > b.index);
+}
+
+/**
+ * The pre-execute check, from the adapter's EVENTS rather than from the addresses and ids this run
+ * already knows (security review of audit L-03). It scans every configuration event and every
+ * ownership event of the adapter from its deployment block to the latest block, prints the full
+ * list, and fails when:
+ *   (a) a configuration event comes AFTER the nomination of the timelock
+ *       (`OwnershipTransferStarted(owner, timelock)`) and before its acceptance — the deployer key
+ *       changed the adapter during the pending-owner window;
+ *   (b) a `SoulZapCallerSet` / `CampaignCallerSet` with `allowed = true` names a caller outside
+ *       the expected router(s);
+ *   (c) a `CampaignSet` names a campaign id outside the expected ids;
+ *   (d) the live `valuationWindow()`, `guardian()` or any field of `campaigns(id)` differs from
+ *       the deployment record.
+ */
+async function checkAdapterHistory(check, { adapterAddress, timelockAddress, record }) {
+  const artifact = await hre.artifacts.readArtifact(ADAPTER_KIND);
+  const iface = new hre.ethers.Interface(artifact.abi);
+  const adapter = new hre.ethers.Contract(adapterAddress, artifact.abi, hre.ethers.provider);
+
+  const latest = await hre.ethers.provider.getBlockNumber();
+  const fromRaw = process.env.LP_LOG_FROM_BLOCK || record.block;
+  if (fromRaw === undefined || fromRaw === null || String(fromRaw).trim() === "") {
+    throw new Error(
+      `No deployment block is recorded for ${ADAPTER_KIND} ${adapterAddress}: set LP_LOG_FROM_BLOCK to the ` +
+        `block it was deployed in, so the event scan covers its whole history`
+    );
+  }
+  const from = Number(fromRaw);
+  const history = await scanAdapterHistory(adapterAddress, iface, from, latest);
+
+  console.log(
+    `\n  — the adapter's event history, blocks ${from}..${latest} (chunks of at most ${MAX_LOG_CHUNK}) —`
+  );
+  for (const { log, parsed } of history) {
+    const args = parsed.fragment.inputs.map((input, i) => `${input.name}=${parsed.args[i]}`).join(", ");
+    console.log(`  block ${log.blockNumber} log ${log.index}: ${parsed.name}(${args})`);
+  }
+  if (history.length === 0) console.log("  no event found");
+
+  // (a) the pending-owner window: from the LAST nomination of this timelock to its acceptance.
+  const nominations = history.filter(
+    (h) => h.parsed.name === "OwnershipTransferStarted" && sameValue(h.parsed.args.newOwner, timelockAddress)
+  );
+  const nomination = nominations.length > 0 ? nominations[nominations.length - 1] : null;
+  if (nomination) {
+    const acceptance = history.find(
+      (h) =>
+        h.parsed.name === "OwnershipTransferred" &&
+        sameValue(h.parsed.args.newOwner, timelockAddress) &&
+        after(h.log, nomination.log)
+    );
+    const inWindow = history.filter(
+      (h) =>
+        ADAPTER_CONFIG_EVENTS.includes(h.parsed.name) &&
+        after(h.log, nomination.log) &&
+        (!acceptance || after(acceptance.log, h.log))
+    );
+    for (const h of inWindow) {
+      console.log(`  (a) ${h.parsed.name} at block ${h.log.blockNumber} came after the nomination at block ${nomination.log.blockNumber}`);
+    }
+    check(
+      `(a) configuration events after the nomination of the timelock (block ${nomination.log.blockNumber})` +
+        `${acceptance ? ` and before its acceptance (block ${acceptance.log.blockNumber})` : ""}`,
+      inWindow.length,
+      0
+    );
+  } else {
+    console.log("  (a) no OwnershipTransferStarted naming the timelock: no pending-owner window to check");
+  }
+
+  // (b) every caller ever allowed is an expected router.
+  const expectedCallers = new Set(record.callers.map((c) => hre.ethers.getAddress(c)));
+  const strangers = [];
+  for (const h of history) {
+    if ((h.parsed.name === "SoulZapCallerSet" || h.parsed.name === "CampaignCallerSet") && h.parsed.args.allowed) {
+      const caller = hre.ethers.getAddress(h.parsed.args.caller);
+      if (!expectedCallers.has(caller)) strangers.push(`${h.parsed.name} ${caller} at block ${h.log.blockNumber}`);
+    }
+  }
+  for (const line of strangers) console.log(`  (b) unexpected caller allowed: ${line}`);
+  check(`(b) callers allowed outside the expected router(s) ${[...expectedCallers].join(", ") || "(none)"}`, strangers.length, 0);
+
+  // (c) every configured campaign is an expected one.
+  const expectedIds = new Set(record.campaigns.map((c) => c.id.toLowerCase()));
+  const foreign = history
+    .filter((h) => h.parsed.name === "CampaignSet" && !expectedIds.has(h.parsed.args.campaignId.toLowerCase()))
+    .map((h) => `${h.parsed.args.campaignId} at block ${h.log.blockNumber}`);
+  for (const line of foreign) console.log(`  (c) unexpected campaign configured: ${line}`);
+  check(`(c) campaigns configured outside the expected ids`, foreign.length, 0);
+
+  // (d) the live configuration is the recorded one.
+  if (record.valuationWindow !== undefined && record.valuationWindow !== null) {
+    check("(d) ApeBondPositionAdapter.valuationWindow (live vs record)", await adapter.valuationWindow(), record.valuationWindow);
+  } else {
+    console.log("  (d) no valuationWindow in the record (an adapter deployed before audit L-02): not compared");
+  }
+  if (record.guardian) check("(d) ApeBondPositionAdapter.guardian (live vs record)", await adapter.guardian(), record.guardian);
+  for (const c of record.campaigns) {
+    const live = await adapter.campaigns(c.id);
+    for (const field of ["enabled", "downTicks", "upTicks", "toleranceTicks", "bonusCliffSeconds", "bonusBps", "minBonusAmount"]) {
+      check(`(d) campaigns(${c.id}).${field} (live vs record)`, live[field], c[field]);
+    }
+  }
 }
 
 /** `check(label, actual, expected)` printing OK / FAIL and collecting failures. */

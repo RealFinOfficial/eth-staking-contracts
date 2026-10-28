@@ -491,6 +491,76 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(result.stdout).to.not.include("FAIL");
       expect(await nonceOf(w.deployer.address)).to.equal(nonce);
     });
+
+    // The pre-execute check reads the adapter's EVENTS, not only the callers and ids it already
+    // knows (security review of audit L-03): a change made by the deployer key in the
+    // pending-owner window, or a caller nobody expected, must fail the run.
+    it("prints the adapter's full event history and passes it on the untouched pair", async function () {
+      const result = await world.runOk("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
+      expect(result.stdout).to.include("— the adapter's event history, blocks");
+      expect(result.stdout).to.match(/ValuationWindowSet\(previous=0, next=1800\)/);
+      expect(result.stdout).to.match(new RegExp(`SoulZapCallerSet\\(caller=${w.signer2.address}, allowed=true\\)`));
+      expect(result.stdout).to.match(new RegExp(`OwnershipTransferStarted\\(previousOwner=${w.deployer.address}, newOwner=${timelockAddr}\\)`));
+      expect(result.stdout).to.match(/OK {4}\(a\) configuration events after the nomination of the timelock \(block \d+\): 0/);
+      expect(result.stdout).to.match(/OK {4}\(b\) callers allowed outside the expected router\(s\) .*: 0/);
+      expect(result.stdout).to.match(/OK {4}\(c\) campaigns configured outside the expected ids: 0/);
+      expect(result.stdout).to.include("OK    (d) ApeBondPositionAdapter.valuationWindow (live vs record): 1800");
+    });
+
+    /** Runs `body` on a chain snapshot and reverts it, so the pair stays as the later tests need it. */
+    async function onSnapshot(body) {
+      const id = await provider.send("evm_snapshot", []);
+      try {
+        await body();
+      } finally {
+        await provider.send("evm_revert", [id]);
+      }
+    }
+
+    it("FAILS (a) on a configuration change made by the deployer key after the nomination", async function () {
+      await onSnapshot(async () => {
+        // Still the owner in the third state: the call goes through and emits an event.
+        await (await adapter.connect(w.deployer).setCampaignEnabled(CAMPAIGN_ID, true)).wait();
+        const result = await world.run("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
+        expect(result.code).to.not.equal(0);
+        expect(result.stdout).to.match(/\(a\) CampaignEnabledSet at block \d+ came after the nomination at block \d+/);
+        expect(result.stdout).to.match(/FAIL {2}\(a\) configuration events after the nomination of the timelock \(block \d+\): 1 \(expected 0\)/);
+        expect(result.stdout).to.match(/OK {4}\(b\) callers allowed/);
+        expect(result.stderr + result.stdout).to.match(/The pre-execute verification failed for: \(a\)/);
+      });
+    });
+
+    it("FAILS (a) and (b) on a caller the deployer key slipped in after the nomination", async function () {
+      await onSnapshot(async () => {
+        await (await adapter.connect(w.deployer).setSoulZapCaller(w.carol.address, true)).wait();
+        const result = await world.run("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
+        expect(result.code).to.not.equal(0);
+        expect(result.stdout).to.match(/FAIL {2}\(a\) configuration events after the nomination/);
+        expect(result.stdout).to.match(new RegExp(`\\(b\\) unexpected caller allowed: SoulZapCallerSet ${w.carol.address} at block \\d+`));
+        expect(result.stdout).to.match(/FAIL {2}\(b\) callers allowed outside the expected router\(s\) .*: 1 \(expected 0\)/);
+      });
+    });
+
+    it("FAILS (b) alone on an allowed caller the deployment record does not name", async function () {
+      // The chain is untouched: the record is narrowed to one router, so the second one the
+      // deploy allowlisted (before the nomination) is a caller nobody expects.
+      const original = fs.readFileSync(world.registryFile, "utf8");
+      const edited = JSON.parse(original);
+      const entry = edited[String(CHAIN_ID)].ApeBondPositionAdapter;
+      entry.soulZapCallers = entry.soulZapCallers.filter((c) => c !== w.signer2.address);
+      entry.campaigns = entry.campaigns.map((c) => ({ ...c, callers: c.callers.filter((x) => x !== w.signer2.address) }));
+      fs.writeFileSync(world.registryFile, JSON.stringify(edited, null, 2) + "\n");
+      try {
+        const result = await world.run("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
+        expect(result.code).to.not.equal(0);
+        expect(result.stdout).to.match(/OK {4}\(a\) configuration events after the nomination/);
+        expect(result.stdout).to.match(new RegExp(`\\(b\\) unexpected caller allowed: SoulZapCallerSet ${w.signer2.address} at block \\d+`));
+        expect(result.stdout).to.match(new RegExp(`\\(b\\) unexpected caller allowed: CampaignCallerSet ${w.signer2.address} at block \\d+`));
+        expect(result.stdout).to.match(/FAIL {2}\(b\) callers allowed outside the expected router\(s\) .*: 2 \(expected 0\)/);
+      } finally {
+        fs.writeFileSync(world.registryFile, original);
+      }
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
