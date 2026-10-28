@@ -115,6 +115,14 @@ contract TwapColdOracleTest is ForkHarness {
     }
 }
 
+/// @dev The one pool selector the oracle-free test breaks on purpose.
+interface IObserve {
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s);
+}
+
 contract TwapManipulationTest is ForkHarness {
     /// @dev Whale trade sizes measured against the seeded depth: ~700 ticks each way.
     uint256 internal constant PUSH_UP_USDC = 500_000e6;
@@ -122,6 +130,38 @@ contract TwapManipulationTest is ForkHarness {
 
     function setUp() public {
         _deployForkedStack();
+    }
+
+    // ──────────────────────── The oracle-free paths ────────────
+
+    /**
+     * @dev The paths that must never consult the oracle, on the real pool: with every
+     *      `observe` call reverting `OLD` (a broken oracle), a position is still staked,
+     *      re-ranged with no swap leg, and unstaked. What the oracle guards (a swap leg, the
+     *      preview) is shown to be broken in the same state, so the assertion is not vacuous.
+     *      This replaces the cold-oracle arm of SEC-01, which audit L-04 made unreachable: a vault
+     *      can no longer be born on a pool without history.
+     */
+    function test_OracleFreePaths_StakeRebalanceWithoutSwapAndUnstakeIgnoreABrokenOracle() public {
+        vm.mockCallRevert(address(poolRef), abi.encodeWithSelector(IObserve.observe.selector), bytes("OLD"));
+
+        vm.expectRevert(bytes("OLD"));
+        vault.previewTwap();
+
+        uint256 tokenId = _mintAndStake(alice, 600);
+        assertEq(vault.stakerOf(tokenId), alice, "stake must not read the oracle");
+
+        int24 tick = _currentTick();
+        vm.prank(alice);
+        uint256 newTokenId =
+            vault.rebalance(tokenId, _alignDown(tick) - 1200, _alignUp(tick) + 1200, _noSwap(), FAR_DEADLINE);
+        assertEq(vault.stakerOf(newTokenId), alice, "a swap-free rebalance must not read the oracle");
+
+        vm.prank(alice);
+        vault.unstake(newTokenId);
+        assertEq(npm.ownerOf(newTokenId), alice, "unstake must not read the oracle");
+
+        vm.clearMockedCalls();
     }
 
     // ──────────────────────── Baseline ─────────────────────────
