@@ -325,8 +325,10 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         ApeBondPositionAdapter fresh = _adapterWith(1800);
         assertEq(fresh.valuationWindow(), 1800, "the constructor stores the window");
         assertEq(adapter.valuationWindow(), 1800, "the harness adapter runs the deploy default");
-        assertEq(fresh.MIN_VALUATION_WINDOW(), 300, "the floor mirrors the vault's TWAP floor");
-        assertEq(fresh.MAX_VALUATION_WINDOW(), 3600, "the ceiling mirrors the vault's TWAP ceiling");
+        // One source for the bounds: the vault's TWAP bounds and the valuation window's are both
+        // OracleHistory.MIN_WINDOW / MAX_WINDOW.
+        assertEq(vault.MIN_TWAP_WINDOW(), OracleHistory.MIN_WINDOW, "the vault reads the shared floor");
+        assertEq(vault.MAX_TWAP_WINDOW(), OracleHistory.MAX_WINDOW, "the vault reads the shared ceiling");
     }
 
     /// @dev Bounded to 300..3600 s, at construction and in the setter; both bounds accepted.

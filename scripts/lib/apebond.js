@@ -60,7 +60,7 @@ const MAX_UINT64 = (1n << 64n) - 1n;
 
 /** The adapter's valuation window when LP_APEBOND_VALUATION_WINDOW is unset (audit L-02). */
 const DEFAULT_VALUATION_WINDOW = 1800n;
-/** The adapter's MIN_VALUATION_WINDOW / MAX_VALUATION_WINDOW (the vault's TWAP bounds). */
+/** The adapter's valuation-window bounds: OracleHistory.MIN_WINDOW / MAX_WINDOW, the vault's TWAP bounds. */
 const MIN_VALUATION_WINDOW = 300;
 const MAX_VALUATION_WINDOW = 3600;
 

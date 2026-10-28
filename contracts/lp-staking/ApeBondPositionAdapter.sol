@@ -224,12 +224,6 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
     /// @notice Basis-point denominator; also the ceiling of `bonusBps` (the whole value).
     uint16 public constant BPS = 10_000;
 
-    /// @notice Shortest valuation window, in seconds. Mirrors `TwapGuard.MIN_TWAP_WINDOW`: the
-    ///         guard is an abstract contract, and Solidity does not let another contract read a
-    ///         contract's constant by type name.
-    uint32 public constant MIN_VALUATION_WINDOW = 300;
-    /// @notice Longest valuation window, in seconds. Mirrors `TwapGuard.MAX_TWAP_WINDOW`.
-    uint32 public constant MAX_VALUATION_WINDOW = 3600;
 
     // ──────────────────────── Immutables ───────────────────────
 
@@ -264,8 +258,9 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
 
     /// @notice The window, in seconds, whose arithmetic-mean tick values every position and so
     ///         every bonus (audit L-02). Set at construction and by {setValuationWindow}, bounded
-    ///         to {MIN_VALUATION_WINDOW}..{MAX_VALUATION_WINDOW} and checked against the pool's
-    ///         history ({OracleHistory-requireServes}) each time.
+    ///         to the vault's own TWAP bounds ({OracleHistory-MIN_WINDOW}..{OracleHistory-MAX_WINDOW},
+    ///         300..3600 s) and checked against the pool's history ({OracleHistory-requireServes})
+    ///         each time.
     uint32 public valuationWindow;
 
     /// @notice True while `caller` may call {depositFor} at all (the global allowlist).
@@ -372,7 +367,7 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
     /// @dev The constructor was given a zero cliff floor.
     error ZeroMinCliff();
 
-    /// @dev A valuation window outside {MIN_VALUATION_WINDOW}..{MAX_VALUATION_WINDOW}.
+    /// @dev A valuation window outside {OracleHistory-MIN_WINDOW}..{OracleHistory-MAX_WINDOW}.
     error InvalidValuationWindow(uint32 window, uint32 min, uint32 max);
 
     /// @dev A campaign cliff below {minCliffSeconds}.
@@ -763,7 +758,7 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
     /**
      * @notice Sets the window whose mean tick values every position and so every bonus (audit
      *         L-02). Affects only deposits made afterwards.
-     * @dev Owner tier (the timelock). Bounded to {MIN_VALUATION_WINDOW}..{MAX_VALUATION_WINDOW}
+     * @dev Owner tier (the timelock). Bounded to {OracleHistory-MIN_WINDOW}..{OracleHistory-MAX_WINDOW}
      *      ({InvalidValuationWindow}) and checked against the pool's history
      *      ({OracleHistory-requireServes}): grow the pool first, then change the window.
      */
@@ -908,7 +903,7 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
         (int24 currentTick, int24 twapTick, int24 maxDeviationTicks, bool withinBounds) = vault.previewTwap();
         if (!withinBounds) revert PriceOutsideTwapBounds(currentTick, twapTick, maxDeviationTicks);
 
-        int24 valuationTick = _meanTick(valuationWindow);
+        int24 valuationTick = OracleHistory.meanTick(IUniswapV3Pool(address(_pool)), valuationWindow);
         d.twapTick = valuationTick;
         d.positionValue =
             PositionValue.valueAt(d.liquidity, d.tickLower, d.tickUpper, valuationTick, bonusIsToken0);
@@ -920,27 +915,12 @@ contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC7
 
     /// @dev Bounds-checks the window, checks the pool serves it now and forever after, stores it.
     function _setValuationWindow(uint32 window) private {
-        if (window < MIN_VALUATION_WINDOW || window > MAX_VALUATION_WINDOW) {
-            revert InvalidValuationWindow(window, MIN_VALUATION_WINDOW, MAX_VALUATION_WINDOW);
+        if (window < OracleHistory.MIN_WINDOW || window > OracleHistory.MAX_WINDOW) {
+            revert InvalidValuationWindow(window, OracleHistory.MIN_WINDOW, OracleHistory.MAX_WINDOW);
         }
         OracleHistory.requireServes(IUniswapV3Pool(address(_pool)), window);
         emit ValuationWindowSet(valuationWindow, window);
         valuationWindow = window;
-    }
-
-    /// @dev Arithmetic-mean tick over `window` from `pool.observe([window, 0])`, rounded toward
-    ///      negative infinity exactly like {TwapGuard-_twapAndSpotTicks} (Uniswap's own
-    ///      OracleLibrary convention). Fails closed: no fallback when the pool cannot serve it.
-    function _meanTick(uint32 window) private view returns (int24 meanTick) {
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = window;
-        (int56[] memory tickCumulatives,) = IUniswapV3Pool(address(_pool)).observe(secondsAgos);
-
-        int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
-        int56 windowSigned = int56(uint56(window));
-        meanTick = int24(tickDelta / windowSigned);
-        // Solidity truncates toward zero; the oracle convention floors.
-        if (tickDelta < 0 && tickDelta % windowSigned != 0) meanTick--;
     }
 
     /// @dev The stored campaign, reverting when none is configured under `campaignId`.

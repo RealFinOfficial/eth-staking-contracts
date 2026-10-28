@@ -122,12 +122,12 @@ test("one newly uncovered branch fails the gate — every branch floor is the ce
 // ceiling: a line that arrives uncovered has to fail, exactly the way a branch does.
 test("the adapter's line floor is its ceiling — one uncovered line fails", () => {
   const lcov = buildLcov({
-    "contracts/lp-staking/ApeBondPositionAdapter.sol": {lines: [196, 197], branches: [44, 44]},
+    "contracts/lp-staking/ApeBondPositionAdapter.sol": {lines: [188, 189], branches: [43, 43]},
   });
   const {code, stderr} = runChecker(lcov);
   assert.equal(code, 1);
-  assert.match(stderr, /ApeBondPositionAdapter\.sol: lines coverage 99\.49% \(196\/197\)/);
-  assert.match(stderr, /below the floor 100\.00% \(197\/197\)/);
+  assert.match(stderr, /ApeBondPositionAdapter\.sol: lines coverage 99\.47% \(188\/189\)/);
+  assert.match(stderr, /below the floor 100\.00% \(189\/189\)/);
 });
 
 test("all violations are reported, not just the first", () => {

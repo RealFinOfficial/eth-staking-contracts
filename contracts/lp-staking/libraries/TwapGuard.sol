@@ -87,12 +87,12 @@ struct SwapParams {
 abstract contract TwapGuard {
     // ──────────────────────── Constants ────────────────────────
 
-    /// @notice Shortest permitted TWAP window, in seconds.
-    uint32 public constant MIN_TWAP_WINDOW = 300;
+    /// @notice Shortest permitted TWAP window, in seconds ({OracleHistory-MIN_WINDOW}).
+    uint32 public constant MIN_TWAP_WINDOW = OracleHistory.MIN_WINDOW;
     /// @notice Longest permitted TWAP window, in seconds. One hour: long enough for any
     ///         sane circuit breaker, short enough that a pool can actually serve it, so a
     ///         single owner transaction can no longer brick both swap legs.
-    uint32 public constant MAX_TWAP_WINDOW = 3600;
+    uint32 public constant MAX_TWAP_WINDOW = OracleHistory.MAX_WINDOW;
     /// @notice Widest permitted deviation, in ticks. 1823 = floor(ln 1.2 / ln 1.0001), i.e.
     ///         a 20% price move — the loosest the guard may ever be configured.
     uint24 public constant MAX_TWAP_DEVIATION_TICKS = 1823;
@@ -189,25 +189,10 @@ abstract contract TwapGuard {
     }
 
     /// @dev Arithmetic-mean tick over `twapWindow`, rounded toward negative infinity
-    ///      (matching Uniswap's own OracleLibrary), plus the current spot tick.
+    ///      (matching Uniswap's own OracleLibrary, {OracleHistory-meanTick}), plus the current
+    ///      spot tick.
     function _twapAndSpotTicks() internal view returns (int24 twapTick, int24 currentTick) {
-        uint32 window = _twapGuardStorage().twapWindow;
-
-        uint32[] memory secondsAgos = new uint32[](2);
-        secondsAgos[0] = window;
-        secondsAgos[1] = 0;
-
-        (int56[] memory tickCumulatives, ) = pool.observe(secondsAgos);
-
-        int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
-        int56 windowSigned = int56(uint56(window));
-
-        twapTick = int24(tickDelta / windowSigned);
-        // Solidity truncates toward zero; the oracle convention floors.
-        if (tickDelta < 0 && tickDelta % windowSigned != 0) {
-            twapTick--;
-        }
-
+        twapTick = OracleHistory.meanTick(pool, _twapGuardStorage().twapWindow);
         (, currentTick, , , , , ) = pool.slot0();
     }
 

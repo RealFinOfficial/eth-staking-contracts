@@ -26,12 +26,21 @@ import "../interfaces/IUniswapV3Pool.sol";
  *
  *  It is called from every place that sets a window ({TwapGuard-_setTwapParams}, which covers
  *  `initialize` and `setTwapParams` of the vault and the zapper, and the ApeBond adapter's
- *  valuation window). The READ paths stay as they are and fail closed: there is no try/catch
- *  fallback on any of them.
+ *  valuation window). The READ paths fail closed: {meanTick} has no try/catch fallback.
+ *
+ *  The library also holds the two things every window user shares: the window bounds
+ *  ({MIN_WINDOW}, {MAX_WINDOW}; `TwapGuard.MIN_TWAP_WINDOW` / `MAX_TWAP_WINDOW` and the adapter's
+ *  valuation window read them from here, because Solidity does not let one contract read another
+ *  contract's constant by type name) and the one mean-tick computation ({meanTick}).
  */
 library OracleHistory {
     /// Conservative block time: today's 12 s halved, so the guarantee survives 6 s slots.
     uint256 internal constant MIN_SECONDS_PER_SLOT = 6;
+
+    /// Shortest window any LP contract may configure, in seconds.
+    uint32 internal constant MIN_WINDOW = 300;
+    /// Longest window any LP contract may configure, in seconds. One hour.
+    uint32 internal constant MAX_WINDOW = 3600;
 
     error HistoryTooShort(uint32 window);
     error CardinalityTooLow(uint16 cardinality, uint256 needed);
@@ -47,6 +56,26 @@ library OracleHistory {
         try pool.observe(secondsAgos) returns (int56[] memory, uint160[] memory) {}
         catch {
             revert HistoryTooShort(window);
+        }
+    }
+
+    /// Arithmetic-mean tick over `window` from `pool.observe([window, 0])`, rounded toward
+    /// negative infinity (Uniswap's own OracleLibrary convention). Reverts with the pool's own
+    /// error when the pool cannot serve the window: no fallback.
+    function meanTick(IUniswapV3Pool pool, uint32 window) internal view returns (int24 tick) {
+        uint32[] memory secondsAgos = new uint32[](2);
+        secondsAgos[0] = window;
+        secondsAgos[1] = 0;
+
+        (int56[] memory tickCumulatives,) = pool.observe(secondsAgos);
+
+        int56 tickDelta = tickCumulatives[1] - tickCumulatives[0];
+        int56 windowSigned = int56(uint56(window));
+
+        tick = int24(tickDelta / windowSigned);
+        // Solidity truncates toward zero; the oracle convention floors.
+        if (tickDelta < 0 && tickDelta % windowSigned != 0) {
+            tick--;
         }
     }
 }
