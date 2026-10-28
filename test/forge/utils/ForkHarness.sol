@@ -267,7 +267,7 @@ abstract contract ForkHarness is BaseForge {
         registry = _deployRegistryProxy(address(distributor), address(this), multisig);
         // Owner = the deployer (this contract) so the wiring below can run; guardian AND
         // operator = the multisig, which is what makes the fork tier's admin calls
-        // (`setDepositsPaused`, `rescuePosition`, `setSigner`) reach their real tier.
+        // (`pauseDeposits`, `rescuePosition`, `setSigner`) reach their real tier.
         vault = _deployVaultProxy(
             BaseForge.VaultProxyParams({
                 positionManager: profile.npm,

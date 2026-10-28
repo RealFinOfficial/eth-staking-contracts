@@ -114,10 +114,11 @@ const ethers = require("ethers");
 /**
  * The owner tier, in full. Everything here is `onlyOwner` on a contract the timelock owns, so
  * everything here can ONLY be reached through a scheduled operation. The guardian tier (the
- * vault's two pauses, the distributor's `setPaused`) and the operator tier (`setTwapParams`,
+ * vault's two pauses, the distributor's `pause`) and the operator tier (`setTwapParams`,
  * `rescuePosition`, `sweep`, `setSigner`, `recoverExcess`, the distributor's `mintRewardToken`
  * — the operator's only road to minting $OVTR, since the distributor proxy is the token's
- * minter — the registry's epoch functions, and those same pauses) are deliberately absent: those are one-transaction
+ * minter — the registry's epoch functions, those same pauses and the unpauses, which are the
+ * operator's alone) are deliberately absent: those are one-transaction
  * calls the hot key and the multisig send directly, and routing them through here would defeat
  * the reason they exist.
  *

@@ -186,7 +186,7 @@ contract ZapperBranchesTest is LocalHarness {
      *      a paused vault costs a would-be staker one reverted call and nothing else.
      */
     function test_ZapIn_RevertsBeforeAnyValueMovesWhenTheVaultsDepositsArePaused() public {
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         uint256 balanceBefore = usdcToken.balanceOf(alice);
         uint256 callsBefore = routerMock.swapCalls();
@@ -204,8 +204,8 @@ contract ZapperBranchesTest is LocalHarness {
 
     /// @dev The pre-check is the ONLY thing the pause changes: unpause and the same call works.
     function test_ZapIn_ResumesTheMomentTheVaultIsUnpaused() public {
-        vault.setDepositsPaused(true);
-        vault.setDepositsPaused(false);
+        vault.pauseDeposits();
+        vault.unpauseDeposits();
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP);

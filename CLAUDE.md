@@ -49,7 +49,9 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
   range, refund dust, burn the emptied NFT) without ever losing custody. It computes no rewards
   and stores no dollar values — scoring is off-chain, from the full-state events. `unstake` is
   never gated by a pause switch, a signature or backend liveness. Deposits and `rebalance` have
-  one pause switch each — `setDepositsPaused` (which also stops zaps) and `setRebalancePaused`.
+  one pause switch each — `pauseDeposits` / `unpauseDeposits` (which also stops zaps) and
+  `pauseRebalance` / `unpauseRebalance`; a pause takes the guardian or the operator, an unpause the
+  operator only (audit L-01).
   It is upgradeable because `stakers[tokenId]` is the only record of who owns each custodied
   NFT. THREE admin tiers — **owner** (the timelock): upgrades, `setZapper`, `setBonusEscrow`,
   `setGuardian`, `setOperator`; **guardian** (a hot key, no delay): the two pauses and nothing
@@ -87,11 +89,11 @@ planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is 
   because `claimed[token][user]` must survive a fix — the proxy is UPGRADED, never REPLACED
   (SEC-04). Tiers — **owner** (the timelock): upgrades, `addRewardToken(token, conditional,
   claimsEnabled)`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator`;
-  **guardian**: `setPaused`; **operator**: `setSigner`, `recoverExcess(token, amount)` (to the
+  **guardian**: `pause`; **operator**: `setSigner`, `recoverExcess(token, amount)` (to the
   operator), `mintRewardToken(token, to, amount)` (mints a registered token whose minter is the
   distributor to one wallet, outside the claim flow; `$ASSET` — stored as `asset()`, appended to
   the namespace in v2 — is refused by address with `AssetNotMintable`, whoever calls),
-  `setGuardian`, `setPaused`. A v1 proxy (stack #6) migrates with `upgradeToAndCall(impl,
+  `setGuardian`, `pause`, `unpause`. A v1 proxy (stack #6) migrates with `upgradeToAndCall(impl,
   initializeV2($ASSET))` through the timelock (`initializeV2` is `reinitializer(2) onlyOwner`). Launch tokens: `$ASSET` (conditional, claims CLOSED,
   opened later by the timelock) and `$OVTR` (unconditional, claims open). `enabled` only decides
   whether the registry may schedule a token; `claimsEnabled` gates `claim`. A leaked signer key
@@ -138,7 +140,8 @@ An un-flagged run is byte-for-byte the stack above, with `bonusEscrow = 0`:
   writes no storage (transient reentrancy lock and receive window). No rescue, no sweep, no
   arbitrary call. Owner (the timelock): `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`,
   `setSoulZapCaller`, `setGuardian`; the vault's operator (read live from `vault.operator()`,
-  audit C-29): `setGuardian` too; guardian (a pause key): `setDepositsPaused`
+  audit C-29): `setGuardian`, `pauseDeposits` and `unpauseDeposits` (the only tier that unpauses,
+  audit L-01); guardian (a pause key): `pauseDeposits`
 - **`libraries/TickMath.sol`, `libraries/LiquidityAmounts.sol`** (vendored from Uniswap's 0.8
   branches, GPL-2.0-or-later headers kept — open item O6) and **`libraries/PositionValue.sol`**
   (ours): the ONE valuation the adapter and the escrow share

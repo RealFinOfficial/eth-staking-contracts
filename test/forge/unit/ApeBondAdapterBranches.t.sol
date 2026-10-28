@@ -313,13 +313,17 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         adapter.setGuardian(bob);
 
         vm.prank(apeGuardian);
-        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotGuardian.selector, apeGuardian, bob));
-        adapter.setDepositsPaused(true);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ApeBondPositionAdapter.NotGuardianOrOperator.selector, apeGuardian, bob, address(this)
+            )
+        );
+        adapter.pauseDeposits();
 
         vm.expectEmit(false, false, false, true, address(adapter));
         emit ApeBondPositionAdapter.DepositsPausedSet(true);
         vm.prank(bob);
-        adapter.setDepositsPaused(true);
+        adapter.pauseDeposits();
         assertTrue(adapter.depositsPaused(), "the new guardian paused");
     }
 
@@ -347,22 +351,59 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertEq(adapter.guardian(), bob, "the operator moved the seat");
     }
 
-    /// @dev The timelock holds no undelayed switch: the owner is refused on the pause, and so is
-    ///      a stranger.
-    function test_SetDepositsPaused_IsGuardianOnly() public {
+    /// @dev Audit L-01. The timelock holds no undelayed switch: the owner is refused on the pause
+    ///      and on the unpause, and so is a stranger. The guardian pauses and is refused on the
+    ///      unpause. The vault's operator (read live) does both. The local vault starts with this
+    ///      contract in every seat, so the operator gets its own key first.
+    function test_PauseDeposits_GuardianOrVaultOperator_UnpauseVaultOperatorOnly() public {
+        vault.setOperator(operatorSafe);
         address[2] memory refused = [address(this), stranger];
         for (uint256 i = 0; i < refused.length; ++i) {
             vm.prank(refused[i]);
             vm.expectRevert(
-                abi.encodeWithSelector(ApeBondPositionAdapter.NotGuardian.selector, refused[i], apeGuardian)
+                abi.encodeWithSelector(
+                    ApeBondPositionAdapter.NotGuardianOrOperator.selector, refused[i], apeGuardian, operatorSafe
+                )
             );
-            adapter.setDepositsPaused(true);
+            adapter.pauseDeposits();
         }
+        address[3] memory notOperator = [address(this), stranger, apeGuardian];
+        for (uint256 i = 0; i < notOperator.length; ++i) {
+            vm.prank(notOperator[i]);
+            vm.expectRevert(
+                abi.encodeWithSelector(ApeBondPositionAdapter.NotOperator.selector, notOperator[i], operatorSafe)
+            );
+            adapter.unpauseDeposits();
+        }
+
+        vm.expectEmit(false, false, false, true, address(adapter));
+        emit ApeBondPositionAdapter.DepositsPausedSet(true);
         vm.prank(apeGuardian);
-        adapter.setDepositsPaused(true);
+        adapter.pauseDeposits();
+        assertTrue(adapter.depositsPaused(), "the guardian paused");
+
+        vm.expectEmit(false, false, false, true, address(adapter));
+        emit ApeBondPositionAdapter.DepositsPausedSet(false);
+        vm.prank(operatorSafe);
+        adapter.unpauseDeposits();
+        assertFalse(adapter.depositsPaused(), "the vault's operator unpaused");
+
+        vm.prank(operatorSafe);
+        adapter.pauseDeposits();
+        assertTrue(adapter.depositsPaused(), "the vault's operator pauses too");
+    }
+
+    /// @dev Audit L-01 proof of concept, inverted: the operator pauses during an incident and a
+    ///      leaked guardian key cannot lift that pause.
+    function test_PauseDeposits_TheGuardianCannotLiftTheOperatorsPause() public {
+        vault.setOperator(operatorSafe);
+        vm.prank(operatorSafe);
+        adapter.pauseDeposits();
+
         vm.prank(apeGuardian);
-        adapter.setDepositsPaused(false);
-        assertFalse(adapter.depositsPaused(), "and unpaused again");
+        vm.expectRevert(abi.encodeWithSelector(ApeBondPositionAdapter.NotOperator.selector, apeGuardian, operatorSafe));
+        adapter.unpauseDeposits();
+        assertTrue(adapter.depositsPaused(), "the operator's pause holds");
     }
 
     /// @dev Every configuration setter is owner (timelock) tier: the guardian, a caller and a
@@ -492,13 +533,12 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
         vault.setBonusEscrow(address(0));
         vm.prank(apeGuardian);
-        adapter.setDepositsPaused(true);
+        adapter.pauseDeposits();
         vm.expectRevert(
             abi.encodeWithSelector(ApeBondPositionAdapter.EscrowNotLinked.selector, address(0), address(escrow))
         );
         soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
-        vm.prank(apeGuardian);
-        adapter.setDepositsPaused(false);
+        adapter.unpauseDeposits(); // this contract is the local vault's operator
 
         BonusEscrow other = _deployBonusEscrowProxy(address(asset), address(vault), address(this), address(0));
         vault.setBonusEscrow(address(other));
@@ -516,7 +556,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
 
     function test_DepositFor_1_RevertsWhileTheAdaptersDepositsArePaused() public {
         vm.prank(apeGuardian);
-        adapter.setDepositsPaused(true);
+        adapter.pauseDeposits();
         uint256 tokenId = _mintForSoulZap(BUY_LIQUIDITY);
         vm.expectRevert(ApeBondPositionAdapter.DepositsArePaused.selector);
         soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);
@@ -726,7 +766,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     /// @dev The vault's own deposit pause reaches the purchase through `stakeFor` and unwinds it:
     ///      the NFT stays with the caller and nothing is reserved.
     function test_DepositFor_9_RevertsUnderTheVaultsPauseAndUnwinds() public {
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
         uint256 tokenId = _mintForSoulZap(BUY_LIQUIDITY);
         vm.expectRevert(LPStakingVault.DepositsArePaused.selector);
         soulZap.deposit(adapter, address(npmMock), tokenId, CAMPAIGN, alice);

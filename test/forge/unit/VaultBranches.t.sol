@@ -356,8 +356,8 @@ contract VaultBranchesTest is LocalHarness {
         bytes32 expected =
             keccak256(abi.encode(uint256(keccak256("real.lp.storage.LPStakingVault")) - 1)) & ~bytes32(uint256(0xff));
 
-        vault.setDepositsPaused(true);
-        vault.setRebalancePaused(true);
+        vault.pauseDeposits();
+        vault.pauseRebalance();
 
         // Namespace slot 0 is `zapper` alone (20 bytes, and `guardian` needs another 20).
         assertEq(
@@ -405,7 +405,7 @@ contract VaultBranchesTest is LocalHarness {
 
     function test_Stake_RevertsWhileDepositsArePaused() public {
         uint256 tokenId = _createPosition(alice, TICK_LOWER, TICK_UPPER, LIQUIDITY);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         vm.startPrank(alice);
         npmMock.approve(address(vault), tokenId);
@@ -600,7 +600,7 @@ contract VaultBranchesTest is LocalHarness {
     function test_StakeFor_TheOperatorPathIsGatedByTheDepositPause() public {
         vault.setStakeOperator(carol, true);
         uint256 tokenId = _createPosition(carol, TICK_LOWER, TICK_UPPER, LIQUIDITY);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         vm.startPrank(carol);
         npmMock.approve(address(vault), tokenId);
@@ -685,7 +685,7 @@ contract VaultBranchesTest is LocalHarness {
     ///      check and before a single position read — with and without a swap leg.
     function test_Rebalance_RevertsWhilePaused() public {
         uint256 tokenId = _stakePosition(alice);
-        vault.setRebalancePaused(true);
+        vault.pauseRebalance();
 
         vm.prank(alice);
         vm.expectRevert(LPStakingVault.RebalanceIsPaused.selector);
@@ -701,7 +701,7 @@ contract VaultBranchesTest is LocalHarness {
 
         // and the identical call goes through once the switch is lifted, so nothing but the
         // pause rejected it
-        vault.setRebalancePaused(false);
+        vault.unpauseRebalance();
         vm.prank(alice);
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
     }
@@ -882,23 +882,23 @@ contract VaultBranchesTest is LocalHarness {
     function test_SetDepositsPaused_EmitsTheFullNewState() public {
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.DepositsPausedSet(true);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.DepositsPausedSet(false);
-        vault.setDepositsPaused(false);
+        vault.unpauseDeposits();
     }
 
     function test_SetRebalancePaused_EmitsTheFullNewState() public {
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.RebalancePausedSet(true);
-        vault.setRebalancePaused(true);
+        vault.pauseRebalance();
         assertTrue(vault.rebalancePaused(), "the flag must follow the event");
         assertFalse(vault.depositsPaused(), "the deposit switch must be untouched by it");
 
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.RebalancePausedSet(false);
-        vault.setRebalancePaused(false);
+        vault.unpauseRebalance();
         assertFalse(vault.rebalancePaused(), "the flag must follow the event back");
     }
 
@@ -947,9 +947,9 @@ contract VaultBranchesTest is LocalHarness {
 
         // The OWNER is rejected on both pause switches and on every operator function.
         vm.expectRevert(ownerPauseRejection);
-        twin.setDepositsPaused(true);
+        twin.pauseDeposits();
         vm.expectRevert(ownerPauseRejection);
-        twin.setRebalancePaused(true);
+        twin.pauseRebalance();
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, address(this), operatorSafe));
         twin.setTwapParams(600, 100);
         vm.expectRevert(abi.encodeWithSelector(LPStakingVault.NotOperator.selector, address(this), operatorSafe));
@@ -989,10 +989,10 @@ contract VaultBranchesTest is LocalHarness {
 
         // Each tier does work from its own address, and each pause takes either of two.
         vm.prank(multisig);
-        twin.setDepositsPaused(true);
+        twin.pauseDeposits();
         assertTrue(twin.depositsPaused(), "the guardian must be able to pause deposits");
         vm.prank(operatorSafe);
-        twin.setDepositsPaused(false);
+        twin.unpauseDeposits();
         assertFalse(twin.depositsPaused(), "and so must the operator, as the cold fallback");
         vm.prank(operatorSafe);
         twin.setTwapParams(600, 100);
@@ -1013,7 +1013,7 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, carol, address(this))
         );
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
     }
 
     /**
@@ -1038,24 +1038,25 @@ contract VaultBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, address(0), address(this))
         );
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.NotGuardianOrOperator.selector, alice, address(0), address(this))
         );
-        vault.setRebalancePaused(true);
+        vault.pauseRebalance();
         vm.stopPrank();
 
         // The operator half of the pause tier is untouched by the revocation.
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
         assertTrue(vault.depositsPaused(), "the operator must still be able to pause deposits");
 
         // And the seat can be filled again from the vacant state.
         vm.expectEmit(false, false, false, true, address(vault));
         emit LPStakingVault.GuardianSet(address(0), carol);
         vault.setGuardian(carol);
+        vault.unpauseDeposits();
         vm.prank(carol);
-        vault.setDepositsPaused(false);
-        assertFalse(vault.depositsPaused(), "the re-appointed guardian must hold the tier");
+        vault.pauseDeposits();
+        assertTrue(vault.depositsPaused(), "the re-appointed guardian must hold the tier");
     }
 
     /// @dev `setOperator` did NOT move with `setGuardian`: it is still owner-only and still
@@ -1177,7 +1178,7 @@ contract VaultBranchesTest is LocalHarness {
     function test_Upgrade_PreservesTheStakerLedgerAndBothTiers() public {
         uint256 tokenId = _stakePosition(alice);
         vault.setZapper(address(0xcafe));
-        vault.setRebalancePaused(true);
+        vault.pauseRebalance();
 
         address v2 = address(_v2Implementation());
         vault.upgradeToAndCall(v2, "");

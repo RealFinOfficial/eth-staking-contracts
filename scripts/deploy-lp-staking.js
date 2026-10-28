@@ -143,7 +143,7 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //   LP_APEBOND_ENABLED          — 1 deploys BonusEscrow + ApeBondPositionAdapter; 0 or unset not
 //   LP_APEBOND_BONUS_TOKEN      — the escrow's immutable bonus token; must be one of the pool's
 //                                 two tokens (LP_ASSET)
-//   LP_APEBOND_GUARDIAN         — the adapter's pause key, setDepositsPaused only (LP_GUARDIAN)
+//   LP_APEBOND_GUARDIAN         — the adapter's pause key, pauseDeposits only (LP_GUARDIAN)
 //   LP_APEBOND_SOULZAP_CALLERS  — comma-separated SoulZap contracts: the global allowlist, and
 //                                 the callers permitted for the campaign below (none)
 //   LP_APEBOND_MIN_CLIFF_SECONDS — the adapter's immutable floor under every campaign cliff, in

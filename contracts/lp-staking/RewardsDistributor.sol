@@ -68,7 +68,7 @@ import "./interfaces/IMintableRewardToken.sol";
  *
  *  Trust (stated, not mitigated): with no cap anywhere, a leaked signer key can sign vouchers
  *  that take the whole funded balance of every token until the guardian pauses claims. The
- *  guardian's {setPaused} is the one-transaction containment; the operator then rotates the
+ *  guardian's {pause} is the one-transaction containment; the operator then rotates the
  *  signer with {setSigner}. The guardian key must therefore stay hot and watched. A leaked
  *  signer or guardian key cannot mint: {mintRewardToken} is the operator's alone, and it is the
  *  only path from this contract to a token's `mint`. Nothing here caps what the operator mints.
@@ -103,13 +103,15 @@ import "./interfaces/IMintableRewardToken.sol";
  *    |---------------------|-------------------------------------------------------------------|
  *    | owner (timelock)    | `_authorizeUpgrade`, `addRewardToken`, `setRewardTokenEnabled`,   |
  *    |                     | `setClaimsEnabled`, `setOperator`, `setGuardian`, `initializeV2`  |
- *    | guardian (hot key)  | `setPaused`                                                       |
+ *    | guardian (hot key)  | `pause`                                                           |
  *    | operator (multisig) | `setSigner`, `recoverExcess`, `mintRewardToken`, `setGuardian`,   |
- *    |                     | `setPaused`                                                       |
+ *    |                     | `pause`, `unpause`                                                |
  *
- *  Nothing the guardian can do moves value or installs a key, which is what makes a hot
- *  guardian acceptable. The operator can pause as well, as the cold fallback for a lost
- *  guardian key, and it can revoke or replace the guardian with no delay — see {setGuardian}.
+ *  Nothing the guardian can do moves value, installs a key or lifts a pause, which is what
+ *  makes a hot guardian acceptable. The operator can pause as well, as the cold fallback for a
+ *  lost guardian key, and it is the ONLY tier that unpauses (audit L-01): a leaked guardian key
+ *  cannot undo a pause the operator set during an incident. It can revoke or replace the
+ *  guardian with no delay — see {setGuardian}.
  *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled.
  */
 contract RewardsDistributor is
@@ -179,7 +181,8 @@ contract RewardsDistributor is
     }
 
     /// @dev The pause tier: the guardian (hot key, fast path) or the operator (multisig, the
-    ///      cold fallback for a lost guardian key). Deliberately NOT satisfied by `owner()`:
+    ///      cold fallback for a lost guardian key). It guards {pause} only; {unpause} is
+    ///      {onlyOperator} (audit L-01). Deliberately NOT satisfied by `owner()`:
     ///      the timelock has no business holding an undelayed switch. The guardian slot may
     ///      hold `address(0)` — the "no guardian" state {setGuardian} can write — and then this
     ///      modifier admits the operator alone, because `msg.sender` is never the zero address.
@@ -413,7 +416,7 @@ contract RewardsDistributor is
 
     /// @notice Opens or closes the claims of one registered token.
     /// @dev Owner tier: opening a token's claims (e.g. $ASSET after maturity) is a program
-    ///      decision. The incident switch for ALL tokens is {setPaused}, which needs no delay.
+    ///      decision. The incident switch for ALL tokens is {pause}, which needs no delay.
     function setClaimsEnabled(address token, bool enabled) external onlyOwner {
         RewardToken storage t = _requireRegistered(token);
         t.claimsEnabled = enabled;
@@ -424,7 +427,7 @@ contract RewardsDistributor is
     /// @param newGuardian The new guardian, or `address(0)` to leave the tier vacant.
     /// @dev Owner OR operator. The owner is a timelock 48 h away on mainnet, so a guardian key
     ///      known to be compromised must be revocable without that delay; the operator already
-    ///      holds `setPaused`, so it gains nothing by holding this too. `address(0)` is the
+    ///      holds `pause`, so it gains nothing by holding this too. `address(0)` is the
     ///      explicit "no guardian" state: {onlyGuardianOrOperator} then admits the operator alone.
     function setGuardian(address newGuardian) external onlyOwnerOrOperator {
         RewardsDistributorStorage storage $ = _distributorStorage();
@@ -457,10 +460,21 @@ contract RewardsDistributor is
 
     // ──────────────────────── Pause (guardian or operator) ─────
 
-    /// @notice Pause or unpause `claim` for every token. Affects nothing else.
-    function setPaused(bool paused_) external onlyGuardianOrOperator {
-        _distributorStorage().paused = paused_;
-        emit Paused(paused_);
+    /// @notice Pause `claim` for every token. Affects nothing else.
+    /// @dev Guardian or operator. Lifting the pause is {unpause}, the operator's alone (audit
+    ///      L-01). Emits {Paused} with `true`, also when claims were already paused.
+    function pause() external onlyGuardianOrOperator {
+        _distributorStorage().paused = true;
+        emit Paused(true);
+    }
+
+    /// @notice Resume `claim` for every token.
+    /// @dev Operator only (audit L-01). The guardian is a hot key, and a guardian that could also
+    ///      unpause could undo a pause the operator set while the voucher signer is rotated.
+    ///      Emits {Paused} with `false`, also when claims were not paused.
+    function unpause() external onlyOperator {
+        _distributorStorage().paused = false;
+        emit Paused(false);
     }
 
     // ──────────────────────── Operator functions ───────────────

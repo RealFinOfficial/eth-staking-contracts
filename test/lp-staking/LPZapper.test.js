@@ -556,7 +556,7 @@ describe("LPZapper", function () {
     });
 
     it("rejects the zap up front when the vault's deposits are paused, before any USDC moves", async function () {
-      await vault.setDepositsPaused(true);
+      await vault.pauseDeposits();
 
       const balanceBefore = await usdc.balanceOf(alice.address);
       const callsBefore = await router.swapCalls();
@@ -574,8 +574,8 @@ describe("LPZapper", function () {
     });
 
     it("takes the zap again the moment the vault is unpaused", async function () {
-      await vault.setDepositsPaused(true);
-      await vault.setDepositsPaused(false);
+      await vault.pauseDeposits();
+      await vault.unpauseDeposits();
 
       const tokenId = await zap
         .connect(alice)

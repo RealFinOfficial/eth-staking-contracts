@@ -170,7 +170,7 @@ contract PositionLifecycleTest is ForkHarness {
         uint256 fresh = _mintAroundSpot(bob, 600);
 
         vm.prank(multisig);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         vm.startPrank(bob);
         npm.approve(address(vault), fresh);
@@ -194,7 +194,7 @@ contract PositionLifecycleTest is ForkHarness {
         uint256 tokenId = _mintAndStake(alice, 600);
 
         vm.prank(multisig);
-        vault.setRebalancePaused(true);
+        vault.pauseRebalance();
 
         int24 tick = _alignDown(_currentTick());
         vm.prank(alice);
@@ -206,7 +206,7 @@ contract PositionLifecycleTest is ForkHarness {
 
         // the exit is unconditional, with BOTH switches on
         vm.prank(multisig);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
         vm.prank(alice);
         vault.unstake(tokenId);
         assertEq(npm.ownerOf(tokenId), alice, "the exit must survive both pauses");
@@ -214,7 +214,7 @@ contract PositionLifecycleTest is ForkHarness {
 
     function test_DepositsPaused_BlocksTheZapPathToo() public {
         vm.prank(multisig);
-        vault.setDepositsPaused(true);
+        vault.pauseDeposits();
 
         int24 tick = _currentTick();
         SwapParams memory swap =

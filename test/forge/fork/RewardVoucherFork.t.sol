@@ -112,7 +112,7 @@ contract RewardVoucherForkTest is ForkHarness {
     function test_Voucher_PausingBlocksEveryToken() public {
         vm.startPrank(multisig);
         distributor.setClaimsEnabled(assetToken, true);
-        distributor.setPaused(true);
+        distributor.pause();
         vm.stopPrank();
 
         bytes memory voucher = _sign(ovtr, alice, AWARD);

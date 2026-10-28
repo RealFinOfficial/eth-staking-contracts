@@ -287,7 +287,7 @@ contract DistributorBranchesTest is LocalHarness {
 
         RewardsDistributor twin = _guardedTwin();
         vm.prank(operatorSafe);
-        twin.setPaused(true);
+        twin.pause();
 
         uint256 base = uint256(expected);
         uint256 slot0 = uint256(vm.load(address(twin), bytes32(base)));
@@ -327,7 +327,7 @@ contract DistributorBranchesTest is LocalHarness {
     /// @dev With every gate hostile at once, the caller sees the pause and nothing else.
     function test_CheckOrder_PausedBeatsEveryOtherGate() public {
         MockERC20Permit stray = new MockERC20Permit("Stray", "STRAY", 0, 18);
-        distributor.setPaused(true);
+        distributor.pause();
 
         vm.warp(1_000_000);
         vm.prank(alice);
@@ -337,7 +337,7 @@ contract DistributorBranchesTest is LocalHarness {
 
     function test_CheckOrder_PausedBeatsAnUnknownToken() public {
         MockERC20Permit stray = new MockERC20Permit("Stray", "STRAY", 0, 18);
-        distributor.setPaused(true);
+        distributor.pause();
 
         bytes memory voucher = _sign(address(stray), alice, AWARD, FAR_DEADLINE);
         vm.prank(alice);
@@ -882,12 +882,12 @@ contract DistributorBranchesTest is LocalHarness {
     function test_SetPaused_EmitsTheFullNewState() public {
         vm.expectEmit(false, false, false, true, address(distributor));
         emit IRewardsDistributor.Paused(true);
-        distributor.setPaused(true);
+        distributor.pause();
         assertTrue(distributor.paused(), "stored");
 
         vm.expectEmit(false, false, false, true, address(distributor));
         emit IRewardsDistributor.Paused(false);
-        distributor.setPaused(false);
+        distributor.unpause();
         assertFalse(distributor.paused(), "and back");
     }
 
@@ -1123,7 +1123,7 @@ contract DistributorBranchesTest is LocalHarness {
                 IRewardsDistributor.NotGuardianOrOperator.selector, alice, address(this), address(this)
             )
         );
-        distributor.setPaused(true);
+        distributor.pause();
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, alice, address(this)));
         distributor.recoverExcess(ovtr, 1);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, alice, address(this)));
@@ -1146,7 +1146,7 @@ contract DistributorBranchesTest is LocalHarness {
                 IRewardsDistributor.NotGuardianOrOperator.selector, address(this), multisig, operatorSafe
             )
         );
-        twin.setPaused(true);
+        twin.pause();
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, address(this), operatorSafe));
         twin.setSigner(carol);
         vm.expectRevert(abi.encodeWithSelector(IRewardsDistributor.NotOperator.selector, address(this), operatorSafe));
@@ -1189,10 +1189,10 @@ contract DistributorBranchesTest is LocalHarness {
 
         // Each tier does work from its own address, and the pause takes either of two.
         vm.prank(multisig);
-        twin.setPaused(true);
+        twin.pause();
         assertTrue(twin.paused(), "the guardian must be able to pause");
         vm.prank(operatorSafe);
-        twin.setPaused(false);
+        twin.unpause();
         assertFalse(twin.paused(), "and so must the operator, as the cold fallback");
         vm.prank(operatorSafe);
         twin.setSigner(carol);
@@ -1213,7 +1213,7 @@ contract DistributorBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IRewardsDistributor.NotGuardianOrOperator.selector, alice, carol, address(this))
         );
-        distributor.setPaused(true);
+        distributor.pause();
     }
 
     /**
@@ -1232,17 +1232,18 @@ contract DistributorBranchesTest is LocalHarness {
         vm.expectRevert(
             abi.encodeWithSelector(IRewardsDistributor.NotGuardianOrOperator.selector, alice, address(0), address(this))
         );
-        distributor.setPaused(true);
+        distributor.pause();
 
-        distributor.setPaused(true);
+        distributor.pause();
         assertTrue(distributor.paused(), "the operator must still be able to pause");
 
         vm.expectEmit(false, false, false, true, address(distributor));
         emit IRewardsDistributor.GuardianSet(address(0), carol);
         distributor.setGuardian(carol);
+        distributor.unpause();
         vm.prank(carol);
-        distributor.setPaused(false);
-        assertFalse(distributor.paused(), "the re-appointed guardian must hold the tier");
+        distributor.pause();
+        assertTrue(distributor.paused(), "the re-appointed guardian must hold the tier");
     }
 
     /// @dev `setOperator` is owner-only and rejects zero, so the operator cannot rotate itself

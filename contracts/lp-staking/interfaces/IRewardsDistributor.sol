@@ -180,9 +180,11 @@ interface IRewardsDistributor {
 
     // ──────────────────────── Guardian or operator ─────────────
 
-    function setPaused(bool paused_) external;
+    function pause() external;
 
     // ──────────────────────── Operator (the multisig) ──────────
+
+    function unpause() external;
 
     function setSigner(address newSigner) external;
 

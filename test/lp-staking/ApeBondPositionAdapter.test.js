@@ -538,11 +538,12 @@ describe("ApeBondPositionAdapter", function () {
       // Unlinked: the vault would report no exit, so this bonus could never be forfeited. The
       // link is checked first — before the adapter's own pause, which is step 1.
       await vault.setBonusEscrow(ZERO);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
       const position = await createPosition(soulZapAddr);
       let { tx } = await deposit({ tokenId: position });
       await expect(tx).to.be.revertedWithCustomError(adapter, "EscrowNotLinked").withArgs(ZERO, escrowAddr);
-      await asGuardian().setDepositsPaused(false);
+      // the fixture's vault names the owner as its operator, the only tier that unpauses
+      await adapter.unpauseDeposits();
 
       // Linked to another escrow for the same vault: that one would forfeit nothing of ours.
       const other = await deployEscrowProxy();
@@ -559,7 +560,7 @@ describe("ApeBondPositionAdapter", function () {
     });
 
     it("1. refuses while the adapter's own deposits are paused", async function () {
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
       const { tx } = await deposit();
       await expect(tx).to.be.revertedWithCustomError(adapter, "DepositsArePaused");
     });
@@ -707,7 +708,7 @@ describe("ApeBondPositionAdapter", function () {
     });
 
     it("takes the vault's own deposit pause with it", async function () {
-      await vault.connect(guardian).setDepositsPaused(true);
+      await vault.connect(guardian).pauseDeposits();
       const { tx } = await deposit();
       await expect(tx).to.be.revertedWithCustomError(vault, "DepositsArePaused");
       expect(await adapter.depositsPaused()).to.equal(false);
@@ -945,7 +946,7 @@ describe("ApeBondPositionAdapter", function () {
       const { tx, tokenId } = await deposit();
       await tx;
       await asset.transfer(escrowAddr, expected().bonus);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
       await time.increase(APEBOND_CLIFF_SECONDS);
       await expect(escrow.claim(tokenId)).to.emit(escrow, "BonusClaimed");
     });
@@ -1128,18 +1129,39 @@ describe("ApeBondPositionAdapter", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("The guardian", function () {
-    it("pauses and resumes deposits, full state logged, and nobody else can", async function () {
-      await expect(asGuardian().setDepositsPaused(true)).to.emit(adapter, "DepositsPausedSet").withArgs(true);
+    it("pauses deposits (guardian or the vault's operator), only the vault's operator resumes them (L-01)", async function () {
+      // The fixture's vault names the owner as its operator; give the operator seat its own key.
+      await vault.setOperator(keeper.address);
+
+      await expect(asGuardian().pauseDeposits()).to.emit(adapter, "DepositsPausedSet").withArgs(true);
       expect(await adapter.depositsPaused()).to.equal(true);
-      await expect(asGuardian().setDepositsPaused(false))
+
+      // Audit L-01 PoC, inverted: the guardian cannot lift a pause, and neither can the owner.
+      for (const caller of [guardian, owner, stranger]) {
+        await expect(adapter.connect(caller).unpauseDeposits())
+          .to.be.revertedWithCustomError(adapter, "NotOperator")
+          .withArgs(caller.address, keeper.address);
+      }
+      await expect(adapter.connect(keeper).unpauseDeposits())
         .to.emit(adapter, "DepositsPausedSet")
         .withArgs(false);
+      expect(await adapter.depositsPaused()).to.equal(false);
 
       for (const caller of [owner, stranger]) {
-        await expect(adapter.connect(caller).setDepositsPaused(true))
-          .to.be.revertedWithCustomError(adapter, "NotGuardian")
-          .withArgs(caller.address, guardian.address);
+        await expect(adapter.connect(caller).pauseDeposits())
+          .to.be.revertedWithCustomError(adapter, "NotGuardianOrOperator")
+          .withArgs(caller.address, guardian.address, keeper.address);
       }
+      await expect(adapter.connect(keeper).pauseDeposits()).to.emit(adapter, "DepositsPausedSet").withArgs(true);
+    });
+
+    it("keeps the vault operator's pause when the guardian tries to lift it (audit L-01 PoC)", async function () {
+      await vault.setOperator(keeper.address);
+      await adapter.connect(keeper).pauseDeposits();
+      await expect(asGuardian().unpauseDeposits())
+        .to.be.revertedWithCustomError(adapter, "NotOperator")
+        .withArgs(guardian.address, keeper.address);
+      expect(await adapter.depositsPaused()).to.equal(true);
     });
 
     it("is rotated by the vault's operator with no delay; a stranger and the guardian are refused (C-29)", async function () {
@@ -1168,15 +1190,15 @@ describe("ApeBondPositionAdapter", function () {
         .to.emit(adapter, "GuardianSet")
         .withArgs(guardian.address, bob.address);
 
-      await expect(asGuardian().setDepositsPaused(true))
-        .to.be.revertedWithCustomError(adapter, "NotGuardian")
-        .withArgs(guardian.address, bob.address);
-      await adapter.connect(bob).setDepositsPaused(true);
+      await expect(asGuardian().pauseDeposits())
+        .to.be.revertedWithCustomError(adapter, "NotGuardianOrOperator")
+        .withArgs(guardian.address, bob.address, owner.address);
+      await adapter.connect(bob).pauseDeposits();
       expect(await adapter.depositsPaused()).to.equal(true);
     });
 
     it("leaves ordinary stakers alone while the ApeBond route is paused", async function () {
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
       const tokenId = await createPosition(bob.address);
       await nfpm.connect(bob).approve(vaultAddr, tokenId);
       await vault.connect(bob).stake(tokenId);

@@ -65,18 +65,18 @@
  *   A10 alice rebalances P1 -> P5      A31 operator recovers 1000 ASSET
  *   A11 bob rebalances P2 -> P6        A32 guardian pauses claims
  *   A12 alice unstakes P5              A33 bob's claim reverts ClaimsPaused
- *   A13 alice re-approves P5           A34 guardian unpauses
+ *   A13 alice re-approves P5           A34 operator unpauses
  *   A14 alice re-stakes P5             A35 operator rotates the signer
  *   A15 guardian pauses deposits       A36 operator rotates it back
  *   A16 carol's stake reverts          A37 stray NFT rescued from the vault
- *   A17 guardian resumes deposits      A38 stray NFT rescued from the zapper
+ *   A17 operator resumes deposits      A38 stray NFT rescued from the zapper
  *   A18 carol stakes P7                A39 stray USDC swept from the zapper
  *   A19 operator retunes the vault     A40 snapshot, stake P10, revert, re-mine
  *   A20 operator retunes the zapper    A41 zapper wiring cycled via the timelock
  *   A21 carol claims 1000 $OVTR        A42 Overture minter cycled via the timelock
  *                                      A43 guardian pauses rebalance
  *                                      A44 alice's rebalance reverts
- *                                      A45 guardian resumes rebalance
+ *                                      A45 operator resumes rebalance
  *                                      A46 upgrade to V2 scheduled
  *                                      A47 premature execute reverts
  *                                      A48 upgrade executes; state survives
@@ -727,8 +727,8 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       // warns when either collapses onto the multisig or onto the deploying key, so this run
       // is also the proof that the strict path deploys without a single warning.
       //
-      // The guardian tier is the three pause switches and nothing else (A15/A17, A32/A34,
-      // A43/A45 send from `w.guardian`).
+      // The guardian tier is the three pauses and nothing else (A15, A32 and A43 send from
+      // `w.guardian`). Lifting a pause is the operator's alone (A17, A34, A45, audit L-01).
       LP_GUARDIAN: w.guardian.address,
       // The operator tier is the vault's and the zapper's setTwapParams and rescuePosition, the
       // zapper's sweep, the distributor's setSigner and recoverExcess, the registry's epoch
@@ -1656,7 +1656,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       // The pause switches are the guardian's whole tier: one hot key, one transaction, no
       // delay. The operator can send the same call as the cold fallback, and the OWNER cannot
       // send it at all.
-      const receipt = await chain.send(vault.connect(w.guardian).setDepositsPaused(true));
+      const receipt = await chain.send(vault.connect(w.guardian).pauseDeposits());
       ledger.record("A15", "guardian pauses deposits", receipt, [
         { address: vaultAddr, name: "DepositsPausedSet" },
       ]);
@@ -1687,9 +1687,9 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await npm.ownerOf(positions.P7)).to.equal(w.carol.address);
     });
 
-    it("A17: the guardian resumes deposits", async function () {
-      const receipt = await chain.send(vault.connect(w.guardian).setDepositsPaused(false));
-      ledger.record("A17", "guardian resumes deposits", receipt, [
+    it("A17: the operator resumes deposits (only the operator lifts a pause, audit L-01)", async function () {
+      const receipt = await chain.send(vault.connect(w.operator).unpauseDeposits());
+      ledger.record("A17", "operator resumes deposits", receipt, [
         { address: vaultAddr, name: "DepositsPausedSet" },
       ]);
       expect(await vault.depositsPaused()).to.equal(false);
@@ -2105,7 +2105,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     });
 
     it("A32: the guardian pauses claims", async function () {
-      const receipt = await chain.send(distributor.connect(w.guardian).setPaused(true));
+      const receipt = await chain.send(distributor.connect(w.guardian).pause());
       ledger.record("A32", "guardian pauses claims", receipt, [
         { address: distributorAddr, name: "Paused" },
       ]);
@@ -2125,9 +2125,9 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await distributor.claimed(assetAddr, w.bob.address)).to.equal(C.ASSET(3_000));
     });
 
-    it("A34: the guardian unpauses claims", async function () {
-      const receipt = await chain.send(distributor.connect(w.guardian).setPaused(false));
-      ledger.record("A34", "guardian unpauses claims", receipt, [
+    it("A34: the operator unpauses claims (only the operator lifts a pause, audit L-01)", async function () {
+      const receipt = await chain.send(distributor.connect(w.operator).unpause());
+      ledger.record("A34", "operator unpauses claims", receipt, [
         { address: distributorAddr, name: "Paused" },
       ]);
       expect(await distributor.paused()).to.equal(false);
@@ -2325,7 +2325,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     });
 
     it("A43: the guardian pauses rebalance", async function () {
-      const receipt = await chain.send(vault.connect(w.guardian).setRebalancePaused(true));
+      const receipt = await chain.send(vault.connect(w.guardian).pauseRebalance());
       ledger.record("A43", "guardian pauses rebalance", receipt, [
         { address: vaultAddr, name: "RebalancePausedSet" },
       ]);
@@ -2354,9 +2354,9 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await npm.ownerOf(positions.P5)).to.equal(vaultAddr);
     });
 
-    it("A45: the guardian resumes rebalance", async function () {
-      const receipt = await chain.send(vault.connect(w.guardian).setRebalancePaused(false));
-      ledger.record("A45", "guardian resumes rebalance", receipt, [
+    it("A45: the operator resumes rebalance (only the operator lifts a pause, audit L-01)", async function () {
+      const receipt = await chain.send(vault.connect(w.operator).unpauseRebalance());
+      ledger.record("A45", "operator resumes rebalance", receipt, [
         { address: vaultAddr, name: "RebalancePausedSet" },
       ]);
       expect(

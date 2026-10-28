@@ -303,10 +303,11 @@ Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` an
 (escrow) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
 `setGuardian` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
-pause switches (`setDepositsPaused`, `setRebalancePaused`, `setPaused`), sent directly by the hot
-key; the operator tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper),
-`setSigner`, `recoverExcess` and `mintRewardToken` (distributor), the registry's four epoch
-functions, plus the three pauses as the cold fallback and `setGuardian` — sent directly by the
+pauses (`pauseDeposits`, `pauseRebalance`, `pause`), sent directly by the hot key; the operator
+tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper), `setSigner`,
+`recoverExcess` and `mintRewardToken` (distributor), the registry's four epoch functions, plus the
+three pauses as the cold fallback, the three unpauses (`unpauseDeposits`, `unpauseRebalance`,
+`unpause`, the operator's alone since audit L-01) and `setGuardian` — sent directly by the
 operator multisig.
 
 `setGuardian` is the one call that is on BOTH sides. It stayed routable here because the owner

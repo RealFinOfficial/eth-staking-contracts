@@ -42,7 +42,8 @@ interface IBonusEscrowReservations {
  *
  *  Exits are unconditional: `unstake` is never gated by a pause switch, by a signature, or
  *  by backend liveness. Deposits and `rebalance` are each pausable behind their own switch,
- *  which the guardian or the operator can throw. Zaps stop with the deposit pause, because
+ *  which the guardian or the operator can throw and only the operator can lift (audit L-01).
+ *  Zaps stop with the deposit pause, because
  *  `zapIn` finishes through `stakeFor`. An exit notifies the bonus escrow (when one is linked)
  *  and proceeds whatever the escrow answers.
  *
@@ -106,14 +107,18 @@ interface IBonusEscrowReservations {
  *    |--------------------|-----------------------------------------------------------|
  *    | owner (timelock)   | `_authorizeUpgrade`, `setZapper`, `setBonusEscrow`,       |
  *    |                    | `setStakeOperator`, `setGuardian`, `setOperator`          |
- *    | guardian (hot key) | `setDepositsPaused`, `setRebalancePaused`                 |
- *    | operator (multisig)| `setTwapParams`, `rescuePosition`, `setGuardian`, and both pause switches |
+ *    | guardian (hot key) | `pauseDeposits`, `pauseRebalance`                         |
+ *    | operator (multisig)| `setTwapParams`, `rescuePosition`, `setGuardian`,         |
+ *    |                    | `pauseDeposits`, `pauseRebalance`, `unpauseDeposits`,     |
+ *    |                    | `unpauseRebalance`                                        |
  *
  *  The split follows blast radius, then response time. The guardian can stop deposits and
- *  re-ranging in one transaction but can move nothing and set no key, so it is safe to hold
- *  on a hot key. The operator can move stray value (to itself) and recalibrate the guard, so
- *  it is a multisig; it can also throw both pause switches, as the cold fallback for a lost
- *  guardian key, and it can revoke or replace the guardian with no delay, because a hot key
+ *  re-ranging in one transaction but can move nothing, set no key and lift no pause, so it is
+ *  safe to hold on a hot key. The operator can move stray value (to itself) and recalibrate
+ *  the guard, so it is a multisig; it can also throw both pause switches, as the cold fallback
+ *  for a lost guardian key, and it is the ONLY tier that lifts a pause (audit L-01): a leaked
+ *  guardian key cannot undo a pause the operator set during an incident. It can revoke or
+ *  replace the guardian with no delay, because a hot key
  *  that holds an undelayed switch has to be removable without one — see {setGuardian}. Code
  *  changes, and the operator tier itself, go through the timelock's public delay.
  *  Ownership is two-step (`Ownable2StepUpgradeable`), and `renounceOwnership` is disabled:
@@ -313,7 +318,7 @@ contract LPStakingVault is
     error PositionIsStaked(uint256 tokenId, address staker);
     /// @dev An operator-tier function was called by someone else — the owner and the guardian included.
     error NotOperator(address caller, address operator);
-    /// @dev A pause switch was called by someone who is neither the guardian nor the operator.
+    /// @dev A pause function was called by someone who is neither the guardian nor the operator.
     error NotGuardianOrOperator(address caller, address guardian, address operator);
     /// @dev `setGuardian` was called by someone who is neither the owner nor the operator —
     ///      the standing guardian included, since the guardian cannot rotate itself.
@@ -331,7 +336,8 @@ contract LPStakingVault is
 
     // ──────────────────────── Modifiers ────────────────────────
 
-    /// @dev The routine-operations tier. Not satisfied by `owner()` or by the guardian.
+    /// @dev The routine-operations tier, and the only tier that lifts a pause. Not satisfied
+    ///      by `owner()` or by the guardian.
     modifier onlyOperator() {
         address operator_ = _vaultStorage().operator;
         if (msg.sender != operator_) revert NotOperator(msg.sender, operator_);
@@ -339,7 +345,8 @@ contract LPStakingVault is
     }
 
     /// @dev The pause tier: the guardian (hot key, fast path) or the operator (multisig, the
-    ///      cold fallback for a lost guardian key). Deliberately NOT satisfied by `owner()`:
+    ///      cold fallback for a lost guardian key). It guards the two pause functions only;
+    ///      lifting a pause is {onlyOperator} (audit L-01). Deliberately NOT satisfied by `owner()`:
     ///      the timelock has no business holding an undelayed switch. The guardian slot may
     ///      legitimately hold `address(0)` — the explicit "no guardian" state that
     ///      {setGuardian} can write — and in that state the first comparison can never match,
@@ -430,7 +437,7 @@ contract LPStakingVault is
     /**
      * @notice One-time setup, executed on the PROXY in its own deployment transaction.
      * @param owner_ Owner: the `TimelockController`. Upgrades, zapper and role changes.
-     * @param guardian_ Guardian: the hot incident key. The two pause switches, nothing else.
+     * @param guardian_ Guardian: the hot incident key. The two pause functions, nothing else.
      * @param operator_ Operator: the multisig. TWAP calibration and NFT rescue, no delay.
      * @param zapper_ Zapper whitelisted for `stakeFor`. The deploy script pre-computes the
      *        zapper's CREATE address and passes it here, so the proxy can be born owned by
@@ -601,7 +608,7 @@ contract LPStakingVault is
      *      mint, which together bound the round trip. Set them from a fresh quote.
      *
      *      Works while deposits are paused: re-ranging is part of exiting risk, not a deposit.
-     *      It has its own switch instead — `setRebalancePaused`, held by the guardian —
+     *      It has its own switch instead — `pauseRebalance`, held by the guardian —
      *      because this is the most complex function here and an upgrade cannot execute
      *      before the timelock's public delay, so the immediate mitigation has to be a
      *      switch the multisig can throw by itself. Pausing it never touches `unstake`:
@@ -710,7 +717,7 @@ contract LPStakingVault is
      *
      *      Owner tier: pointing the deposit path at a new contract is a code change in all
      *      but name, so it takes the timelock's delay like an upgrade does. Stopping the
-     *      existing zapper needs no delay — {setDepositsPaused} reverts every `zapIn`.
+     *      existing zapper needs no delay — {pauseDeposits} reverts every `zapIn`.
      * @param newZapper New zapper address, or zero to disable.
      */
     function setZapper(address newZapper) external onlyOwner {
@@ -765,7 +772,7 @@ contract LPStakingVault is
      *      Owner tier, exactly like {setZapper} and for the same reason: adding a deposit
      *      entry point is a code change in all but name, so it takes the timelock's delay and
      *      is publicly visible before it can run. Removing one needs no delay to be effective
-     *      in an incident — {setDepositsPaused} reverts every operator's `stakeFor` in one
+     *      in an incident — {pauseDeposits} reverts every operator's `stakeFor` in one
      *      guardian transaction, because the pause is checked inside `_stake`.
      *
      *      The zero address is rejected rather than treated as a switch: unlike `zapper`,
@@ -787,9 +794,9 @@ contract LPStakingVault is
      * @param newGuardian The address that holds the guardian tier from this transaction
      *        onwards, or `address(0)` to revoke the guardian and leave the tier vacant.
      * @dev The guardian is a hot key: one externally owned account, kept online so that
-     *      {setDepositsPaused} and {setRebalancePaused} can be thrown within minutes of an
-     *      incident. It holds nothing else — it cannot move value and cannot set a key — which
-     *      is what makes it acceptable for that key to be hot.
+     *      {pauseDeposits} and {pauseRebalance} can be thrown within minutes of an
+     *      incident. It holds nothing else — it cannot move value, cannot set a key and cannot
+     *      lift a pause — which is what makes it acceptable for that key to be hot.
      *
      *      This function is owner OR operator tier. The owner is a `TimelockController` with a
      *      48 hour minimum delay on mainnet, so if the owner were the only tier that could
@@ -859,43 +866,64 @@ contract LPStakingVault is
     // ──────────────────────── Pause functions (guardian or operator) ────
 
     /**
-     * @notice Pauses or resumes new deposits.
+     * @notice Pauses new deposits.
      * @dev Gates `stake`, `stakeWithPermit` and `stakeFor` only. `unstake` and `rebalance`
-     *      stay available; `rebalance` has its own switch, see {setRebalancePaused}.
+     *      stay available; `rebalance` has its own switch, see {pauseRebalance}.
      *
      *      This is also the zap kill switch, and the operator kill switch with it. The check
      *      lives inside `_stake`, which every entry point ends in, so `LPZapper.zapIn` and
      *      every allowlisted stake operator ({setStakeOperator}) revert with
-     *      {DepositsArePaused} while this is on — no periphery contract needs a pause of its
+     *      {DepositsArePaused} while this is on. No periphery contract needs a pause of its
      *      own, and none can outlive this one.
      *
      *      Pause tier: the guardian is a hot key that can only pause, so this switch can be
-     *      thrown in minutes without putting any value behind that key; the operator multisig
-     *      can throw it too, so a lost guardian key never leaves a pause stuck for the 48 h
-     *      its rotation through the timelock takes.
-     * @param paused True to block new deposits.
+     *      thrown in minutes without putting any value behind that key. The operator multisig
+     *      can throw it too, so a lost guardian key never leaves the vault without a pause for
+     *      the 48 h its rotation through the timelock takes. Lifting it is {unpauseDeposits},
+     *      the operator's alone (audit L-01). Emits {DepositsPausedSet} with `true`, also when
+     *      deposits were already paused.
      */
-    function setDepositsPaused(bool paused) external onlyGuardianOrOperator {
-        _vaultStorage().depositsPaused = paused;
-        emit DepositsPausedSet(paused);
+    function pauseDeposits() external onlyGuardianOrOperator {
+        _vaultStorage().depositsPaused = true;
+        emit DepositsPausedSet(true);
     }
 
     /**
-     * @notice Pauses or resumes `rebalance`.
+     * @notice Resumes new deposits.
+     * @dev Operator only (audit L-01). The guardian is a hot key, and a guardian that could
+     *      also unpause could undo a pause the operator set during an incident. Emits
+     *      {DepositsPausedSet} with `false`, also when deposits were not paused.
+     */
+    function unpauseDeposits() external onlyOperator {
+        _vaultStorage().depositsPaused = false;
+        emit DepositsPausedSet(false);
+    }
+
+    /**
+     * @notice Pauses `rebalance`.
      * @dev The incident switch for the most complex path in the contract. It gates
      *      `rebalance` and nothing else: `unstake` stays open at all times, so a paused
-     *      rebalance never traps a position — the staker withdraws the NFT and re-ranges it
+     *      rebalance never traps a position. The staker withdraws the NFT and re-ranges it
      *      on Uniswap directly.
      *
      *      Pause tier: the guardian is a hot key that can only pause, so this switch can be
-     *      thrown in minutes without putting any value behind that key; the operator multisig
-     *      can throw it too, so a lost guardian key never leaves a pause stuck for the 48 h
-     *      its rotation through the timelock takes.
-     * @param paused True to block `rebalance`.
+     *      thrown in minutes without putting any value behind that key. The operator multisig
+     *      can throw it too. Lifting it is {unpauseRebalance}, the operator's alone (audit
+     *      L-01). Emits {RebalancePausedSet} with `true`, also when it was already paused.
      */
-    function setRebalancePaused(bool paused) external onlyGuardianOrOperator {
-        _vaultStorage().rebalancePaused = paused;
-        emit RebalancePausedSet(paused);
+    function pauseRebalance() external onlyGuardianOrOperator {
+        _vaultStorage().rebalancePaused = true;
+        emit RebalancePausedSet(true);
+    }
+
+    /**
+     * @notice Resumes `rebalance`.
+     * @dev Operator only (audit L-01), for the same reason as {unpauseDeposits}. Emits
+     *      {RebalancePausedSet} with `false`, also when it was not paused.
+     */
+    function unpauseRebalance() external onlyOperator {
+        _vaultStorage().rebalancePaused = false;
+        emit RebalancePausedSet(false);
     }
 
     // ──────────────────────── Operator functions ───────────────
@@ -907,7 +935,7 @@ contract LPStakingVault is
      * @dev Operator tier: the guard's calibration is a routine parameter — misuse can only
      *      grief the swap legs (bounded by MIN/MAX_TWAP_WINDOW and MAX_TWAP_DEVIATION_TICKS),
      *      never move value — so it needs a multisig but not a delay. When the guard needs to
-     *      stop mattering RIGHT NOW, the answer is {setRebalancePaused}, which the guardian holds.
+     *      stop mattering RIGHT NOW, the answer is {pauseRebalance}, which the guardian holds.
      */
     function setTwapParams(uint32 window, uint24 maxDeviationTicks) external onlyOperator {
         _setTwapParams(window, maxDeviationTicks);

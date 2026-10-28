@@ -264,9 +264,30 @@
         "internalType": "address",
         "name": "guardian",
         "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
       }
     ],
-    "name": "NotGuardian",
+    "name": "NotGuardianOrOperator",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "operator",
+        "type": "address"
+      }
+    ],
+    "name": "NotOperator",
     "type": "error"
   },
   {
@@ -992,6 +1013,13 @@
   },
   {
     "inputs": [],
+    "name": "pauseDeposits",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "positionManager",
     "outputs": [
       {
@@ -1187,19 +1215,6 @@
   {
     "inputs": [
       {
-        "internalType": "bool",
-        "name": "paused",
-        "type": "bool"
-      }
-    ],
-    "name": "setDepositsPaused",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
         "name": "newGuardian",
         "type": "address"
@@ -1295,6 +1310,13 @@
       }
     ],
     "name": "transferOwnership",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "unpauseDeposits",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

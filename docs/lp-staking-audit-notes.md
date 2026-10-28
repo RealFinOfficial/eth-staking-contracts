@@ -145,7 +145,7 @@ failure analysis:
 | `LPZapper` | the upgrade path, `setOperator` | `zapIn` / `zapInWithPermit`; the operator's `setTwapParams`, `sweep`, `rescuePosition` |
 | `LPEpochRegistry` | the upgrade path, `setOperator` | the operator's whole schedule (`scheduleEpoch`, `setEpochAmount`, `updateEpochBounds`, `cancelEpoch`) — the program keeps running for every token already registered |
 | `LPStakingVault` | the upgrade path, `setZapper`, `setBonusEscrow`, `setStakeOperator` (lane 2), `setOperator` | everything else; the three tiers are independent slots, so the guardian's pauses and the operator's `setTwapParams` / `rescuePosition` / `setGuardian` stay. `stake` and `unstake` were never the owner's to lose |
-| `RewardsDistributor` | the upgrade path, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setOperator` | `claim` for every registered token whose claims are open; the guardian keeps `setPaused`, the operator keeps `setSigner`, `recoverExcess`, `mintRewardToken` and `setGuardian` |
+| `RewardsDistributor` | the upgrade path, `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setOperator` | `claim` for every registered token whose claims are open; the guardian keeps `pause`, the operator keeps `unpause`, `setSigner`, `recoverExcess`, `mintRewardToken` and `setGuardian` |
 
 The staker-facing consequence is limited: no staked position can be trapped by a lost owner,
 because `unstake` is permissionless and unpausable, and claims of open tokens keep paying. The
@@ -225,7 +225,7 @@ What follows for operations:
   the distributor's balance of that token (`lp.distributor.underfunded`, alert only).
 - **The trust note that replaces the cap.** With no bound anywhere, a leaked SIGNER key can sign
   vouchers that take the whole funded balance of every token, in one block per token, until the
-  guardian pauses claims (`setPaused(true)`, one transaction, hot key). The guardian key must
+  guardian pauses claims (`pause()`, one transaction, hot key). The guardian key must
   therefore stay hot and watched, and the operator rotates the signer (`setSigner`) right after
   the pause. Keeping the funded balance close to what is owed is the only lever that limits the
   exposure, and it is an operational one.
@@ -497,8 +497,8 @@ with the owner.
 
 | Switch | Caller | Gates | Never gates |
 |---|---|---|---|
-| `setDepositsPaused(bool)` | guardian OR operator | `stake`, `stakeWithPermit`, `stakeFor` — and therefore the whole `LPZapper.zapIn` flow, which ends in `stakeFor` | `unstake`, `rebalance` |
-| `setRebalancePaused(bool)` | guardian OR operator | `rebalance`, with or without a swap leg | `unstake`, deposits |
+| `pauseDeposits()` / `unpauseDeposits()` | pause: guardian OR operator; unpause: operator only (audit L-01) | `stake`, `stakeWithPermit`, `stakeFor` — and therefore the whole `LPZapper.zapIn` flow, which ends in `stakeFor` | `unstake`, `rebalance` |
+| `pauseRebalance()` / `unpauseRebalance()` | pause: guardian OR operator; unpause: operator only (audit L-01) | `rebalance`, with or without a swap leg | `unstake`, deposits |
 
 `if (rebalancePaused) revert RebalanceIsPaused();` is the first statement of `rebalance`, so a
 paused call reads no storage past the flag and mines nothing. `RebalancePausedSet(bool)` carries
@@ -686,16 +686,16 @@ now.
 | tier | functions | why |
 |---|---|---|
 | owner | `_authorizeUpgrade`, `initializeV2` (once, inside the v1 -> v2 upgrade), `addRewardToken`, `setRewardTokenEnabled`, `setClaimsEnabled`, `setGuardian`, `setOperator` | a code change, a new reward token, opening or closing a token's claims, and changing who may pause or rotate the signer should all be visible on-chain before they can run |
-| guardian | `setPaused` | a bug in the claim path — or a leaked signer key — has to be stoppable in minutes |
-| operator | `setSigner`, `recoverExcess`, `mintRewardToken` (never `$ASSET`), **plus `setPaused` and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, a token leaves the contract only towards the operator, minting is treasury work the hot key must never do, and a hot guardian key has to be revocable without a delay |
+| guardian | `pause` | a bug in the claim path — or a leaked signer key — has to be stoppable in minutes |
+| operator | `setSigner`, `recoverExcess`, `mintRewardToken` (never `$ASSET`), **plus `pause`, `unpause` (the only tier that unpauses, audit L-01) and `setGuardian`** | a leaked signing key is rotated by the multisig, not by the hot key, a token leaves the contract only towards the operator, minting is treasury work the hot key must never do, and a hot guardian key has to be revocable without a delay |
 
 `LPStakingVault`:
 
 | tier | functions | why |
 |---|---|---|
 | owner | `_authorizeUpgrade`, `setZapper`, `setBonusEscrow`, `setStakeOperator` (lane 2), `setGuardian`, `setOperator` | code, pointing the deposit path at a new periphery contract, linking the bonus escrow every exit notifies (item 15), and the tier assignments are program decisions |
-| guardian | `setDepositsPaused`, `setRebalancePaused` | the two incident switches (item 13) have to act in one transaction |
-| operator | `setTwapParams`, `rescuePosition`, **plus both pause switches and `setGuardian`** | calibrating the guard is an operations decision, not an emergency one, a stranded NFT leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
+| guardian | `pauseDeposits`, `pauseRebalance` | the two incident switches (item 13) have to act in one transaction |
+| operator | `setTwapParams`, `rescuePosition`, **plus both pauses, both unpauses (the only tier that unpauses, audit L-01) and `setGuardian`** | calibrating the guard is an operations decision, not an emergency one, a stranded NFT leaves the contract only towards the operator, and a hot guardian key has to be revocable without a delay |
 
 `LPEpochRegistry`, `TokenOverture`, `LPZapper` (no guardian tier — nothing on them needs a
 pause):
@@ -1147,8 +1147,10 @@ false)`, `escrow.setAdapter(new)` (`scripts/deploy-apebond.js LP_APEBOND_MODE=re
 `setSoulZapCaller`, `setGuardian`. `setGuardian` also accepts the vault's operator, read live from
 `vault.operator()` (audit C-29; `NotOwnerOrOperator` for anyone else), so a leaked pause key is
 replaced without the timelock delay. Guardian (a pause key, `LP_APEBOND_GUARDIAN`, default the
-stack's `LP_GUARDIAN`): `setDepositsPaused` only — narrower than the vault's deposit pause, which
-stops every staker. With the signer gone, the guardian holds nothing but the pause.
+stack's `LP_GUARDIAN`): `pauseDeposits` only — narrower than the vault's deposit pause, which
+stops every staker. With the signer gone, the guardian holds nothing but the pause. The vault's
+operator (read live) also pauses, and it is the only tier that calls `unpauseDeposits` (audit
+L-01), so a leaked guardian key cannot lift a pause set during an incident.
 
 **What still rests on trust (P6).** The caller allowlists decide who can earn a bonus; after D1 a
 compromised caller gains nothing unless real capital stays staked through the cliff. The

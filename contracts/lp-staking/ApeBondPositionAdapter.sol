@@ -144,15 +144,17 @@ interface IApeBondPool {
  *    |---------------------------------|--------------------------------------------------------|
  *    | owner (timelock)                | {setCampaign}, {setCampaignEnabled},                   |
  *    |                                 | {setCampaignCaller}, {setSoulZapCaller}, {setGuardian} |
- *    | vault operator (multisig, read  | {setGuardian} (audit C-29)                             |
- *    | live from `vault.operator()`)   |                                                        |
- *    | guardian (pause key)            | {setDepositsPaused}                                    |
+ *    | vault operator (multisig, read  | {setGuardian} (audit C-29), {pauseDeposits},           |
+ *    | live from `vault.operator()`)   | {unpauseDeposits} (audit L-01)                         |
+ *    | guardian (pause key)            | {pauseDeposits}                                        |
  *
  *  Admitting a caller or changing what a campaign pays is a code change in all but name, so it
- *  waits out the timelock. Stopping the route is an incident, so the guardian does it in one
- *  transaction; the vault's own deposit pause stops this adapter too (every deposit ends in
- *  `stakeFor`), but stops ordinary stakers with it. Replacing a leaked guardian key is an
- *  incident too, so the vault's operator may do it with no delay, as on the vault itself.
+ *  waits out the timelock. Stopping the route is an incident, so the guardian (or the vault's
+ *  operator) does it in one transaction; the vault's own deposit pause stops this adapter too
+ *  (every deposit ends in `stakeFor`), but stops ordinary stakers with it. Restarting the route
+ *  is the vault's operator's alone (audit L-01): a leaked guardian key cannot undo a pause set
+ *  during an incident. Replacing a leaked guardian key is an incident too, so the vault's
+ *  operator may do it with no delay, as on the vault itself.
  *
  *  WHAT STILL RESTS ON TRUST (P6): the caller allowlist decides who can earn a bonus; the
  *  beneficiary is the router's word; and the vault's TWAP parameters, which this contract values
@@ -234,7 +236,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @notice While true, {depositFor} reverts. Nothing else on this contract is affected.
     bool public depositsPaused;
 
-    /// @notice The fast-path incident responder: {setDepositsPaused}, nothing else.
+    /// @notice The fast-path incident responder: {pauseDeposits}, nothing else.
     address public guardian;
 
     /// @notice True while `caller` may call {depositFor} at all (the global allowlist).
@@ -374,8 +376,13 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /// @dev A position NFT was safe-transferred here outside a live deposit.
     error UnsolicitedPosition(address operator, address from, uint256 tokenId);
 
-    /// @dev A guardian-tier function was called by someone else — the owner included.
-    error NotGuardian(address caller, address guardian);
+    /// @dev {pauseDeposits} was called by someone who is neither the guardian nor the vault's
+    ///      operator — the owner included.
+    error NotGuardianOrOperator(address caller, address guardian, address operator);
+
+    /// @dev {unpauseDeposits} was called by someone other than the vault's operator — the owner
+    ///      and the guardian included.
+    error NotOperator(address caller, address operator);
 
     /// @dev {setGuardian} was called by someone who is neither the owner nor the vault's operator —
     ///      the standing guardian included, since a guardian cannot rotate itself.
@@ -383,9 +390,21 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
 
     // ──────────────────────── Modifiers ────────────────────────
 
-    /// @dev The fast-path tier. Deliberately NOT satisfied by `owner()`.
-    modifier onlyGuardian() {
-        if (msg.sender != guardian) revert NotGuardian(msg.sender, guardian);
+    /// @dev The pause tier: the guardian (the fast path) OR the vault's operator (the multisig,
+    ///      read live from `vault.operator()`). Deliberately NOT satisfied by `owner()`.
+    modifier onlyGuardianOrVaultOperator() {
+        address operator_ = vault.operator();
+        if (msg.sender != guardian && msg.sender != operator_) {
+            revert NotGuardianOrOperator(msg.sender, guardian, operator_);
+        }
+        _;
+    }
+
+    /// @dev The unpause tier: the vault's operator ONLY (audit L-01), read live from
+    ///      `vault.operator()`. Not satisfied by `owner()` or by the guardian.
+    modifier onlyVaultOperator() {
+        address operator_ = vault.operator();
+        if (msg.sender != operator_) revert NotOperator(msg.sender, operator_);
         _;
     }
 
@@ -661,7 +680,7 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     }
 
     /// @notice Puts one caller on, or takes it off, the global allowlist.
-    /// @dev Removing a caller urgently does not need this: {setDepositsPaused} stops every caller
+    /// @dev Removing a caller urgently does not need this: {pauseDeposits} stops every caller
     ///      in one guardian transaction.
     function setSoulZapCaller(address caller, bool allowed) external onlyOwner {
         if (caller == address(0)) revert ZeroAddress();
@@ -672,11 +691,11 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     /**
      * @notice Rotates the guardian.
      * @dev Owner OR the vault's operator (audit C-29, 7 Oct 2026). The guardian holds an undelayed
-     *      switch, so a leaked guardian key could pause or unpause ApeBond deposits for the whole
-     *      48 h a timelock-only rotation would take; the operator multisig replaces it at once,
-     *      exactly as it can on the vault. Zero is still refused; to empty the seat in a hurry the
-     *      operator appoints itself, which gives it nothing beyond the deposit pause it already
-     *      holds on the vault.
+     *      switch, so a leaked guardian key could pause ApeBond deposits for the whole 48 h a
+     *      timelock-only rotation would take; the operator multisig replaces it at once, exactly
+     *      as it can on the vault. Zero is still refused; to empty the seat in a hurry the
+     *      operator appoints itself, which gives it nothing beyond the pause and unpause it
+     *      already holds here.
      */
     function setGuardian(address newGuardian) external onlyOwnerOrVaultOperator {
         if (newGuardian == address(0)) revert ZeroAddress();
@@ -684,17 +703,30 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         guardian = newGuardian;
     }
 
-    // ──────────────────────── Guardian function ────────────────
+    // ──────────────────────── Pause functions ──────────────────
 
     /**
-     * @notice Stops and restarts ApeBond deposits.
-     * @dev Narrower than the vault's own deposit pause, which stops every staker: this one takes
-     *      the ApeBond route out and leaves everything else running. Unstakes and bonus claims
-     *      never pass through this contract and are unaffected.
+     * @notice Stops ApeBond deposits.
+     * @dev The guardian or the vault's operator. Narrower than the vault's own deposit pause,
+     *      which stops every staker: this one takes the ApeBond route out and leaves everything
+     *      else running. Unstakes and bonus claims never pass through this contract and are
+     *      unaffected. Lifting it is {unpauseDeposits}, the vault's operator's alone (audit
+     *      L-01). Emits {DepositsPausedSet} with `true`, also when deposits were already paused.
      */
-    function setDepositsPaused(bool paused) external onlyGuardian {
-        depositsPaused = paused;
-        emit DepositsPausedSet(paused);
+    function pauseDeposits() external onlyGuardianOrVaultOperator {
+        depositsPaused = true;
+        emit DepositsPausedSet(true);
+    }
+
+    /**
+     * @notice Restarts ApeBond deposits.
+     * @dev The vault's operator only (audit L-01). The guardian is a hot key, and a guardian that
+     *      could also unpause could undo a pause the operator set during an incident. Emits
+     *      {DepositsPausedSet} with `false`, also when deposits were not paused.
+     */
+    function unpauseDeposits() external onlyVaultOperator {
+        depositsPaused = false;
+        emit DepositsPausedSet(false);
     }
 
     // ──────────────────────── Internal helpers ─────────────────

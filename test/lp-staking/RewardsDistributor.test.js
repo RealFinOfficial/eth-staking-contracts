@@ -516,7 +516,7 @@ describe("RewardsDistributor", function () {
     // and asserts the earlier one wins, which is what makes the order a real order.
 
     it("ClaimsPaused beats UnknownRewardToken", async function () {
-      await asGuardian().setPaused(true);
+      await asGuardian().pause();
       await expect(claim(alice.address, alice, TOKENS(1))).to.be.revertedWithCustomError(
         distributor,
         "ClaimsPaused"
@@ -879,33 +879,51 @@ describe("RewardsDistributor", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("Pause", function () {
-    it("is guardian OR operator — the owner is rejected — and emits Paused", async function () {
-      await expect(distributor.connect(alice).setPaused(true))
+    it("pauses guardian OR operator, unpauses operator ONLY — the owner is rejected — and emits Paused", async function () {
+      await expect(distributor.connect(alice).pause())
         .to.be.revertedWithCustomError(distributor, "NotGuardianOrOperator")
         .withArgs(alice.address, guardian.address, operatorSafe.address);
 
       // The pause is an incident switch. Routing it through the timelock would mean waiting
       // out the delay before a live bug can be stopped, so the OWNER does not hold it.
-      await expect(distributor.setPaused(true))
+      await expect(distributor.pause())
         .to.be.revertedWithCustomError(distributor, "NotGuardianOrOperator")
         .withArgs(owner.address, guardian.address, operatorSafe.address);
 
-      await expect(asGuardian().setPaused(true)).to.emit(distributor, "Paused").withArgs(true);
+      await expect(asGuardian().pause()).to.emit(distributor, "Paused").withArgs(true);
       expect(await distributor.paused()).to.equal(true);
 
-      // The operator holds the same switch, as the cold fallback for a lost guardian key.
-      await expect(asOperator().setPaused(false)).to.emit(distributor, "Paused").withArgs(false);
+      // Audit L-01: lifting the pause is the operator's alone. The guardian, the owner and a
+      // stranger are refused.
+      for (const who of [guardian, owner, alice]) {
+        await expect(distributor.connect(who).unpause())
+          .to.be.revertedWithCustomError(distributor, "NotOperator")
+          .withArgs(who.address, operatorSafe.address);
+      }
+
+      await expect(asOperator().unpause()).to.emit(distributor, "Paused").withArgs(false);
       expect(await distributor.paused()).to.equal(false);
+
+      // The operator holds the pause too, as the cold fallback for a lost guardian key.
+      await expect(asOperator().pause()).to.emit(distributor, "Paused").withArgs(true);
+    });
+
+    it("keeps an operator's pause when the guardian tries to lift it (audit L-01 PoC)", async function () {
+      await asOperator().pause();
+      await expect(asGuardian().unpause())
+        .to.be.revertedWithCustomError(distributor, "NotOperator")
+        .withArgs(guardian.address, operatorSafe.address);
+      expect(await distributor.paused()).to.equal(true);
     });
 
     it("blocks every token while paused and restores them all on unpause", async function () {
       await openAssetClaims();
-      await asGuardian().setPaused(true);
+      await asGuardian().pause();
 
       await expect(claimOverture(alice, TOKENS(100))).to.be.revertedWithCustomError(distributor, "ClaimsPaused");
       await expect(claimAsset(alice, TOKENS(500))).to.be.revertedWithCustomError(distributor, "ClaimsPaused");
 
-      await expect(asGuardian().setPaused(false)).to.emit(distributor, "Paused").withArgs(false);
+      await expect(asOperator().unpause()).to.emit(distributor, "Paused").withArgs(false);
 
       await claimOverture(alice, TOKENS(100));
       await claimAsset(alice, TOKENS(500));
@@ -914,7 +932,7 @@ describe("RewardsDistributor", function () {
     });
 
     it("leaves the admin functions usable while paused", async function () {
-      await asGuardian().setPaused(true);
+      await asGuardian().pause();
 
       await asOperator().setSigner(bob.address);
       expect(await distributor.signer()).to.equal(bob.address);
@@ -940,7 +958,7 @@ describe("RewardsDistributor", function () {
 
       // And whoever holds this call can install a signer of their own and take the funded
       // balances, so it belongs to a multisig, not to the hot GUARDIAN key. The guardian's
-      // `setPaused` is the one-transaction containment; this is the follow-up.
+      // `pause` is the one-transaction containment; this is the follow-up.
       await expect(asGuardian().setSigner(treasury.address))
         .to.be.revertedWithCustomError(distributor, "NotOperator")
         .withArgs(guardian.address, operatorSafe.address);
@@ -1194,27 +1212,28 @@ describe("RewardsDistributor", function () {
 
       // address(0) is the explicit "no guardian" state: the former guardian loses the pause
       // switch at once.
-      await expect(asGuardian().setPaused(true))
+      await expect(asGuardian().pause())
         .to.be.revertedWithCustomError(distributor, "NotGuardianOrOperator")
         .withArgs(guardian.address, ethers.ZeroAddress, operatorSafe.address);
 
       // The operator still holds the switch itself.
-      await asOperator().setPaused(true);
+      await asOperator().pause();
       expect(await distributor.paused()).to.equal(true);
 
       // And the owner can re-appoint afterwards, from the vacant state.
       await expect(distributor.setGuardian(treasury.address))
         .to.emit(distributor, "GuardianSet")
         .withArgs(ethers.ZeroAddress, treasury.address);
-      await distributor.connect(treasury).setPaused(false);
-      expect(await distributor.paused()).to.equal(false);
+      await asOperator().unpause();
+      await distributor.connect(treasury).pause();
+      expect(await distributor.paused()).to.equal(true);
     });
 
     it("lets the OPERATOR appoint a replacement guardian, not only revoke", async function () {
       await expect(asOperator().setGuardian(treasury.address))
         .to.emit(distributor, "GuardianSet")
         .withArgs(guardian.address, treasury.address);
-      await distributor.connect(treasury).setPaused(true);
+      await distributor.connect(treasury).pause();
       expect(await distributor.paused()).to.equal(true);
     });
 
@@ -1270,7 +1289,7 @@ describe("RewardsDistributor", function () {
       expect((await asset.balanceOf(treasury.address)) - before).to.equal(TOKENS(400));
 
       // ...and the pause tier follows the operator too, because the operator holds it.
-      await distributor.connect(treasury).setPaused(true);
+      await distributor.connect(treasury).pause();
       expect(await distributor.paused()).to.equal(true);
     });
   });
@@ -1816,14 +1835,14 @@ describe("RewardsDistributor", function () {
         await handOverToTimelock();
 
         // No schedule, no delay: the incident switch still works in one transaction.
-        await asGuardian().setPaused(true);
+        await asGuardian().pause();
         expect(await distributor.paused()).to.equal(true);
 
         // And so does the operator tier: rotating a compromised signing key must not wait out
         // 48 h.
         await asOperator().setSigner(treasury.address);
         expect(await distributor.signer()).to.equal(treasury.address);
-        await asOperator().setPaused(false);
+        await asOperator().unpause();
         expect(await distributor.paused()).to.equal(false);
       });
 

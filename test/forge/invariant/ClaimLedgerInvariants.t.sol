@@ -207,14 +207,14 @@ contract ClaimLedgerHandler is Test {
         bytes memory sig = _sign(signerPk, token, actor, cumulative, FAR_DEADLINE);
 
         vm.prank(admin);
-        distributor.setPaused(true);
+        distributor.pause();
         (bool paid,) = _attempt(token, actor, cumulative, FAR_DEADLINE, sig);
         if (paid) {
             pausedClaimEverPaid = true;
             entitlement[token][actor] = cumulative;
         }
         vm.prank(admin);
-        distributor.setPaused(false);
+        distributor.unpause();
         _observeLedgers();
     }
 

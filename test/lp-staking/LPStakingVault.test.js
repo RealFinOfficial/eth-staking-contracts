@@ -550,7 +550,7 @@ describe("LPStakingVault", function () {
 
     it("rejects a stake while deposits are paused", async function () {
       const tokenId = await createPosition(alice);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
 
       await expect(vault.connect(alice).stake(tokenId)).to.be.revertedWithCustomError(
         vault,
@@ -655,7 +655,7 @@ describe("LPStakingVault", function () {
     it("is gated by the deposit pause like every other stake path", async function () {
       await vault.setZapper(zapper.address);
       const tokenId = await createPosition(zapper);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
 
       await expect(
         vault.connect(zapper).stakeFor(alice.address, tokenId)
@@ -749,7 +749,7 @@ describe("LPStakingVault", function () {
     it("gates the operator path with the deposit pause too", async function () {
       await vault.setStakeOperator(stranger.address, true);
       const tokenId = await createPosition(stranger);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
 
       await expect(
         vault.connect(stranger).stakeFor(alice.address, tokenId)
@@ -762,7 +762,7 @@ describe("LPStakingVault", function () {
         .withArgs(stranger.address);
 
       // Adding a deposit entry point is a code change in all but name, so it takes the
-      // timelock's delay; stopping an operator that already has one is `setDepositsPaused`.
+      // timelock's delay; stopping an operator that already has one is `pauseDeposits`.
       await expect(asGuardian().setStakeOperator(stranger.address, true))
         .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
         .withArgs(guardian.address);
@@ -816,7 +816,7 @@ describe("LPStakingVault", function () {
 
     it("stays open while deposits are paused (exits are never gated)", async function () {
       const tokenId = await stakePosition(alice);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
 
       await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
@@ -824,8 +824,8 @@ describe("LPStakingVault", function () {
 
     it("stays open while rebalance is paused (the exit is the fallback)", async function () {
       const tokenId = await stakePosition(alice);
-      await asGuardian().setRebalancePaused(true);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseRebalance();
+      await asGuardian().pauseDeposits();
 
       await expect(vault.connect(alice).unstake(tokenId)).to.emit(vault, "Unstaked");
       expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
@@ -1064,7 +1064,7 @@ describe("LPStakingVault", function () {
     it("stays open while deposits are paused", async function () {
       const tokenId = await stakePosition(alice);
       await primeHappyPath(tokenId);
-      await asGuardian().setDepositsPaused(true);
+      await asGuardian().pauseDeposits();
 
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
@@ -1074,7 +1074,7 @@ describe("LPStakingVault", function () {
     it("reverts while rebalance is paused, and works again once it is lifted", async function () {
       const tokenId = await stakePosition(alice);
       await primeHappyPath(tokenId);
-      await asGuardian().setRebalancePaused(true);
+      await asGuardian().pauseRebalance();
 
       // the pause is the first statement, so it fires even for the staker's own position
       await expect(
@@ -1083,7 +1083,8 @@ describe("LPStakingVault", function () {
       // nothing moved: the position is still staked, still under the same staker
       expect(await vault.stakerOf(tokenId)).to.equal(alice.address);
 
-      await asGuardian().setRebalancePaused(false);
+      // lifting a pause is the operator's alone (audit L-01)
+      await asOperator().unpauseRebalance();
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swapParams(), FAR_DEADLINE)
       ).to.emit(vault, "Rebalanced");
@@ -1092,7 +1093,7 @@ describe("LPStakingVault", function () {
     it("is blocked by the rebalance pause even with no swap leg", async function () {
       const tokenId = await stakePosition(alice);
       await nfpm.setMintConsumeBps(10_000n);
-      await asGuardian().setRebalancePaused(true);
+      await asGuardian().pauseRebalance();
 
       await expect(
         vault.connect(alice).rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, NO_SWAP, FAR_DEADLINE)
@@ -1706,7 +1707,7 @@ describe("LPStakingVault", function () {
         .withArgs(owner.address, operatorSafe.address);
 
       // ...and neither does the hot GUARDIAN key. When the guard has to stop mattering RIGHT
-      // NOW the answer is `setRebalancePaused`, which the guardian does hold.
+      // NOW the answer is `pauseRebalance`, which the guardian does hold.
       await expect(asGuardian().setTwapParams(1200, 100))
         .to.be.revertedWithCustomError(vault, "NotOperator")
         .withArgs(guardian.address, operatorSafe.address);
@@ -1742,42 +1743,72 @@ describe("LPStakingVault", function () {
       expect(await vault.twapWindow()).to.equal(3600);
     });
 
-    it("toggles the deposit pause, guardian OR operator — the owner is rejected", async function () {
-      await expect(vault.connect(alice).setDepositsPaused(true))
+    it("pauses deposits guardian OR operator, unpauses operator ONLY — the owner is rejected", async function () {
+      await expect(vault.connect(alice).pauseDeposits())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(alice.address, guardian.address, operatorSafe.address);
 
       // The pause is the fast mitigation. Routing it through the timelock would mean waiting
       // out the delay before a live bug can be stopped, so the OWNER does not hold it.
-      await expect(vault.setDepositsPaused(true))
+      await expect(vault.pauseDeposits())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(owner.address, guardian.address, operatorSafe.address);
 
-      await expect(asGuardian().setDepositsPaused(true)).to.emit(vault, "DepositsPausedSet").withArgs(true);
+      await expect(asGuardian().pauseDeposits()).to.emit(vault, "DepositsPausedSet").withArgs(true);
       expect(await vault.depositsPaused()).to.equal(true);
 
-      // The operator holds the same switch, as the cold fallback for a lost guardian key: a
-      // pause is never stuck for the 48 h a guardian rotation through the timelock takes.
-      await expect(asOperator().setDepositsPaused(false)).to.emit(vault, "DepositsPausedSet").withArgs(false);
+      // Audit L-01: lifting the pause is the operator's alone. The guardian, the owner and a
+      // stranger are refused.
+      for (const who of [guardian, owner, alice]) {
+        await expect(vault.connect(who).unpauseDeposits())
+          .to.be.revertedWithCustomError(vault, "NotOperator")
+          .withArgs(who.address, operatorSafe.address);
+      }
+
+      await expect(asOperator().unpauseDeposits()).to.emit(vault, "DepositsPausedSet").withArgs(false);
       expect(await vault.depositsPaused()).to.equal(false);
+
+      // The operator holds the pause too, as the cold fallback for a lost guardian key.
+      await expect(asOperator().pauseDeposits()).to.emit(vault, "DepositsPausedSet").withArgs(true);
     });
 
-    it("toggles the rebalance pause, guardian OR operator — the owner is rejected", async function () {
-      await expect(vault.connect(alice).setRebalancePaused(true))
+    it("pauses rebalance guardian OR operator, unpauses operator ONLY — the owner is rejected", async function () {
+      await expect(vault.connect(alice).pauseRebalance())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(alice.address, guardian.address, operatorSafe.address);
 
-      await expect(vault.setRebalancePaused(true))
+      await expect(vault.pauseRebalance())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(owner.address, guardian.address, operatorSafe.address);
 
-      await expect(asGuardian().setRebalancePaused(true)).to.emit(vault, "RebalancePausedSet").withArgs(true);
+      await expect(asGuardian().pauseRebalance()).to.emit(vault, "RebalancePausedSet").withArgs(true);
       expect(await vault.rebalancePaused()).to.equal(true);
       // the two switches are independent
       expect(await vault.depositsPaused()).to.equal(false);
 
-      await expect(asOperator().setRebalancePaused(false)).to.emit(vault, "RebalancePausedSet").withArgs(false);
+      // Audit L-01: lifting the pause is the operator's alone.
+      for (const who of [guardian, owner, alice]) {
+        await expect(vault.connect(who).unpauseRebalance())
+          .to.be.revertedWithCustomError(vault, "NotOperator")
+          .withArgs(who.address, operatorSafe.address);
+      }
+
+      await expect(asOperator().unpauseRebalance()).to.emit(vault, "RebalancePausedSet").withArgs(false);
       expect(await vault.rebalancePaused()).to.equal(false);
+      await expect(asOperator().pauseRebalance()).to.emit(vault, "RebalancePausedSet").withArgs(true);
+    });
+
+    it("keeps an operator's pause when the guardian tries to lift it (audit L-01 PoC)", async function () {
+      await asOperator().pauseDeposits();
+      await asOperator().pauseRebalance();
+      await expect(asGuardian().unpauseDeposits())
+        .to.be.revertedWithCustomError(vault, "NotOperator")
+        .withArgs(guardian.address, operatorSafe.address);
+      await expect(asGuardian().unpauseRebalance())
+        .to.be.revertedWithCustomError(vault, "NotOperator")
+        .withArgs(guardian.address, operatorSafe.address);
+      expect(await vault.depositsPaused()).to.equal(true);
+      expect(await vault.rebalancePaused()).to.equal(true);
     });
 
     it("sets and clears the zapper, owner only — guardian and operator rejected — carrying both sides", async function () {
@@ -1787,7 +1818,7 @@ describe("LPStakingVault", function () {
       );
 
       // Pointing the deposit path at new code is a code change in all but name, so it takes
-      // the timelock's delay; stopping the existing zapper is `setDepositsPaused`.
+      // the timelock's delay; stopping the existing zapper is `pauseDeposits`.
       await expect(asGuardian().setZapper(alice.address))
         .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
         .withArgs(guardian.address);
@@ -1886,26 +1917,26 @@ describe("LPStakingVault", function () {
       // address(0) is the explicit "no guardian" state: the former guardian loses both
       // switches at once, and the rejection names the zero address as the party that would
       // have been allowed — which nobody can be, because msg.sender is never address(0).
-      await expect(asGuardian().setDepositsPaused(true))
+      await expect(asGuardian().pauseDeposits())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(guardian.address, ZERO, operatorSafe.address);
-      await expect(asGuardian().setRebalancePaused(true))
+      await expect(asGuardian().pauseRebalance())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(guardian.address, ZERO, operatorSafe.address);
 
       // The operator still holds both switches itself, which is why the revocation costs the
       // protocol nothing: no incident response is lost by removing the hot key.
-      await asOperator().setDepositsPaused(true);
+      await asOperator().pauseDeposits();
       expect(await vault.depositsPaused()).to.equal(true);
-      await asOperator().setRebalancePaused(true);
+      await asOperator().pauseRebalance();
       expect(await vault.rebalancePaused()).to.equal(true);
 
       // And the owner can re-appoint afterwards, from the vacant state.
       await expect(vault.setGuardian(alice.address))
         .to.emit(vault, "GuardianSet")
         .withArgs(ZERO, alice.address);
-      await vault.connect(alice).setDepositsPaused(false);
-      expect(await vault.depositsPaused()).to.equal(false);
+      await vault.connect(alice).pauseRebalance();
+      expect(await vault.rebalancePaused()).to.equal(true);
     });
 
     it("lets the OPERATOR appoint a replacement guardian, not only revoke", async function () {
@@ -1914,7 +1945,7 @@ describe("LPStakingVault", function () {
         .withArgs(guardian.address, alice.address);
       expect(await vault.guardian()).to.equal(alice.address);
 
-      await vault.connect(alice).setRebalancePaused(true);
+      await vault.connect(alice).pauseRebalance();
       expect(await vault.rebalancePaused()).to.equal(true);
     });
 
@@ -1925,21 +1956,21 @@ describe("LPStakingVault", function () {
       await expect(asOperator().setGuardian(bob.address))
         .to.emit(vault, "GuardianSet")
         .withArgs(ZERO, bob.address);
-      await vault.connect(bob).setDepositsPaused(true);
+      await vault.connect(bob).pauseDeposits();
       expect(await vault.depositsPaused()).to.equal(true);
     });
 
     it("moves the whole pause tier in one call", async function () {
       await vault.setGuardian(stranger.address);
 
-      await expect(asGuardian().setDepositsPaused(true))
+      await expect(asGuardian().pauseDeposits())
         .to.be.revertedWithCustomError(vault, "NotGuardianOrOperator")
         .withArgs(guardian.address, stranger.address, operatorSafe.address);
 
-      await vault.connect(stranger).setDepositsPaused(true);
+      await vault.connect(stranger).pauseDeposits();
       expect(await vault.depositsPaused()).to.equal(true);
 
-      await vault.connect(stranger).setRebalancePaused(true);
+      await vault.connect(stranger).pauseRebalance();
       expect(await vault.rebalancePaused()).to.equal(true);
     });
 
@@ -1996,7 +2027,7 @@ describe("LPStakingVault", function () {
       expect(await nfpm.ownerOf(tokenId)).to.equal(stranger.address);
 
       // ...and the pause tier follows the operator too, because the operator holds it.
-      await vault.connect(stranger).setDepositsPaused(true);
+      await vault.connect(stranger).pauseDeposits();
       expect(await vault.depositsPaused()).to.equal(true);
     });
   });
@@ -2281,7 +2312,7 @@ describe("LPStakingVault", function () {
     it("keeps the staker ledger, the switches and both roles across upgradeProxy", async function () {
       const tokenId = await stakePosition(alice);
       await vault.setZapper(zapper.address);
-      await asGuardian().setRebalancePaused(true);
+      await asGuardian().pauseRebalance();
 
       const V2 = await v2Factory();
       const upgraded = await upgrades.upgradeProxy(vaultAddr, V2, {
@@ -2448,16 +2479,16 @@ describe("LPStakingVault", function () {
         await handOver();
 
         // No schedule, no delay: the incident switches still work in one transaction.
-        await asGuardian().setDepositsPaused(true);
+        await asGuardian().pauseDeposits();
         expect(await vault.depositsPaused()).to.equal(true);
-        await asGuardian().setRebalancePaused(true);
+        await asGuardian().pauseRebalance();
         expect(await vault.rebalancePaused()).to.equal(true);
 
         // And so does the operator tier, which is the whole reason `setTwapParams` left the
         // owner: a calibration must not wait out 48 h.
         await asOperator().setTwapParams(1200, 100);
         expect(await vault.twapWindow()).to.equal(1200);
-        await asOperator().setDepositsPaused(false);
+        await asOperator().unpauseDeposits();
         expect(await vault.depositsPaused()).to.equal(false);
       });
 
