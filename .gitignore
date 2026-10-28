@@ -1,7 +1,26 @@
 node_modules/
 artifacts/
 cache/
+cache_forge/
+out/
 typechain-types/
 coverage/
 coverage.json
 .env
+lcov.info
+
+# `hardhat-upgrades` writes one manifest per network under .openzeppelin/. The named
+# networks (sepolia, mainnet) are COMMITTED — they are the storage-layout baseline
+# `validateUpgrade` grades a new implementation against. The `unknown-<chainId>.json`
+# files are throwaway: every in-process fork run and every ephemeral node writes one.
+.openzeppelin/unknown-*.json
+
+# `scripts/deploy-apebond.js` writes the timelock batch it built beside deployments.json,
+# so the operator can drive the same operation by hand with `lp-timelock.js`. It is a run
+# artifact, not a record: the addresses it names are already in deployments.json.
+apebond-*-batch.json
+
+# `scripts/apebond-rehearsal.js` writes the purchase it made beside deployments.json, so the
+# claim phase can run in another shell on another day. Same reason as the batch file above:
+# it is a run artifact of a TEST-STACK rehearsal, not a record of the deployment.
+apebond-rehearsal-*.json

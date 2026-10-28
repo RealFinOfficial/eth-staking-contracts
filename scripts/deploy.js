@@ -49,7 +49,7 @@ async function main() {
 
   const nonce = await pools.resolveNonce(deployer.address);
   console.log(`\nNonce: ${nonce}`);
-  if (mainnet) console.log("Confirm on the Ledger...");
+  if (mainnet) console.log("Confirm on the mainnet signer...");
 
   const factory = await hre.ethers.getContractFactory("StakingPool");
   const contract = await factory.deploy(stakingToken, rewardTokenAddress, activation, end, { nonce });

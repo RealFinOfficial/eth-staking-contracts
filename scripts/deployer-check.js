@@ -1,17 +1,19 @@
 const hre = require("hardhat");
 
-// Read-only preflight: checks network, deployer balance and deploy cost before
-// any gas is spent. Sends no transaction.
+// Read-only preflight: checks network, deployer address, balance and deploy cost
+// before any gas is spent. Sends no transaction.
 //
-// Note: this does NOT reach the device — hardhat-ledger answers eth_accounts
-// from config alone. Set LEDGER_PING=1 to also sign a throwaway message, which
-// is free but does exercise the USB connection, derivation path and app state.
+// The deployer is the first signer the network config produces: PRIVATE_KEY on
+// sepolia, MAINNET_PRIVATE_KEY on mainnet. The key itself is never printed, only
+// the address it controls. Compare that address with the intended deployer first.
 async function main() {
   const { chainId, name } = await hre.ethers.provider.getNetwork();
   console.log("Network:", hre.network.name, "chainId:", chainId.toString(), `(${name})`);
 
   const signers = await hre.ethers.getSigners();
-  if (signers.length === 0) throw new Error("No signer available — is LEDGER_ACCOUNT set?");
+  if (signers.length === 0) {
+    throw new Error("No signer available — set PRIVATE_KEY (testnet) or MAINNET_PRIVATE_KEY (mainnet)");
+  }
 
   const [deployer] = signers;
   const balance = await hre.ethers.provider.getBalance(deployer.address);
@@ -42,22 +44,10 @@ async function main() {
       console.log("Estimated cost:", hre.ethers.formatEther(gas * fee.maxFeePerGas), "ETH (at maxFeePerGas)");
     }
     if (weightSigner === deployer.address) {
-      console.log("WARNING: WEIGHT_SIGNER is unset — the Ledger address would become the attestation signer.");
+      console.log("WARNING: WEIGHT_SIGNER is unset — the deployer address would become the attestation signer.");
     }
   } else {
     console.log("Deploy params incomplete — skipping gas estimate.");
-  }
-
-  if (process.env.LEDGER_PING === "1") {
-    console.log("\nAsking the Ledger to sign a throwaway message — confirm on the device...");
-    const sig = await deployer.signMessage("WeightedStakingPool preflight");
-    const recovered = hre.ethers.verifyMessage("WeightedStakingPool preflight", sig);
-    console.log("Signed. Recovered:", recovered);
-    console.log(
-      recovered.toLowerCase() === deployer.address.toLowerCase()
-        ? "Device OK — matches LEDGER_ACCOUNT."
-        : "MISMATCH — the device signed with a different address."
-    );
   }
 }
 

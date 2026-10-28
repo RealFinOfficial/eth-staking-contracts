@@ -31,7 +31,7 @@ async function main() {
   if (weightSigner === deployer.address) {
     console.log(
       "\nWARNING: WEIGHT_SIGNER is unset, so the deployer becomes the attestation signer.\n" +
-        "         The signer must sign EIP-712 messages on every stake — a Ledger cannot serve that role."
+        "         The signer must sign EIP-712 messages on every stake — a hardware or multisig signer cannot serve that role."
     );
   }
   if (Number(activationEpoch) <= now) {
@@ -44,7 +44,7 @@ async function main() {
 
   const nonce = await pools.resolveNonce(deployer.address);
   console.log(`\nNonce: ${nonce}`);
-  if (pools.isMainnet(chainId)) console.log("Confirm on the Ledger...");
+  if (pools.isMainnet(chainId)) console.log("Confirm on the mainnet signer...");
 
   const factory = await hre.ethers.getContractFactory("WeightedStakingPool");
   const contract = await factory.deploy(
