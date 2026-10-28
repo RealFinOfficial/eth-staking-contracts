@@ -11,6 +11,7 @@ import {MockSoulZapCaller} from "../../../contracts/lp-staking/mocks/MockSoulZap
 import {MockPositionManager} from "../../../contracts/lp-staking/mocks/MockPositionManager.sol";
 import {MisreportingVault} from "../utils/attackers/MisreportingVault.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @dev An escrow double that names the right vault but a bonus token outside the pool — the one
 ///      combination the real {BonusEscrow} constructor already refuses, so the adapter's own check
@@ -297,6 +298,66 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         emit ApeBondPositionAdapter.SoulZapCallerSet(bob, true);
         adapter.setSoulZapCaller(bob, true);
         assertTrue(adapter.soulZapCallers(bob), "allowlisted");
+    }
+
+    // ──────────────────────── Ownership (audit L-03) ───────────
+
+    /// @dev `transferOwnership` only NOMINATES, as on the five proxies: the owner does not move,
+    ///      the nominee is recorded and holds nothing until it accepts.
+    function test_Ownership_TransferOnlyNominates() public {
+        vm.expectEmit(true, true, false, false, address(adapter));
+        emit Ownable2Step.OwnershipTransferStarted(address(this), operatorSafe);
+        adapter.transferOwnership(operatorSafe);
+
+        assertEq(adapter.owner(), address(this), "a nomination must not move the owner");
+        assertEq(adapter.pendingOwner(), operatorSafe, "the nominee is recorded");
+
+        vm.prank(operatorSafe);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operatorSafe));
+        adapter.setSoulZapCaller(bob, true);
+
+        adapter.setSoulZapCaller(bob, true);
+        assertTrue(adapter.soulZapCallers(bob), "the standing owner still holds the owner tier");
+    }
+
+    /// @dev Accepting is what moves the owner; it clears the nomination and the new owner acts.
+    function test_Ownership_AcceptanceByTheNomineeMovesTheOwner() public {
+        adapter.transferOwnership(operatorSafe);
+        vm.prank(operatorSafe);
+        adapter.acceptOwnership();
+
+        assertEq(adapter.owner(), operatorSafe, "accepting moves the owner");
+        assertEq(adapter.pendingOwner(), address(0), "and clears the nomination");
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        adapter.setSoulZapCaller(bob, true);
+        vm.prank(operatorSafe);
+        adapter.setSoulZapCaller(bob, true);
+        assertTrue(adapter.soulZapCallers(bob), "the new owner acts at once");
+    }
+
+    /// @dev Only the nominee may accept: a stranger and the standing owner are refused.
+    function test_Ownership_OnlyTheNomineeCanAccept() public {
+        adapter.transferOwnership(operatorSafe);
+        address[2] memory refused = [stranger, address(this)];
+        for (uint256 i = 0; i < refused.length; ++i) {
+            vm.prank(refused[i]);
+            vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, refused[i]));
+            adapter.acceptOwnership();
+        }
+        assertEq(adapter.pendingOwner(), operatorSafe, "a refused acceptance leaves the nomination standing");
+        assertEq(adapter.owner(), address(this), "and the owner where it was");
+    }
+
+    /// @dev `renounceOwnership` reverts `RenounceDisabled` for the owner and
+    ///      `OwnableUnauthorizedAccount` for anybody else.
+    function test_Ownership_RenounceIsDisabled() public {
+        vm.expectRevert(ApeBondPositionAdapter.RenounceDisabled.selector);
+        adapter.renounceOwnership();
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        adapter.renounceOwnership();
+        assertEq(adapter.owner(), address(this), "the adapter is never ownerless");
     }
 
     // ──────────────────────── Guardian ─────────────────────────

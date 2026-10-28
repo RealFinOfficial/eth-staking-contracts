@@ -24,8 +24,8 @@ const {
 //
 //   - the five LP proxies (vault, distributor, registry, Overture token, zapper) — required;
 //   - `BonusEscrow`, a UUPS proxy, Ownable2Step like the five;
-//   - `ApeBondPositionAdapter`, plain `Ownable`: its `transferOwnership` IS the whole handover,
-//     effective when the old timelock's batch executes, with nothing to accept;
+//   - `ApeBondPositionAdapter`, Ownable2Step since audit L-03 (not a proxy): nominated by the old
+//     timelock's batch and accepted by the new timelock's, like the others;
 //   - every `RewardToken:<SYMBOL>` entry, Overture-shaped UUPS proxies, Ownable2Step.
 //
 // An optional entry (the escrow, the adapter, a reward token) moves when it is in the registry
@@ -46,17 +46,16 @@ const {
 //                its canceller. Recorded as `TimelockControllerNext` in deployments.json.
 //   schedule     ONE batch on the OLD timelock: transferOwnership(new) on every contract that
 //                moves, scheduled with the old timelock's minDelay (48 h on mainnet).
-//   execute      after that delay: execute the batch. The Ownable2Step contracts now name the
-//                new timelock as pendingOwner (the old timelock is still their owner); the
-//                adapter is the new timelock's already.
+//   execute      after that delay: execute the batch. Every contract that moves now names the
+//                new timelock as pendingOwner (the old timelock is still its owner).
 //   accept       on the NEW timelock: one batch acceptOwnership() on every Ownable2Step contract
 //                that moves, scheduled and — because its delay is still 0 — executed in the same
 //                run. With a non-zero delay the run schedules it and a second `accept` run
 //                executes it.
 //   raise-delay  on the NEW timelock: updateDelay(NEW_TIMELOCK_FINAL_DELAY, default 48 h),
 //                scheduled on itself and executed (same rule as `accept`).
-//   verify       prints owner() of every contract that moved — and pendingOwner() of the
-//                Ownable2Step ones — and requires owner == new timelock and pendingOwner == 0;
+//   verify       prints owner() and pendingOwner() of every contract that moved, and requires
+//                owner == new timelock and pendingOwner == 0;
 //                then the new minDelay; on success, deployments.json records the new owner on
 //                each moved entry, moves the new timelock into `TimelockController` and keeps the
 //                old one as `TimelockControllerRetired`.
@@ -91,8 +90,8 @@ function confirmMainnet(chainId, action) {
 /**
  * Every contract this switch moves, in batch order — the five proxies, then the escrow, the
  * adapter and the reward tokens the registry records as owned by the old timelock — and one
- * line per optional entry it skips, saying why. `twoStep` is false only for the plain-Ownable
- * adapter, which has no `pendingOwner` and nothing to accept.
+ * line per optional entry it skips, saying why. Every one of them is `twoStep` (Ownable2Step):
+ * the adapter joined the list with audit L-03.
  */
 function contractsToMove(entries, chainId, oldAddress) {
   const move = PROXY_KINDS.map((kind) => {
@@ -104,7 +103,7 @@ function contractsToMove(entries, chainId, oldAddress) {
     .sort();
   const optional = [
     { kind: ESCROW_KIND, twoStep: true },
-    { kind: ADAPTER_KIND, twoStep: false },
+    { kind: ADAPTER_KIND, twoStep: true },
     ...rewardKinds.map((kind) => ({ kind, twoStep: true })),
   ];
   const skipped = [];
@@ -195,8 +194,7 @@ async function main() {
   const newAddress = await newTimelock.getAddress();
   for (const line of skipped) console.log(`skip  ${line}`);
 
-  // The one batch on the OLD timelock: one nomination (the adapter: one handover) per contract,
-  // executed atomically.
+  // The one batch on the OLD timelock: one nomination per contract, executed atomically.
   const transferBatch = buildBatch(
     move.map((c) => ({ target: c.address, fn: "transferOwnership", args: [newAddress] })),
     tag
@@ -244,10 +242,9 @@ async function main() {
   for (const m of move) {
     const c = new hre.ethers.Contract(m.address, OWNABLE_ABI, hre.ethers.provider);
     const owner = await c.owner();
-    // The adapter is plain Ownable: it has no pendingOwner to read.
-    const pending = m.twoStep ? await c.pendingOwner() : hre.ethers.ZeroAddress;
+    const pending = await c.pendingOwner();
     const ok = owner.toLowerCase() === newAddress.toLowerCase() && pending === hre.ethers.ZeroAddress;
-    const detail = m.twoStep ? `pendingOwner ${pending}` : "(plain Ownable, nothing to accept)";
+    const detail = `pendingOwner ${pending}`;
     console.log(`${ok ? "OK  " : "FAIL"}  ${m.kind}.owner ${owner} ${detail}`);
     if (!ok) failures.push(m.kind);
   }

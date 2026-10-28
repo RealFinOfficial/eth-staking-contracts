@@ -634,11 +634,13 @@ describe("lp-timelock.js — batches", function () {
       for (const [fn, kinds] of Object.entries(legal)) {
         expect(lpTimelock.OWNER_TIER[fn].kinds, fn).to.deep.equal(kinds);
       }
-      // The escrow is an Ownable2Step UUPS proxy like the five; the adapter is plain Ownable.
+      // The escrow is an Ownable2Step UUPS proxy like the five; the adapter is Ownable2Step too
+      // (audit L-03) but not upgradeable.
       for (const fn of ["upgradeToAndCall", "acceptOwnership", "transferOwnership"]) {
         expect(lpTimelock.OWNER_TIER[fn].kinds, fn).to.include("BonusEscrow");
       }
       expect(lpTimelock.OWNER_TIER.transferOwnership.kinds).to.include("ApeBondPositionAdapter");
+      expect(lpTimelock.OWNER_TIER.acceptOwnership.kinds).to.include("ApeBondPositionAdapter");
       expect(lpTimelock.OWNER_TIER.upgradeToAndCall.kinds).to.not.include("ApeBondPositionAdapter");
       expect(lpTimelock.OWNER_TIER.setGuardian.kinds).to.include("ApeBondPositionAdapter");
       // The signature era is gone: no owner-tier entry may name it.

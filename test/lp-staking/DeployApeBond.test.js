@@ -320,8 +320,13 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(await escrow.owner()).to.equal(timelockAddr);
     });
 
-    it("wired the adapter's callers and campaign, then handed it to the timelock", async function () {
-      expect(await adapter.owner()).to.equal(timelockAddr);
+    it("wired the adapter's callers and campaign, then NOMINATED the timelock (the third state, L-03)", async function () {
+      // Ownable2Step: the deployer stays the owner until the link batch accepts.
+      expect(await adapter.owner()).to.equal(w.deployer.address);
+      expect(await adapter.pendingOwner()).to.equal(timelockAddr);
+      expect(fresh.stdout).to.include(
+        `OK    ApeBondPositionAdapter.pendingOwner (the activation batch opens with acceptOwnership): ${timelockAddr}`
+      );
       expect(await adapter.guardian()).to.equal(w.guardian.address);
       for (const caller of [w.soulZapCaller.address, w.signer2.address]) {
         expect(await adapter.soulZapCallers(caller)).to.equal(true);
@@ -375,6 +380,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
           "guardian",
           "minCliffSeconds",
           "owner",
+          "pendingOwner",
           "positionManager",
           "soulZapCallers",
           "tickSpacing",
@@ -383,7 +389,8 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
           "vault",
         ].sort()
       );
-      expect(a.owner).to.equal(timelockAddr);
+      expect(a.owner).to.equal(w.deployer.address);
+      expect(a.pendingOwner).to.equal(timelockAddr);
       expect(a.tickSpacing).to.equal(60);
       expect(a.minCliffSeconds).to.equal("300");
       expect(a.soulZapCallers).to.deep.equal([w.soulZapCaller.address, w.signer2.address]);
@@ -408,7 +415,9 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
 
     it("filed the ONE link batch, in order, and printed its Safe calldata", function () {
       const filed = JSON.parse(fs.readFileSync(batchFile, "utf8"));
+      // The FIRST call accepts the adapter's ownership: the third state holds (audit L-03).
       expect(filed).to.deep.equal([
+        { target: adapterAddr, fn: "acceptOwnership", args: [] },
         { target: vaultAddr, fn: "setBonusEscrow", args: [escrowAddr] },
         { target: vaultAddr, fn: "setStakeOperator", args: [adapterAddr, "true"] },
         { target: escrowAddr, fn: "setAdapter", args: [adapterAddr] },
@@ -417,6 +426,25 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(fresh.stdout).to.include(`Batch id ${batch.id}`);
       expect(fresh.stdout).to.include(lpTimelock.encodeScheduleBatch(batch, BigInt(MIN_DELAY)));
       expect(fresh.stdout).to.include(lpTimelock.encodeExecuteBatch(batch));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("deploy-apebond.js verify — before the activation executes (the pre-execute check)", function () {
+    it("recognises the third state, prints the adapter's config and asserts pendingOwner == timelock", async function () {
+      const nonce = await nonceOf(w.deployer.address);
+      const result = await world.runOk("deploy-apebond.js", apebondEnv({ LP_APEBOND_MODE: "verify" }));
+      expect(result.stdout).to.include("activation PENDING (nominated to the timelock, not accepted)");
+      expect(result.stdout).to.include(`guardian():                     ${w.guardian.address}`);
+      expect(result.stdout).to.include(`soulZapCallers(${w.soulZapCaller.address}): true`);
+      expect(result.stdout).to.include(`campaigns(${CAMPAIGN_ID}):`);
+      expect(result.stdout).to.include(`campaignCallers(${CAMPAIGN_ID}, ${w.soulZapCaller.address}): true`);
+      expect(result.stdout).to.include(
+        `OK    ApeBondPositionAdapter.pendingOwner (the activation batch opens with acceptOwnership): ${timelockAddr}`
+      );
+      expect(result.stdout).to.include("All pre-execute verification checks passed.");
+      expect(result.stdout).to.not.include("FAIL");
+      expect(await nonceOf(w.deployer.address)).to.equal(nonce);
     });
   });
 
@@ -437,10 +465,23 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       );
       const batch = lpTimelock.buildBatch(JSON.parse(fs.readFileSync(batchFile, "utf8")));
       expect(run.stdout).to.include(`id:          ${batch.id}`);
+      expect(run.stdout).to.include(`0. acceptOwnership() on ${adapterAddr}`);
       expect(await timelock.isOperationDone(batch.id)).to.equal(true);
       expect(run.stdout).to.match(/waiting: \d+s of CHAIN time left/);
+      // The resume recognised the third state: no second nomination was sent.
+      expect(run.stdout).to.include("The adapter is already NOMINATED to the timelock");
       // schedule + execute, and nothing else
       expect((await nonceOf(w.deployer.address)) - nonceBefore).to.equal(2);
+    });
+
+    it("accepted the adapter's ownership in the batch: owned by the timelock, nothing pending", async function () {
+      expect(await adapter.owner()).to.equal(timelockAddr);
+      expect(await adapter.pendingOwner()).to.equal(ethers.ZeroAddress);
+      expect(run.stdout).to.include(`OK    ApeBondPositionAdapter.owner: ${timelockAddr}`);
+      expect(run.stdout).to.include(`OK    ApeBondPositionAdapter.pendingOwner: ${ethers.ZeroAddress}`);
+      const entry = world.entry("ApeBondPositionAdapter");
+      expect(entry.owner).to.equal(timelockAddr);
+      expect(entry.pendingOwner).to.equal(ethers.ZeroAddress);
     });
 
     it("linked the vault and the escrow, and its MANDATORY checks passed", async function () {
@@ -532,8 +573,10 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect((await a.campaigns(CAMPAIGN_ID)).bonusBps).to.equal(1000n);
     });
 
-    it("swapped the rights in ONE batch: new on, old off, escrow re-pointed — in that order", async function () {
+    it("swapped the rights in ONE batch: accept, new on, old off, escrow re-pointed — in that order", async function () {
       const calls = [
+        // The new adapter was nominated to the timelock; the batch accepts it first (L-03).
+        { target: newAdapter, fn: "acceptOwnership", args: [] },
         { target: vaultAddr, fn: "setStakeOperator", args: [newAdapter, "true"] },
         { target: vaultAddr, fn: "setStakeOperator", args: [oldAdapter, "false"] },
         { target: escrowAddr, fn: "setAdapter", args: [newAdapter] },

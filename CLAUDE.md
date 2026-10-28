@@ -126,8 +126,9 @@ An un-flagged run is byte-for-byte the stack above, with `bonusEscrow = 0`:
   leaves it under the OLD id). `recoverSurplus` moves `balance − totalReserved` and reverts
   `NoSurplus` while more is owed than held. **No pause, no guardian, no admin function that
   touches a reservation.** Owner (the timelock): upgrades, `setAdapter`, `recoverSurplus`
-- **`ApeBondPositionAdapter.sol`** — the gate SoulZap deposits through, plain `Ownable`, REPLACED
-  rather than upgraded (one timelock batch: `vault.setStakeOperator(new, true)`,
+- **`ApeBondPositionAdapter.sol`** — the gate SoulZap deposits through, `Ownable2Step` with
+  `renounceOwnership` disabled (audit L-03), REPLACED rather than upgraded (one timelock batch:
+  `adapter.acceptOwnership()` while it is nominated, `vault.setStakeOperator(new, true)`,
   `vault.setStakeOperator(old, false)`, `escrow.setAdapter(new)`). **It computes the bonus**:
   `depositFor(tokenId, campaignId, beneficiary)` values the position with
   `PositionValue.valueAt` at the vault's TWAP (reverting when spot is outside the TWAP bounds),
@@ -267,7 +268,7 @@ contracts/           — Solidity source files
     BonusEscrow.sol           — ApeBond bonuses keyed by tokenId: reserve, forfeit, scale, pay;
                                 UUPS (lane 2; stack #6 and the mainnet launch deploy)
     ApeBondPositionAdapter.sol — The SoulZap gate; computes the bonus at the vault's TWAP;
-                                plain Ownable, replaceable (lane 2; stack #6 and the
+                                Ownable2Step, replaceable (lane 2; stack #6 and the
                                 mainnet launch deploy)
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
     deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the five proxies

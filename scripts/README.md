@@ -301,7 +301,7 @@ Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` an
 `updateDelay` (the timelock itself); with the ApeBond route also `setStakeOperator` (vault),
 `upgradeToAndCall` / `acceptOwnership` / `transferOwnership` / `setAdapter` / `recoverSurplus`
 (escrow) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
-`setGuardian` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
+`setGuardian` / `acceptOwnership` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
 pauses (`pauseDeposits`, `pauseRebalance`, `pause`), sent directly by the hot key; the operator
 tier is `setTwapParams` and `rescuePosition` (vault, zapper), `sweep` (zapper), `setSigner`,
@@ -534,9 +534,9 @@ distributor's own 70,000 `$OVTR` were not touched. The test server's
 **Case 1 — the timelock works, the switch is planned.** No contract stores the timelock address
 immutably; every owner is storage. `lp-switch-timelock.js` moves everything the old timelock
 owns (audit row C-15): the five proxies (Ownable2Step), `BonusEscrow` (a UUPS proxy,
-Ownable2Step), `ApeBondPositionAdapter` (plain `Ownable`: the transfer is the whole handover,
-effective at `execute`, nothing to accept) and every `RewardToken:<SYMBOL>` entry (Overture-shaped
-proxies, Ownable2Step). The escrow, the adapter and a reward token move only when
+Ownable2Step), `ApeBondPositionAdapter` (Ownable2Step since audit L-03: nominated at `execute`,
+accepted by the new timelock's `accept` batch) and every `RewardToken:<SYMBOL>` entry
+(Overture-shaped proxies, Ownable2Step). The escrow, the adapter and a reward token move only when
 `deployments.json` records them for the chain with the old timelock as owner; otherwise the run
 prints a `skip` line naming the entry (a stack without the ApeBond route, a reward token added by
 address). The switch takes six runs:

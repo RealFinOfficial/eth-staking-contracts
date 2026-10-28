@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
@@ -129,8 +129,13 @@ interface IApeBondPool {
  *  NFT receive window are TRANSIENT storage (EIP-1153), cleared at the end of the transaction.
  *  Everything this contract stores is configuration set by the timelock.
  *
- *  REPLACEABLE, NOT UPGRADEABLE. Plain `Ownable`, owned by the timelock. Replacing it is: deploy
- *  the new adapter, configure its campaigns and callers, then ONE timelock batch —
+ *  REPLACEABLE, NOT UPGRADEABLE. `Ownable2Step`, owned by the timelock, and `renounceOwnership`
+ *  reverts {RenounceDisabled} (audit L-03), as on the five proxies: a transfer only nominates,
+ *  and the nominee holds nothing until it calls `acceptOwnership`, so a mistyped address in the
+ *  handover loses nothing. The deploying key configures the adapter, nominates the timelock with
+ *  `transferOwnership`, and the timelock's activation batch opens with `acceptOwnership()`.
+ *  Replacing it is: deploy the new adapter, configure its campaigns and callers, nominate the
+ *  timelock, then ONE timelock batch — `adapter.acceptOwnership()`,
  *  `vault.setStakeOperator(new, true)`, `vault.setStakeOperator(old, false)`,
  *  `escrow.setAdapter(new)` (B.3 §5.5). Nothing is migrated: no id book, no counter.
  *
@@ -160,7 +165,7 @@ interface IApeBondPool {
  *  beneficiary is the router's word; and the vault's TWAP parameters, which this contract values
  *  at, are operator-tier with no delay (bounded to a 300..3600 s window and 1823 ticks).
  */
-contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Receiver {
+contract ApeBondPositionAdapter is Ownable2Step, ReentrancyGuardTransient, IERC721Receiver {
     // ──────────────────────── Types ────────────────────────────
 
     /**
@@ -384,6 +389,10 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
     ///      and the guardian included.
     error NotOperator(address caller, address operator);
 
+    /// @dev `renounceOwnership` is disabled (audit L-03): a renounced adapter could never have a
+    ///      live campaign changed or disabled again.
+    error RenounceDisabled();
+
     /// @dev {setGuardian} was called by someone who is neither the owner nor the vault's operator —
     ///      the standing guardian included, since a guardian cannot rotate itself.
     error NotOwnerOrOperator(address caller);
@@ -423,7 +432,8 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
      * @param _escrow BonusEscrow (the PROXY) that records every bonus. It must be linked to the
      *        same vault, and its bonus token must be one of the vault's two pool tokens.
      * @param _initialOwner Owner: the deploying key while the campaigns are configured, then the
-     *        `TimelockController` (one `transferOwnership`, no acceptance step).
+     *        `TimelockController` (two steps: the deploying key calls `transferOwnership`, which
+     *        only nominates, and the timelock's batch calls `acceptOwnership`).
      * @param _guardian Guardian: the pause key.
      * @param minCliffSeconds_ The shortest campaign cliff {setCampaign} will accept, in seconds.
      *        Immutable and never zero; the deploy scripts default it to one day and refuse less on
@@ -701,6 +711,16 @@ contract ApeBondPositionAdapter is Ownable, ReentrancyGuardTransient, IERC721Rec
         if (newGuardian == address(0)) revert ZeroAddress();
         emit GuardianSet(guardian, newGuardian);
         guardian = newGuardian;
+    }
+
+    /**
+     * @notice Disabled (audit L-03). A renounced adapter would leave every live campaign beyond
+     *         change: no `setCampaignEnabled(false)`, no caller removal, only the pause.
+     * @dev Kept `onlyOwner` and not `view`, so it keeps the ABI of the call it overrides, as on
+     *      the five proxies.
+     */
+    function renounceOwnership() public override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ──────────────────────── Pause functions ──────────────────

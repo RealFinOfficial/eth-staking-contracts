@@ -24,6 +24,8 @@ const {
 // the `ApeBondPositionAdapter`, the gate SoulZap deposits through, which COMPUTES the bonus from
 // the position (no purchase signer exists anywhere). It goes live with ONE timelock batch:
 //
+//      adapter.acceptOwnership()                         while the adapter is nominated to the
+//                                                        timelock and has not accepted (L-03)
 //     [vault.upgradeToAndCall(newImplementation, 0x)]   only when the live vault lacks the route
 //      vault.setBonusEscrow(escrow)                      the vault reports exits and re-ranges
 //      vault.setStakeOperator(adapter, true)             the adapter may stakeFor its buyers
@@ -51,8 +53,12 @@ const {
 //      `ApeBondPositionAdapter(positionManager, vault, escrow, owner = deployer, guardian,
 //      minCliffSeconds)`.
 //   4. WIRING while the deployer owns the adapter: callers, the campaign, the callers permitted
-//      for it, then `transferOwnership(timelock)`.
-//   5. THE BATCH, built from only the calls whose effect is not on chain yet (a resumed run
+//      for it, then `transferOwnership(timelock)`. The adapter is `Ownable2Step` (audit L-03),
+//      so this only nominates the timelock: from here until the batch executes the adapter is in
+//      a THIRD state, `owner() == deployer` and `pendingOwner() == timelock`. A resumed run
+//      recognises it, completes the deployer's configuration and sends no second nomination.
+//   5. THE BATCH, built from only the calls whose effect is not on chain yet, opening with
+//      `adapter.acceptOwnership()` exactly while the third state holds (a resumed run
 //      computes the same id; a finished one an empty batch). On a non-mainnet chain where the
 //      deployer holds PROPOSER and EXECUTOR it schedules, waits out `getMinDelay()` in CHAIN
 //      time, and executes; anywhere else it prints the Safe calldata and stops.
@@ -65,14 +71,20 @@ const {
 // ──────────────────────── the other modes ────────────────────────
 //
 //   LP_APEBOND_MODE=replace-adapter  B.3 §5.5: a new adapter against the EXISTING escrow,
-//                                    configured and handed to the timelock, then ONE batch
+//                                    configured and nominated to the timelock, then ONE batch
+//                                    `adapter.acceptOwnership()` (new adapter),
 //                                    `vault.setStakeOperator(new, true)`,
 //                                    `vault.setStakeOperator(old, false)`, `escrow.setAdapter(new)`.
 //                                    Nothing is migrated: the adapter holds configuration only.
 //                                    Resumable through `pendingAdapter` on the registry entry.
 //   LP_APEBOND_MODE=upgrade-vault    the plain vault upgrade, a one-call batch.
 //   LP_APEBOND_MODE=verify           READ-ONLY: the post-checks of phase 6 against the recorded
-//                                    pair, no deploy and no transaction.
+//                                    pair, no deploy and no transaction. It prints the adapter's
+//                                    configuration (guardian, every recorded or configured
+//                                    campaign, caller and campaign caller). While the activation
+//                                    is PENDING (the adapter nominated, not accepted) it asserts
+//                                    `pendingOwner() == timelock` instead of the link: the check
+//                                    to run right before the Safe executes the batch.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -348,19 +360,38 @@ async function main() {
 
   if (readOnly) {
     if (!escrowEntry || !adapterEntry) throw new Error(`Chain ${chainId} records no ${ESCROW_KIND} / ${ADAPTER_KIND} pair to verify`);
+    const verifyAdapter = hre.ethers.getAddress(adapterEntry.pendingAdapter || adapterEntry.address);
+    const ownership = await apebond.adapterOwnership(verifyAdapter, { timelock: timelockAddress });
+    const pending = ownership.state === "pending";
+    console.log(
+      `\nAdapter ${verifyAdapter}: owner ${ownership.owner}, pendingOwner ${ownership.pendingOwner} — ` +
+        (pending
+          ? "activation PENDING (nominated to the timelock, not accepted): the pre-execute check."
+          : ownership.state === "timelock"
+            ? "owned by the timelock."
+            : "NOT handed over to the timelock.")
+    );
+    await printAdapterConfig(verifyAdapter, {
+      campaignIds: [
+        ...(campaign ? [campaign.id] : []),
+        ...((adapterEntry.campaigns || []).map((c) => c.id)),
+      ],
+      callers: [...soulZapCallers, ...(adapterEntry.soulZapCallers || [])],
+    });
     const failures = [];
     const check = reporter(failures);
     await apebond.checkRoute(check, {
       vaultAddress,
       escrowAddress: hre.ethers.getAddress(escrowEntry.address),
-      adapterAddress: hre.ethers.getAddress(adapterEntry.address),
+      adapterAddress: verifyAdapter,
       timelockAddress,
       bonusToken,
       guardian: process.env.LP_APEBOND_GUARDIAN ? apeBondGuardian : null,
       soulZapCallers,
       campaign,
+      expectLinked: !pending,
     });
-    finish(failures, "verification");
+    finish(failures, pending ? "pre-execute verification" : "verification");
     return;
   }
 
@@ -507,6 +538,7 @@ async function main() {
       vaultAddress,
       escrowAddress,
       adapterAddress,
+      timelockAddress,
       upgradeTo: sameValue(before.implementation, newImplementation) ? null : newImplementation,
       vaultHasRoute: hasRoute,
     });
@@ -517,7 +549,9 @@ async function main() {
   } else {
     // replace-adapter, in the order of B.3 §5.5: the new adapter gains the right first, the old
     // one loses it, the escrow follows — one operation, so there is no moment with two adapters
-    // or with none.
+    // or with none. The timelock accepts the new adapter's ownership before all three (L-03).
+    const accept = await apebond.acceptOwnershipOp(adapterAddress, timelockAddress);
+    if (accept) ops.push(accept);
     if (!(await vault.isStakeOperator(adapterAddress))) {
       ops.push({ target: vaultAddress, kind: VAULT_KIND, fn: "setStakeOperator", args: [adapterAddress, "true"] });
     }
@@ -675,6 +709,17 @@ async function main() {
         ...stripAddress(escrowCurrent),
         adapter: hre.ethers.getAddress(await escrow.adapter()),
       });
+      // The batch accepted the adapter's ownership (audit L-03): the registry follows the chain,
+      // which is what lp-switch-timelock.js reads to decide whether the adapter moves.
+      const adapterCurrent = pools.readRegistry()[String(chainId)][ADAPTER_KIND];
+      if (mode === "activate" && adapterCurrent && sameValue(adapterCurrent.address, adapterAddress)) {
+        const ownership = await apebond.adapterOwnership(adapterAddress, { timelock: timelockAddress });
+        pools.recordDeployment(chainId, ADAPTER_KIND, adapterCurrent.address, {
+          ...stripAddress(adapterCurrent),
+          owner: ownership.owner,
+          pendingOwner: ownership.pendingOwner,
+        });
+      }
     }
     if (mode === "replace-adapter") await recordReplacement({ chainId, adapterAddress, previousAdapter, soulZapCallers, campaign });
   } else {
@@ -691,6 +736,34 @@ async function main() {
   console.log(batch ? `batch:                ${batch.id} (${executed ? "EXECUTED" : "NOT SENT"})` : "batch:                none needed");
 
   finish(failures, "post-activation verification");
+}
+
+/**
+ * Prints the adapter's configuration as the chain holds it, for whoever checks the batch before
+ * the Safe executes it (Krum's pre-execute check, audit L-03): the guardian, each campaign id's
+ * `campaigns(id)`, each caller's `soulZapCallers(caller)` and its `campaignCallers(id, caller)`.
+ */
+async function printAdapterConfig(adapterAddress, { campaignIds, callers }) {
+  const adapter = new hre.ethers.Contract(adapterAddress, ADAPTER_ABI, hre.ethers.provider);
+  console.log("\n  — the adapter's configuration, read from the chain —");
+  console.log(`  guardian():                     ${await adapter.guardian()}`);
+  const ids = [...new Set(campaignIds.map((id) => id.toLowerCase()))];
+  const routers = [...new Set(callers.map((c) => hre.ethers.getAddress(c)))];
+  for (const router of routers) {
+    console.log(`  soulZapCallers(${router}): ${await adapter.soulZapCallers(router)}`);
+  }
+  for (const id of ids) {
+    const c = await adapter.campaigns(id);
+    console.log(
+      `  campaigns(${id}):\n` +
+        `    enabled ${c.enabled}, downTicks ${c.downTicks}, upTicks ${c.upTicks}, toleranceTicks ${c.toleranceTicks}, ` +
+        `bonusCliffSeconds ${c.bonusCliffSeconds}, bonusBps ${c.bonusBps}, minBonusAmount ${c.minBonusAmount}`
+    );
+    for (const router of routers) {
+      console.log(`    campaignCallers(${id}, ${router}): ${await adapter.campaignCallers(id, router)}`);
+    }
+  }
+  if (ids.length === 0) console.log("  campaigns: none recorded and none configured by this run");
 }
 
 /** `check(label, actual, expected)` printing OK / FAIL and collecting failures. */
@@ -742,6 +815,7 @@ async function recordReplacement({ chainId, adapterAddress, previousAdapter, sou
     soulZapCallers: callers,
     campaigns,
     owner: hre.ethers.getAddress(await adapter.owner()),
+    pendingOwner: (await apebond.adapterOwnership(adapterAddress, { timelock: hre.ethers.ZeroAddress })).pendingOwner,
     previousAdapter,
   });
 }

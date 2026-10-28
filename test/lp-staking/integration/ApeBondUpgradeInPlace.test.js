@@ -153,8 +153,10 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
       expect(world.entry("LPStakingVault")).to.not.have.property("pendingImplementation");
     });
 
-    it("ran ONE batch: upgrade, link the escrow, allowlist the adapter, open the escrow — in that order", async function () {
+    it("ran ONE batch: accept the adapter, upgrade, link the escrow, allowlist the adapter, open the escrow — in that order", async function () {
       const batch = lpTimelock.buildBatch([
+        // The adapter was nominated to the timelock (audit L-03, the third state): accepted first.
+        { target: adapterAddr, fn: "acceptOwnership", args: [] },
         { target: vaultAddr, fn: "upgradeToAndCall", args: [await implementationOf(vaultAddr), "0x"] },
         { target: vaultAddr, fn: "setBonusEscrow", args: [escrowAddr] },
         { target: vaultAddr, fn: "setStakeOperator", args: [adapterAddr, "true"] },
@@ -166,6 +168,7 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
         fs.readFileSync(path.join(world.scratchDir, "apebond-activate-batch.json"), "utf8")
       );
       expect(filed.map((call) => call.fn)).to.deep.equal([
+        "acceptOwnership",
         "upgradeToAndCall",
         "setBonusEscrow",
         "setStakeOperator",
@@ -180,6 +183,8 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
       expect(await escrow.adapter()).to.equal(adapterAddr);
       expect(await escrow.owner()).to.equal(timelockAddr);
       expect(await adapter.owner()).to.equal(timelockAddr);
+      expect(await adapter.pendingOwner()).to.equal(ethers.ZeroAddress);
+      expect(world.entry("ApeBondPositionAdapter").owner).to.equal(timelockAddr);
       expect(await adapter.campaignCallers(CAMPAIGN_ID, callerAddr)).to.equal(true);
       expect(activation.stdout).to.include(
         "OK    LPStakingVault.bonusEscrow (MANDATORY: a wrong link fails open)"

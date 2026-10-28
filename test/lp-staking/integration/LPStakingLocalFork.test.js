@@ -3020,7 +3020,11 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(adapterEntry.escrow).to.equal(escrowAddr);
       expect(adapterEntry.tickSpacing).to.equal(60);
       expect(adapterEntry.guardian).to.equal(w.guardian.address);
-      expect(adapterEntry.owner).to.equal(apeTimelockAddr);
+      // Ownable2Step (audit L-03): nominated, not accepted — the third state until the batch.
+      expect(adapterEntry.owner).to.equal(w.deployer.address);
+      expect(adapterEntry.pendingOwner).to.equal(apeTimelockAddr);
+      expect(await adapter.owner()).to.equal(w.deployer.address);
+      expect(await adapter.pendingOwner()).to.equal(apeTimelockAddr);
       expect(adapterEntry.soulZapCallers).to.deep.equal([w.soulZapCaller.address, mockCallerAddr]);
       expect(adapterEntry.campaigns).to.have.length(1);
       expect(adapterEntry.campaigns[0]).to.deep.include({
@@ -3052,10 +3056,16 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await escrow.adapter()).to.equal(C.ZERO_ADDRESS);
       expect(await escrow.vault()).to.equal(apeVaultAddr);
 
-      // The filed batch is the three calls, in order, readable by lp-timelock.js.
+      // The filed batch is the four calls, in order, readable by lp-timelock.js: the adapter's
+      // acceptOwnership() first, because the third state holds.
       const batch = JSON.parse(fs.readFileSync(path.join(scratchDir, "apebond-link-batch.json"), "utf8"));
-      expect(batch.map((call) => call.fn)).to.deep.equal(["setBonusEscrow", "setStakeOperator", "setAdapter"]);
-      expect(batch.map((call) => call.target)).to.deep.equal([apeVaultAddr, apeVaultAddr, escrowAddr]);
+      expect(batch.map((call) => call.fn)).to.deep.equal([
+        "acceptOwnership",
+        "setBonusEscrow",
+        "setStakeOperator",
+        "setAdapter",
+      ]);
+      expect(batch.map((call) => call.target)).to.deep.equal([adapterAddr, apeVaultAddr, apeVaultAddr, escrowAddr]);
     });
 
     it("E1 left the un-flagged deployment above with no ApeBond route at all", async function () {
@@ -3077,7 +3087,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
       expect(linkRun.stdout).to.include("phase 2: SKIPPED");
       expect(linkRun.stdout).to.include("phase 3: SKIPPED");
-      expect(linkRun.stdout).to.include("A batch of 3 call(s)");
+      expect(linkRun.stdout).to.include("A batch of 4 call(s)");
+      expect(linkRun.stdout).to.include(`0. acceptOwnership() on ${adapterAddr}`);
       expect(linkRun.stdout).to.include("OK    BonusEscrow.vault (MANDATORY");
       expect(linkRun.stdout).to.include("OK    LPStakingVault.bonusEscrow (MANDATORY");
       expect(linkRun.stdout).to.include("All post-activation verification checks passed.");
@@ -3085,7 +3096,10 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       expect(await apeVault.bonusEscrow()).to.equal(escrowAddr);
       expect(await apeVault.isStakeOperator(adapterAddr)).to.equal(true);
       expect(await escrow.adapter()).to.equal(adapterAddr);
+      expect(await adapter.owner()).to.equal(apeTimelockAddr);
+      expect(await adapter.pendingOwner()).to.equal(C.ZERO_ADDRESS);
       const entries = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(entries.ApeBondPositionAdapter.owner).to.equal(apeTimelockAddr);
       expect(entries.BonusEscrow.adapter).to.equal(adapterAddr);
       expect(entries.LPStakingVault.bonusEscrow).to.equal(escrowAddr);
     });
@@ -3268,8 +3282,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
     /**
      * Audit C-15: the switch moves EVERY contract the old timelock owns. On this stack that is
-     * the five proxies, the escrow (Ownable2Step: nominated, then accepted), the adapter (plain
-     * Ownable: one transfer, nothing to accept) and a reward token deployed by add-reward-token.js.
+     * the five proxies, the escrow and the adapter (both Ownable2Step: nominated, then accepted;
+     * the adapter since audit L-03) and a reward token deployed by add-reward-token.js.
      * A reward token added BY ADDRESS is someone else's contract: skipped by name. The deploying
      * key holds both roles on both timelocks here (LP_MULTISIG = the deployer, delays 0), so the
      * script sends every step itself.
@@ -3308,32 +3322,33 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
       const scheduled = await switchRun("schedule");
       expect(scheduled.stdout).to.include(`BonusEscrow.transferOwnership(${nextAddr}) on ${escrowAddr}`);
-      expect(scheduled.stdout).to.include(
-        `ApeBondPositionAdapter.transferOwnership(${nextAddr}) on ${adapterAddr} (plain Ownable`
-      );
+      expect(scheduled.stdout).to.include(`ApeBondPositionAdapter.transferOwnership(${nextAddr}) on ${adapterAddr}`);
+      expect(scheduled.stdout).to.not.include("plain Ownable");
       expect(scheduled.stdout).to.include(`RewardToken:FRW.transferOwnership(${nextAddr}) on ${frwAddr}`);
       expect(scheduled.stdout).to.include(
         `skip  ${foreignKind} ${usdcAddr}: the registry records owner (none), not the old timelock`
       );
 
       await switchRun("execute");
-      // The Ownable2Step pair names the new timelock as nominee; the adapter is already moved.
+      // Every Ownable2Step contract names the new timelock as nominee, the adapter included
+      // (audit L-03): the old timelock still owns each of them until the accept batch.
       expect(await escrow.owner()).to.equal(apeTimelockAddr);
       expect(await escrow.pendingOwner()).to.equal(nextAddr);
       expect(await frw.pendingOwner()).to.equal(nextAddr);
-      expect(await adapter.owner()).to.equal(nextAddr);
+      expect(await adapter.owner()).to.equal(apeTimelockAddr);
+      expect(await adapter.pendingOwner()).to.equal(nextAddr);
 
       const accepted = await switchRun("accept");
-      expect(accepted.stdout).to.include("acceptOwnership x7 on the NEW timelock");
+      expect(accepted.stdout).to.include("acceptOwnership x8 on the NEW timelock");
       await switchRun("raise-delay");
-      for (const contract of [escrow, frw, apeVault]) {
+      for (const contract of [escrow, frw, apeVault, adapter]) {
         expect(await contract.owner()).to.equal(nextAddr);
         expect(await contract.pendingOwner()).to.equal(C.ZERO_ADDRESS);
       }
 
       const verified = await switchRun("verify");
       expect(verified.stdout).to.include(`OK    BonusEscrow.owner ${nextAddr} pendingOwner ${C.ZERO_ADDRESS}`);
-      expect(verified.stdout).to.include(`OK    ApeBondPositionAdapter.owner ${nextAddr} (plain Ownable, nothing to accept)`);
+      expect(verified.stdout).to.include(`OK    ApeBondPositionAdapter.owner ${nextAddr} pendingOwner ${C.ZERO_ADDRESS}`);
       expect(verified.stdout).to.include(`OK    RewardToken:FRW.owner ${nextAddr} pendingOwner ${C.ZERO_ADDRESS}`);
       expect(verified.stdout).to.include(`All 8 moved contracts are owned by ${nextAddr}`);
       expect(verified.stdout).to.not.include("FAIL");

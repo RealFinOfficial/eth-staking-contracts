@@ -18,9 +18,12 @@ const { deployContract, deployProxyPair } = require("./proxies");
 //      minCliffSeconds = LP_APEBOND_MIN_CLIFF_SECONDS)` — the immutable floor under every campaign
 //      cliff (audit C-14; default one day, never below one day on mainnet);
 //   3. wiring while the deployer still owns the adapter: `setSoulZapCaller` per caller,
-//      `setCampaign`, `setCampaignCaller` per caller — then `transferOwnership(timelock)` (plain
-//      `Ownable`, effective at once);
+//      `setCampaign`, `setCampaignCaller` per caller — then `transferOwnership(timelock)`.
+//      The adapter is `Ownable2Step` (audit L-03), so that call only NOMINATES the timelock:
+//      the adapter is then in a THIRD state, `owner() == deployer` and `pendingOwner() ==
+//      timelock`, until the batch below executes `acceptOwnership()`;
 //   4. ONE timelock batch, which is the whole activation and is atomic:
+//         adapter.acceptOwnership()                      (exactly while the third state holds)
 //        [vault.upgradeToAndCall(newImpl, 0x)]          (live lane-1 vault only)
 //         vault.setBonusEscrow(escrow)
 //         vault.setStakeOperator(adapter, true)
@@ -79,6 +82,7 @@ const ESCROW_ABI = [
 ];
 const ADAPTER_ABI = [
   "function owner() view returns (address)",
+  "function pendingOwner() view returns (address)",
   "function vault() view returns (address)",
   "function escrow() view returns (address)",
   "function positionManager() view returns (address)",
@@ -104,6 +108,50 @@ const ERC20_DECIMALS_ABI = ["function decimals() view returns (uint8)", "functio
 /** Compares two on-chain values the way Solidity would: addresses case-insensitively. */
 function sameValue(a, b) {
   return String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+/**
+ * The adapter's ownership, read from the chain, as one of three states (audit L-03, the adapter
+ * is `Ownable2Step`):
+ *
+ *   "timelock"  owner() == timelock: handed over and accepted, configuration is owner-tier;
+ *   "pending"   owner() == deployer and pendingOwner() == timelock: nominated, NOT accepted —
+ *               the activation (or replacement) batch must open with `acceptOwnership()`;
+ *   "deployer"  owner() == deployer and nothing pending to the timelock: not handed over;
+ *   "other"     anyone else owns it.
+ *
+ * An adapter without `pendingOwner()` (a plain-Ownable adapter deployed before audit L-03) reads
+ * as nothing pending.
+ */
+async function adapterOwnership(adapterAddress, { deployer, timelock }) {
+  const adapter = new hre.ethers.Contract(adapterAddress, ADAPTER_ABI, hre.ethers.provider);
+  const owner = hre.ethers.getAddress(await adapter.owner());
+  let pendingOwner = hre.ethers.ZeroAddress;
+  try {
+    pendingOwner = hre.ethers.getAddress(await adapter.pendingOwner());
+  } catch {
+    // plain Ownable: no nomination can exist
+  }
+  // Without a `deployer` to compare against (a read-only caller), any owner with the timelock
+  // nominated counts as the third state.
+  const ownerIsDeployer = deployer ? sameValue(owner, deployer) : true;
+  let state = "other";
+  if (sameValue(owner, timelock)) state = "timelock";
+  else if (ownerIsDeployer && sameValue(pendingOwner, timelock)) state = "pending";
+  else if (deployer && ownerIsDeployer) state = "deployer";
+  return { state, owner, pendingOwner };
+}
+
+/**
+ * The `acceptOwnership()` call that must OPEN the activation or replacement batch, or null. It is
+ * added exactly while the adapter is nominated to the timelock and has not accepted: without it
+ * the batch would execute and leave the deploying key as the owner of a live adapter, and with it
+ * while `pendingOwner() != timelock` the whole batch would revert.
+ */
+async function acceptOwnershipOp(adapterAddress, timelockAddress) {
+  const { owner, pendingOwner } = await adapterOwnership(adapterAddress, { timelock: timelockAddress });
+  if (sameValue(owner, timelockAddress) || !sameValue(pendingOwner, timelockAddress)) return null;
+  return { target: adapterAddress, kind: ADAPTER_KIND, fn: "acceptOwnership", args: [] };
 }
 
 // ──────────────────────── environment ────────────────────────
@@ -439,14 +487,25 @@ async function deployEscrowAndAdapter({
 
 /**
  * Step 3: the adapter's configuration, sent by the deployer while it still owns the adapter,
- * then the handover to the timelock. Every call is skipped when its effect is already on chain,
- * so a resumed run sends nothing twice. Returns the callers and campaign that are now in place.
+ * then the nomination of the timelock. Every call is skipped when its effect is already on
+ * chain, so a resumed run sends nothing twice. A run that finds the adapter already nominated
+ * (the third state, `owner == deployer`, `pendingOwner == timelock`) still completes the
+ * configuration the deployer owns and sends no second `transferOwnership`.
  */
 async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress, soulZapCallers, campaign }) {
   const adapter = await hre.ethers.getContractAt(ADAPTER_KIND, adapterAddress, deployer);
-  const owner = hre.ethers.getAddress(await adapter.owner());
+  const { state, owner } = await adapterOwnership(adapterAddress, {
+    deployer: deployer.address,
+    timelock: timelockAddress,
+  });
 
-  if (sameValue(owner, deployer.address)) {
+  if (state === "deployer" || state === "pending") {
+    if (state === "pending") {
+      console.log(
+        "The adapter is already NOMINATED to the timelock (owner = deployer, pendingOwner = timelock):\n" +
+          "the activation batch opens with acceptOwnership(). The configuration is still the deployer's."
+      );
+    }
     for (const caller of soulZapCallers) {
       if (await adapter.soulZapCallers(caller)) {
         console.log(`SoulZap caller ${caller} is already allowlisted — skipped.`);
@@ -481,9 +540,14 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
         );
       }
     }
-    // Plain `Ownable`: one transaction, no acceptance, owned by the timelock from this block.
-    await pools.send(`${ADAPTER_KIND} -> timelock`, deployer, (o) => adapter.transferOwnership(timelockAddress, o));
-  } else if (sameValue(owner, timelockAddress)) {
+    // `Ownable2Step` (audit L-03): this only nominates the timelock. The deployer stays the
+    // owner until the timelock batch executes `acceptOwnership()` (see {acceptOwnershipOp}).
+    if (state === "deployer") {
+      await pools.send(`${ADAPTER_KIND} -> timelock (nomination)`, deployer, (o) =>
+        adapter.transferOwnership(timelockAddress, o)
+      );
+    }
+  } else if (state === "timelock") {
     console.log("The adapter is already owned by the timelock — its configuration is owner-tier from here on.");
     const missing = [];
     for (const caller of soulZapCallers) if (!(await adapter.soulZapCallers(caller))) missing.push(`setSoulZapCaller(${caller}, true)`);
@@ -528,6 +592,7 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
       soulZapCallers: [...new Set([...(rest.soulZapCallers || []), ...callers])],
       campaigns,
       owner: hre.ethers.getAddress(await adapter.owner()),
+      pendingOwner: (await adapterOwnership(adapterAddress, { timelock: timelockAddress })).pendingOwner,
     });
   }
 }
@@ -536,13 +601,18 @@ async function wireAdapter({ chainId, deployer, adapterAddress, timelockAddress,
 
 /**
  * Step 4's calls, only those whose effect is NOT already on chain — which is what makes a resumed
- * run compute the same batch id as the run it resumes, and a finished one an empty batch.
+ * run compute the same batch id as the run it resumes, and a finished one an empty batch. The
+ * FIRST call is `adapter.acceptOwnership()`, exactly while the adapter is nominated to the
+ * timelock and has not accepted (audit L-03, {acceptOwnershipOp}).
  *
- * @param {object} state  `{ vaultAddress, escrowAddress, adapterAddress, upgradeTo }` — `upgradeTo`
- *                        is the new vault implementation when the live vault needs one, else null.
+ * @param {object} state  `{ vaultAddress, escrowAddress, adapterAddress, timelockAddress, upgradeTo }`
+ *                        — `upgradeTo` is the new vault implementation when the live vault needs
+ *                        one, else null.
  */
-async function linkOps({ vaultAddress, escrowAddress, adapterAddress, upgradeTo, vaultHasRoute }) {
+async function linkOps({ vaultAddress, escrowAddress, adapterAddress, timelockAddress, upgradeTo, vaultHasRoute }) {
   const ops = [];
+  const accept = await acceptOwnershipOp(adapterAddress, timelockAddress);
+  if (accept) ops.push(accept);
   if (upgradeTo) {
     ops.push({ target: vaultAddress, kind: "LPStakingVault", fn: "upgradeToAndCall", args: [upgradeTo, "0x"] });
   }
@@ -575,6 +645,10 @@ function batchFileContents(calls) {
 /**
  * The route's post-checks. `check(label, actual, expected)` is the caller's reporter. The two
  * link assertions come first because they are the ones a silent misconfiguration fails.
+ *
+ * `expectLinked = false` is the state BEFORE the activation batch executes: the adapter is then
+ * nominated, not owned, so the check is `pendingOwner() == timelock` (the pre-execute check of
+ * audit L-03). With `expectLinked = true` it is `owner() == timelock` and nothing pending.
  */
 async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, timelockAddress, bonusToken, guardian, soulZapCallers = [], campaign = null, expectLinked = true }) {
   const vault = new hre.ethers.Contract(vaultAddress, VAULT_LINK_ABI, hre.ethers.provider);
@@ -603,7 +677,17 @@ async function checkRoute(check, { vaultAddress, escrowAddress, adapterAddress, 
   check("ApeBondPositionAdapter.token0", await adapter.token0(), await vault.token0());
   check("ApeBondPositionAdapter.token1", await adapter.token1(), await vault.token1());
   check("ApeBondPositionAdapter.fee", await adapter.fee(), await vault.fee());
-  check("ApeBondPositionAdapter.owner", await adapter.owner(), timelockAddress);
+  const ownership = await adapterOwnership(adapterAddress, { timelock: timelockAddress });
+  if (expectLinked) {
+    check("ApeBondPositionAdapter.owner", ownership.owner, timelockAddress);
+    check("ApeBondPositionAdapter.pendingOwner", ownership.pendingOwner, hre.ethers.ZeroAddress);
+  } else {
+    check(
+      "ApeBondPositionAdapter.pendingOwner (the activation batch opens with acceptOwnership)",
+      ownership.pendingOwner,
+      timelockAddress
+    );
+  }
   if (guardian) check("ApeBondPositionAdapter.guardian", await adapter.guardian(), guardian);
   for (const caller of soulZapCallers) {
     check(`ApeBondPositionAdapter.soulZapCallers[${caller}]`, await adapter.soulZapCallers(caller), true);
@@ -646,6 +730,8 @@ module.exports = {
   ESCROW_ABI,
   ADAPTER_ABI,
   sameValue,
+  adapterOwnership,
+  acceptOwnershipOp,
   readApeBondFlag,
   readMinCliff,
   readAddress,

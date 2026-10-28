@@ -1205,4 +1205,40 @@ describe("ApeBondPositionAdapter", function () {
       expect(await vault.stakerOf(tokenId)).to.equal(bob.address);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("Two-step ownership (audit L-03)", function () {
+    it("transferOwnership only nominates; the nominee holds nothing until it accepts", async function () {
+      await expect(adapter.transferOwnership(keeper.address))
+        .to.emit(adapter, "OwnershipTransferStarted")
+        .withArgs(owner.address, keeper.address);
+      expect(await adapter.owner()).to.equal(owner.address);
+      expect(await adapter.pendingOwner()).to.equal(keeper.address);
+      await expect(adapter.connect(keeper).setSoulZapCaller(bob.address, true))
+        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
+        .withArgs(keeper.address);
+    });
+
+    it("acceptOwnership by the nominee completes the handover, by anyone else reverts", async function () {
+      await adapter.transferOwnership(keeper.address);
+      for (const caller of [stranger, owner]) {
+        await expect(adapter.connect(caller).acceptOwnership())
+          .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
+          .withArgs(caller.address);
+      }
+      await expect(adapter.connect(keeper).acceptOwnership())
+        .to.emit(adapter, "OwnershipTransferred")
+        .withArgs(owner.address, keeper.address);
+      expect(await adapter.owner()).to.equal(keeper.address);
+      expect(await adapter.pendingOwner()).to.equal(ZERO);
+    });
+
+    it("renounceOwnership reverts RenounceDisabled for the owner and OwnableUnauthorizedAccount for others", async function () {
+      await expect(adapter.renounceOwnership()).to.be.revertedWithCustomError(adapter, "RenounceDisabled");
+      await expect(adapter.connect(stranger).renounceOwnership())
+        .to.be.revertedWithCustomError(adapter, "OwnableUnauthorizedAccount")
+        .withArgs(stranger.address);
+      expect(await adapter.owner()).to.equal(owner.address);
+    });
+  });
 });

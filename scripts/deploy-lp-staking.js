@@ -64,7 +64,9 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //      `BonusEscrow` implementation(bonusToken, vault) + LPProxy, `initialize(owner = timelock,
 //      adapter = 0)`; `ApeBondPositionAdapter(positionManager, vault, escrow, owner = DEPLOYER,
 //      guardian, minCliffSeconds)`; its callers and campaign written by the deployer, then
-//      `transferOwnership(timelock)`; and the ONE timelock batch that activates the route —
+//      `transferOwnership(timelock)`, which only NOMINATES the timelock (the adapter is
+//      `Ownable2Step`, audit L-03: owner = deployer, pendingOwner = timelock until the batch);
+//      and the ONE timelock batch that activates the route — `adapter.acceptOwnership()`,
 //      `vault.setBonusEscrow(escrow)`, `vault.setStakeOperator(adapter, true)`,
 //      `escrow.setAdapter(adapter)` — PRINTED and FILED, not sent (see the route's note below)
 //  10. `increaseObservationCardinalityNext` on the pool (permissionless)
@@ -163,8 +165,9 @@ const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, desc
 //
 // ──────────────────────── the ApeBond route, and why its last step is printed ────────────────
 //
-// Every proxy here is born owned by the timelock, so the three owner-tier calls that activate
-// the route cannot be sent by this run. They are ONE batch, atomic, and this run prints its
+// Every proxy here is born owned by the timelock, and the adapter is only nominated to it, so
+// the four owner-tier calls that activate the route (`acceptOwnership()` on the adapter first)
+// cannot be sent by this run. They are ONE batch, atomic, and this run prints its
 // `scheduleBatch` / `executeBatch` calldata and writes it as a `TIMELOCK_BATCH` file. Until it
 // executes, nothing can be bought: the vault refuses the adapter's `stakeFor` and the escrow
 // refuses its `reserve`. Drive it with `scripts/deploy-apebond.js` (default mode: it finds the
@@ -841,6 +844,7 @@ async function main() {
       vaultAddress: vaultDeploy.address,
       escrowAddress: apeBondDeploy.escrowDeploy.address,
       adapterAddress: apeBondDeploy.adapterDeploy.address,
+      timelockAddress: timelockDeploy.address,
       upgradeTo: null,
       vaultHasRoute: true,
     });

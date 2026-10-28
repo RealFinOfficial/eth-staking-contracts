@@ -127,6 +127,16 @@ describe("the ApeBond operator scripts — funding and the test-stack rehearsal"
       expect(await asset.balanceOf(escrowAddr)).to.equal(0n);
     });
 
+    it("accepted the adapter's ownership as the batch's FIRST call (audit L-03, the third state)", async function () {
+      // The deployer nominated the timelock (owner = deployer, pendingOwner = timelock); the
+      // activation batch opened with acceptOwnership() and left nothing pending.
+      const calls = activation.stdout.match(/^\s+\d+\. .+ on 0x[0-9a-fA-F]{40}$/gm) || [];
+      expect(calls.length).to.be.greaterThan(1);
+      expect(calls[0].trim()).to.equal(`0. acceptOwnership() on ${adapterAddr}`);
+      expect(await adapter.owner()).to.equal(world.entry("TimelockController").address);
+      expect(await adapter.pendingOwner()).to.equal(ethers.ZeroAddress);
+    });
+
     it("recorded the MockSoulZapCaller the caller phase deployed", async function () {
       const record = readRecord();
       expect(record.caller).to.equal(callerAddr);

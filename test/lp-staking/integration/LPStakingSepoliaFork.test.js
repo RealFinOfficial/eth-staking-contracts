@@ -3119,7 +3119,11 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(adapterEntry.escrow).to.equal(escrowAddr);
       expect(adapterEntry.tickSpacing).to.equal(TICK_SPACING);
       expect(adapterEntry.guardian).to.equal(w.guardian.address);
-      expect(adapterEntry.owner).to.equal(apeTimelockAddr);
+      // Ownable2Step (audit L-03): nominated, not accepted — the third state until the batch.
+      expect(adapterEntry.owner).to.equal(w.deployer.address);
+      expect(adapterEntry.pendingOwner).to.equal(apeTimelockAddr);
+      expect(await adapter.owner()).to.equal(w.deployer.address);
+      expect(await adapter.pendingOwner()).to.equal(apeTimelockAddr);
       expect(adapterEntry.soulZapCallers).to.deep.equal([w.soulZapCaller.address, mockCallerAddr]);
       expect(adapterEntry.campaigns).to.have.length(1);
       expect(adapterEntry.campaigns[0]).to.deep.include({
@@ -3151,10 +3155,16 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await escrow.adapter()).to.equal(C.ZERO_ADDRESS);
       expect(await escrow.vault()).to.equal(apeVaultAddr);
 
-      // The filed batch is the three calls, in order, readable by lp-timelock.js.
+      // The filed batch is the four calls, in order, readable by lp-timelock.js: the adapter's
+      // acceptOwnership() first, because the third state holds.
       const batch = JSON.parse(fs.readFileSync(path.join(scratchDir, "apebond-link-batch.json"), "utf8"));
-      expect(batch.map((call) => call.fn)).to.deep.equal(["setBonusEscrow", "setStakeOperator", "setAdapter"]);
-      expect(batch.map((call) => call.target)).to.deep.equal([apeVaultAddr, apeVaultAddr, escrowAddr]);
+      expect(batch.map((call) => call.fn)).to.deep.equal([
+        "acceptOwnership",
+        "setBonusEscrow",
+        "setStakeOperator",
+        "setAdapter",
+      ]);
+      expect(batch.map((call) => call.target)).to.deep.equal([adapterAddr, apeVaultAddr, apeVaultAddr, escrowAddr]);
     });
 
     it("E1 left the un-flagged deployment above with no ApeBond route at all", async function () {
@@ -3176,7 +3186,8 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
       expect(linkRun.stdout).to.include("phase 2: SKIPPED");
       expect(linkRun.stdout).to.include("phase 3: SKIPPED");
-      expect(linkRun.stdout).to.include("A batch of 3 call(s)");
+      expect(linkRun.stdout).to.include("A batch of 4 call(s)");
+      expect(linkRun.stdout).to.include(`0. acceptOwnership() on ${adapterAddr}`);
       expect(linkRun.stdout).to.include("OK    BonusEscrow.vault (MANDATORY");
       expect(linkRun.stdout).to.include("OK    LPStakingVault.bonusEscrow (MANDATORY");
       expect(linkRun.stdout).to.include("All post-activation verification checks passed.");
@@ -3184,7 +3195,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       expect(await apeVault.bonusEscrow()).to.equal(escrowAddr);
       expect(await apeVault.isStakeOperator(adapterAddr)).to.equal(true);
       expect(await escrow.adapter()).to.equal(adapterAddr);
+      expect(await adapter.owner()).to.equal(apeTimelockAddr);
+      expect(await adapter.pendingOwner()).to.equal(C.ZERO_ADDRESS);
       const entries = runner.readRegistry(apeRegistryFile)["31337"];
+      expect(entries.ApeBondPositionAdapter.owner).to.equal(apeTimelockAddr);
       expect(entries.BonusEscrow.adapter).to.equal(adapterAddr);
       expect(entries.LPStakingVault.bonusEscrow).to.equal(escrowAddr);
     });

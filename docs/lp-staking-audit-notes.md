@@ -846,8 +846,8 @@ proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardia
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
 `updateDelay` (the timelock) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
 `acceptOwnership`, `transferOwnership`, `setAdapter` and `recoverSurplus` (escrow) and
-`setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian` and
-`transferOwnership` (adapter). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
+`setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian`,
+`acceptOwnership` and `transferOwnership` (adapter). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
 but since 2026-09-14 it is owner OR operator, so a guardian revocation or replacement that
 cannot wait is sent DIRECTLY by the operator multisig instead of being scheduled here. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
 now, sent directly by the multisig, and scheduling it here would revert
@@ -1140,8 +1140,16 @@ hook will ever forfeit.
 
 **Replaceable, not upgradeable; no rescue, sweep or arbitrary call** — unchanged reasoning: the
 adapter holds configuration only. Replacement (B.3 §5.5) is a new deployment, its campaigns and
-callers, then ONE timelock batch `vault.setStakeOperator(new, true)`, `vault.setStakeOperator(old,
-false)`, `escrow.setAdapter(new)` (`scripts/deploy-apebond.js LP_APEBOND_MODE=replace-adapter`).
+callers, the nomination of the timelock, then ONE timelock batch `adapter.acceptOwnership()`,
+`vault.setStakeOperator(new, true)`, `vault.setStakeOperator(old, false)`, `escrow.setAdapter(new)`
+(`scripts/deploy-apebond.js LP_APEBOND_MODE=replace-adapter`).
+
+**Two-step ownership (audit L-03).** The adapter is `Ownable2Step` and `renounceOwnership` reverts
+`RenounceDisabled`, like the five proxies and the escrow. The deploying key configures it, then
+`transferOwnership(timelock)` only nominates: until the activation batch executes, the adapter is
+in a third state, `owner() == deployer` and `pendingOwner() == timelock`, and the batch's first call
+is `adapter.acceptOwnership()`. The scripts add that call exactly in that state, resume from it and
+check it (`LP_APEBOND_MODE=verify` asserts `pendingOwner() == timelock` before execution).
 
 **Two tiers.** Owner (the timelock): `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`,
 `setSoulZapCaller`, `setGuardian`. `setGuardian` also accepts the vault's operator, read live from

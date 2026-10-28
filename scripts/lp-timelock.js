@@ -136,8 +136,8 @@ const PROXY_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", 
 /**
  * The ApeBond contracts (on Sepolia test stack #6 since 6 Oct, and part of the mainnet launch
  * deploy since the decision of 14 Oct 2026). `BonusEscrow` is a sixth UUPS proxy, Ownable2Step
- * like the five above; `ApeBondPositionAdapter` is a plain `Ownable` contract with no upgrade
- * path — it is replaced, not upgraded.
+ * like the five above; `ApeBondPositionAdapter` is `Ownable2Step` too (audit L-03) but has no
+ * upgrade path — it is replaced, not upgraded.
  */
 const ESCROW_KIND = "BonusEscrow";
 const ADAPTER_KIND = "ApeBondPositionAdapter";
@@ -145,15 +145,18 @@ const ADAPTER_KIND = "ApeBondPositionAdapter";
 const OWNER_TIER = {
   acceptOwnership: {
     signature: "function acceptOwnership()",
-    kinds: [...PROXY_KINDS, ESCROW_KIND],
-    note: "the second half of the Ownable2Step handover; the NEW owner (a timelock) sends it",
+    kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND],
+    note:
+      "the second half of the Ownable2Step handover; the NEW owner (a timelock) sends it. On the " +
+      "adapter it is the first call of the activation and replace-adapter batches",
   },
   transferOwnership: {
     signature: "function transferOwnership(address newOwner)",
     kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND],
     note:
-      "nominates a new owner on the Ownable2Step proxies (used to move them to a new timelock); " +
-      "on the plain-Ownable adapter it IS the whole handover, with no acceptOwnership after it",
+      "nominates a new owner on the Ownable2Step contracts (the five proxies, the escrow and the " +
+      "adapter, used to move them to a new timelock); the nominee holds nothing until it sends " +
+      "acceptOwnership",
   },
   setZapper: {
     signature: "function setZapper(address newZapper)",
