@@ -123,9 +123,11 @@ An un-flagged run is byte-for-byte the stack above, with `bonusEscrow = 0`:
   active reservation (exists, not claimed, not forfeited, before `unlockAt`), and `onRebalance`
   moves it to the new `tokenId` scaled by `min(1, valueNew / valueOld)` at the vault's TWAP; after
   the cliff both hooks return at once and nothing can touch the bonus (a post-cliff rebalance
-  leaves it under the OLD id). `recoverSurplus` moves `balance − totalReserved` and reverts
-  `NoSurplus` while more is owed than held. **No pause, no guardian, no admin function that
-  touches a reservation.** Owner (the timelock): upgrades, `setAdapter`, `recoverSurplus`
+  leaves it under the OLD id). `recoverSurplus(to)` moves `balance − totalReserved` and
+  `recoverSurplus(to, amount)` moves a named amount of it, reverting
+  `SurplusExceeded(requested, available)` above the surplus; both revert `NoSurplus` while more is
+  owed than held. **No pause, no guardian, no admin function that touches a reservation.** Owner
+  (the timelock): upgrades, `setAdapter`, `recoverSurplus` (both forms)
 - **`ApeBondPositionAdapter.sol`** — the gate SoulZap deposits through, `Ownable2Step` with
   `renounceOwnership` disabled (audit L-03), REPLACED rather than upgraded (one timelock batch:
   `adapter.acceptOwnership()` while it is nominated, `vault.setStakeOperator(new, true)`,

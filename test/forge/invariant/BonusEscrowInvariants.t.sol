@@ -297,6 +297,31 @@ contract BonusEscrowHandler is Test {
         _afterStep(0);
     }
 
+    /// @notice The owner moves a NAMED amount of the surplus out, bounded to [0, surplus + 1] so a
+    ///         run also hits the zero amount and the one wei too many. It pays exactly the amount
+    ///         and never takes the balance below `totalReserved`, or refuses and moves nothing.
+    function recoverSurplusAmount(uint256 seed) external {
+        uint256 balanceBefore = asset.balanceOf(address(escrow));
+        uint256 reserved = escrow.totalReserved();
+        uint256 available = balanceBefore > reserved ? balanceBefore - reserved : 0;
+        uint256 amount = bound(seed, 0, available + 1);
+        vm.prank(owner);
+        try escrow.recoverSurplus(address(0xBEEF), amount) {
+            recovered += amount;
+            uint256 balanceAfter = asset.balanceOf(address(escrow));
+            if (
+                amount == 0 || amount > available || balanceAfter != balanceBefore - amount || balanceAfter < reserved
+                    || escrow.totalReserved() != reserved
+            ) ++i8Violations;
+        } catch {
+            // Refused with a payable amount, or refused and something moved anyway.
+            if ((amount != 0 && amount <= available) || asset.balanceOf(address(escrow)) != balanceBefore) {
+                ++i8Violations;
+            }
+        }
+        _afterStep(0);
+    }
+
     // ──────────────────────── Views for the invariants ─────────
 
     function trackedIds() external view returns (uint256[] memory) {
@@ -431,8 +456,10 @@ contract BonusEscrowHandler is Test {
  *    I6 at most one reservation is created per tokenId (re-buys of exited NFTs included).
  *    I7 after `unlockAt`, only `claim` changes a reservation.
  *    I8 a claim pays exactly `amount` from a balance >= `amount`, or reverts and changes
- *       nothing; `recoverSurplus` leaves exactly `totalReserved`, or refuses because nothing
- *       is free.
+ *       nothing; `recoverSurplus(to)` leaves exactly `totalReserved`, or refuses because nothing
+ *       is free; `recoverSurplus(to, amount)` pays exactly `amount` and leaves at least
+ *       `totalReserved`, or refuses (zero amount, more than the surplus, nothing free) and
+ *       moves nothing. Through either owner action the balance never drops below `totalReserved`.
  *  And the conservation identity: escrow balance = funded - paid - recovered.
  */
 contract BonusEscrowInvariantsTest is ApeBondHarness {
@@ -455,7 +482,7 @@ contract BonusEscrowInvariantsTest is ApeBondHarness {
         usdcToken.transfer(address(npmMock), 100_000_000e6);
         asset.transfer(address(handler), 100_000_000e18);
 
-        bytes4[] memory selectors = new bytes4[](12);
+        bytes4[] memory selectors = new bytes4[](13);
         selectors[0] = BonusEscrowHandler.buy.selector;
         selectors[1] = BonusEscrowHandler.buy.selector; // purchases are the hot path, x2
         selectors[2] = BonusEscrowHandler.unstake.selector;
@@ -468,6 +495,7 @@ contract BonusEscrowInvariantsTest is ApeBondHarness {
         selectors[9] = BonusEscrowHandler.claim.selector;
         selectors[10] = BonusEscrowHandler.claim.selector; // claims race everything else, x2
         selectors[11] = BonusEscrowHandler.recoverSurplus.selector;
+        selectors[12] = BonusEscrowHandler.recoverSurplusAmount.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -538,8 +566,8 @@ contract BonusEscrowInvariantsTest is ApeBondHarness {
     }
 
     /// @dev Anti-vacuity per run: the purchase, exit, re-range and claim actions prime themselves
-    ///      with a purchase, so only a run drawn entirely from warp / fund / recoverSurplus could
-    ///      buy nothing — (3/12)^25 under the default profile.
+    ///      with a purchase, so only a run drawn entirely from warp / fund / the two surplus
+    ///      recoveries could buy nothing — (4/13)^25 under the default profile.
     function afterInvariant() public view {
         console.log("buys", handler.buys(), "reservations", handler.reservations());
         console.log("exits", handler.exits(), "forfeitures", handler.forfeitures());

@@ -48,6 +48,11 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-02 (the escrow's two-argument `recoverSurplus(to, amount)`,
+//    both forms on the shared `_surplus` / `_recoverSurplus` body) ── escrow lines 111 -> 120,
+//    branches 23 -> 26; all nine new lines and all three new branches are covered. The escrow's
+//    three uncovered `--ir-minimum` artefacts are unchanged in count and moved by four lines
+//    (205, 269, 285 -> 209, 273, 289).
 // ── Pinned floors, re-measured 2026-10-28 (code review: the mean tick and the window bounds move
 //    into OracleHistory) ── adapter lines 197 -> 189, branches 44 -> 43; TwapGuard lines
 //    44 -> 35, branches 7 -> 6; OracleHistory lines 9 -> 19, branches 3 -> 4. The floor-rounding
@@ -69,7 +74,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | file                        | lines             | branches        |
 // |-----------------------------|-------------------|-----------------|
 // | ApeBondPositionAdapter.sol  | 100.00% (189/189) | 100.00% (43/43) |
-// | BonusEscrow.sol             |  97.30% (108/111) | 100.00% (23/23) |
+// | BonusEscrow.sol             |  97.50% (117/120) | 100.00% (26/26) |
 // | LPStakingVault.sol          |  98.09% (205/209) | 100.00% (37/37) |
 // | LPZapper.sol                |  96.08% (98/102)  | 100.00% (20/20) |
 // | RewardsDistributor.sol      |  97.87% (138/141) | 100.00% (22/22) |
@@ -161,8 +166,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 43, minHit: 43},
   },
   "contracts/lp-staking/BonusEscrow.sol": {
-    lines: {found: 111, minHit: 108},
-    branches: {found: 23, minHit: 23},
+    lines: {found: 120, minHit: 117},
+    branches: {found: 26, minHit: 26},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
     lines: {found: 209, minHit: 205},

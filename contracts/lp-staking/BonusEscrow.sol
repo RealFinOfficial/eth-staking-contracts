@@ -68,7 +68,8 @@ interface IBonusEscrowVault {
  *  NO PAUSE, NO GUARDIAN, NO ADMIN FUNCTION THAT TOUCHES A RESERVATION (Q5). A reservation changes
  *  only by rule — through the adapter at {reserve}, through the vault's two notifications, and
  *  through {claim}. The owner holds exactly three things: `_authorizeUpgrade`, {setAdapter} and
- *  {recoverSurplus}, and the last one is bounded by arithmetic to `balance - totalReserved`.
+ *  {recoverSurplus}, in two forms (all of the surplus, or a named amount of it), and both forms
+ *  are bounded by arithmetic to `balance - totalReserved`.
  *
  *  UPGRADEABILITY. This contract is the implementation behind a UUPS (ERC-1967) proxy
  *  (`deploy/LPProxy.sol`), owned by the `LPTimelock`; ownership is two-step and
@@ -143,6 +144,9 @@ contract BonusEscrow is
 
     /// @dev Every wei held is owed (or more is owed than is held), so there is nothing to recover.
     error NoSurplus();
+
+    /// @dev A named recovery asked for more than the surplus, `balance - totalReserved`.
+    error SurplusExceeded(uint256 requested, uint256 available);
 
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
@@ -468,21 +472,36 @@ contract BonusEscrow is
      * @param to Destination for the surplus.
      * @dev The amount is not an argument and cannot be, so no reservation is ever reachable.
      *      Reverts with {NoSurplus} when nothing is free — including while more is owed than held.
-     *      No `nonReentrant`: the transfer is the last statement and the amount is derived from
-     *      the live balance, so a callback that re-entered {claim} would only pay a beneficiary
-     *      out of money that was never the surplus.
+     *      No `nonReentrant`: the bound is derived from the live balance and nothing is written
+     *      after it — the transfer and the event are the last statements — so a callback that
+     *      re-entered {claim} would only pay a beneficiary out of money that was never the surplus.
      */
     function recoverSurplus(address to) external onlyOwner {
         if (to == address(0)) revert ZeroAddress();
+        _recoverSurplus(to, _surplus());
+    }
 
-        uint256 balance = bonusToken.balanceOf(address(this));
-        uint256 reserved = _escrowStorage().totalReserved;
-        if (balance <= reserved) revert NoSurplus();
-
-        uint256 amount = balance - reserved;
-        bonusToken.safeTransfer(to, amount);
-
-        emit SurplusRecovered(to, amount);
+    /**
+     * @notice Moves a NAMED amount of the unreserved balance out, at most
+     *         `balanceOf(this) - totalReserved`.
+     * @param to     Destination for the amount.
+     * @param amount How much of the surplus to move. Must be positive and at most the surplus.
+     * @dev The bound is the same as the one-argument form's: an amount above the surplus reverts
+     *      with {SurplusExceeded}, so no reservation is ever reachable. With a surplus of 2,000,
+     *      a call with 1,000 pays 1,000 and leaves 1,000 recoverable; a call with 2,500 reverts
+     *      `SurplusExceeded(2500, 2000)`. Reverts with {ZeroAmount} on zero and with {NoSurplus}
+     *      when nothing is free — including while more is owed than held. `totalReserved` and
+     *      every reservation stay untouched. No `nonReentrant`: the bound is derived from the
+     *      live balance and nothing is written after it — the transfer and the event are the last
+     *      statements — so a callback that re-entered {claim} would only pay a beneficiary out of
+     *      money that was never the surplus.
+     */
+    function recoverSurplus(address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        uint256 available = _surplus();
+        if (amount > available) revert SurplusExceeded(amount, available);
+        _recoverSurplus(to, amount);
     }
 
     /// @notice UUPS upgrade hook. The owner is the timelock.
@@ -496,6 +515,21 @@ contract BonusEscrow is
     }
 
     // ──────────────────────── Internal helpers ─────────────────
+
+    /// @dev `balanceOf(this) - totalReserved`, read live. Reverts {NoSurplus} when nothing is
+    ///      free — including while more is owed than held.
+    function _surplus() private view returns (uint256) {
+        uint256 balance = bonusToken.balanceOf(address(this));
+        uint256 reserved = _escrowStorage().totalReserved;
+        if (balance <= reserved) revert NoSurplus();
+        return balance - reserved;
+    }
+
+    /// @dev The one body both {recoverSurplus} forms end in: the transfer, then the event.
+    function _recoverSurplus(address to, uint256 amount) private {
+        bonusToken.safeTransfer(to, amount);
+        emit SurplusRecovered(to, amount);
+    }
 
     /// @dev Exists, not claimed, not forfeited, cliff not reached.
     function _isActive(Reservation storage r) private view returns (bool) {

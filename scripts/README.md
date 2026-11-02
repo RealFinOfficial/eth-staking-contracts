@@ -353,8 +353,9 @@ Owner tier, and therefore routable: `acceptOwnership` and `transferOwnership` an
 (vault, distributor), `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
 `updateDelay` (the timelock itself); with the ApeBond route also `setStakeOperator` (vault),
-`upgradeToAndCall` / `acceptOwnership` / `transferOwnership` / `setAdapter` / `recoverSurplus`
-(escrow) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
+`upgradeToAndCall` / `acceptOwnership` / `transferOwnership` / `setAdapter` / `recoverSurplus` /
+`recoverSurplusAmount` (escrow, where the amount of `recoverSurplusAmount` is in wei, 18 decimals:
+1,000 $ASSET = 1000000000000000000000) and `setCampaign` / `setCampaignEnabled` / `setCampaignCaller` / `setSoulZapCaller` /
 `setGuardian` / `setValuationWindow` / `acceptOwnership` / `transferOwnership` (adapter). The other two tiers are deliberately NOT here, because
 routing them through a delay would defeat the reason they exist: the guardian tier is the three
 pauses (`pauseDeposits`, `pauseRebalance`, `pause`), sent directly by the hot key; the operator

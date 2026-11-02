@@ -219,6 +219,14 @@ const OWNER_TIER = {
     kinds: [ESCROW_KIND],
     note: "moves `balance - totalReserved` out; no amount argument, so no reservation is reachable",
   },
+  recoverSurplusAmount: {
+    signature: "function recoverSurplus(address to, uint256 amount)",
+    kinds: [ESCROW_KIND],
+    note:
+      "moves a named amount of `balance - totalReserved` out; reverts SurplusExceeded above it, " +
+      "so no reservation is reachable. The amount is in wei, 18 decimals: " +
+      "1,000 $ASSET = 1000000000000000000000",
+  },
   setSoulZapCaller: {
     signature: "function setSoulZapCaller(address caller, bool allowed)",
     kinds: [ADAPTER_KIND],
@@ -266,6 +274,12 @@ const OWNER_TIER = {
 const OWNER_TIER_INTERFACE = new ethers.Interface(
   Object.values(OWNER_TIER).map((spec) => spec.signature)
 );
+
+// Each entry's fragment, resolved once here by FULL signature, not by name: `recoverSurplus` is
+// overloaded (two entries) and ethers refuses a bare overloaded name. A typo fails at load.
+for (const spec of Object.values(OWNER_TIER)) {
+  spec.fragment = OWNER_TIER_INTERFACE.getFunction(ethers.FunctionFragment.from(spec.signature).format());
+}
 
 /** The timelock surface this script sends and reads. Stock OZ v5; `LPTimelock` adds nothing. */
 const TIMELOCK_INTERFACE = new ethers.Interface([
@@ -322,7 +336,7 @@ const ACTIONS = [
  * which is how the fork suites hand in a BigInt or an address object.
  */
 function coerceArgs(fn, args) {
-  const fragment = OWNER_TIER_INTERFACE.getFunction(fn);
+  const fragment = OWNER_TIER[fn].fragment;
   if (args.length !== fragment.inputs.length) {
     throw new Error(
       `${fn} takes ${fragment.inputs.length} argument(s) ` +
@@ -385,7 +399,7 @@ function encodeOwnerCall(fn, args = []) {
   if (!OWNER_TIER[fn]) {
     throw new Error(`${fn} is not an owner-tier function — one of ${Object.keys(OWNER_TIER).join(", ")}`);
   }
-  return OWNER_TIER_INTERFACE.encodeFunctionData(fn, coerceArgs(fn, args));
+  return OWNER_TIER_INTERFACE.encodeFunctionData(OWNER_TIER[fn].fragment, coerceArgs(fn, args));
 }
 
 /**

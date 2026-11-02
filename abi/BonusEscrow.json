@@ -224,6 +224,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "requested",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "available",
+        "type": "uint256"
+      }
+    ],
+    "name": "SurplusExceeded",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "T",
     "type": "error"
@@ -731,6 +747,24 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "recoverSurplus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {

@@ -26,7 +26,8 @@ const { valueAt, scaledAmount } = require("./helpers/positionValue");
  *     `onRebalance`; anything else returns at once without reading the oracle (D3);
  *   - the same rules hold through a REAL `LPStakingVault` proxy linked with `setBonusEscrow`;
  *   - `recoverSurplus` reaches only `balance - totalReserved`, and nothing while more is owed
- *     than held;
+ *     than held; its two-argument form moves a named amount of that surplus and reverts
+ *     `SurplusExceeded` above it;
  *   - the proxy upgrades in place — directly and through an `LPTimelock` — with the book intact.
  *
  * The expected scaled amounts are computed in JavaScript from `helpers/positionValue.js`, a
@@ -1015,7 +1016,7 @@ describe("BonusEscrow", function () {
       await asset.transfer(escrowAddr, FUNDING);
       await reserve(1n, alice, TOKENS(400));
 
-      await expect(escrow.recoverSurplus(treasury.address))
+      await expect(escrow["recoverSurplus(address)"](treasury.address))
         .to.emit(escrow, "SurplusRecovered")
         .withArgs(treasury.address, FUNDING - TOKENS(400));
       expect(await asset.balanceOf(treasury.address)).to.equal(FUNDING - TOKENS(400));
@@ -1025,7 +1026,7 @@ describe("BonusEscrow", function () {
     it("reverts NoSurplus when every wei is owed", async function () {
       await asset.transfer(escrowAddr, BONUS);
       await reserve(1n, alice, BONUS);
-      await expect(escrow.recoverSurplus(treasury.address)).to.be.revertedWithCustomError(
+      await expect(escrow["recoverSurplus(address)"](treasury.address)).to.be.revertedWithCustomError(
         escrow,
         "NoSurplus"
       );
@@ -1034,7 +1035,7 @@ describe("BonusEscrow", function () {
     it("reverts NoSurplus while more is owed than held", async function () {
       await asset.transfer(escrowAddr, TOKENS(50));
       await reserve(1n, alice, TOKENS(100));
-      await expect(escrow.recoverSurplus(treasury.address)).to.be.revertedWithCustomError(
+      await expect(escrow["recoverSurplus(address)"](treasury.address)).to.be.revertedWithCustomError(
         escrow,
         "NoSurplus"
       );
@@ -1046,7 +1047,7 @@ describe("BonusEscrow", function () {
       await reserve(1n, alice, BONUS);
       await asVault((e) => e.onUnstake(1n));
 
-      await expect(escrow.recoverSurplus(treasury.address))
+      await expect(escrow["recoverSurplus(address)"](treasury.address))
         .to.emit(escrow, "SurplusRecovered")
         .withArgs(treasury.address, BONUS);
     });
@@ -1054,11 +1055,89 @@ describe("BonusEscrow", function () {
     it("is owner-only, and refuses address zero", async function () {
       await asset.transfer(escrowAddr, FUNDING);
       for (const caller of [adapter, alice]) {
-        await expect(escrow.connect(caller).recoverSurplus(caller.address))
+        await expect(escrow.connect(caller)["recoverSurplus(address)"](caller.address))
           .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
           .withArgs(caller.address);
       }
-      await expect(escrow.recoverSurplus(ZERO)).to.be.revertedWithCustomError(escrow, "ZeroAddress");
+      await expect(escrow["recoverSurplus(address)"](ZERO)).to.be.revertedWithCustomError(escrow, "ZeroAddress");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("recoverSurplus(to, amount)", function () {
+    const RECOVER = "recoverSurplus(address,uint256)";
+
+    beforeEach(async function () {
+      await escrow.setAdapter(adapter.address);
+    });
+
+    it("pays the named amount and leaves the rest of the surplus recoverable", async function () {
+      await asset.transfer(escrowAddr, BONUS + TOKENS(2_000));
+      await reserve(1n, alice, BONUS);
+
+      await expect(escrow[RECOVER](treasury.address, TOKENS(1_000)))
+        .to.emit(escrow, "SurplusRecovered")
+        .withArgs(treasury.address, TOKENS(1_000));
+      expect(await asset.balanceOf(treasury.address)).to.equal(TOKENS(1_000));
+      expect(await asset.balanceOf(escrowAddr)).to.equal(BONUS + TOKENS(1_000));
+      expect(await escrow.totalReserved()).to.equal(BONUS);
+
+      await escrow[RECOVER](treasury.address, TOKENS(1_000));
+      expect(await asset.balanceOf(treasury.address)).to.equal(TOKENS(2_000));
+      expect(await asset.balanceOf(escrowAddr)).to.equal(await escrow.totalReserved());
+    });
+
+    it("takes exactly the whole surplus and leaves exactly what is owed", async function () {
+      await asset.transfer(escrowAddr, FUNDING);
+      await reserve(1n, alice, TOKENS(400));
+
+      await expect(escrow[RECOVER](treasury.address, FUNDING - TOKENS(400)))
+        .to.emit(escrow, "SurplusRecovered")
+        .withArgs(treasury.address, FUNDING - TOKENS(400));
+      expect(await asset.balanceOf(escrowAddr)).to.equal(TOKENS(400));
+      expect(await escrow.totalReserved()).to.equal(TOKENS(400));
+    });
+
+    it("reverts SurplusExceeded one wei above the surplus, with both numbers", async function () {
+      await asset.transfer(escrowAddr, FUNDING);
+      await reserve(1n, alice, TOKENS(400));
+      const available = FUNDING - TOKENS(400);
+
+      await expect(escrow[RECOVER](treasury.address, available + 1n))
+        .to.be.revertedWithCustomError(escrow, "SurplusExceeded")
+        .withArgs(available + 1n, available);
+      expect(await asset.balanceOf(escrowAddr)).to.equal(FUNDING);
+    });
+
+    it("reverts ZeroAmount on a zero amount", async function () {
+      await asset.transfer(escrowAddr, FUNDING);
+      await expect(escrow[RECOVER](treasury.address, 0n)).to.be.revertedWithCustomError(escrow, "ZeroAmount");
+    });
+
+    it("reverts ZeroAddress on address zero, before anything else", async function () {
+      await expect(escrow[RECOVER](ZERO, 0n)).to.be.revertedWithCustomError(escrow, "ZeroAddress");
+      await asset.transfer(escrowAddr, FUNDING);
+      await expect(escrow[RECOVER](ZERO, 1n)).to.be.revertedWithCustomError(escrow, "ZeroAddress");
+    });
+
+    it("reverts NoSurplus when every wei is owed, and while more is owed than held", async function () {
+      await asset.transfer(escrowAddr, BONUS);
+      await reserve(1n, alice, BONUS);
+      await expect(escrow[RECOVER](treasury.address, 1n)).to.be.revertedWithCustomError(escrow, "NoSurplus");
+
+      await reserve(2n, bob, BONUS);
+      await expect(escrow[RECOVER](treasury.address, 1n)).to.be.revertedWithCustomError(escrow, "NoSurplus");
+      expect(await asset.balanceOf(escrowAddr)).to.equal(BONUS);
+    });
+
+    it("is owner-only", async function () {
+      await asset.transfer(escrowAddr, FUNDING);
+      for (const caller of [adapter, alice]) {
+        await expect(escrow.connect(caller)[RECOVER](caller.address, 1n))
+          .to.be.revertedWithCustomError(escrow, "OwnableUnauthorizedAccount")
+          .withArgs(caller.address);
+      }
+      expect(await asset.balanceOf(escrowAddr)).to.equal(FUNDING);
     });
   });
 

@@ -1321,6 +1321,8 @@ contract AccessControlTest is LocalHarness {
             vm.expectRevert(notOwner);
             escrow.recoverSurplus(refused[i]);
             vm.expectRevert(notOwner);
+            escrow.recoverSurplus(refused[i], 1);
+            vm.expectRevert(notOwner);
             escrow.upgradeToAndCall(v2, "");
             vm.stopPrank();
         }

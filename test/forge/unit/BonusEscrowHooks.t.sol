@@ -27,7 +27,8 @@ import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonus
  *      reverting; one with an active reservation fails closed and can still exit.
  *    - FUNDING (override O2): a reservation needs no balance; a claim reverts `InsufficientFunds`
  *      until the escrow holds the whole amount, then pays exactly it; `recoverSurplus` reverts
- *      `NoSurplus` while more is owed than held.
+ *      `NoSurplus` while more is owed than held; its two-argument form moves a named amount of
+ *      the surplus and reverts `SurplusExceeded` above it.
  *    - GAS: the real escrow's `onUnstake`, measured from the caller, against the vault's
  *      `BONUS_HOOK_GAS` (100,000).
  */
@@ -380,12 +381,19 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         _fundEscrow(escrow, owed / 2);
         vm.expectRevert(BonusEscrow.NoSurplus.selector);
         escrow.recoverSurplus(operatorSafe);
+        vm.expectRevert(BonusEscrow.NoSurplus.selector);
+        escrow.recoverSurplus(operatorSafe, 1);
 
         _fundEscrow(escrow, owed - owed / 2);
         vm.expectRevert(BonusEscrow.NoSurplus.selector);
         escrow.recoverSurplus(operatorSafe);
+        vm.expectRevert(BonusEscrow.NoSurplus.selector);
+        escrow.recoverSurplus(operatorSafe, 1);
 
         _fundEscrow(escrow, 5);
+        vm.expectRevert(abi.encodeWithSelector(BonusEscrow.SurplusExceeded.selector, 6, 5));
+        escrow.recoverSurplus(operatorSafe, 6);
+        escrow.recoverSurplus(operatorSafe, 2);
         escrow.recoverSurplus(operatorSafe);
         assertEq(asset.balanceOf(operatorSafe), 5, "only the surplus over what is owed");
         assertEq(asset.balanceOf(address(escrow)), owed, "every owed wei stays");

@@ -691,6 +691,96 @@ contract BonusEscrowBranchesTest is ApeBondHarness {
         assertEq(asset.balanceOf(operatorSafe), BONUS, "the forfeited bonus is free again");
     }
 
+    // ──────────────────────── recoverSurplus(to, amount) ───────
+
+    /// @dev 2,000 free: 1,000 named, 1,000 paid and 1,000 still recoverable; a second call for
+    ///      the other 1,000 leaves exactly what is owed. No reservation moves either time.
+    function test_RecoverSurplusAmount_PaysTheNamedAmountAndLeavesTheRestRecoverable() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS + 2_000e18);
+
+        vm.expectEmit(false, false, false, true, address(book));
+        emit BonusEscrow.SurplusRecovered(operatorSafe, 1_000e18);
+        book.recoverSurplus(operatorSafe, 1_000e18);
+
+        assertEq(asset.balanceOf(operatorSafe), 1_000e18, "the named amount, to the wei");
+        assertEq(asset.balanceOf(address(book)), BONUS + 1_000e18, "the rest of the surplus stays");
+        assertEq(book.totalReserved(), BONUS, "what is owed did not move");
+
+        book.recoverSurplus(operatorSafe, 1_000e18);
+        assertEq(asset.balanceOf(operatorSafe), 2_000e18, "the second call takes the rest");
+        assertEq(asset.balanceOf(address(book)), book.totalReserved(), "exactly what is owed stays");
+    }
+
+    function test_RecoverSurplusAmount_TheWholeSurplusLeavesExactlyWhatIsOwed() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS + 7);
+
+        vm.expectEmit(false, false, false, true, address(book));
+        emit BonusEscrow.SurplusRecovered(operatorSafe, 7);
+        book.recoverSurplus(operatorSafe, 7);
+
+        assertEq(asset.balanceOf(operatorSafe), 7, "the whole surplus, to the wei");
+        assertEq(asset.balanceOf(address(book)), book.totalReserved(), "exactly what is owed stays");
+    }
+
+    /// @dev The bound is exact: one wei above the surplus reverts with both numbers and moves nothing.
+    function test_RecoverSurplusAmount_OneWeiAboveTheSurplusRevertsWithBothNumbers() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS + 7);
+
+        vm.expectRevert(abi.encodeWithSelector(BonusEscrow.SurplusExceeded.selector, 8, 7));
+        book.recoverSurplus(operatorSafe, 8);
+        assertEq(asset.balanceOf(address(book)), BONUS + 7, "nothing moved");
+    }
+
+    function test_RecoverSurplusAmount_RejectsAZeroAmount() public {
+        _fundEscrow(book, BONUS);
+        vm.expectRevert(BonusEscrow.ZeroAmount.selector);
+        book.recoverSurplus(operatorSafe, 0);
+    }
+
+    /// @dev The destination is checked first: with a surplus, and with no surplus and no amount.
+    function test_RecoverSurplusAmount_RejectsAZeroDestinationBeforeAnythingElse() public {
+        _fundEscrow(book, BONUS);
+        vm.expectRevert(BonusEscrow.ZeroAddress.selector);
+        book.recoverSurplus(address(0), 1);
+
+        _reserve(ID1, alice, 2 * BONUS, UNLOCK);
+        vm.expectRevert(BonusEscrow.ZeroAddress.selector);
+        book.recoverSurplus(address(0), 0);
+    }
+
+    function test_RecoverSurplusAmount_NoSurplusWhenTheBalanceIsExactlyWhatIsOwed() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS);
+        vm.expectRevert(BonusEscrow.NoSurplus.selector);
+        book.recoverSurplus(operatorSafe, 1);
+    }
+
+    function test_RecoverSurplusAmount_NoSurplusWhileMoreIsOwedThanHeld() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS / 2);
+        vm.expectRevert(BonusEscrow.NoSurplus.selector);
+        book.recoverSurplus(operatorSafe, 1);
+        assertEq(asset.balanceOf(address(book)), BONUS / 2, "nothing moved");
+    }
+
+    /// @dev A partial recovery never touches reserved money: the reservation claimed after it is
+    ///      paid in full, and only the unrecovered part of the surplus is left behind.
+    function test_RecoverSurplusAmount_AReservationClaimedAfterwardsIsPaidInFull() public {
+        _reserve(ID1, alice, BONUS, UNLOCK);
+        _fundEscrow(book, BONUS + 2_000e18);
+        book.recoverSurplus(operatorSafe, 1_000e18);
+
+        vm.warp(UNLOCK);
+        uint256 before = asset.balanceOf(alice);
+        assertEq(book.claim(ID1), BONUS, "the whole bonus is paid");
+        assertEq(asset.balanceOf(alice) - before, BONUS, "and lands on the beneficiary");
+        assertEq(asset.balanceOf(address(book)), 1_000e18, "only the unrecovered surplus is left");
+        assertEq(book.totalReserved(), 0, "and nothing is owed");
+    }
+
     // ──────────────────────── setAdapter ───────────────────────
 
     function test_SetAdapter_AnnouncesBothSidesAndMovesTheReserveRight() public {

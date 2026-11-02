@@ -861,9 +861,12 @@ proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardia
 `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
 `updateDelay` (the timelock) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
-`acceptOwnership`, `transferOwnership`, `setAdapter` and `recoverSurplus` (escrow) and
+`acceptOwnership`, `transferOwnership`, `setAdapter`, `recoverSurplus` and `recoverSurplusAmount` (escrow) and
 `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian`,
-`setValuationWindow`, `acceptOwnership` and `transferOwnership` (adapter). Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
+`setValuationWindow`, `acceptOwnership` and `transferOwnership` (adapter). `recoverSurplusAmount` is the
+escrow's two-argument `recoverSurplus(to, amount)`: it moves a named amount of `balance − totalReserved`
+(in wei, 18 decimals: 1,000 $ASSET = 1000000000000000000000), reverts
+`SurplusExceeded(requested, available)` above the surplus and `NoSurplus` when nothing is free. Nothing else is routable, and nothing else needs to be. `setGuardian` stays on this list because the owner can still send it,
 but since 2026-09-14 it is owner OR operator, so a guardian revocation or replacement that
 cannot wait is sent DIRECTLY by the operator multisig instead of being scheduled here. `setTwapParams` LEFT this list on 2026-09-09 — it is operator-tier
 now, sent directly by the multisig, and scheduling it here would revert
@@ -1216,7 +1219,9 @@ check is gone. `claim(tokenId)` (anyone; pays the RECORDED beneficiary) reverts 
 `InsufficientFunds(needed, balance)` while the escrow holds less than the amount — all or nothing,
 nothing changes on a revert (I8). `totalReserved` may exceed the balance; the backend alerts when
 it does (`lp.escrow.underfunded`). `recoverSurplus` moves `balance − totalReserved` and reverts
-`NoSurplus` when nothing is free, including while more is owed than held.
+`NoSurplus` when nothing is free, including while more is owed than held. The two-argument
+`recoverSurplus(to, amount)` moves a named amount of that surplus, reverts
+`SurplusExceeded(requested, available)` above the surplus and `NoSurplus` when nothing is free.
 
 **Conditional on staying staked through the cliff (D1, D3, D8).** A reservation is ACTIVE while
 it exists, is neither claimed nor forfeited, and `block.timestamp < unlockAt`. The vault's two
