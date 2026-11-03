@@ -158,6 +158,7 @@
 
 const fs = require("fs");
 const ethers = require("ethers");
+const { scanLogs } = require("./lib/logs");
 
 // ──────────────────────── the operations this script can build ────────────────────────
 
@@ -334,6 +335,17 @@ const OWNER_TIER = {
     kinds: ["TimelockController"],
     note: "deletes an executed, unaccepted canceller offer",
   },
+  // The road for a rotated Safe to PROPOSER_ROLE and EXECUTOR_ROLE (a 48 h operation). For
+  // CANCELLER_ROLE it reverts CancellerGrantOnlyByAcceptance for every caller, the timelock's
+  // own scheduled call included, so the builder refuses that role before anything is scheduled:
+  // the only road to the canceller role is `offer-canceller` and its acceptance.
+  grantRole: {
+    signature: "function grantRole(bytes32 role, address account)",
+    kinds: ["TimelockController"],
+    note:
+      "grants a timelock role, e.g. PROPOSER_ROLE or EXECUTOR_ROLE to a rotated Safe. For " +
+      "CANCELLER_ROLE it reverts CancellerGrantOnlyByAcceptance: use offer-canceller instead",
+  },
   revokeRole: {
     signature: "function revokeRole(bytes32 role, address account)",
     kinds: ["TimelockController"],
@@ -439,9 +451,6 @@ const BATCH_SALT_NAMESPACE = "real.lp.timelock.v1.batch";
 /** The registry key the timelock records itself under. */
 const TIMELOCK_KIND = "TimelockController";
 
-/** The widest `eth_getLogs` block range a scan asks for (the Infura plan's cap). */
-const LOG_CHUNK_BLOCKS = 10_000;
-
 const ACTIONS = [
   "schedule",
   "execute",
@@ -526,7 +535,15 @@ function encodeOwnerCall(fn, args = []) {
   if (!OWNER_TIER[fn]) {
     throw new Error(`${fn} is not an owner-tier function — one of ${Object.keys(OWNER_TIER).join(", ")}`);
   }
-  return OWNER_TIER_INTERFACE.encodeFunctionData(OWNER_TIER[fn].fragment, coerceArgs(fn, args));
+  const coerced = coerceArgs(fn, args);
+  if (fn === "grantRole" && String(coerced[0]).toLowerCase() === CANCELLER_ROLE) {
+    throw new Error(
+      "grantRole(CANCELLER_ROLE, …) reverts CancellerGrantOnlyByAcceptance for every caller, the " +
+        "timelock's own scheduled call included. The canceller role is reached only through " +
+        "TIMELOCK_ACTION=offer-canceller and the appointee's acceptance."
+    );
+  }
+  return OWNER_TIER_INTERFACE.encodeFunctionData(OWNER_TIER[fn].fragment, coerced);
 }
 
 /**
@@ -1070,8 +1087,20 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
   const context = { pools, timelock, timelockAddress, chainId, minDelay, signer };
 
   if (state === "unset") {
-    if (fn === "revokeRole") await describeTermForRevocation(timelock, account);
-    if (fn === "withdrawCancellerOffer" && !(await offerToWithdraw({ pools, chainId, timelock, account }))) return;
+    if (fn === "revokeRole") {
+      await refuseInvalidRevocation(timelock, timelockAddress, account);
+      if (!(await timelock.hasRole(CANCELLER_ROLE, account))) {
+        console.log(`\n${account} holds no canceller role: nothing to schedule.`);
+        return;
+      }
+      await describeTermForRevocation(timelock, account);
+    }
+    if (
+      fn === "withdrawCancellerOffer" &&
+      !(await offerToWithdraw({ pools, chainId, timelock, timelockAddress, account, minDelay }))
+    ) {
+      return;
+    }
     return scheduleOperation(context, op);
   }
 
@@ -1101,6 +1130,10 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
       console.log(`\n${account} has no offer: the execute would revert NoCancellerOffer. Nothing sent.`);
       return;
     }
+    if (now >= offer.expiresAt) {
+      console.log(`\nThe offer expired at ${when(offer.expiresAt)}: withdrawing it changes nothing. Nothing sent.`);
+      return;
+    }
   }
   await executeOperation(context, op);
 }
@@ -1119,6 +1152,27 @@ async function refuseInvalidOffer(timelock, timelockAddress, account) {
   if ((await timelock.hasRole(CANCELLER_ROLE, account)) && (await timelock.cancellerTermEnd(account)) === 0n) {
     throw new Error(
       `${account} is a permanent canceller (REAL's Safe, no term): the offer would revert InvalidCancellerAccount`
+    );
+  }
+}
+
+/**
+ * The addresses `revoke-canceller` refuses before anything is scheduled: the zero address, the
+ * timelock itself, and a PERMANENT canceller (the role with term end 0, that is REAL's own Safe).
+ * Revoking REAL's permanent role would be irreversible: `grantRole(CANCELLER_ROLE, …)` reverts for
+ * everyone, and an offer to REAL's Safe could only ever give it a term.
+ */
+async function refuseInvalidRevocation(timelock, timelockAddress, account) {
+  if (account === ethers.ZeroAddress) {
+    throw new Error("CANCELLER_ADDRESS is the zero address: there is no canceller to revoke");
+  }
+  if (account.toLowerCase() === timelockAddress.toLowerCase()) {
+    throw new Error("CANCELLER_ADDRESS is the timelock itself: there is no canceller to revoke");
+  }
+  if ((await timelock.hasRole(CANCELLER_ROLE, account)) && (await timelock.cancellerTermEnd(account)) === 0n) {
+    throw new Error(
+      `${account} is a permanent canceller (REAL's Safe, no term): revoke-canceller refuses it, because ` +
+        "the permanent role can never be granted again (grantRole(CANCELLER_ROLE, …) reverts for everyone)"
     );
   }
 }
@@ -1153,31 +1207,70 @@ async function describeTermForRevocation(timelock, account) {
 }
 
 /**
- * Before a `withdrawCancellerOffer` is scheduled: there must be an EXECUTED offer to withdraw.
- * When there is none, the offer is often still a pending operation, and that is stopped at once
- * with `cancel` on its id instead of a 48 h withdrawal. Returns true when scheduling makes sense.
+ * Before a `withdrawCancellerOffer` is scheduled: there must be an EXECUTED offer that can still be
+ * accepted. An expired offer can no longer be accepted, so withdrawing it changes nothing. When
+ * there is no executed offer, the offer is often still a pending operation, and that is stopped at
+ * once with `cancel` on its id instead of a 48 h withdrawal. Returns true when scheduling makes
+ * sense.
+ *
+ * The hint comes from a FULL scan of `CallScheduled` from the timelock's deploy block, not a
+ * bounded one: an OpenZeppelin operation never expires, so an offer operation scheduled long ago
+ * and never executed or cancelled is still pending, and a scan bounded to `minDelay` plus the
+ * offer window would miss exactly that one. The scan prints its progress per chunk, and the
+ * pending checks run in parallel.
  */
-async function offerToWithdraw({ pools, chainId, timelock, account }) {
+async function offerToWithdraw({ pools, chainId, timelock, timelockAddress, account }) {
   const offer = await timelock.cancellerOffer(account);
-  if (offer.expiresAt !== 0n) return true;
+  if (offer.expiresAt !== 0n) {
+    const now = await chainNow(timelock);
+    if (now >= offer.expiresAt) {
+      console.log(
+        `\nThe offer expired at ${when(offer.expiresAt)}: withdrawing it changes nothing. Nothing scheduled.`
+      );
+      return false;
+    }
+    return true;
+  }
+
   const selector = TIMELOCK_INTERFACE.getFunction("offerCancellerRole").selector;
-  const pendingOffers = [];
+  const target = timelockAddress.toLowerCase();
   const fromBlock = await scanStartBlock(pools, chainId, timelock);
   const scheduled = TIMELOCK_INTERFACE.getEvent("CallScheduled").topicHash;
-  for (const log of await scanTimelockLogs(timelock, [scheduled], fromBlock)) {
-    if (!log.args.data.startsWith(selector)) continue;
-    const [offered] = TIMELOCK_INTERFACE.decodeFunctionData("offerCancellerRole", log.args.data);
-    if (offered.toLowerCase() !== account.toLowerCase()) continue;
-    if (await timelock.isOperationPending(log.args.id)) pendingOffers.push(log.args.id);
+  console.log(`\nLooking for a pending offer operation for ${account} (CallScheduled since block ${fromBlock})`);
+  const logs = await scanTimelockLogs(timelock, [scheduled], fromBlock, ({ end, toBlock, found }) =>
+    console.log(`  scanned to block ${end} of ${toBlock} (${found} CallScheduled log(s))`)
+  );
+
+  // A batch emits one CallScheduled per call under ONE id: group by id, count the calls, and keep
+  // the ids where some call is an offer to this account aimed at THIS timelock.
+  const byId = new Map();
+  for (const log of logs) {
+    const entry = byId.get(log.args.id) || { calls: 0, offersAccount: false };
+    entry.calls += 1;
+    if (
+      log.args.target.toLowerCase() === target &&
+      log.args.data.startsWith(selector) &&
+      TIMELOCK_INTERFACE.decodeFunctionData("offerCancellerRole", log.args.data)[0].toLowerCase() ===
+        account.toLowerCase()
+    ) {
+      entry.offersAccount = true;
+    }
+    byId.set(log.args.id, entry);
   }
+  const candidates = [...byId].filter(([, entry]) => entry.offersAccount);
+  const pending = await Promise.all(candidates.map(([id]) => timelock.isOperationPending(id)));
+  const pendingOffers = candidates.filter((_, index) => pending[index]);
+
   console.log(`\n${account} has no executed offer: withdrawCancellerOffer would revert NoCancellerOffer. Nothing scheduled.`);
   if (pendingOffers.length === 0) {
     console.log("  No offer operation for it is pending either: there is nothing to withdraw.");
     return false;
   }
-  for (const id of new Set(pendingOffers)) {
+  for (const [id, entry] of pendingOffers) {
+    const batch =
+      entry.calls > 1 ? ` It is a batch of ${entry.calls} calls: cancelling it drops all ${entry.calls}.` : "";
     console.log(
-      `  Its offer operation ${id} is still pending. Stop it at once with:\n` +
+      `  Its offer operation ${id} is still pending.${batch} Stop it at once with:\n` +
         `    TIMELOCK_ACTION=cancel TIMELOCK_ID=${id}`
     );
   }
@@ -1285,22 +1378,20 @@ async function scanStartBlock(pools, chainId, timelock) {
 }
 
 /**
- * Every log of the timelock whose topics match `topics`, from `fromBlock` to the latest block, in
- * chunks of at most {@link LOG_CHUNK_BLOCKS} (the `eth_getLogs` range the Infura plan accepts).
- * Each log is returned with its parsed `args` next to the raw fields.
+ * Every log of the timelock whose topics match `topics`, from `fromBlock` to the latest block,
+ * through the shared chunked scanner (`scripts/lib/logs.js`, at most 10,000 blocks per call).
+ * Each log is returned with its parsed `args` next to the raw fields. `onChunk` reports progress.
  */
-async function scanTimelockLogs(timelock, topics, fromBlock = 0) {
+async function scanTimelockLogs(timelock, topics, fromBlock = 0, onChunk) {
   const provider = timelock.runner.provider;
-  const address = await timelock.getAddress();
-  const latest = await provider.getBlockNumber();
-  const logs = [];
-  for (let start = fromBlock; start <= latest; start += LOG_CHUNK_BLOCKS) {
-    const toBlock = Math.min(start + LOG_CHUNK_BLOCKS - 1, latest);
-    for (const log of await provider.getLogs({ address, topics, fromBlock: start, toBlock })) {
-      logs.push({ ...log, topics: log.topics, blockNumber: log.blockNumber, args: TIMELOCK_INTERFACE.parseLog(log).args });
-    }
-  }
-  return logs;
+  const logs = await scanLogs(provider, {
+    address: await timelock.getAddress(),
+    topics,
+    fromBlock,
+    toBlock: await provider.getBlockNumber(),
+    onChunk,
+  });
+  return logs.map((log) => ({ ...log, args: TIMELOCK_INTERFACE.parseLog(log).args }));
 }
 
 /**

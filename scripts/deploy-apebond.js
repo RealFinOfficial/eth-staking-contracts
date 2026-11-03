@@ -5,6 +5,8 @@ const hre = require("hardhat");
 const pools = require("./lib/pools");
 const apebond = require("./lib/apebond");
 const { deployContract } = require("./lib/proxies");
+// Infura caps `eth_getLogs` at 10,000 blocks per call: one chunked scanner for every script.
+const { MAX_LOG_CHUNK, scanLogs } = require("./lib/logs");
 const { deployImplementation } = require("./deploy-implementation");
 const {
   TIMELOCK_KIND,
@@ -805,8 +807,6 @@ const ADAPTER_CONFIG_EVENTS = [
   "ValuationWindowSet",
 ];
 const ADAPTER_HISTORY_EVENTS = [...ADAPTER_CONFIG_EVENTS, "OwnershipTransferStarted", "OwnershipTransferred"];
-/** Infura caps `eth_getLogs` at 10,000 blocks per call. */
-const MAX_LOG_CHUNK = 10_000;
 
 /**
  * What the adapter must hold, from the deployment record (or, for a replacement still pending,
@@ -843,11 +843,7 @@ async function scanAdapterHistory(adapterAddress, iface, from, to) {
   const requested = Number(process.env.LP_LOG_CHUNK_BLOCKS || MAX_LOG_CHUNK);
   const chunk = Math.min(Math.max(1, requested), MAX_LOG_CHUNK);
   const topics = [ADAPTER_HISTORY_EVENTS.map((name) => iface.getEvent(name).topicHash)];
-  const logs = [];
-  for (let start = from; start <= to; start += chunk) {
-    const end = Math.min(start + chunk - 1, to);
-    logs.push(...(await hre.ethers.provider.getLogs({ address: adapterAddress, topics, fromBlock: start, toBlock: end })));
-  }
+  const logs = await scanLogs(hre.ethers.provider, { address: adapterAddress, topics, fromBlock: from, toBlock: to, chunk });
   return logs
     .map((log) => ({ log, parsed: iface.parseLog(log) }))
     .sort((a, b) => a.log.blockNumber - b.log.blockNumber || a.log.index - b.log.index);

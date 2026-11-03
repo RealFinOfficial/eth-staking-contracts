@@ -58,6 +58,9 @@ const {
 //                executes it.
 //   raise-delay  on the NEW timelock: updateDelay(NEW_TIMELOCK_FINAL_DELAY, default 48 h),
 //                scheduled on itself and executed (same rule as `accept`).
+//   check        re-runs the canceller shape checks of the new timelock (the ones `deploy` runs
+//                right after the deploy). Use it when those checks could not run, e.g. an RPC
+//                error after the deploy: the new timelock is recorded, nothing is redeployed.
 //   verify       prints owner() and pendingOwner() of every contract that moved, and requires
 //                owner == new timelock and pendingOwner == 0;
 //                then the new minDelay; on success, deployments.json records the new owner on
@@ -70,7 +73,7 @@ const {
 //
 // ──────────────────────── environment ────────────────────────
 //
-//   SWITCH_ACTION              deploy | schedule | execute | accept | raise-delay | verify
+//   SWITCH_ACTION              deploy | check | schedule | execute | accept | raise-delay | verify
 //   NEW_TIMELOCK_ADDRESS       the new timelock (default: TimelockControllerNext in the registry)
 //   NEW_TIMELOCK_MIN_DELAY     delay of the new timelock at deploy, seconds (0)
 //   NEW_TIMELOCK_FINAL_DELAY   delay `raise-delay` installs, seconds (172800 = 48 h)
@@ -82,7 +85,54 @@ const {
 const NEXT_KIND = "TimelockControllerNext";
 const RETIRED_KIND = "TimelockControllerRetired";
 const REWARD_TOKEN_PREFIX = "RewardToken:";
-const ACTIONS = ["deploy", "schedule", "execute", "accept", "raise-delay", "verify"];
+const ACTIONS = ["deploy", "check", "schedule", "execute", "accept", "raise-delay", "verify"];
+
+/**
+ * The canceller shape checks of a new timelock (the same rows `deploy-lp-staking.js` checks),
+ * printed one per line. Returns the labels that failed. A failed RPC read THROWS instead: that is
+ * not a verdict on the timelock, and the caller must keep the two cases apart.
+ */
+async function checkNewTimelock({ address, multisig, deployer, provider }) {
+  const deployed = new hre.ethers.Contract(address, TIMELOCK_INTERFACE, provider);
+  const failures = [];
+  for (const [label, actual, expected] of await cancellerShapeChecks(deployed, {
+    timelockAddress: address, multisig, deployer,
+  })) {
+    const ok = String(actual).toLowerCase() === String(expected).toLowerCase();
+    console.log(`${ok ? "OK  " : "FAIL"}  ${label}: ${actual}${ok ? "" : ` (expected ${expected})`}`);
+    if (!ok) failures.push(label);
+  }
+  return failures;
+}
+
+/**
+ * Records a freshly deployed timelock FIRST, then checks its canceller shape, so a paid-for
+ * timelock is never lost from the registry by an RPC error. Two outcomes are kept apart:
+ *
+ *   - a genuine shape failure (a check read a wrong value): the entry just written is removed and
+ *     the error says "Not recorded", with the address;
+ *   - any other error (an RPC timeout, a rate limit): the entry stays, and the error names the
+ *     address and `SWITCH_ACTION=check`, which re-runs the checks without a second deploy.
+ *
+ * `record` and `remove` write the registry (`pools.recordDeployment` / `pools.removeDeployment`
+ * in the CLI), passed in so a suite can drive this without touching any registry file.
+ */
+async function recordCheckedTimelock({ address, info, multisig, deployer, provider, record, remove }) {
+  record(address, info);
+  let failures;
+  try {
+    failures = await checkNewTimelock({ address, multisig, deployer, provider });
+  } catch (error) {
+    throw new Error(
+      `The new timelock ${address} is deployed and recorded as ${NEXT_KIND}, but its role checks ` +
+        `could not run (${error.message}). Re-run them with SWITCH_ACTION=check. Do NOT run deploy again.`
+    );
+  }
+  if (failures.length > 0) {
+    remove();
+    throw new Error(`The new timelock ${address} failed its role checks: ${failures.join(", ")}. Not recorded.`);
+  }
+}
 const OWNABLE_ABI = ["function owner() view returns (address)", "function pendingOwner() view returns (address)"];
 
 function confirmMainnet(chainId, action) {
@@ -204,31 +254,38 @@ async function main() {
     }
     confirmMainnet(chainId, "deploy a new LPTimelock");
     const d = await deployContract("LPTimelock", [minDelay, [multisig], [multisig], hre.ethers.ZeroAddress], signer);
-    // The canceller shape of the new timelock, checked BEFORE it is recorded, so a timelock this
-    // script rejects never appears in deployments.json. The same checks deploy-lp-staking.js makes: only
-    // the timelock holds DEFAULT_ADMIN_ROLE and administers CANCELLER_ROLE, the multisig is a
-    // permanent canceller (term end 0), the term cap is 180 days and the offer window 7 days.
-    const deployed = new hre.ethers.Contract(d.address, TIMELOCK_INTERFACE, hre.ethers.provider);
-    const shapeFailures = [];
-    for (const [label, actual, expected] of await cancellerShapeChecks(deployed, {
-      timelockAddress: d.address, multisig, deployer: signer.address,
-    })) {
-      const ok = String(actual).toLowerCase() === String(expected).toLowerCase();
-      console.log(`${ok ? "OK  " : "FAIL"}  ${label}: ${actual}${ok ? "" : ` (expected ${expected})`}`);
-      if (!ok) shapeFailures.push(label);
-    }
-    if (shapeFailures.length > 0) {
-      throw new Error(`The new timelock ${d.address} failed its role checks: ${shapeFailures.join(", ")}. Not recorded.`);
-    }
-    pools.recordDeployment(chainId, NEXT_KIND, d.address, {
-      deployTx: d.tx.hash, block: d.receipt.blockNumber, minDelay,
-      proposers: [multisig], executors: [multisig], cancellers: [multisig], admin: hre.ethers.ZeroAddress,
+    // Recorded first, then checked: see recordCheckedTimelock for why the order matters.
+    await recordCheckedTimelock({
+      address: d.address,
+      info: {
+        deployTx: d.tx.hash, block: d.receipt.blockNumber, minDelay,
+        proposers: [multisig], executors: [multisig], cancellers: [multisig], admin: hre.ethers.ZeroAddress,
+      },
+      multisig,
+      deployer: signer.address,
+      provider: hre.ethers.provider,
+      record: (address, info) => pools.recordDeployment(chainId, NEXT_KIND, address, info),
+      remove: () => pools.removeDeployment(chainId, NEXT_KIND),
     });
     return console.log(`\nNext: SWITCH_ACTION=schedule (one batch on the old timelock ${old.address}).`);
   }
 
   const nextAddress = process.env.NEW_TIMELOCK_ADDRESS || (entries[NEXT_KIND] && entries[NEXT_KIND].address);
   if (!nextAddress) throw new Error(`Set NEW_TIMELOCK_ADDRESS, or run SWITCH_ACTION=deploy first`);
+
+  if (action === "check") {
+    const next = entries[NEXT_KIND] || {};
+    const multisig = hre.ethers.getAddress(
+      process.env.LP_MULTISIG || (next.proposers && next.proposers[0]) || old.proposers[0]
+    );
+    const address = hre.ethers.getAddress(nextAddress);
+    const failures = await checkNewTimelock({ address, multisig, deployer: signer.address, provider: hre.ethers.provider });
+    if (failures.length > 0) {
+      if (next.address && next.address.toLowerCase() === address.toLowerCase()) pools.removeDeployment(chainId, NEXT_KIND);
+      throw new Error(`The new timelock ${address} failed its role checks: ${failures.join(", ")}. Not recorded.`);
+    }
+    return console.log(`\nThe new timelock ${address} passed its role checks. Next: SWITCH_ACTION=schedule.`);
+  }
   const newTimelock = new hre.ethers.Contract(hre.ethers.getAddress(nextAddress), TIMELOCK_INTERFACE, signer);
   const newAddress = await newTimelock.getAddress();
   for (const line of skipped) console.log(`skip  ${line}`);
@@ -307,7 +364,13 @@ async function main() {
   console.log(`\nAll ${move.length} moved contracts are owned by ${newAddress}; deployments.json updated.`);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+module.exports = { checkNewTimelock, recordCheckedTimelock };
+
+// `hardhat run` executes this file as the entry point. A `require` from a suite must only pick
+// up the two functions above.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}

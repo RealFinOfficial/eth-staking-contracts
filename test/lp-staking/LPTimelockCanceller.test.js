@@ -2,6 +2,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 const lpTimelock = require("../../scripts/lp-timelock");
+const lpSwitch = require("../../scripts/lp-switch-timelock");
 
 /**
  * The CANCELLER half of `scripts/lp-timelock.js`, run end to end against a real `LPTimelock` this
@@ -383,6 +384,71 @@ describe("lp-timelock.js — the canceller actions", function () {
       expect(await timelock.isOperationReady(op.id), "left ready, not executed").to.equal(true);
     });
 
+    it("refuses to revoke a permanent canceller, the zero address or the timelock before scheduling", async function () {
+      const nonce = await nonceOf(multisig.address);
+      const revoke = (address) => run(multisig, { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: address });
+      await expect(revoke(multisig.address)).to.be.rejectedWith(/is a permanent canceller .*revoke-canceller refuses it/);
+      await expect(revoke(ethers.ZeroAddress)).to.be.rejectedWith(/zero address: there is no canceller to revoke/);
+      await expect(revoke(timelockAddr)).to.be.rejectedWith(/the timelock itself: there is no canceller to revoke/);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+      const op = selfCall("revokeRole", [lpTimelock.CANCELLER_ROLE, multisig.address]);
+      expect(await timelock.isOperation(op.id)).to.equal(false);
+    });
+
+    it("schedules no revocation for an address that holds no canceller role", async function () {
+      const nonce = await nonceOf(multisig.address);
+      const out = await run(multisig, { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: other.address });
+      expect(out).to.include(`${other.address} holds no canceller role: nothing to schedule.`);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+      const op = selfCall("revokeRole", [lpTimelock.CANCELLER_ROLE, other.address]);
+      expect(await timelock.isOperation(op.id)).to.equal(false);
+    });
+
+    it("refuses to schedule or execute a withdrawal of an expired offer", async function () {
+      const withdrawEnv = { TIMELOCK_ACTION: "withdraw-offer", CANCELLER_ADDRESS: ape.address };
+      const withdrawOp = selfCall("withdrawCancellerOffer", [ape.address]);
+      await run(multisig, offerEnv(ape, 180));
+      await increase(MIN_DELAY);
+      await run(multisig, offerEnv(ape, 180));
+      const { expiresAt } = await timelock.cancellerOffer(ape.address);
+
+      // Scheduled while the offer is open, ready only after it expired: the execute is refused.
+      await increase(7 * DAY - 30);
+      await run(multisig, withdrawEnv);
+      expect(await timelock.isOperationPending(withdrawOp.id)).to.equal(true);
+      await increase(MIN_DELAY);
+      const nonce = await nonceOf(multisig.address);
+      const atExecute = await run(multisig, withdrawEnv);
+      expect(atExecute).to.include(`The offer expired at ${expiresAt}`);
+      expect(atExecute).to.include("withdrawing it changes nothing. Nothing sent.");
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+
+      // A fresh withdrawal of the expired offer is not even scheduled.
+      const atSchedule = await run(multisig, { ...withdrawEnv, TIMELOCK_SALT_TAG: "again" });
+      expect(atSchedule).to.include("withdrawing it changes nothing. Nothing scheduled.");
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+    });
+
+    it("names a pending offer inside a batch with its call count, and ignores the selector on another target", async function () {
+      const withdrawEnv = { TIMELOCK_ACTION: "withdraw-offer", CANCELLER_ADDRESS: ape.address };
+      const offerData = timelock.interface.encodeFunctionData("offerCancellerRole", [ape.address, 180]);
+
+      // The same calldata aimed at another address is not an offer.
+      await (await timelock.connect(multisig).schedule(other.address, 0, offerData, ethers.ZeroHash, ethers.id("foreign"), MIN_DELAY)).wait();
+      expect(await run(multisig, withdrawEnv)).to.include("there is nothing to withdraw");
+
+      const targets = [timelockAddr, other.address];
+      const payloads = [offerData, "0x"];
+      const salt = ethers.id("offer-batch");
+      await (await timelock.connect(multisig).scheduleBatch(targets, [0, 0], payloads, ethers.ZeroHash, salt, MIN_DELAY)).wait();
+      const id = await timelock.hashOperationBatch(targets, [0, 0], payloads, ethers.ZeroHash, salt);
+
+      const out = await run(multisig, withdrawEnv);
+      expect(out).to.include(`Its offer operation ${id} is still pending. It is a batch of 2 calls: cancelling it drops all 2.`);
+      expect(out).to.match(/scanned to block \d+ of \d+ \(\d+ CallScheduled log\(s\)\)/);
+      expect(out.match(/Its offer operation/g)).to.have.length(1);
+    });
+
     it("points a withdrawal of a still-pending offer at cancel, and schedules nothing", async function () {
       const offerOp = selfCall("offerCancellerRole", [ape.address, "180"]);
       const withdrawEnv = { TIMELOCK_ACTION: "withdraw-offer", CANCELLER_ADDRESS: ape.address };
@@ -417,6 +483,95 @@ describe("lp-timelock.js — the canceller actions", function () {
       expect((await timelock.cancellerOffer(ape.address)).expiresAt).to.equal(0n);
       const out = await run(ape, { TIMELOCK_ACTION: "accept-canceller", CANCELLER_TERM_DAYS: "180" });
       expect(out).to.include("has no offer");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("grantRole through the timelock (a rotated Safe)", function () {
+    const grantEnv = (step, role, account) => ({
+      TIMELOCK_ACTION: step,
+      TIMELOCK_TARGET_ADDRESS: timelockAddr,
+      TIMELOCK_FN: "grantRole",
+      TIMELOCK_ARGS: `${role},${account}`,
+    });
+
+    it("schedules and executes grantRole(PROPOSER_ROLE, x)", async function () {
+      const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
+      await run(multisig, grantEnv("schedule", PROPOSER_ROLE, other.address));
+      await increase(MIN_DELAY);
+      await run(multisig, grantEnv("execute", PROPOSER_ROLE, other.address));
+      expect(await timelock.hasRole(PROPOSER_ROLE, other.address)).to.equal(true);
+    });
+
+    it("refuses grantRole(CANCELLER_ROLE, x) before anything is scheduled", async function () {
+      const nonce = await nonceOf(multisig.address);
+      await expect(
+        run(multisig, grantEnv("schedule", lpTimelock.CANCELLER_ROLE, other.address))
+      ).to.be.rejectedWith(/CancellerGrantOnlyByAcceptance.*offer-canceller/);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("lp-switch-timelock.js: record, then check", function () {
+    function recorder() {
+      const calls = { recorded: [], removed: 0 };
+      return {
+        calls,
+        record: (address, info) => calls.recorded.push({ address, info }),
+        remove: () => (calls.removed += 1),
+      };
+    }
+    const quiet = async (fn) => {
+      const log = console.log;
+      console.log = () => {};
+      try {
+        return await fn();
+      } finally {
+        console.log = log;
+      }
+    };
+
+    it("keeps a timelock that passes, recorded once", async function () {
+      const r = recorder();
+      await quiet(() =>
+        lpSwitch.recordCheckedTimelock({
+          address: timelockAddr, info: {}, multisig: multisig.address, deployer: deployer.address,
+          provider: ethers.provider, record: r.record, remove: r.remove,
+        })
+      );
+      expect(r.calls.recorded).to.have.length(1);
+      expect(r.calls.removed).to.equal(0);
+    });
+
+    it("removes the entry on a genuine shape failure and says Not recorded", async function () {
+      const r = recorder();
+      // Checked against the wrong multisig: CANCELLER_ROLE[multisig] reads false.
+      await expect(
+        quiet(() =>
+          lpSwitch.recordCheckedTimelock({
+            address: timelockAddr, info: {}, multisig: other.address, deployer: deployer.address,
+            provider: ethers.provider, record: r.record, remove: r.remove,
+          })
+        )
+      ).to.be.rejectedWith(new RegExp(`${timelockAddr} failed its role checks: .*CANCELLER_ROLE\\[multisig\\].*Not recorded`));
+      expect(r.calls.recorded).to.have.length(1);
+      expect(r.calls.removed).to.equal(1);
+    });
+
+    it("keeps the entry when the checks cannot run, and names SWITCH_ACTION=check", async function () {
+      const r = recorder();
+      // No contract at this address: the first read throws, which is not a verdict.
+      await expect(
+        quiet(() =>
+          lpSwitch.recordCheckedTimelock({
+            address: other.address, info: {}, multisig: multisig.address, deployer: deployer.address,
+            provider: ethers.provider, record: r.record, remove: r.remove,
+          })
+        )
+      ).to.be.rejectedWith(/is deployed and recorded .*Re-run them with SWITCH_ACTION=check\. Do NOT run deploy again\./);
+      expect(r.calls.recorded).to.have.length(1);
+      expect(r.calls.removed).to.equal(0);
     });
   });
 });

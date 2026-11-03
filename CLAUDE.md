@@ -44,7 +44,7 @@ nothing added), and every proxy is owned by the `LPTimelock` (`deploy/LPTimelock
 transaction onwards. The canceller role: an offer by a timelock self-call, an acceptance by the
 appointee inside 7 days, a term of 1 to 180 days, cancel only of operations scheduled before the
 term end, `grantRole(CANCELLER_ROLE, …)` blocked, and `_revokeRole` refusing a revocation during
-the term (see the Q1 section of `docs/lp-staking-audit-notes.md`). Ownership
+the term by anyone but the holder (`renounceRole` passes at any time) (see the Q1 section of `docs/lp-staking-audit-notes.md`). Ownership
 is two-step on all five and `renounceOwnership` reverts. The timelock is replaceable by a
 planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is storage.
 

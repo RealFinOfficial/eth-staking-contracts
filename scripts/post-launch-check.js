@@ -1,5 +1,6 @@
 const hre = require("hardhat");
 const pools = require("./lib/pools");
+const logScan = require("./lib/logs");
 
 // The three checks before launch (krumbgf's item 12 of 27 Oct 2026, the mainnet bootstrap with a
 // short timelock delay). READ-ONLY: it sends nothing and needs no key.
@@ -41,7 +42,7 @@ const LP_KINDS = ["TokenOverture", "RewardsDistributor", "LPEpochRegistry", "LPS
 const OPTIONAL_KINDS = ["BonusEscrow", "ApeBondPositionAdapter"];
 const REWARD_TOKEN_PREFIX = "RewardToken:";
 const DEFAULT_MIN_DELAY = 172800n;
-const MAX_LOG_CHUNK = 10_000;
+const MAX_LOG_CHUNK = logScan.MAX_LOG_CHUNK;
 
 const TIMELOCK_ABI = [
   "function getMinDelay() view returns (uint256)",
@@ -69,13 +70,8 @@ function readBig(name, fallback) {
 }
 
 /** Every log of `topic` on `address` in [from, to], in chunks of at most `chunk` blocks. */
-async function scanLogs(address, topic, from, to, chunk) {
-  const logs = [];
-  for (let start = from; start <= to; start += chunk) {
-    const end = Math.min(start + chunk - 1, to);
-    logs.push(...(await hre.ethers.provider.getLogs({ address, topics: [topic], fromBlock: start, toBlock: end })));
-  }
-  return logs;
+function scanLogs(address, topic, from, to, chunk) {
+  return logScan.scanLogs(hre.ethers.provider, { address, topics: [topic], fromBlock: from, toBlock: to, chunk });
 }
 
 async function main() {

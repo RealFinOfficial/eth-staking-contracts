@@ -973,7 +973,8 @@ The owner tier is exactly: `acceptOwnership`, `transferOwnership`, `upgradeToAnd
 proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardian` (vault, distributor),
 `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
-`updateDelay`, `offerCancellerRole`, `withdrawCancellerOffer` and `revokeRole` (the timelock itself) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
+`updateDelay`, `offerCancellerRole`, `withdrawCancellerOffer`, `grantRole` (never for `CANCELLER_ROLE`, which
+the script refuses) and `revokeRole` (the timelock itself) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
 `acceptOwnership`, `transferOwnership`, `setAdapter`, `recoverSurplus` and `recoverSurplusAmount` (escrow) and
 `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian`,
 `setValuationWindow`, `acceptOwnership` and `transferOwnership` (adapter). `recoverSurplusAmount` is the
