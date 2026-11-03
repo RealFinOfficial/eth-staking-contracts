@@ -4,6 +4,7 @@ pragma solidity 0.8.38;
 import {Test, Vm} from "forge-std/Test.sol";
 import {LPTimelock} from "../../../contracts/lp-staking/deploy/LPTimelock.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 /**
  * @notice Why this file exists: `LPTimelock` adds one thing to OpenZeppelin's `TimelockController`,
@@ -51,6 +52,7 @@ contract LPTimelockCancellerTest is Test {
     event CancellerOfferWithdrawn(address indexed account);
     event CancellerAccepted(address indexed account, uint64 termEnd);
     event OperationCancelled(bytes32 indexed id, address indexed canceller);
+    event Cancelled(bytes32 indexed id); // OpenZeppelin's, re-declared to pin the order
     event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
@@ -500,11 +502,36 @@ contract LPTimelockCancellerTest is Test {
         assertEq(vm.getRecordedLogs().length, 0, "a refused cancel emits no event");
     }
 
+    function test_Cancel_EmitsCancelledThenOperationCancelled() public {
+        bytes32 id = _scheduleNoop(MIN_DELAY);
+        vm.expectEmit(address(timelock));
+        emit Cancelled(id);
+        vm.expectEmit(address(timelock));
+        emit OperationCancelled(id, real);
+        vm.prank(real);
+        timelock.cancel(id);
+    }
+
     function test_Cancel_AStrangerReverts() public {
         bytes32 id = _scheduleNoop(MIN_DELAY);
+        vm.recordLogs();
         vm.prank(stranger);
         vm.expectRevert(_unauthorized(stranger, CANCELLER_ROLE));
         timelock.cancel(id);
+        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel emits no event");
+    }
+
+    function test_Cancel_ANonPendingIdRevertsAndEmitsNothing() public {
+        bytes32 id = keccak256("never");
+        // OpenZeppelin's expected-states bitmap for `cancel`: Waiting (1 << 1) | Ready (1 << 2).
+        bytes32 expectedStates = bytes32(uint256((1 << 1) | (1 << 2)));
+        vm.recordLogs();
+        vm.prank(real);
+        vm.expectRevert(
+            abi.encodeWithSelector(TimelockController.TimelockUnexpectedOperationState.selector, id, expectedStates)
+        );
+        timelock.cancel(id);
+        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel emits no event");
     }
 
     // ──────────────────────── Revoke ───────────────────────────

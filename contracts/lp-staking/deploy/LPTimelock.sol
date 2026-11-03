@@ -9,7 +9,9 @@ import "@openzeppelin/contracts/governance/TimelockController.sol";
  *         `RewardsDistributor`, `LPEpochRegistry`, `TokenOverture`, `LPZapper`, and the
  *         `BonusEscrow` proxy and the `ApeBondPositionAdapter` of the ApeBond route). It is
  *         OpenZeppelin's `TimelockController` with ONE addition: a canceller role with a term
- *         written on chain, so ApeBonds' Safe can veto owner-tier operations for a bounded time.
+ *         written on chain, so ApeBonds' Safe can veto owner-tier operations for a bounded time,
+ *         made observable by two events (`cancel` emits `OperationCancelled(id, canceller)`, and
+ *         `_revokeRole` emits `CancellerOfferWithdrawn` when it deletes a live offer).
  *         Everything else (the proposer and executor roles, `schedule`, `execute`, `updateDelay`,
  *         the role admins) is untouched OpenZeppelin code.
  *
@@ -206,7 +208,7 @@ contract LPTimelock is TimelockController {
     /// @dev Reverts `CancellerTermEnded` when the caller has a term and `scheduledAt[id]` is at or
     ///      after it. A caller without the role has no term end and reaches OpenZeppelin's role
     ///      check, which reverts `AccessControlUnauthorizedAccount`. Only a cancel that went
-    ///      through emits `OperationCancelled(id, caller)`, after OpenZeppelin's `Cancelled(id)`.
+    ///      through emits `OperationCancelled(id, canceller)`, after OpenZeppelin's `Cancelled(id)`.
     function cancel(bytes32 id) public override {
         address account = _msgSender();
         uint64 end = cancellerTermEnd[account];

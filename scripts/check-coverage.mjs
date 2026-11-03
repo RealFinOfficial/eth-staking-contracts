@@ -51,14 +51,18 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
 // ── Pinned floors, re-measured 2026-11-03, third time (`LPTimelock._revokeRole` emits
 //    `CancellerOfferWithdrawn` when it deletes a live offer) ── LPTimelock lines 50 -> 51,
-//    branches 14 -> 15 (the emit and its `expiresAt != 0` condition). Covered by
-//    `test_Renounce_AnOffereeWithoutTheRoleWithdrawsItsOfferWithAnEvent`,
-//    `test_Revoke_AHolderWithALiveRenewalOfferEmitsTheWithdrawalOnce` and
+//    branches 14 -> 15 (the emit and its `expiresAt != 0` condition). The emit line and the
+//    condition's true arm are covered by
+//    `test_Renounce_AnOffereeWithoutTheRoleWithdrawsItsOfferWithAnEvent` and
+//    `test_Revoke_AHolderWithALiveRenewalOfferEmitsTheWithdrawalOnce`. The false arm is covered by
 //    `test_RevokeAndRenounce_WithoutALiveOfferEmitNoWithdrawal`. No other file moved.
 // ── Pinned floors, re-measured 2026-11-03, second time (`LPTimelock.cancel` emits
 //    `OperationCancelled(id, canceller)`) ── LPTimelock lines 49 -> 50, branches 14 -> 14 (the emit
-//    is one line and no branch). Covered by the three `test_Cancel_*OperationCancelled` /
-//    `test_Cancel_ARefusedCancelEmitsNothing` tests. No other file moved.
+//    is one line and no branch). The emit line is covered by
+//    `test_Cancel_ThePermanentCancellerIsNamedInOperationCancelled` and
+//    `test_Cancel_ATermCancellerIsNamedInOperationCancelled`.
+//    `test_Cancel_ARefusedCancelEmitsNothing` never reaches it: it is the placement guard, proving
+//    the emit sits after `super.cancel` so a refused cancel emits nothing. No other file moved.
 // ── Pinned floors, re-measured 2026-11-03 (the term-limited canceller role on `LPTimelock`) ──
 //    the timelock enters the gate: `deploy/LPTimelock.sol` 49 lines and 14 branches, all covered
 //    by `test/forge/unit/LPTimelockCanceller.t.sol`. Until this round it was OpenZeppelin's
@@ -104,7 +108,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | deploy/LPTimelock.sol       | 100.00% (51/51)   | 100.00% (15/15) |
 //
 // Branch coverage is 100% on all thirteen files, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate. Measured on 852 Foundry tests in 36 suites (the 2026-11-03 run
+// uncovered branch fails the gate. Measured on 854 Foundry tests in 36 suites (the 2026-11-03 run
 // that pinned the LPTimelock floors).
 //
 // The 2026-10-07 round moved one denominator: RewardsDistributor (lines 122 -> 138, branches

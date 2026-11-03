@@ -872,15 +872,13 @@ async function main() {
       timelock.connect(signer).cancel(id, o)
     );
     // `OperationCancelled(id, canceller)` names who cancelled, which OZ's `Cancelled(id)` does not.
-    for (const log of receipt.logs) {
-      let parsed = null;
-      try {
-        parsed = TIMELOCK_INTERFACE.parseLog(log);
-      } catch {
-        continue;
-      }
-      if (parsed && parsed.name === "OperationCancelled") console.log(`  cancelled by ${parsed.args.canceller}`);
-    }
+    // ethers v6 `parseLog` returns null for an unknown topic and throws only on a malformed log of a
+    // known one, which is a real problem and is left to surface.
+    const cancelled = receipt.logs
+      .filter((log) => log.address.toLowerCase() === timelockAddress.toLowerCase())
+      .map((log) => TIMELOCK_INTERFACE.parseLog(log))
+      .find((parsed) => parsed && parsed.name === "OperationCancelled");
+    if (cancelled) console.log(`  cancelled by ${cancelled.args.canceller}`);
     return;
   }
 
