@@ -93,8 +93,9 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | libraries/PositionValue.sol | 100.00% (4/4)     | (0/0 — the ternary is not instrumented) |
 // | deploy/LPTimelock.sol       | 100.00% (49/49)   | 100.00% (14/14) |
 //
-// Branch coverage is 100% on all six, so every branch floor is the ceiling: one newly uncovered
-// branch fails the gate. Measured on 567 Foundry tests in 28 suites.
+// Branch coverage is 100% on all thirteen files, so every branch floor is the ceiling: one newly
+// uncovered branch fails the gate. Measured on 846 Foundry tests in 36 suites (the 2026-11-03 run
+// that pinned the LPTimelock floors).
 //
 // The 2026-10-07 round moved one denominator: RewardsDistributor (lines 122 -> 138, branches
 // 18 -> 22) gained the operator-only `mintRewardToken(token, to, amount)` — the $ASSET guard by

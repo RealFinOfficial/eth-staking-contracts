@@ -412,6 +412,39 @@ contract LPTimelockCancellerTest is Test {
         assertTrue(timelock.isOperationPending(id));
     }
 
+    /// @dev A two-call batch scheduled by REAL's Safe now (`scheduleBatch`). Returns its id.
+    function _scheduleNoopBatch() internal returns (bytes32 id) {
+        address[] memory targets = new address[](2);
+        targets[0] = stranger;
+        targets[1] = stranger;
+        uint256[] memory values = new uint256[](2);
+        bytes[] memory payloads = new bytes[](2);
+        bytes32 salt = keccak256(abi.encode("batch", ++nonce));
+        vm.prank(real);
+        timelock.scheduleBatch(targets, values, payloads, bytes32(0), salt, MIN_DELAY);
+        id = timelock.hashOperationBatch(targets, values, payloads, bytes32(0), salt);
+    }
+
+    function test_Cancel_ATermCancellerCancelsABatchScheduledDuringItsTerm() public {
+        _appoint(ape, TERM);
+        bytes32 id = _scheduleNoopBatch();
+
+        vm.prank(ape);
+        timelock.cancel(id);
+        assertFalse(timelock.isOperation(id), "the batch is cancelled");
+    }
+
+    function test_Cancel_ATermCancellerIsRefusedOnABatchScheduledAtItsTermEnd() public {
+        uint64 termEnd = _appoint(ape, TERM);
+        vm.warp(termEnd);
+        bytes32 id = _scheduleNoopBatch();
+
+        vm.prank(ape);
+        vm.expectRevert(abi.encodeWithSelector(LPTimelock.CancellerTermEnded.selector, ape, termEnd, id));
+        timelock.cancel(id);
+        assertTrue(timelock.isOperationPending(id), "the batch stays pending");
+    }
+
     function test_Cancel_REALCancelsAnything() public {
         uint64 termEnd = _appoint(ape, TERM);
         bytes32 during = _scheduleNoop(MIN_DELAY);

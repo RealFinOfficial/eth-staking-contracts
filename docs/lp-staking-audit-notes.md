@@ -951,6 +951,24 @@ a gap, REAL executes or cancels every pending operation, because operations sche
 and still pending at the acceptance become cancellable by the appointee. A revocation after the
 term is housekeeping: the veto on new operations already ended with the term.
 
+**A canceller appointment does not move with a switch.** The role, the term end and any open
+offer live in the old timelock's storage. After a switch the new timelock has REAL's Safe as its
+only (permanent) canceller, so `offer-canceller` has to be run again on the new timelock: 48 h
+for the offer, then up to 7 days for ApeBonds' acceptance. The switch batch on the OLD timelock
+is itself an owner-tier operation, so a term canceller can cancel it while it is pending if it
+was scheduled during the term. During a term the switch therefore needs ApeBonds' agreement, or
+it waits until the term end and is scheduled after it.
+
+**Rotating REAL's Safe and the canceller role.** `grantRole(CANCELLER_ROLE, x)` reverts for
+every caller, the timelock's own scheduled call included, and `offerCancellerRole` caps every term
+at 180 days. So after REAL rotates its Safe, the new Safe receives `PROPOSER_ROLE` and
+`EXECUTOR_ROLE` through 48 h operations, but it can hold `CANCELLER_ROLE` only as a term canceller:
+an offer, an acceptance, and a renewal at least every 180 days. The only road to a new permanent
+canceller is a timelock switch (`scripts/lp-switch-timelock.js`), because the `LPTimelock`
+constructor grants `CANCELLER_ROLE` with no term to every proposer. Operating rule: rotate REAL's
+Safe together with a planned timelock switch, or run the new Safe as a term canceller and renew it
+before every term end.
+
 The owner tier is exactly: `acceptOwnership`, `transferOwnership`, `upgradeToAndCall` (all five
 proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardian` (vault, distributor),
 `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,

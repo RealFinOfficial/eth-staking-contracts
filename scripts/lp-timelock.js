@@ -602,9 +602,21 @@ function encodeExecute(op) {
   ]);
 }
 
-/** The `cancel(id)` calldata. Any canceller — here, the multisig — may send it. */
+/**
+ * The `cancel(id)` calldata. REAL's Safe, a permanent canceller, may send it for any pending id. A
+ * term canceller (ApeBonds' Safe) may send it only for an id scheduled before its term end.
+ */
 function encodeCancel(id) {
   return TIMELOCK_INTERFACE.encodeFunctionData("cancel", [id]);
+}
+
+/** The operands of one operation, printed the same way by every action that builds one. */
+function printOperation(op) {
+  console.log(`\nOperation: ${describeOperation(op)}`);
+  console.log(`  calldata:    ${op.data}`);
+  console.log(`  predecessor: ${op.predecessor}`);
+  console.log(`  salt:        ${op.salt}`);
+  console.log(`  id:          ${op.id}`);
 }
 
 /** Human-readable one-liner for an operation, used by the CLI and by the deploy script. */
@@ -792,6 +804,13 @@ async function main() {
     const id = requireId();
     await reportStatus(timelock, id, minDelay);
     const signer = await pools.getSigner();
+    // An operation that is not pending (never scheduled, cancelled or executed) cannot be
+    // cancelled by anyone, so nothing is sent or printed for a Safe: the call would revert
+    // TimelockUnexpectedOperationState.
+    if (!(await timelock.isOperationPending(id))) {
+      console.log(`\nOperation ${id} is not pending (never scheduled, cancelled or executed): nothing to cancel.`);
+      return;
+    }
     const cancelData = encodeCancel(id);
     console.log(`  cancel calldata: ${cancelData}`);
     // `canCancel` answers exactly what `cancel` would do, so a refusal is explained here instead
@@ -901,11 +920,7 @@ async function main() {
     tag: process.env.TIMELOCK_SALT_TAG || "",
   });
 
-  console.log(`\nOperation: ${describeOperation(op)}`);
-  console.log(`  calldata:    ${op.data}`);
-  console.log(`  predecessor: ${op.predecessor}`);
-  console.log(`  salt:        ${op.salt}`);
-  console.log(`  id:          ${op.id}`);
+  printOperation(op);
 
   const signer = await pools.getSigner();
   const context = { pools, timelock, timelockAddress, chainId, minDelay, signer };
@@ -1036,11 +1051,7 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
     args,
     tag: process.env.TIMELOCK_SALT_TAG || "",
   });
-  console.log(`\nOperation: ${describeOperation(op)}`);
-  console.log(`  calldata:    ${op.data}`);
-  console.log(`  predecessor: ${op.predecessor}`);
-  console.log(`  salt:        ${op.salt}`);
-  console.log(`  id:          ${op.id}`);
+  printOperation(op);
 
   const { state, readyAt } = await reportStatus(timelock, op.id, minDelay);
   if (state === "done") {
@@ -1059,13 +1070,21 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
   const context = { pools, timelock, timelockAddress, chainId, minDelay, signer };
 
   if (state === "unset") {
-    if (fn === "revokeRole") await describeTermForRevocation(timelock, account, minDelay);
+    if (fn === "revokeRole") await describeTermForRevocation(timelock, account);
+    if (fn === "withdrawCancellerOffer" && !(await offerToWithdraw({ pools, chainId, timelock, account }))) return;
     return scheduleOperation(context, op);
   }
 
-  // Ready. Refuse an execute the contract would revert, and say why.
+  // Ready. Refuse an execute the contract would revert or that would change nothing, and say why.
   const now = await chainNow(timelock);
   if (fn === "revokeRole") {
+    if (!(await timelock.hasRole(CANCELLER_ROLE, account))) {
+      console.log(
+        `\n${account} holds no canceller role: nothing to revoke. Nothing sent (the execute would ` +
+          "change nothing and still cost a Safe execution)."
+      );
+      return;
+    }
     const termEnd = await timelock.cancellerTermEnd(account);
     // The execute lands in a later block, at `now + 1` at the earliest.
     if (now + 1n < termEnd) {
@@ -1104,25 +1123,65 @@ async function refuseInvalidOffer(timelock, timelockAddress, account) {
   }
 }
 
-/** Before a revocation is scheduled: the appointee's term, and whether the execute can pass. */
-async function describeTermForRevocation(timelock, account, minDelay) {
+/**
+ * Before a revocation is scheduled: the appointee's term, and what it means for this operation.
+ * The contract lets a term canceller cancel an operation whose SCHEDULE time is before its term
+ * end (`scheduledAt[id] < cancellerTermEnd`), so the schedule time decides the veto, not the
+ * ready time. The schedule lands in a later block, at `now + 1` at the earliest.
+ */
+async function describeTermForRevocation(timelock, account) {
   const termEnd = await timelock.cancellerTermEnd(account);
   if (termEnd === 0n) {
     console.log(`\n${account} has no term end: the revocation can execute as soon as it is ready.`);
     return;
   }
-  const delay = resolveDelay(minDelay);
-  const readyAt = (await chainNow(timelock)) + delay;
+  const scheduleAt = (await chainNow(timelock)) + 1n;
   console.log(`\nThe term of ${account} ends at ${when(termEnd)}.`);
-  if (readyAt < termEnd) {
+  if (scheduleAt < termEnd) {
     console.log(
-      "  The operation will be ready BEFORE that time. An execute before the term end reverts " +
-        "CancellerTermActive. Scheduled during the term, the operation can also be cancelled by " +
-        "the appointee."
+      "  This revocation is scheduled DURING the term, so the appointee can cancel it at any time " +
+        "until it executes, also after its term end. An execute before the term end reverts " +
+        "CancellerTermActive. To make the revocation impossible for the appointee to block, " +
+        "schedule it after the term end."
     );
   } else {
-    console.log("  The term is over: the appointee cannot cancel this operation, and it executes once ready.");
+    console.log(
+      "  The term is over: this revocation is scheduled after the term end, so the appointee " +
+        "cannot cancel it, and it executes once ready."
+    );
   }
+}
+
+/**
+ * Before a `withdrawCancellerOffer` is scheduled: there must be an EXECUTED offer to withdraw.
+ * When there is none, the offer is often still a pending operation, and that is stopped at once
+ * with `cancel` on its id instead of a 48 h withdrawal. Returns true when scheduling makes sense.
+ */
+async function offerToWithdraw({ pools, chainId, timelock, account }) {
+  const offer = await timelock.cancellerOffer(account);
+  if (offer.expiresAt !== 0n) return true;
+  const selector = TIMELOCK_INTERFACE.getFunction("offerCancellerRole").selector;
+  const pendingOffers = [];
+  const fromBlock = await scanStartBlock(pools, chainId, timelock);
+  const scheduled = TIMELOCK_INTERFACE.getEvent("CallScheduled").topicHash;
+  for (const log of await scanTimelockLogs(timelock, [scheduled], fromBlock)) {
+    if (!log.args.data.startsWith(selector)) continue;
+    const [offered] = TIMELOCK_INTERFACE.decodeFunctionData("offerCancellerRole", log.args.data);
+    if (offered.toLowerCase() !== account.toLowerCase()) continue;
+    if (await timelock.isOperationPending(log.args.id)) pendingOffers.push(log.args.id);
+  }
+  console.log(`\n${account} has no executed offer: withdrawCancellerOffer would revert NoCancellerOffer. Nothing scheduled.`);
+  if (pendingOffers.length === 0) {
+    console.log("  No offer operation for it is pending either: there is nothing to withdraw.");
+    return false;
+  }
+  for (const id of new Set(pendingOffers)) {
+    console.log(
+      `  Its offer operation ${id} is still pending. Stop it at once with:\n` +
+        `    TIMELOCK_ACTION=cancel TIMELOCK_ID=${id}`
+    );
+  }
+  return false;
 }
 
 /**
@@ -1180,10 +1239,12 @@ async function acceptCanceller({ pools, timelock, timelockAddress, chainId }) {
 
 /** Prints one address's canceller state: the role, the term end, the activity, the offer. */
 async function reportCanceller(timelock, account, now) {
-  const holds = await timelock.hasRole(CANCELLER_ROLE, account);
-  const termEnd = await timelock.cancellerTermEnd(account);
-  const active = await timelock.isCancellerActive(account);
-  const offer = await timelock.cancellerOffer(account);
+  const [holds, termEnd, active, offer] = await Promise.all([
+    timelock.hasRole(CANCELLER_ROLE, account),
+    timelock.cancellerTermEnd(account),
+    timelock.isCancellerActive(account),
+    timelock.cancellerOffer(account),
+  ]);
   const termLine =
     termEnd === 0n
       ? holds
@@ -1204,26 +1265,61 @@ async function reportCanceller(timelock, account, now) {
 }
 
 /**
+ * The first block of a log scan on this timelock: the `block` of the registry entry whose address
+ * IS this timelock (so `TIMELOCK_ADDRESS` pointing at, say, `TimelockControllerNext` scans from
+ * that contract's own deploy block). When no entry records it, the scan starts at block 0 and a
+ * warning says so: correct, only slower.
+ */
+async function scanStartBlock(pools, chainId, timelock) {
+  const address = (await timelock.getAddress()).toLowerCase();
+  const entries = Object.values(pools.readRegistry()[String(chainId)] || {});
+  const entry = entries.find((e) => e && typeof e.address === "string" && e.address.toLowerCase() === address);
+  const fromBlock = entry ? entry.block || 0 : 0;
+  if (!entry || !entry.block) {
+    console.log(
+      `\nWARNING: no deploy block recorded for ${address} in the registry: the log scan starts at ` +
+        "block 0 (correct, only slower)."
+    );
+  }
+  return fromBlock;
+}
+
+/**
+ * Every log of the timelock whose topics match `topics`, from `fromBlock` to the latest block, in
+ * chunks of at most {@link LOG_CHUNK_BLOCKS} (the `eth_getLogs` range the Infura plan accepts).
+ * Each log is returned with its parsed `args` next to the raw fields.
+ */
+async function scanTimelockLogs(timelock, topics, fromBlock = 0) {
+  const provider = timelock.runner.provider;
+  const address = await timelock.getAddress();
+  const latest = await provider.getBlockNumber();
+  const logs = [];
+  for (let start = fromBlock; start <= latest; start += LOG_CHUNK_BLOCKS) {
+    const toBlock = Math.min(start + LOG_CHUNK_BLOCKS - 1, latest);
+    for (const log of await provider.getLogs({ address, topics, fromBlock: start, toBlock })) {
+      logs.push({ ...log, topics: log.topics, blockNumber: log.blockNumber, args: TIMELOCK_INTERFACE.parseLog(log).args });
+    }
+  }
+  return logs;
+}
+
+/**
  * Every address that ever received the canceller role or an offer, from the `RoleGranted` and
  * `CancellerOffered` logs, plus every address in `CANCELLER_ADDRESS`, with its current state.
  * The scan starts at the timelock's recorded deploy block and moves in chunks of at most 10,000
  * blocks, the `eth_getLogs` range the Infura plan accepts.
  */
 async function listCancellers({ pools, timelock, chainId }) {
-  const entry = pools.readRegistry()[String(chainId)] || {};
-  const fromBlock = entry[TIMELOCK_KIND] ? entry[TIMELOCK_KIND].block : 0;
-  const latest = await timelock.runner.provider.getBlockNumber();
+  const fromBlock = await scanStartBlock(pools, chainId, timelock);
   const accounts = new Map();
   const add = (address) => accounts.set(ethers.getAddress(address).toLowerCase(), ethers.getAddress(address));
 
-  for (let start = fromBlock; start <= latest; start += LOG_CHUNK_BLOCKS) {
-    const end = Math.min(start + LOG_CHUNK_BLOCKS - 1, latest);
-    for (const log of await timelock.queryFilter(timelock.filters.RoleGranted(CANCELLER_ROLE), start, end)) {
-      add(log.args.account);
-    }
-    for (const log of await timelock.queryFilter(timelock.filters.CancellerOffered(), start, end)) {
-      add(log.args.account);
-    }
+  // One topic0 list, so each chunk is ONE eth_getLogs call for both events.
+  const roleGranted = TIMELOCK_INTERFACE.getEvent("RoleGranted").topicHash;
+  const offered = TIMELOCK_INTERFACE.getEvent("CancellerOffered").topicHash;
+  for (const log of await scanTimelockLogs(timelock, [[roleGranted, offered]], fromBlock)) {
+    if (log.topics[0] === roleGranted && log.args.role !== CANCELLER_ROLE) continue;
+    add(log.args.account);
   }
   for (const raw of splitArgs(process.env.CANCELLER_ADDRESS)) add(raw);
 
@@ -1232,12 +1328,11 @@ async function listCancellers({ pools, timelock, chainId }) {
   for (const account of accounts.values()) await reportCanceller(timelock, account, now);
 }
 
-/** Why a canceller cannot cancel `id` now: it is not pending, or it was scheduled after the term. */
+/**
+ * Why a canceller cannot cancel the pending operation `id`: it was scheduled at or after the
+ * canceller's term end. (The not-pending case is answered for every signer before this runs.)
+ */
 async function explainCancelRefusal(timelock, account, id) {
-  if (!(await timelock.isOperationPending(id))) {
-    console.log(`\nOperation ${id} is not pending (never scheduled, cancelled or executed): nothing to cancel.`);
-    return;
-  }
   const termEnd = await timelock.cancellerTermEnd(account);
   const scheduled = await timelock.scheduledAt(id);
   console.log(
@@ -1432,14 +1527,16 @@ async function reportStatus(timelock, id, minDelay) {
  * Every operation the timelock has ever been told about, with its current state.
  *
  * OZ stores one timestamp per id and enumerates nothing, so the list has to come from the
- * logs: `CallScheduled` from the timelock's own deploy block forward, then one `getTimestamp`
- * per id. The deploy block comes out of the registry; without it the scan starts at 0, which
- * a public endpoint may refuse for a wide range.
+ * logs: `CallScheduled` from the timelock's own deploy block forward (see {@link scanStartBlock}),
+ * in chunks of at most 10,000 blocks, then one `getTimestamp` per id.
  */
 async function listPending(hre, pools, timelock, chainId) {
-  const entry = pools.readRegistry()[String(chainId)] || {};
-  const fromBlock = entry[TIMELOCK_KIND] ? entry[TIMELOCK_KIND].block : 0;
-  const logs = await timelock.queryFilter("CallScheduled", fromBlock, "latest");
+  const fromBlock = await scanStartBlock(pools, chainId, timelock);
+  const logs = await scanTimelockLogs(
+    timelock,
+    [TIMELOCK_INTERFACE.getEvent("CallScheduled").topicHash],
+    fromBlock
+  );
 
   if (logs.length === 0) {
     console.log(`\nNo CallScheduled logs since block ${fromBlock}.`);

@@ -255,6 +255,10 @@ describe("lp-timelock.js — the canceller actions", function () {
 
       const out = await run(deployer, { TIMELOCK_ACTION: "cancellers" });
 
+      // This timelock is in no registry: the scan starts at block 0, says so, and still finds all three.
+      expect(out).to.include(`WARNING: no deploy block recorded for ${timelockAddr.toLowerCase()}`);
+      expect(out).to.include("3 canceller address(es) since block 0");
+
       const block = (address) => out.split(`Canceller ${address}`)[1].split("Canceller ")[0];
       expect(block(multisig.address)).to.include("holds CANCELLER_ROLE: yes");
       expect(block(multisig.address)).to.include("term end:             0 (permanent, no term)");
@@ -301,6 +305,17 @@ describe("lp-timelock.js — the canceller actions", function () {
       const gone = await run(multisig, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: after });
       expect(gone).to.include("is not pending");
     });
+
+    it("prints no Safe transaction for an operation that is no longer pending, whoever the signer is", async function () {
+      const id = await scheduleNoop("executed");
+      await increase(MIN_DELAY);
+      await (await timelock.connect(multisig).execute(other.address, 0, "0x", ethers.ZeroHash, ethers.id("executed"))).wait();
+
+      const out = await run(other, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: id });
+
+      expect(out).to.include(`Operation ${id} is not pending (never scheduled, cancelled or executed): nothing to cancel.`);
+      expect(out).to.not.include("Safe transaction");
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -326,6 +341,64 @@ describe("lp-timelock.js — the canceller actions", function () {
       expect(await timelock.isOperationDone(op.id)).to.equal(true);
       expect(await timelock.hasRole(lpTimelock.CANCELLER_ROLE, ape.address)).to.equal(false);
       expect(await timelock.cancellerTermEnd(ape.address)).to.equal(0n);
+    });
+
+    it("says the appointee CAN cancel a revocation scheduled just before its term end and ready after it", async function () {
+      const termEnd = await appoint(ape, 1);
+      // Scheduled 30 s before the term end, ready 60 s later, so ready AFTER the term end. The
+      // contract compares the schedule time with the term end, so the appointee keeps its veto.
+      await increase(termEnd - (await now()) - 30n);
+      const revokeEnv = { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: ape.address };
+      const op = selfCall("revokeRole", [lpTimelock.CANCELLER_ROLE, ape.address]);
+
+      const scheduled = await run(multisig, revokeEnv);
+      expect(scheduled).to.include("scheduled DURING the term, so the appointee can cancel it");
+      expect(await timelock.getTimestamp(op.id)).to.be.greaterThan(termEnd);
+      expect(await timelock.scheduledAt(op.id)).to.be.lessThan(termEnd);
+
+      await increase(MIN_DELAY);
+      await run(ape, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: op.id });
+      expect(await timelock.isOperation(op.id), "the appointee cancelled it after its term end").to.equal(false);
+    });
+
+    it("says the appointee cannot cancel a revocation scheduled after its term end", async function () {
+      await appoint(ape, 1);
+      await increase(DAY);
+      const out = await run(multisig, { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: ape.address });
+      expect(out).to.include("scheduled after the term end, so the appointee cannot cancel it");
+    });
+
+    it("sends no revocation for an address that no longer holds the role", async function () {
+      await appoint(ape, 1);
+      const revokeEnv = { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: ape.address };
+      const op = selfCall("revokeRole", [lpTimelock.CANCELLER_ROLE, ape.address]);
+      await run(multisig, revokeEnv);
+      await (await timelock.connect(ape).renounceRole(lpTimelock.CANCELLER_ROLE, ape.address)).wait();
+      await increase(MIN_DELAY);
+
+      const nonce = await nonceOf(multisig.address);
+      const out = await run(multisig, revokeEnv);
+      expect(out).to.include(`${ape.address} holds no canceller role: nothing to revoke`);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+      expect(await timelock.isOperationReady(op.id), "left ready, not executed").to.equal(true);
+    });
+
+    it("points a withdrawal of a still-pending offer at cancel, and schedules nothing", async function () {
+      const offerOp = selfCall("offerCancellerRole", [ape.address, "180"]);
+      const withdrawEnv = { TIMELOCK_ACTION: "withdraw-offer", CANCELLER_ADDRESS: ape.address };
+      const withdrawOp = selfCall("withdrawCancellerOffer", [ape.address]);
+
+      const none = await run(multisig, withdrawEnv);
+      expect(none).to.include("there is nothing to withdraw");
+
+      await run(multisig, offerEnv(ape, 180));
+      const nonce = await nonceOf(multisig.address);
+      const out = await run(multisig, withdrawEnv);
+      expect(out).to.include(`${ape.address} has no executed offer`);
+      expect(out).to.include(`Its offer operation ${offerOp.id} is still pending`);
+      expect(out).to.include(`TIMELOCK_ACTION=cancel TIMELOCK_ID=${offerOp.id}`);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+      expect(await timelock.isOperation(withdrawOp.id)).to.equal(false);
     });
 
     it("withdraws an executed offer through the same schedule and execute flow", async function () {

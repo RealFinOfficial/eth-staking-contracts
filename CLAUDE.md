@@ -39,8 +39,12 @@ liquidity and are rewarded in `$ASSET` and the Overture token (`$OVTR`, contract
 owner and no token with `StakingPool` / `WeightedStakingPool`.
 
 ALL FIVE LP contracts are UUPS implementations behind `deploy/LPProxy.sol` (OZ `ERC1967Proxy`,
-nothing added), and every proxy is owned by the `LPTimelock` (`deploy/LPTimelock.sol`, a plain
-OZ `TimelockController`, 48 h on mainnet) from its own deployment transaction onwards. Ownership
+nothing added), and every proxy is owned by the `LPTimelock` (`deploy/LPTimelock.sol`, OZ's
+`TimelockController` plus a term-limited canceller role, 48 h on mainnet) from its own deployment
+transaction onwards. The canceller role: an offer by a timelock self-call, an acceptance by the
+appointee inside 7 days, a term of 1 to 180 days, cancel only of operations scheduled before the
+term end, `grantRole(CANCELLER_ROLE, …)` blocked, and `_revokeRole` refusing a revocation during
+the term (see the Q1 section of `docs/lp-staking-audit-notes.md`). Ownership
 is two-step on all five and `renounceOwnership` reverts. The timelock is replaceable by a
 planned switch (`scripts/lp-switch-timelock.js`), because each proxy's owner is storage.
 
@@ -280,7 +284,9 @@ contracts/           — Solidity source files
                                 Ownable2Step, replaceable (lane 2; stack #6 and the
                                 mainnet launch deploy)
     deploy/LPProxy.sol        — OZ ERC1967Proxy, nothing added; the repo's own artifact
-    deploy/LPTimelock.sol     — OZ TimelockController, nothing added; owner of the five proxies
+    deploy/LPTimelock.sol     — OZ TimelockController plus the term-limited canceller role (offer,
+                                acceptance, term-bound cancel, blocked grantRole, term-guarded
+                                _revokeRole, audit notes Q1). Owner of the five proxies
     interfaces/               — Vendored Uniswap V3 interfaces (position manager, router, pool),
                                 IRewardsDistributor, ILPEpochRegistry, IBonusEscrowHooks,
                                 IMintableRewardToken (the mint shape of every reward token we deploy)
