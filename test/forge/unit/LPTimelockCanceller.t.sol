@@ -50,6 +50,7 @@ contract LPTimelockCancellerTest is Test {
     event CancellerOffered(address indexed account, uint32 termDays, uint64 expiresAt);
     event CancellerOfferWithdrawn(address indexed account);
     event CancellerAccepted(address indexed account, uint64 termEnd);
+    event OperationCancelled(bytes32 indexed id, address indexed canceller);
     event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
@@ -468,6 +469,35 @@ contract LPTimelockCancellerTest is Test {
         vm.prank(ape);
         vm.expectRevert(_unauthorized(ape, CANCELLER_ROLE));
         timelock.cancel(id);
+    }
+
+    function test_Cancel_ThePermanentCancellerIsNamedInOperationCancelled() public {
+        bytes32 id = _scheduleNoop(MIN_DELAY);
+        vm.expectEmit(address(timelock));
+        emit OperationCancelled(id, real);
+        vm.prank(real);
+        timelock.cancel(id);
+    }
+
+    function test_Cancel_ATermCancellerIsNamedInOperationCancelled() public {
+        _appoint(ape, TERM);
+        bytes32 id = _scheduleNoop(MIN_DELAY);
+        vm.expectEmit(address(timelock));
+        emit OperationCancelled(id, ape);
+        vm.prank(ape);
+        timelock.cancel(id);
+    }
+
+    function test_Cancel_ARefusedCancelEmitsNothing() public {
+        uint64 termEnd = _appoint(ape, TERM);
+        vm.warp(termEnd);
+        bytes32 id = _scheduleNoop(MIN_DELAY);
+
+        vm.recordLogs();
+        vm.prank(ape);
+        vm.expectRevert(abi.encodeWithSelector(LPTimelock.CancellerTermEnded.selector, ape, termEnd, id));
+        timelock.cancel(id);
+        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel emits no event");
     }
 
     function test_Cancel_AStrangerReverts() public {

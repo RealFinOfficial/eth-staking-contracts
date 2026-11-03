@@ -735,6 +735,19 @@ Exploit table:
 | offered address compromised before it accepts | accept inside the 7 day window | accept after the window | cancel the pending offer operation (instant) or withdraw it (48 h) |
 | REAL's Safe hacked (listed for completeness) | schedule malicious operations (ApeBonds vetoes them during the term). Propose offers to its own addresses (ApeBonds can veto these too). Revoke REAL's own permanent canceller | remove ApeBonds during the term. Stop ApeBonds from cancelling anything scheduled during the term | as today: the timelock is lost, new proxies and a migration. Users exit |
 
+Events `LPTimelock` adds to OpenZeppelin's:
+
+| Event | Emitted by | What it carries |
+|---|---|---|
+| `CancellerOffered(account, termDays, expiresAt)` | the execution of `offerCancellerRole` | the offered term and the end of the 7 day window |
+| `CancellerOfferWithdrawn(account)` | the execution of `withdrawCancellerOffer` | the address whose offer was deleted |
+| `CancellerAccepted(account, termEnd)` | `acceptCancellerRole` | the new term end (next to OpenZeppelin's `RoleGranted` on a first acceptance) |
+| `OperationCancelled(id, canceller)` | every `cancel` that went through, after OpenZeppelin's `Cancelled(id)` | who cancelled: REAL's Safe or a term canceller. For a Safe it is the Safe, not the key that submitted the Safe transaction |
+
+OpenZeppelin's `Cancelled(id)` does not name the caller, and the indexer engine gives a handler only
+the transaction hash, so the indexer reads the canceller from `OperationCancelled`. That event is
+the only exact source of who cancelled an operation.
+
 The veto covers the owner tier only. The operator tier (pauses, `setSigner`, `recoverExcess`,
 `mintRewardToken`, `rescuePosition`, `setTwapParams`, the epoch functions, `sweep`) is sent
 directly by the operator multisig and never passes through the timelock.

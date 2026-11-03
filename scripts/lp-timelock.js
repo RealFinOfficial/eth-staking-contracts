@@ -427,6 +427,7 @@ const TIMELOCK_INTERFACE = new ethers.Interface([
   "event CancellerOffered(address indexed account, uint32 termDays, uint64 expiresAt)",
   "event CancellerOfferWithdrawn(address indexed account)",
   "event CancellerAccepted(address indexed account, uint64 termEnd)",
+  "event OperationCancelled(bytes32 indexed id, address indexed canceller)",
   "error AccessControlUnauthorizedAccount(address account, bytes32 neededRole)",
   "error BootstrapAdminNotAllowed(address admin)",
   "error InvalidCancellerAccount(address account)",
@@ -867,9 +868,19 @@ async function main() {
       return;
     }
     pools.requireConfirmation(chainId, `cancel timelock operation ${id}`);
-    await pools.send(`Cancelling ${id}`, signer, (o) =>
+    const receipt = await pools.send(`Cancelling ${id}`, signer, (o) =>
       timelock.connect(signer).cancel(id, o)
     );
+    // `OperationCancelled(id, canceller)` names who cancelled, which OZ's `Cancelled(id)` does not.
+    for (const log of receipt.logs) {
+      let parsed = null;
+      try {
+        parsed = TIMELOCK_INTERFACE.parseLog(log);
+      } catch {
+        continue;
+      }
+      if (parsed && parsed.name === "OperationCancelled") console.log(`  cancelled by ${parsed.args.canceller}`);
+    }
     return;
   }
 

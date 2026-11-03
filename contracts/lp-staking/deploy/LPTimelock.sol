@@ -100,6 +100,13 @@ contract LPTimelock is TimelockController {
     /// @notice `account` accepted its offer and holds the canceller role until `termEnd`.
     event CancellerAccepted(address indexed account, uint64 termEnd);
 
+    /// @notice Operation `id` was cancelled by `canceller`, emitted next to OpenZeppelin's
+    ///         `Cancelled(id)`, which does not name the caller. It tells whether REAL's Safe or a
+    ///         term canceller (ApeBonds' Safe) cancelled the operation, and the indexer reads the
+    ///         canceller from it. `canceller` is the address that called `cancel`: for a cancel
+    ///         executed by a Safe it is the Safe, not the key that submitted the Safe transaction.
+    event OperationCancelled(bytes32 indexed id, address indexed canceller);
+
     /// @dev The constructor was given a non-zero bootstrap admin. The timelock must be the only
     ///      holder of `DEFAULT_ADMIN_ROLE`.
     error BootstrapAdminNotAllowed(address admin);
@@ -197,12 +204,14 @@ contract LPTimelock is TimelockController {
     ///         (term end 0) can cancel any pending operation.
     /// @dev Reverts `CancellerTermEnded` when the caller has a term and `scheduledAt[id]` is at or
     ///      after it. A caller without the role has no term end and reaches OpenZeppelin's role
-    ///      check, which reverts `AccessControlUnauthorizedAccount`.
+    ///      check, which reverts `AccessControlUnauthorizedAccount`. Only a cancel that went
+    ///      through emits `OperationCancelled(id, caller)`, after OpenZeppelin's `Cancelled(id)`.
     function cancel(bytes32 id) public override {
         address account = _msgSender();
         uint64 end = cancellerTermEnd[account];
         if (end != 0 && scheduledAt[id] >= end) revert CancellerTermEnded(account, end, id);
         super.cancel(id);
+        emit OperationCancelled(id, account);
     }
 
     /// @notice OpenZeppelin's `schedule`, which also records the block time in `scheduledAt`.
@@ -233,7 +242,11 @@ contract LPTimelock is TimelockController {
 
     /// @notice OpenZeppelin's `grantRole`, except for `CANCELLER_ROLE`, which reverts
     ///         `CancellerGrantOnlyByAcceptance` for every caller. Every other role keeps the
-    ///         OpenZeppelin rule (the role's admin, here the timelock).
+    ///         OpenZeppelin rule (the role's admin, here the timelock). Because the revert covers
+    ///         the timelock itself too, a Safe that replaces REAL's Safe after a rotation can hold
+    ///         the canceller role only as a term canceller (offer, acceptance, renewal every 180
+    ///         days at most), and a new permanent canceller needs a timelock switch, whose
+    ///         constructor grants the role with no term to every proposer.
     function grantRole(bytes32 role, address account) public override {
         if (role == CANCELLER_ROLE) revert CancellerGrantOnlyByAcceptance();
         super.grantRole(role, account);

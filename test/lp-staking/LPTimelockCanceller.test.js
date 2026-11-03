@@ -287,8 +287,11 @@ describe("lp-timelock.js — the canceller actions", function () {
       const termEnd = await appoint(ape, 1);
 
       const during = await scheduleNoop("during");
-      await run(ape, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: during });
+      const byApe = await run(ape, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: during });
       expect(await timelock.isOperation(during), "cancelled by the term canceller").to.equal(false);
+      expect(byApe).to.include(`cancelled by ${ape.address}`);
+      const [apeEvent] = await timelock.queryFilter(timelock.filters.OperationCancelled(during));
+      expect(apeEvent.args.canceller, "the receipt names the term canceller").to.equal(ape.address);
 
       await increase(DAY);
       const after = await scheduleNoop("after");
@@ -305,8 +308,11 @@ describe("lp-timelock.js — the canceller actions", function () {
       expect(printed).to.include("Safe transaction for the canceller (LPTimelock.cancel)");
       expect(printed).to.include(`data:  ${lpTimelock.encodeCancel(after)}`);
 
-      await run(multisig, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: after });
+      const byReal = await run(multisig, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: after });
       expect(await timelock.isOperation(after), "REAL cancels anything pending").to.equal(false);
+      expect(byReal).to.include(`cancelled by ${multisig.address}`);
+      const [realEvent] = await timelock.queryFilter(timelock.filters.OperationCancelled(after));
+      expect(realEvent.args.canceller, "the receipt names REAL's Safe").to.equal(multisig.address);
 
       const gone = await run(multisig, { TIMELOCK_ACTION: "cancel", TIMELOCK_ID: after });
       expect(gone).to.include("is not pending");
