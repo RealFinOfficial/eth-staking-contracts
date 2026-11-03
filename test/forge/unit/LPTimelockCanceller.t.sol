@@ -52,9 +52,6 @@ contract LPTimelockCancellerTest is Test {
     event CancellerOfferWithdrawn(address indexed account);
     event CancellerAccepted(address indexed account, uint64 termEnd);
     event OperationCancelled(bytes32 indexed id, address indexed canceller);
-    event Cancelled(bytes32 indexed id); // OpenZeppelin's, re-declared to pin the order
-    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
-    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
 
     function setUp() public {
         vm.warp(T0);
@@ -297,7 +294,7 @@ contract LPTimelockCancellerTest is Test {
         uint64 expectedEnd = uint64(block.timestamp + uint256(TERM) * 1 days);
 
         vm.expectEmit(address(timelock));
-        emit RoleGranted(CANCELLER_ROLE, ape, ape);
+        emit IAccessControl.RoleGranted(CANCELLER_ROLE, ape, ape);
         vm.expectEmit(address(timelock));
         emit CancellerAccepted(ape, expectedEnd);
         vm.prank(ape);
@@ -505,7 +502,7 @@ contract LPTimelockCancellerTest is Test {
     function test_Cancel_EmitsCancelledThenOperationCancelled() public {
         bytes32 id = _scheduleNoop(MIN_DELAY);
         vm.expectEmit(address(timelock));
-        emit Cancelled(id);
+        emit TimelockController.Cancelled(id);
         vm.expectEmit(address(timelock));
         emit OperationCancelled(id, real);
         vm.prank(real);
@@ -522,16 +519,27 @@ contract LPTimelockCancellerTest is Test {
     }
 
     function test_Cancel_ANonPendingIdRevertsAndEmitsNothing() public {
+        _appoint(ape, TERM);
         bytes32 id = keccak256("never");
-        // OpenZeppelin's expected-states bitmap for `cancel`: Waiting (1 << 1) | Ready (1 << 2).
-        bytes32 expectedStates = bytes32(uint256((1 << 1) | (1 << 2)));
+        // OpenZeppelin's expected-states bitmap for `cancel`, built from its own enum.
+        bytes32 expectedStates = bytes32(1 << uint8(TimelockController.OperationState.Waiting))
+            | bytes32(1 << uint8(TimelockController.OperationState.Ready));
+        bytes memory refusal =
+            abi.encodeWithSelector(TimelockController.TimelockUnexpectedOperationState.selector, id, expectedStates);
+
         vm.recordLogs();
         vm.prank(real);
-        vm.expectRevert(
-            abi.encodeWithSelector(TimelockController.TimelockUnexpectedOperationState.selector, id, expectedStates)
-        );
+        vm.expectRevert(refusal);
         timelock.cancel(id);
-        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel emits no event");
+        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel by REAL emits no event");
+
+        // A term canceller reaches the same OpenZeppelin revert: for a never-scheduled id
+        // `scheduledAt[id]` is 0, so the term guard `scheduledAt[id] >= end` is false.
+        vm.recordLogs();
+        vm.prank(ape);
+        vm.expectRevert(refusal);
+        timelock.cancel(id);
+        assertEq(vm.getRecordedLogs().length, 0, "a refused cancel by the term canceller emits no event");
     }
 
     // ──────────────────────── Revoke ───────────────────────────
@@ -556,7 +564,7 @@ contract LPTimelockCancellerTest is Test {
 
         vm.warp(block.timestamp + MIN_DELAY);
         vm.expectEmit(address(timelock));
-        emit RoleRevoked(CANCELLER_ROLE, ape, address(timelock));
+        emit IAccessControl.RoleRevoked(CANCELLER_ROLE, ape, address(timelock));
         _executeSelf(_revokeData(ape), "revoke");
 
         assertFalse(timelock.hasRole(CANCELLER_ROLE, ape), "revoked");
@@ -629,7 +637,7 @@ contract LPTimelockCancellerTest is Test {
         assertTrue(timelock.isCancellerActive(ape), "inside the term");
 
         vm.expectEmit(address(timelock));
-        emit RoleRevoked(CANCELLER_ROLE, ape, ape);
+        emit IAccessControl.RoleRevoked(CANCELLER_ROLE, ape, ape);
         vm.prank(ape);
         timelock.renounceRole(CANCELLER_ROLE, ape);
 
@@ -638,6 +646,13 @@ contract LPTimelockCancellerTest is Test {
         (uint32 termDays, uint64 expiresAt) = _offerOf(ape);
         assertEq(termDays, 0, "offer deleted");
         assertEq(expiresAt, 0, "offer deleted");
+    }
+
+    /// @dev Counts every log the TIMELOCK emitted among the recorded ones.
+    function _timelockLogs(Vm.Log[] memory logs) internal view returns (uint256 count) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(timelock)) count++;
+        }
     }
 
     /// @dev Counts the `CancellerOfferWithdrawn` logs the TIMELOCK emitted among the recorded ones
@@ -657,10 +672,12 @@ contract LPTimelockCancellerTest is Test {
         _offer(ape, TERM);
         assertFalse(timelock.hasRole(CANCELLER_ROLE, ape));
 
+        vm.recordLogs();
         vm.expectEmit(address(timelock));
         emit CancellerOfferWithdrawn(ape);
         vm.prank(ape);
         timelock.renounceRole(CANCELLER_ROLE, ape);
+        assertEq(_timelockLogs(vm.getRecordedLogs()), 1, "CancellerOfferWithdrawn alone, no RoleRevoked");
 
         (, uint64 expiresAt) = _offerOf(ape);
         assertEq(expiresAt, 0, "the offer is gone");
@@ -669,20 +686,38 @@ contract LPTimelockCancellerTest is Test {
         timelock.acceptCancellerRole(TERM);
     }
 
-    function test_Revoke_AHolderWithALiveRenewalOfferEmitsTheWithdrawalOnce() public {
+    function test_Revoke_AHolderWithAStoredRenewalOfferEmitsTheWithdrawalOnceThenRoleRevoked() public {
         uint64 termEnd = _appoint(ape, TERM);
         vm.warp(termEnd);
-        _offer(ape, TERM); // a renewal offer, live, not accepted
+        _offer(ape, TERM); // a renewal offer, stored, not accepted
         _readySelf(_revokeData(ape), "revoke");
 
+        // The order is a contract fact the indexer relies on: the withdrawal, then the revocation.
         vm.recordLogs();
         vm.expectEmit(address(timelock));
         emit CancellerOfferWithdrawn(ape);
+        vm.expectEmit(address(timelock));
+        emit IAccessControl.RoleRevoked(CANCELLER_ROLE, ape, address(timelock));
         _executeSelf(_revokeData(ape), "revoke");
         assertEq(_withdrawnLogs(vm.getRecordedLogs()), 1, "exactly one CancellerOfferWithdrawn");
     }
 
-    function test_RevokeAndRenounce_WithoutALiveOfferEmitNoWithdrawal() public {
+    /// @dev The condition is `expiresAt != 0`: an offer whose 7 day window has passed is still
+    ///      stored, and deleting it still emits the event.
+    function test_Renounce_AfterTheWindowPassedStillWithdrawsTheStoredOfferWithAnEvent() public {
+        _offer(ape, TERM);
+        (, uint64 expiresAt) = _offerOf(ape);
+        vm.warp(uint256(expiresAt) + 1 days);
+
+        vm.expectEmit(address(timelock));
+        emit CancellerOfferWithdrawn(ape);
+        vm.prank(ape);
+        timelock.renounceRole(CANCELLER_ROLE, ape);
+        (, uint64 left) = _offerOf(ape);
+        assertEq(left, 0, "the expired offer is deleted too");
+    }
+
+    function test_RevokeAndRenounce_WithoutAStoredOfferEmitNoWithdrawal() public {
         uint64 termEnd = _appoint(ape, TERM);
         vm.warp(termEnd);
         vm.recordLogs();

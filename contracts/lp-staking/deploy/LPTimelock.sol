@@ -9,9 +9,10 @@ import "@openzeppelin/contracts/governance/TimelockController.sol";
  *         `RewardsDistributor`, `LPEpochRegistry`, `TokenOverture`, `LPZapper`, and the
  *         `BonusEscrow` proxy and the `ApeBondPositionAdapter` of the ApeBond route). It is
  *         OpenZeppelin's `TimelockController` with ONE addition: a canceller role with a term
- *         written on chain, so ApeBonds' Safe can veto owner-tier operations for a bounded time,
- *         made observable by two events (`cancel` emits `OperationCancelled(id, canceller)`, and
- *         `_revokeRole` emits `CancellerOfferWithdrawn` when it deletes a live offer).
+ *         written on chain, so ApeBonds' Safe can veto owner-tier operations for a bounded time.
+ *         Every step of it emits an event: `CancellerOffered`, `CancellerOfferWithdrawn` (also
+ *         when a revoke or renounce deletes a stored offer, unaccepted, possibly expired),
+ *         `CancellerAccepted` and `OperationCancelled(id, canceller)` on every cancel.
  *         Everything else (the proposer and executor roles, `schedule`, `execute`, `updateDelay`,
  *         the role admins) is untouched OpenZeppelin code.
  *
@@ -97,7 +98,8 @@ contract LPTimelock is TimelockController {
     event CancellerOffered(address indexed account, uint32 termDays, uint64 expiresAt);
 
     /// @notice The unaccepted offer of `account` was deleted: by `withdrawCancellerOffer`, or by a
-    ///         revoke or renounce of `CANCELLER_ROLE` that removed a live offer.
+    ///         revoke or renounce of `CANCELLER_ROLE` that removed a stored offer (unaccepted,
+    ///         possibly expired).
     event CancellerOfferWithdrawn(address indexed account);
 
     /// @notice `account` accepted its offer and holds the canceller role until `termEnd`.
@@ -261,9 +263,11 @@ contract LPTimelock is TimelockController {
     ///      never from itself, so `renounceRole` always passes. Both clear the term end and delete
     ///      any unaccepted offer of the address. `account != _msgSender()` is safe as the test:
     ///      `revokeRole` needs `DEFAULT_ADMIN_ROLE`, so its sender is the timelock, offers to the
-    ///      timelock itself revert, and `renounceRole` forces `account == sender`. When a live offer
-    ///      is deleted here, `CancellerOfferWithdrawn` is emitted, so the deletion is observable
-    ///      even where OpenZeppelin emits nothing (a renounce by an offeree that holds no role).
+    ///      timelock itself revert, and `renounceRole` forces `account == sender`. When a stored
+    ///      offer (unaccepted, possibly expired) is deleted here, `CancellerOfferWithdrawn` is
+    ///      emitted, BEFORE OpenZeppelin's `RoleRevoked` when a role was held, so the deletion is
+    ///      observable even where OpenZeppelin emits nothing (a renounce by an offeree that holds
+    ///      no role).
     function _revokeRole(bytes32 role, address account) internal override returns (bool) {
         if (role == CANCELLER_ROLE) {
             uint64 end = cancellerTermEnd[account];
