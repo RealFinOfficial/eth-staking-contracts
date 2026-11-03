@@ -613,6 +613,61 @@ contract LPTimelockCancellerTest is Test {
         assertEq(expiresAt, 0, "offer deleted");
     }
 
+    /// @dev Counts the `CancellerOfferWithdrawn` logs the TIMELOCK emitted among the recorded ones
+    ///      (the test's own `emit` for `vm.expectEmit` is recorded too, from this contract).
+    function _withdrawnLogs(Vm.Log[] memory logs) internal view returns (uint256 count) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (
+                logs[i].emitter == address(timelock) && logs[i].topics.length > 0
+                    && logs[i].topics[0] == CancellerOfferWithdrawn.selector
+            ) count++;
+        }
+    }
+
+    /// @dev An offeree that holds no role yet renounces: OpenZeppelin emits nothing (no role was
+    ///      held), so `CancellerOfferWithdrawn` is the only trace that its offer is gone.
+    function test_Renounce_AnOffereeWithoutTheRoleWithdrawsItsOfferWithAnEvent() public {
+        _offer(ape, TERM);
+        assertFalse(timelock.hasRole(CANCELLER_ROLE, ape));
+
+        vm.expectEmit(address(timelock));
+        emit CancellerOfferWithdrawn(ape);
+        vm.prank(ape);
+        timelock.renounceRole(CANCELLER_ROLE, ape);
+
+        (, uint64 expiresAt) = _offerOf(ape);
+        assertEq(expiresAt, 0, "the offer is gone");
+        vm.prank(ape);
+        vm.expectRevert(abi.encodeWithSelector(LPTimelock.NoCancellerOffer.selector, ape));
+        timelock.acceptCancellerRole(TERM);
+    }
+
+    function test_Revoke_AHolderWithALiveRenewalOfferEmitsTheWithdrawalOnce() public {
+        uint64 termEnd = _appoint(ape, TERM);
+        vm.warp(termEnd);
+        _offer(ape, TERM); // a renewal offer, live, not accepted
+        _readySelf(_revokeData(ape), "revoke");
+
+        vm.recordLogs();
+        vm.expectEmit(address(timelock));
+        emit CancellerOfferWithdrawn(ape);
+        _executeSelf(_revokeData(ape), "revoke");
+        assertEq(_withdrawnLogs(vm.getRecordedLogs()), 1, "exactly one CancellerOfferWithdrawn");
+    }
+
+    function test_RevokeAndRenounce_WithoutALiveOfferEmitNoWithdrawal() public {
+        uint64 termEnd = _appoint(ape, TERM);
+        vm.warp(termEnd);
+        vm.recordLogs();
+        _runSelf(_revokeData(ape), "revoke");
+        assertEq(_withdrawnLogs(vm.getRecordedLogs()), 0, "a revoke without an offer");
+
+        vm.recordLogs();
+        vm.prank(real);
+        timelock.renounceRole(CANCELLER_ROLE, real);
+        assertEq(_withdrawnLogs(vm.getRecordedLogs()), 0, "a renounce without an offer");
+    }
+
     // ──────────────────────── grantRole ────────────────────────
 
     function test_GrantRole_TheCancellerRoleThroughAnOperationReverts() public {

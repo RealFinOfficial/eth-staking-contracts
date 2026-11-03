@@ -94,7 +94,8 @@ contract LPTimelock is TimelockController {
     /// @notice An offer was stored for `account` (the execution of `offerCancellerRole`).
     event CancellerOffered(address indexed account, uint32 termDays, uint64 expiresAt);
 
-    /// @notice The unaccepted offer of `account` was withdrawn by the timelock.
+    /// @notice The unaccepted offer of `account` was deleted: by `withdrawCancellerOffer`, or by a
+    ///         revoke or renounce of `CANCELLER_ROLE` that removed a live offer.
     event CancellerOfferWithdrawn(address indexed account);
 
     /// @notice `account` accepted its offer and holds the canceller role until `termEnd`.
@@ -258,12 +259,15 @@ contract LPTimelock is TimelockController {
     ///      never from itself, so `renounceRole` always passes. Both clear the term end and delete
     ///      any unaccepted offer of the address. `account != _msgSender()` is safe as the test:
     ///      `revokeRole` needs `DEFAULT_ADMIN_ROLE`, so its sender is the timelock, offers to the
-    ///      timelock itself revert, and `renounceRole` forces `account == sender`.
+    ///      timelock itself revert, and `renounceRole` forces `account == sender`. When a live offer
+    ///      is deleted here, `CancellerOfferWithdrawn` is emitted, so the deletion is observable
+    ///      even where OpenZeppelin emits nothing (a renounce by an offeree that holds no role).
     function _revokeRole(bytes32 role, address account) internal override returns (bool) {
         if (role == CANCELLER_ROLE) {
             uint64 end = cancellerTermEnd[account];
             if (block.timestamp < end && account != _msgSender()) revert CancellerTermActive(account, end);
             delete cancellerTermEnd[account];
+            if (cancellerOffer[account].expiresAt != 0) emit CancellerOfferWithdrawn(account);
             delete cancellerOffer[account];
         }
         return super._revokeRole(role, account);

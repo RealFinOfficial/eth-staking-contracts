@@ -710,7 +710,7 @@ renewal is a new offer and a new acceptance, and the acceptance RESETS the term 
 acceptance time plus the new term. During the term a revocation reverts at execution
 (`CancellerTermActive`). The holder may `renounceRole` at any time. A revocation and a
 renouncement both clear the term end and delete any unaccepted offer of that address, so no
-stale offer can be accepted later.
+stale offer can be accepted later, and the deletion of a live offer emits `CancellerOfferWithdrawn`.
 
 Who can do what:
 
@@ -740,7 +740,7 @@ Events `LPTimelock` adds to OpenZeppelin's:
 | Event | Emitted by | What it carries |
 |---|---|---|
 | `CancellerOffered(account, termDays, expiresAt)` | the execution of `offerCancellerRole` | the offered term and the end of the 7 day window |
-| `CancellerOfferWithdrawn(account)` | the execution of `withdrawCancellerOffer` | the address whose offer was deleted |
+| `CancellerOfferWithdrawn(account)` | the execution of `withdrawCancellerOffer`, and every revoke or renounce of `CANCELLER_ROLE` that deletes a live offer | the address whose offer was deleted. So every change of an offer is visible on chain, also a renounce by an offeree that holds no role, where OpenZeppelin emits nothing |
 | `CancellerAccepted(account, termEnd)` | `acceptCancellerRole` | the new term end (next to OpenZeppelin's `RoleGranted` on a first acceptance) |
 | `OperationCancelled(id, canceller)` | every `cancel` that went through, after OpenZeppelin's `Cancelled(id)` | who cancelled: REAL's Safe or a term canceller. For a Safe it is the Safe, not the key that submitted the Safe transaction |
 

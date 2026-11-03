@@ -49,6 +49,12 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-03, third time (`LPTimelock._revokeRole` emits
+//    `CancellerOfferWithdrawn` when it deletes a live offer) ── LPTimelock lines 50 -> 51,
+//    branches 14 -> 15 (the emit and its `expiresAt != 0` condition). Covered by
+//    `test_Renounce_AnOffereeWithoutTheRoleWithdrawsItsOfferWithAnEvent`,
+//    `test_Revoke_AHolderWithALiveRenewalOfferEmitsTheWithdrawalOnce` and
+//    `test_RevokeAndRenounce_WithoutALiveOfferEmitNoWithdrawal`. No other file moved.
 // ── Pinned floors, re-measured 2026-11-03, second time (`LPTimelock.cancel` emits
 //    `OperationCancelled(id, canceller)`) ── LPTimelock lines 49 -> 50, branches 14 -> 14 (the emit
 //    is one line and no branch). Covered by the three `test_Cancel_*OperationCancelled` /
@@ -95,10 +101,10 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | libraries/TickMath.sol      | 100.00% (25/25)   | 100.00% (21/21) |
 // | libraries/LiquidityAmounts.sol | 100.00% (15/15) | 100.00% (7/7)  |
 // | libraries/PositionValue.sol | 100.00% (4/4)     | (0/0 — the ternary is not instrumented) |
-// | deploy/LPTimelock.sol       | 100.00% (50/50)   | 100.00% (14/14) |
+// | deploy/LPTimelock.sol       | 100.00% (51/51)   | 100.00% (15/15) |
 //
 // Branch coverage is 100% on all thirteen files, so every branch floor is the ceiling: one newly
-// uncovered branch fails the gate. Measured on 849 Foundry tests in 36 suites (the 2026-11-03 run
+// uncovered branch fails the gate. Measured on 852 Foundry tests in 36 suites (the 2026-11-03 run
 // that pinned the LPTimelock floors).
 //
 // The 2026-10-07 round moved one denominator: RewardsDistributor (lines 122 -> 138, branches
@@ -222,8 +228,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 0, minHit: 0},
   },
   "contracts/lp-staking/deploy/LPTimelock.sol": {
-    lines: {found: 50, minHit: 50},
-    branches: {found: 14, minHit: 14},
+    lines: {found: 51, minHit: 51},
+    branches: {found: 15, minHit: 15},
   },
 };
 
