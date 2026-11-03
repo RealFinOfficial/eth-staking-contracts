@@ -3,6 +3,7 @@ const { ethers } = require("hardhat");
 
 const lpTimelock = require("../../scripts/lp-timelock");
 const lpSwitch = require("../../scripts/lp-switch-timelock");
+const { scanLogs } = require("../../scripts/lib/logs");
 
 /**
  * The CANCELLER half of `scripts/lp-timelock.js`, run end to end against a real `LPTimelock` this
@@ -45,6 +46,10 @@ describe("lp-timelock.js — the canceller actions", function () {
     "CANCELLER_TERM_DAYS",
     "LP_DEPLOYER_IMPERSONATE",
     "CONFIRM",
+    "TIMELOCK_TARGET_ADDRESS",
+    "TIMELOCK_FN",
+    "TIMELOCK_ARGS",
+    "CONFIRM_REVOKE_PERMANENT",
   ];
 
   /**
@@ -387,12 +392,44 @@ describe("lp-timelock.js — the canceller actions", function () {
     it("refuses to revoke a permanent canceller, the zero address or the timelock before scheduling", async function () {
       const nonce = await nonceOf(multisig.address);
       const revoke = (address) => run(multisig, { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: address });
-      await expect(revoke(multisig.address)).to.be.rejectedWith(/is a permanent canceller .*revoke-canceller refuses it/);
+      await expect(revoke(multisig.address)).to.be.rejectedWith(
+        /is a permanent canceller .*no permanent canceller can ever be granted again without a timelock switch.*CONFIRM_REVOKE_PERMANENT=1/
+      );
       await expect(revoke(ethers.ZeroAddress)).to.be.rejectedWith(/zero address: there is no canceller to revoke/);
       await expect(revoke(timelockAddr)).to.be.rejectedWith(/the timelock itself: there is no canceller to revoke/);
       expect(await nonceOf(multisig.address)).to.equal(nonce);
       const op = selfCall("revokeRole", [lpTimelock.CANCELLER_ROLE, multisig.address]);
       expect(await timelock.isOperation(op.id)).to.equal(false);
+    });
+
+    it("refuses a hand-built revokeRole of the permanent canceller on the generic schedule path too", async function () {
+      const env = {
+        TIMELOCK_ACTION: "schedule",
+        TIMELOCK_TARGET_ADDRESS: timelockAddr,
+        TIMELOCK_FN: "revokeRole",
+        TIMELOCK_ARGS: `${lpTimelock.CANCELLER_ROLE},${multisig.address}`,
+      };
+      const nonce = await nonceOf(multisig.address);
+      await expect(run(multisig, env)).to.be.rejectedWith(/is a permanent canceller .*CONFIRM_REVOKE_PERMANENT=1/);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+
+      // The override lets the deliberate revocation through, and the contract allows it.
+      await run(multisig, { ...env, CONFIRM_REVOKE_PERMANENT: "1" });
+      await increase(MIN_DELAY);
+      await run(multisig, { ...env, TIMELOCK_ACTION: "execute", CONFIRM_REVOKE_PERMANENT: "1" });
+      expect(await timelock.hasRole(lpTimelock.CANCELLER_ROLE, multisig.address)).to.equal(false);
+    });
+
+    it("revokes the permanent canceller through revoke-canceller only with the override", async function () {
+      const env = { TIMELOCK_ACTION: "revoke-canceller", CANCELLER_ADDRESS: multisig.address, CONFIRM_REVOKE_PERMANENT: "1" };
+      const scheduled = await run(multisig, env);
+      expect(scheduled).to.include("CONFIRM_REVOKE_PERMANENT=1: the revocation of the permanent canceller");
+      await increase(MIN_DELAY);
+      await expect(run(multisig, { ...env, CONFIRM_REVOKE_PERMANENT: "" })).to.be.rejectedWith(
+        /is a permanent canceller/
+      );
+      await run(multisig, env);
+      expect(await timelock.hasRole(lpTimelock.CANCELLER_ROLE, multisig.address)).to.equal(false);
     });
 
     it("schedules no revocation for an address that holds no canceller role", async function () {
@@ -412,21 +449,37 @@ describe("lp-timelock.js — the canceller actions", function () {
       await run(multisig, offerEnv(ape, 180));
       const { expiresAt } = await timelock.cancellerOffer(ape.address);
 
-      // Scheduled while the offer is open, ready only after it expired: the execute is refused.
-      await increase(7 * DAY - 30);
+      // Scheduled while a withdrawal could still execute in time, then left until the offer expired:
+      // the execute is refused, and the command that cancels the pending withdrawal is printed.
+      await increase(7 * DAY - 120);
       await run(multisig, withdrawEnv);
       expect(await timelock.isOperationPending(withdrawOp.id)).to.equal(true);
-      await increase(MIN_DELAY);
+      await increase(MIN_DELAY + 120n);
       const nonce = await nonceOf(multisig.address);
       const atExecute = await run(multisig, withdrawEnv);
       expect(atExecute).to.include(`The offer expired at ${expiresAt}`);
       expect(atExecute).to.include("withdrawing it changes nothing. Nothing sent.");
+      expect(atExecute).to.include(`TIMELOCK_ACTION=cancel TIMELOCK_ID=${withdrawOp.id}`);
       expect(await nonceOf(multisig.address)).to.equal(nonce);
 
       // A fresh withdrawal of the expired offer is not even scheduled.
       const atSchedule = await run(multisig, { ...withdrawEnv, TIMELOCK_SALT_TAG: "again" });
       expect(atSchedule).to.include("withdrawing it changes nothing. Nothing scheduled.");
       expect(await nonceOf(multisig.address)).to.equal(nonce);
+    });
+
+    it("refuses to schedule a withdrawal that could only execute after the offer expires", async function () {
+      const withdrawOp = selfCall("withdrawCancellerOffer", [ape.address]);
+      await run(multisig, offerEnv(ape, 180));
+      await increase(MIN_DELAY);
+      await run(multisig, offerEnv(ape, 180));
+      await increase(7 * DAY - 30);
+
+      const nonce = await nonceOf(multisig.address);
+      const out = await run(multisig, { TIMELOCK_ACTION: "withdraw-offer", CANCELLER_ADDRESS: ape.address });
+      expect(out).to.include("before a withdrawal could execute: let it lapse. Nothing scheduled.");
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+      expect(await timelock.isOperation(withdrawOp.id)).to.equal(false);
     });
 
     it("names a pending offer inside a batch with its call count, and ignores the selector on another target", async function () {
@@ -510,6 +563,14 @@ describe("lp-timelock.js — the canceller actions", function () {
       ).to.be.rejectedWith(/CancellerGrantOnlyByAcceptance.*offer-canceller/);
       expect(await nonceOf(multisig.address)).to.equal(nonce);
     });
+
+    it("refuses grantRole(DEFAULT_ADMIN_ROLE, x), naming the only-the-timelock invariant", async function () {
+      const nonce = await nonceOf(multisig.address);
+      await expect(
+        run(multisig, grantEnv("schedule", ethers.ZeroHash, other.address))
+      ).to.be.rejectedWith(/timelock must stay the ONLY holder of DEFAULT_ADMIN_ROLE/);
+      expect(await nonceOf(multisig.address)).to.equal(nonce);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -569,9 +630,76 @@ describe("lp-timelock.js — the canceller actions", function () {
             provider: ethers.provider, record: r.record, remove: r.remove,
           })
         )
-      ).to.be.rejectedWith(/is deployed and recorded .*Re-run them with SWITCH_ACTION=check\. Do NOT run deploy again\./);
+      ).to.be.rejectedWith(/is deployed and recorded .*Re-run them with SWITCH_ACTION=check\. A second deploy is refused while this entry exists\./);
       expect(r.calls.recorded).to.have.length(1);
       expect(r.calls.removed).to.equal(0);
+    });
+
+    describe("SWITCH_ACTION=check (checkAction), report-only", function () {
+      const old = () => ({ proposers: [multisig.address] });
+      const next = (proposer, extra = {}) => ({
+        address: timelockAddr,
+        proposers: [proposer],
+        deployer: deployer.address,
+        ...extra,
+      });
+      const check = (nextEntry, env = {}, fallbackDeployer = async () => deployer.address) =>
+        quiet(() => lpSwitch.checkAction({ next: nextEntry, old: old(), env, provider: ethers.provider, fallbackDeployer }));
+
+      it("checks against the recorded proposer and deployer, and passes", async function () {
+        let asked = 0;
+        await check(next(multisig.address), {}, async () => (asked += 1, deployer.address));
+        expect(asked, "the recorded deployer is used, not the signer").to.equal(0);
+      });
+
+      it("refuses to run when LP_MULTISIG disagrees with the recorded proposer, printing both", async function () {
+        await expect(check(next(multisig.address), { LP_MULTISIG: other.address })).to.be.rejectedWith(
+          new RegExp(`LP_MULTISIG ${other.address} disagrees .* ${multisig.address}\\. Nothing checked`)
+        );
+      });
+
+      it("reports a genuine failure and keeps the entry: it has no way to remove it", async function () {
+        await expect(check(next(other.address))).to.be.rejectedWith(
+          /failed its role checks: .*The registry entry is kept \(check is report-only\)\./
+        );
+      });
+
+      it("falls back to the signer only for an entry without a recorded deployer", async function () {
+        let asked = 0;
+        await check(next(multisig.address, { deployer: undefined }), {}, async () => (asked += 1, deployer.address));
+        expect(asked).to.equal(1);
+      });
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  describe("scripts/lib/logs.js scanLogs", function () {
+    it("coerces string block numbers once, so the chunks stay chunks", async function () {
+      await scheduleNoop("logs-a");
+      await scheduleNoop("logs-b");
+      const latest = await ethers.provider.getBlockNumber();
+      const topic = timelock.interface.getEvent("CallScheduled").topicHash;
+      const chunks = [];
+      const logs = await scanLogs(ethers.provider, {
+        address: timelockAddr,
+        topics: [topic],
+        fromBlock: "0",
+        toBlock: String(latest),
+        chunk: "2",
+        onChunk: ({ start, end }) => chunks.push([start, end]),
+      });
+      expect(logs).to.have.length(2);
+      expect(chunks[0]).to.deep.equal([0, 1]);
+      expect(chunks).to.have.length(Math.ceil((latest + 1) / 2));
+    });
+
+    it("refuses a non-finite bound and a chunk below one block", async function () {
+      const base = { address: timelockAddr, topics: [], fromBlock: 0, toBlock: 10 };
+      await expect(scanLogs(ethers.provider, { ...base, fromBlock: "abc" })).to.be.rejectedWith(
+        /fromBlock must be a finite number of blocks — got abc/
+      );
+      await expect(scanLogs(ethers.provider, { ...base, toBlock: undefined })).to.be.rejectedWith(/toBlock must be a finite/);
+      await expect(scanLogs(ethers.provider, { ...base, chunk: 0 })).to.be.rejectedWith(/chunk must be at least 1 block — got 0/);
     });
   });
 });

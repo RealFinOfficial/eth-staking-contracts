@@ -405,8 +405,19 @@ TIMELOCK_ACTION=cancellers npx hardhat run scripts/lp-timelock.js --network sepo
 `withdraw-offer` (deletes an executed offer that was not accepted) and `revoke-canceller`
 (`revokeRole(CANCELLER_ROLE, CANCELLER_ADDRESS)`) run the same way as the offer, through a
 schedule and an execute. A revocation executes only after the appointee's term end: before it the
-execute would revert `CancellerTermActive`, so the script refuses it and says until when. A
-pending offer operation is stopped at once with `cancel` on its id. A renewal is a new offer and a
+execute would revert `CancellerTermActive`, so the script refuses it and says until when.
+`revoke-canceller` refuses the zero address, the timelock itself and a permanent canceller before
+anything is scheduled, and `CONFIRM_REVOKE_PERMANENT=1` lets a deliberate revocation of a permanent
+canceller through, on this action and on a hand-built `revokeRole` alike (after it no permanent
+canceller can be granted again without a timelock switch). `revoke-canceller` also refuses, before
+scheduling, an address that holds no canceller role ("nothing to schedule"). `withdraw-offer`
+refuses an offer that has already expired, and an offer that would expire before the withdrawal
+could execute ("let it lapse"). `grantRole` refuses `CANCELLER_ROLE` (only an offer and its
+acceptance reach it) and `DEFAULT_ADMIN_ROLE` (the timelock must stay its only holder) before
+anything is scheduled. `lp-switch-timelock.js` refuses `deploy` while a `TimelockControllerNext`
+entry exists, unless `SWITCH_REPLACE_NEXT=1`. `SWITCH_ACTION=check` is report-only: it never removes
+the registry entry.
+A pending offer operation is stopped at once with `cancel` on its id. A renewal is a new offer and a
 new acceptance, and the acceptance resets the term end to the acceptance time plus the new term.
 The renewal has to start early enough that 48 h of delay, the Safe signatures on both sides and
 the acceptance all fit before the term end. Before a re-appointment that follows a gap after a term

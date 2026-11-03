@@ -63,6 +63,18 @@
 // appointee's term is still running (the execute would revert `CancellerTermActive`), and
 // `withdraw-offer` refuses when there is no offer.
 //
+// `revoke-canceller` refuses the zero address, the timelock itself and a permanent canceller before
+// anything is scheduled, and `CONFIRM_REVOKE_PERMANENT=1` lets a deliberate revocation of a
+// permanent canceller through, on this action and on a hand-built `revokeRole` alike (after it no
+// permanent canceller can be granted again without a timelock switch). `revoke-canceller` also
+// refuses, before scheduling, an address that holds no canceller role ("nothing to schedule").
+// `withdraw-offer` refuses an offer that has already expired, and an offer that would expire before
+// the withdrawal could execute ("let it lapse"). `grantRole` refuses `CANCELLER_ROLE` (only an
+// offer and its acceptance reach it) and `DEFAULT_ADMIN_ROLE` (the timelock must stay its only
+// holder) before anything is scheduled. `lp-switch-timelock.js` refuses `deploy` while a
+// `TimelockControllerNext` entry exists, unless `SWITCH_REPLACE_NEXT=1`. `SWITCH_ACTION=check` is
+// report-only: it never removes the registry entry.
+//
 // `accept-canceller` is the appointee's own call, `acceptCancellerRole(CANCELLER_TERM_DAYS)`, and
 // it has no delay. It must be sent inside the seven day window that opens when the offer
 // executes, and it must name the offered term. When the signer is the appointee the script sends
@@ -128,6 +140,9 @@
 //                             and revoke-canceller. For cancellers, extra addresses to report
 //                             (comma-separated)
 //   CANCELLER_TERM_DAYS       offer-canceller / accept-canceller. The term in whole days, 1..180
+//   CONFIRM_REVOKE_PERMANENT=1  lets a revocation of a PERMANENT canceller through (revoke-canceller
+//                             and a hand-built revokeRole). Without a timelock switch no permanent
+//                             canceller can be granted again afterwards
 //   CONFIRM=yes               required on mainnet, like every other state-changing script
 //
 // ──────────────────────── the salt, and why it is derived ────────────────────────
@@ -543,6 +558,13 @@ function encodeOwnerCall(fn, args = []) {
         "TIMELOCK_ACTION=offer-canceller and the appointee's acceptance."
     );
   }
+  if (fn === "grantRole" && String(coerced[0]).toLowerCase() === DEFAULT_ADMIN_ROLE) {
+    throw new Error(
+      "grantRole(DEFAULT_ADMIN_ROLE, …) is refused: the timelock must stay the ONLY holder of " +
+        "DEFAULT_ADMIN_ROLE, because that role administers every timelock role, the canceller role " +
+        "included, and a second holder could change any of them without the delay."
+    );
+  }
   return OWNER_TIER_INTERFACE.encodeFunctionData(OWNER_TIER[fn].fragment, coerced);
 }
 
@@ -860,6 +882,7 @@ async function main() {
       readBatchFile().map((entry, index) => resolveBatchEntry(pools, chainId, entry, index)),
       process.env.TIMELOCK_SALT_TAG || ""
     );
+    await refusePermanentRevocations(timelock, batch.calls);
 
     console.log(
       `\nBatch of ${batch.calls.length} call(s)` + (batch.tag ? ` [tag ${batch.tag}]` : "")
@@ -938,6 +961,7 @@ async function main() {
   });
 
   printOperation(op);
+  await refusePermanentRevocations(timelock, [op]);
 
   const signer = await pools.getSigner();
   const context = { pools, timelock, timelockAddress, chainId, minDelay, signer };
@@ -1054,7 +1078,7 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
   let args;
   if (fn === "offerCancellerRole") {
     const termDays = requireTermDays();
-    await refuseInvalidOffer(timelock, timelockAddress, account);
+    refuseInvalidCancellerAccount(timelockAddress, account, await cancellerState(timelock, account), OFFER_REFUSALS);
     args = [account, String(termDays)];
   } else if (fn === "withdrawCancellerOffer") {
     args = [account];
@@ -1088,12 +1112,13 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
 
   if (state === "unset") {
     if (fn === "revokeRole") {
-      await refuseInvalidRevocation(timelock, timelockAddress, account);
-      if (!(await timelock.hasRole(CANCELLER_ROLE, account))) {
+      const state = await cancellerState(timelock, account);
+      refuseInvalidCancellerAccount(timelockAddress, account, state, REVOCATION_REFUSALS);
+      if (!state.holds) {
         console.log(`\n${account} holds no canceller role: nothing to schedule.`);
         return;
       }
-      await describeTermForRevocation(timelock, account);
+      await describeTermForRevocation(timelock, account, state.termEnd);
     }
     if (
       fn === "withdrawCancellerOffer" &&
@@ -1107,6 +1132,7 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
   // Ready. Refuse an execute the contract would revert or that would change nothing, and say why.
   const now = await chainNow(timelock);
   if (fn === "revokeRole") {
+    await refusePermanentRevocations(timelock, [op]);
     if (!(await timelock.hasRole(CANCELLER_ROLE, account))) {
       console.log(
         `\n${account} holds no canceller role: nothing to revoke. Nothing sent (the execute would ` +
@@ -1130,50 +1156,87 @@ async function runCancellerSelfCall({ pools, timelock, timelockAddress, chainId,
       console.log(`\n${account} has no offer: the execute would revert NoCancellerOffer. Nothing sent.`);
       return;
     }
-    if (now >= offer.expiresAt) {
-      console.log(`\nThe offer expired at ${when(offer.expiresAt)}: withdrawing it changes nothing. Nothing sent.`);
+    // The execute lands in a later block, at `now + 1` at the earliest.
+    if (now + 1n >= offer.expiresAt) {
+      console.log(
+        `\nThe offer expired at ${when(offer.expiresAt)}: withdrawing it changes nothing. Nothing sent.\n` +
+          `This withdrawal stays pending until it is cancelled:\n    TIMELOCK_ACTION=cancel TIMELOCK_ID=${op.id}`
+      );
       return;
     }
   }
   await executeOperation(context, op);
 }
 
+/** `hasRole(CANCELLER_ROLE, account)` and `cancellerTermEnd(account)`, read once, together. */
+async function cancellerState(timelock, account) {
+  const [holds, termEnd] = await Promise.all([
+    timelock.hasRole(CANCELLER_ROLE, account),
+    timelock.cancellerTermEnd(account),
+  ]);
+  return { holds, termEnd };
+}
+
+/** The refusal messages of an offer: the checks `offerCancellerRole` makes at execution. */
+const OFFER_REFUSALS = {
+  zero: "CANCELLER_ADDRESS is the zero address: the offer would revert InvalidCancellerAccount",
+  timelock: "CANCELLER_ADDRESS is the timelock itself: the offer would revert InvalidCancellerAccount",
+  permanent: (account) =>
+    `${account} is a permanent canceller (REAL's Safe, no term): the offer would revert InvalidCancellerAccount`,
+};
+
+/** The refusal messages of a revocation: no canceller to revoke, or a permanent one. */
+const REVOCATION_REFUSALS = {
+  zero: "CANCELLER_ADDRESS is the zero address: there is no canceller to revoke",
+  timelock: "CANCELLER_ADDRESS is the timelock itself: there is no canceller to revoke",
+  permanent: (account) => permanentRevocationMessage(account),
+};
+
+/** The override that lets a revocation of a PERMANENT canceller through, on every path. */
+const PERMANENT_REVOCATION_OVERRIDE = "CONFIRM_REVOKE_PERMANENT";
+
+function permanentRevocationMessage(account) {
+  return (
+    `${account} is a permanent canceller (no term, REAL's Safe). Revoking it is refused: after it, ` +
+    "no permanent canceller can ever be granted again without a timelock switch, because " +
+    "grantRole(CANCELLER_ROLE, …) reverts for everyone and an offer only ever gives a term. For a " +
+    `deliberate revocation (a rotated-out Safe), set ${PERMANENT_REVOCATION_OVERRIDE}=1.`
+  );
+}
+
 /**
- * The checks `offerCancellerRole` makes at execution, made here before anything is scheduled, so
- * a wrong address is refused now rather than after the whole delay.
+ * One refusal helper for the offer and the revocation, made before anything is scheduled: the
+ * zero address, the timelock itself, and a permanent canceller (the role with term end 0). The
+ * permanent case of a revocation honours `CONFIRM_REVOKE_PERMANENT=1`. `state` is the pair from
+ * {@link cancellerState}, read once by the caller.
  */
-async function refuseInvalidOffer(timelock, timelockAddress, account) {
-  if (account === ethers.ZeroAddress) {
-    throw new Error("CANCELLER_ADDRESS is the zero address: the offer would revert InvalidCancellerAccount");
-  }
-  if (account.toLowerCase() === timelockAddress.toLowerCase()) {
-    throw new Error("CANCELLER_ADDRESS is the timelock itself: the offer would revert InvalidCancellerAccount");
-  }
-  if ((await timelock.hasRole(CANCELLER_ROLE, account)) && (await timelock.cancellerTermEnd(account)) === 0n) {
-    throw new Error(
-      `${account} is a permanent canceller (REAL's Safe, no term): the offer would revert InvalidCancellerAccount`
-    );
+function refuseInvalidCancellerAccount(timelockAddress, account, state, messages) {
+  if (account === ethers.ZeroAddress) throw new Error(messages.zero);
+  if (account.toLowerCase() === timelockAddress.toLowerCase()) throw new Error(messages.timelock);
+  if (state.holds && state.termEnd === 0n) {
+    const overridden = messages === REVOCATION_REFUSALS && process.env[PERMANENT_REVOCATION_OVERRIDE] === "1";
+    if (!overridden) throw new Error(messages.permanent(account));
+    console.log(`\n${PERMANENT_REVOCATION_OVERRIDE}=1: the revocation of the permanent canceller ${account} goes ahead.`);
   }
 }
 
 /**
- * The addresses `revoke-canceller` refuses before anything is scheduled: the zero address, the
- * timelock itself, and a PERMANENT canceller (the role with term end 0, that is REAL's own Safe).
- * Revoking REAL's permanent role would be irreversible: `grantRole(CANCELLER_ROLE, …)` reverts for
- * everyone, and an offer to REAL's Safe could only ever give it a term.
+ * The same permanent-canceller refusal for the generic `schedule` / `execute` and batch paths: a
+ * `revokeRole(CANCELLER_ROLE, x)` call built by hand is refused when `x` is a permanent canceller,
+ * unless `CONFIRM_REVOKE_PERMANENT=1`. (It reads the chain, so it cannot live in the synchronous
+ * `encodeOwnerCall`: every path that builds such a call runs it right after building.)
  */
-async function refuseInvalidRevocation(timelock, timelockAddress, account) {
-  if (account === ethers.ZeroAddress) {
-    throw new Error("CANCELLER_ADDRESS is the zero address: there is no canceller to revoke");
-  }
-  if (account.toLowerCase() === timelockAddress.toLowerCase()) {
-    throw new Error("CANCELLER_ADDRESS is the timelock itself: there is no canceller to revoke");
-  }
-  if ((await timelock.hasRole(CANCELLER_ROLE, account)) && (await timelock.cancellerTermEnd(account)) === 0n) {
-    throw new Error(
-      `${account} is a permanent canceller (REAL's Safe, no term): revoke-canceller refuses it, because ` +
-        "the permanent role can never be granted again (grantRole(CANCELLER_ROLE, …) reverts for everyone)"
-    );
+async function refusePermanentRevocations(timelock, calls) {
+  for (const call of calls) {
+    if (call.fn !== "revokeRole") continue;
+    const [role, rawAccount] = call.args;
+    if (String(role).toLowerCase() !== CANCELLER_ROLE) continue;
+    const account = ethers.getAddress(String(rawAccount));
+    const state = await cancellerState(timelock, account);
+    if (state.holds && state.termEnd === 0n) {
+      if (process.env[PERMANENT_REVOCATION_OVERRIDE] !== "1") throw new Error(permanentRevocationMessage(account));
+      console.log(`\n${PERMANENT_REVOCATION_OVERRIDE}=1: the revocation of the permanent canceller ${account} goes ahead.`);
+    }
   }
 }
 
@@ -1183,8 +1246,7 @@ async function refuseInvalidRevocation(timelock, timelockAddress, account) {
  * end (`scheduledAt[id] < cancellerTermEnd`), so the schedule time decides the veto, not the
  * ready time. The schedule lands in a later block, at `now + 1` at the earliest.
  */
-async function describeTermForRevocation(timelock, account) {
-  const termEnd = await timelock.cancellerTermEnd(account);
+async function describeTermForRevocation(timelock, account, termEnd) {
   if (termEnd === 0n) {
     console.log(`\n${account} has no term end: the revocation can execute as soon as it is ready.`);
     return;
@@ -1219,13 +1281,21 @@ async function describeTermForRevocation(timelock, account) {
  * offer window would miss exactly that one. The scan prints its progress per chunk, and the
  * pending checks run in parallel.
  */
-async function offerToWithdraw({ pools, chainId, timelock, timelockAddress, account }) {
+async function offerToWithdraw({ pools, chainId, timelock, timelockAddress, account, minDelay }) {
   const offer = await timelock.cancellerOffer(account);
   if (offer.expiresAt !== 0n) {
+    // The schedule lands at `now + 1` at the earliest, the execute `delay` after it.
     const now = await chainNow(timelock);
-    if (now >= offer.expiresAt) {
+    if (now + 1n >= offer.expiresAt) {
       console.log(
         `\nThe offer expired at ${when(offer.expiresAt)}: withdrawing it changes nothing. Nothing scheduled.`
+      );
+      return false;
+    }
+    if (now + 1n + resolveDelay(minDelay) >= offer.expiresAt) {
+      console.log(
+        `\nThe offer expires at ${when(offer.expiresAt)}, before a withdrawal could execute: let it lapse. ` +
+          "Nothing scheduled."
       );
       return false;
     }

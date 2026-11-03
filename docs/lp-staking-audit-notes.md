@@ -941,7 +941,19 @@ the timelock on itself, so each is a scheduled operation. The same command runs 
 run schedules, a run after the delay executes, and a run in between prints the ready time.
 `offer-canceller` refuses the zero address, the timelock, a permanent canceller and a term outside
 1 to 180 days before anything is scheduled. `revoke-canceller` refuses to execute before the
-appointee's term end, where the execute would revert `CancellerTermActive`. `accept-canceller` is
+appointee's term end, where the execute would revert `CancellerTermActive`.
+`revoke-canceller` refuses the zero address, the timelock itself and a permanent canceller before
+anything is scheduled, and `CONFIRM_REVOKE_PERMANENT=1` lets a deliberate revocation of a permanent
+canceller through, on this action and on a hand-built `revokeRole` alike (after it no permanent
+canceller can be granted again without a timelock switch). `revoke-canceller` also refuses, before
+scheduling, an address that holds no canceller role ("nothing to schedule"). `withdraw-offer`
+refuses an offer that has already expired, and an offer that would expire before the withdrawal
+could execute ("let it lapse"). `grantRole` refuses `CANCELLER_ROLE` (only an offer and its
+acceptance reach it) and `DEFAULT_ADMIN_ROLE` (the timelock must stay its only holder) before
+anything is scheduled. `lp-switch-timelock.js` refuses `deploy` while a `TimelockControllerNext`
+entry exists, unless `SWITCH_REPLACE_NEXT=1`. `SWITCH_ACTION=check` is report-only: it never removes
+the registry entry.
+`accept-canceller` is
 the appointee's own call, with no delay, inside the 7 days after the offer executed and naming the
 offered term. It is sent when the signer is the appointee, and otherwise the calldata for the
 appointee's Safe is printed. `cancellers` lists every canceller and every offer with its term end,

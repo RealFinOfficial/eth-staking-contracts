@@ -61,6 +61,12 @@ const {
 //   check        re-runs the canceller shape checks of the new timelock (the ones `deploy` runs
 //                right after the deploy). Use it when those checks could not run, e.g. an RPC
 //                error after the deploy: the new timelock is recorded, nothing is redeployed.
+//                REPORT-ONLY: it never removes the registry entry. It checks against the
+//                proposer and the deployer recorded at deploy time, and refuses to run when
+//                LP_MULTISIG disagrees with the recorded proposer.
+//
+// `deploy` refuses while a `TimelockControllerNext` entry exists, so a second deploy cannot
+// overwrite the record of the first. SWITCH_REPLACE_NEXT=1 replaces it deliberately.
 //   verify       prints owner() and pendingOwner() of every contract that moved, and requires
 //                owner == new timelock and pendingOwner == 0;
 //                then the new minDelay; on success, deployments.json records the new owner on
@@ -80,6 +86,7 @@ const {
 //   LP_MULTISIG                proposer/executor/canceller of the new timelock (default: the
 //                              old timelock's recorded proposer)
 //   TIMELOCK_SALT_TAG          distinguishes a repeat of the same batch (see lp-timelock.js)
+//   SWITCH_REPLACE_NEXT=1      lets `deploy` replace an existing TimelockControllerNext entry
 //   CONFIRM=1                  required on mainnet
 
 const NEXT_KIND = "TimelockControllerNext";
@@ -125,13 +132,51 @@ async function recordCheckedTimelock({ address, info, multisig, deployer, provid
   } catch (error) {
     throw new Error(
       `The new timelock ${address} is deployed and recorded as ${NEXT_KIND}, but its role checks ` +
-        `could not run (${error.message}). Re-run them with SWITCH_ACTION=check. Do NOT run deploy again.`
+        `could not run (${error.message}). Re-run them with SWITCH_ACTION=check. A second deploy is ` +
+        `refused while this entry exists.`
     );
   }
   if (failures.length > 0) {
     remove();
     throw new Error(`The new timelock ${address} failed its role checks: ${failures.join(", ")}. Not recorded.`);
   }
+}
+
+/**
+ * `SWITCH_ACTION=check`: the role checks of the recorded new timelock, REPORT-ONLY. It never
+ * removes the registry entry, because a stale value on the operator's machine must not erase the
+ * record of a correct, paid-for timelock. The multisig is the proposer recorded at deploy time.
+ * `LP_MULTISIG` is only a cross-check: when it is set and disagrees with the record, the run
+ * stops and prints both. The deployer is the one recorded at deploy time too, and only an entry
+ * written before that field existed falls back to `fallbackDeployer()` (the current signer).
+ *
+ * @param {{next: object, old: object, env: object, provider: object, fallbackDeployer: function}} options
+ */
+async function checkAction({ next = {}, old, env, provider, fallbackDeployer }) {
+  const rawAddress = env.NEW_TIMELOCK_ADDRESS || next.address;
+  if (!rawAddress) throw new Error("Set NEW_TIMELOCK_ADDRESS, or run SWITCH_ACTION=deploy first");
+  const address = hre.ethers.getAddress(rawAddress);
+  const recorded = next.proposers && next.proposers[0] ? hre.ethers.getAddress(next.proposers[0]) : null;
+  if (recorded && env.LP_MULTISIG && hre.ethers.getAddress(env.LP_MULTISIG) !== recorded) {
+    throw new Error(
+      `LP_MULTISIG ${hre.ethers.getAddress(env.LP_MULTISIG)} disagrees with the proposer recorded for the new ` +
+        `timelock, ${recorded}. Nothing checked. Unset LP_MULTISIG or correct it.`
+    );
+  }
+  const multisig = recorded || hre.ethers.getAddress(env.LP_MULTISIG || old.proposers[0]);
+  let deployer = next.deployer;
+  if (!deployer) {
+    deployer = await fallbackDeployer();
+    console.log(`WARNING: no deployer recorded for ${address}: the deployer row is checked against ${deployer}.`);
+  }
+  const failures = await checkNewTimelock({ address, multisig, deployer, provider });
+  if (failures.length > 0) {
+    throw new Error(
+      `The new timelock ${address} failed its role checks: ${failures.join(", ")}. ` +
+        "The registry entry is kept (check is report-only)."
+    );
+  }
+  console.log(`\nThe new timelock ${address} passed its role checks. Next: SWITCH_ACTION=schedule.`);
 }
 const OWNABLE_ABI = ["function owner() view returns (address)", "function pendingOwner() view returns (address)"];
 
@@ -233,6 +278,17 @@ async function main() {
   const entries = pools.readRegistry()[String(chainId)] || {};
   const old = entries[TIMELOCK_KIND];
   if (!old) throw new Error(`No ${TIMELOCK_KIND} for chain ${chainId} in deployments.json`);
+  // `check` is read-only and needs none of the move set: it runs before it, so a registry that
+  // lacks a proxy kind cannot block the one action meant to recover a half-finished deploy.
+  if (action === "check") {
+    return checkAction({
+      next: entries[NEXT_KIND],
+      old,
+      env: process.env,
+      provider: hre.ethers.provider,
+      fallbackDeployer: async () => (await pools.getSigner()).address,
+    });
+  }
   const { move, skipped } = contractsToMove(entries, chainId, old.address);
   await probeTwoStep(move);
   const signer = await pools.getSigner();
@@ -240,6 +296,12 @@ async function main() {
   const oldTimelock = new hre.ethers.Contract(old.address, TIMELOCK_INTERFACE, signer);
 
   if (action === "deploy") {
+    if (entries[NEXT_KIND] && process.env.SWITCH_REPLACE_NEXT !== "1") {
+      throw new Error(
+        `A new timelock is already recorded as ${NEXT_KIND} (${entries[NEXT_KIND].address}). Nothing deployed. ` +
+          "Continue with SWITCH_ACTION=check or schedule, or set SWITCH_REPLACE_NEXT=1 to deploy a replacement."
+      );
+    }
     const multisig = hre.ethers.getAddress(process.env.LP_MULTISIG || old.proposers[0]);
     const minDelay = Number(process.env.NEW_TIMELOCK_MIN_DELAY || 0);
     console.log(`New timelock: proposer/executor/canceller ${multisig}, minDelay ${minDelay}s`);
@@ -260,6 +322,7 @@ async function main() {
       info: {
         deployTx: d.tx.hash, block: d.receipt.blockNumber, minDelay,
         proposers: [multisig], executors: [multisig], cancellers: [multisig], admin: hre.ethers.ZeroAddress,
+        deployer: signer.address,
       },
       multisig,
       deployer: signer.address,
@@ -273,19 +336,6 @@ async function main() {
   const nextAddress = process.env.NEW_TIMELOCK_ADDRESS || (entries[NEXT_KIND] && entries[NEXT_KIND].address);
   if (!nextAddress) throw new Error(`Set NEW_TIMELOCK_ADDRESS, or run SWITCH_ACTION=deploy first`);
 
-  if (action === "check") {
-    const next = entries[NEXT_KIND] || {};
-    const multisig = hre.ethers.getAddress(
-      process.env.LP_MULTISIG || (next.proposers && next.proposers[0]) || old.proposers[0]
-    );
-    const address = hre.ethers.getAddress(nextAddress);
-    const failures = await checkNewTimelock({ address, multisig, deployer: signer.address, provider: hre.ethers.provider });
-    if (failures.length > 0) {
-      if (next.address && next.address.toLowerCase() === address.toLowerCase()) pools.removeDeployment(chainId, NEXT_KIND);
-      throw new Error(`The new timelock ${address} failed its role checks: ${failures.join(", ")}. Not recorded.`);
-    }
-    return console.log(`\nThe new timelock ${address} passed its role checks. Next: SWITCH_ACTION=schedule.`);
-  }
   const newTimelock = new hre.ethers.Contract(hre.ethers.getAddress(nextAddress), TIMELOCK_INTERFACE, signer);
   const newAddress = await newTimelock.getAddress();
   for (const line of skipped) console.log(`skip  ${line}`);
@@ -364,7 +414,7 @@ async function main() {
   console.log(`\nAll ${move.length} moved contracts are owned by ${newAddress}; deployments.json updated.`);
 }
 
-module.exports = { checkNewTimelock, recordCheckedTimelock };
+module.exports = { checkNewTimelock, recordCheckedTimelock, checkAction };
 
 // `hardhat run` executes this file as the entry point. A `require` from a suite must only pick
 // up the two functions above.
