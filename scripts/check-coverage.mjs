@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Blocking coverage gate for the seven LP-staking contracts (the five LP proxies, the ApeBond
- * escrow and adapter) plus the four libraries they share.
+ * escrow and adapter), the `LPTimelock` that owns them, and the four libraries they share.
  *
  * Reads the lcov file `forge coverage --report lcov` writes and enforces three things:
  *
@@ -16,7 +16,8 @@
  *   (c) the per-file line and branch FLOORS are met, expressed as a minimum number of
  *       covered entities rather than a percentage so no rounding can creep in.
  *
- * Scope is `contracts/lp-staking/{the seven contracts}` + `libraries/{TwapGuard, TickMath,
+ * Scope is `contracts/lp-staking/{the seven contracts}` + `deploy/LPTimelock.sol` +
+ * `libraries/{TwapGuard, TickMath,
  * LiquidityAmounts, PositionValue}.sol`. The mocks,
  * the interfaces and the two legacy staking pools are deliberately out of scope: they are
  * test scaffolding and frozen pre-LP code, and including them would dilute the number in both
@@ -48,6 +49,11 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-03 (the term-limited canceller role on `LPTimelock`) ──
+//    the timelock enters the gate: `deploy/LPTimelock.sol` 49 lines and 14 branches, all covered
+//    by `test/forge/unit/LPTimelockCanceller.t.sol`. Until this round it was OpenZeppelin's
+//    `TimelockController` with nothing added and had no measurable line of its own. No other
+//    file moved.
 // ── Pinned floors, re-measured 2026-11-02 (the escrow's two-argument `recoverSurplus(to, amount)`,
 //    both forms on the shared `_surplus` / `_recoverSurplus` body) ── escrow lines 111 -> 120,
 //    branches 23 -> 26; all nine new lines and all three new branches are covered. The escrow's
@@ -85,6 +91,7 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 // | libraries/TickMath.sol      | 100.00% (25/25)   | 100.00% (21/21) |
 // | libraries/LiquidityAmounts.sol | 100.00% (15/15) | 100.00% (7/7)  |
 // | libraries/PositionValue.sol | 100.00% (4/4)     | (0/0 — the ternary is not instrumented) |
+// | deploy/LPTimelock.sol       | 100.00% (49/49)   | 100.00% (14/14) |
 //
 // Branch coverage is 100% on all six, so every branch floor is the ceiling: one newly uncovered
 // branch fails the gate. Measured on 567 Foundry tests in 28 suites.
@@ -208,6 +215,10 @@ export const PER_FILE_FLOORS = {
   "contracts/lp-staking/libraries/PositionValue.sol": {
     lines: {found: 4, minHit: 4},
     branches: {found: 0, minHit: 0},
+  },
+  "contracts/lp-staking/deploy/LPTimelock.sol": {
+    lines: {found: 49, minHit: 49},
+    branches: {found: 14, minHit: 14},
   },
 };
 
