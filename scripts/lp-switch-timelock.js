@@ -13,6 +13,7 @@ const {
   encodeExecuteBatch,
   encodeSchedule,
   encodeExecute,
+  cancellerShapeChecks,
 } = require("./lp-timelock");
 
 // Replace the LPTimelock that owns the stack with a new one — the planned switch (decision T19,
@@ -207,6 +208,21 @@ async function main() {
       deployTx: d.tx.hash, block: d.receipt.blockNumber, minDelay,
       proposers: [multisig], executors: [multisig], cancellers: [multisig], admin: hre.ethers.ZeroAddress,
     });
+    // The canceller shape of the new timelock, the same checks deploy-lp-staking.js makes: only
+    // the timelock holds DEFAULT_ADMIN_ROLE and administers CANCELLER_ROLE, the multisig is a
+    // permanent canceller (term end 0), the term cap is 180 days and the offer window 7 days.
+    const deployed = new hre.ethers.Contract(d.address, TIMELOCK_INTERFACE, hre.ethers.provider);
+    const shapeFailures = [];
+    for (const [label, actual, expected] of await cancellerShapeChecks(deployed, {
+      timelockAddress: d.address, multisig, deployer: signer.address,
+    })) {
+      const ok = String(actual).toLowerCase() === String(expected).toLowerCase();
+      console.log(`${ok ? "OK  " : "FAIL"}  ${label}: ${actual}${ok ? "" : ` (expected ${expected})`}`);
+      if (!ok) shapeFailures.push(label);
+    }
+    if (shapeFailures.length > 0) {
+      throw new Error(`The new timelock ${d.address} failed its role checks: ${shapeFailures.join(", ")}`);
+    }
     return console.log(`\nNext: SWITCH_ACTION=schedule (one batch on the old timelock ${old.address}).`);
   }
 

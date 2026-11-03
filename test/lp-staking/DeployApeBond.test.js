@@ -643,6 +643,7 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
       expect(result.stdout).to.match(/OK    every CallScheduled id has a CallExecuted or a Cancelled \(0 open\)/);
       expect(result.stdout).to.include(`OK    getMinDelay() == ${MIN_DELAY} (is ${MIN_DELAY})`);
       expect(result.stdout).to.include("OK    LPTimelock.PROPOSER_ROLE not held by the deployer");
+      expect(result.stdout).to.include("OK    LPTimelock.DEFAULT_ADMIN_ROLE held by the timelock only (no other holder)");
       expect(result.stdout).to.include(`OK    ApeBondPositionAdapter.owner() is not the deployer (${timelockAddr})`);
       expect(result.stdout).to.include("All post-launch checks passed.");
       expect(await nonceOf(w.deployer.address), "read-only").to.equal(nonce);

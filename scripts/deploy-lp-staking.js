@@ -8,7 +8,14 @@ const { deployContract, deployProxyPair } = require("./lib/proxies");
 const apebond = require("./lib/apebond");
 // The core bootstrap routes nothing through the timelock (N-7). The optional ApeBond route
 // builds ONE batch — the vault-escrow link — and only prints and files it.
-const { TIMELOCK_KIND, buildBatch, encodeScheduleBatch, encodeExecuteBatch, describeCall } = require("./lp-timelock");
+const {
+  TIMELOCK_KIND,
+  buildBatch,
+  encodeScheduleBatch,
+  encodeExecuteBatch,
+  describeCall,
+  cancellerShapeChecks,
+} = require("./lp-timelock");
 
 // Deploy the full LP staking stack and record every address in deployments.json.
 //
@@ -686,11 +693,14 @@ async function main() {
   // The timelock first. It depends on nothing, and all five proxies name it as their owner in
   // their own deployment transaction, so it has to exist before any of them.
   //
-  // Stock OZ v5, through the repo's own `LPTimelock` wrapper. Roles, per spec §2.5: the
-  // multisig is the only proposer, the only executor (execution is deliberately NOT open) and
-  // — because the OZ constructor grants it alongside PROPOSER_ROLE — the only canceller.
-  // `admin = address(0)` leaves the timelock its own DEFAULT_ADMIN_ROLE holder, so even a
-  // role change is a scheduled, publicly visible operation.
+  // OZ v5's TimelockController through the repo's own `LPTimelock`, which adds the term-limited
+  // canceller role. Roles, per spec §2.5: the multisig is the only proposer and the only executor
+  // (execution is deliberately NOT open). The OZ constructor also grants it CANCELLER_ROLE, with
+  // no term: REAL's Safe is a permanent canceller. ApeBonds' Safe becomes a second canceller later,
+  // only through an offer (a scheduled operation) and its own acceptance, with a term of at most
+  // 180 days, never in this run. `admin = address(0)` is the only value the constructor accepts:
+  // the timelock is its own and only DEFAULT_ADMIN_ROLE holder, so every role change, every
+  // canceller offer included, is a scheduled, publicly visible operation.
   const timelockDeploy = await deployContract(
     "LPTimelock",
     [timelockMinDelay, [multisig], [multisig], hre.ethers.ZeroAddress],
@@ -1076,23 +1086,20 @@ async function main() {
   check("LPTimelock.getMinDelay", await timelock.getMinDelay(), timelockMinDelay);
   const PROPOSER_ROLE = await timelock.PROPOSER_ROLE();
   const EXECUTOR_ROLE = await timelock.EXECUTOR_ROLE();
-  const CANCELLER_ROLE = await timelock.CANCELLER_ROLE();
-  const DEFAULT_ADMIN_ROLE = await timelock.DEFAULT_ADMIN_ROLE();
   check("LPTimelock.PROPOSER_ROLE[multisig]", await timelock.hasRole(PROPOSER_ROLE, multisig), true);
   check("LPTimelock.EXECUTOR_ROLE[multisig]", await timelock.hasRole(EXECUTOR_ROLE, multisig), true);
-  check("LPTimelock.CANCELLER_ROLE[multisig]", await timelock.hasRole(CANCELLER_ROLE, multisig), true);
-  // Self-administered: the timelock is its own admin, and nobody else is — least of all the
-  // key that deployed it, which would otherwise be a permanent back door around the delay.
-  check(
-    "LPTimelock.DEFAULT_ADMIN_ROLE[timelock]",
-    await timelock.hasRole(DEFAULT_ADMIN_ROLE, timelockDeploy.address),
-    true
-  );
-  check(
-    "LPTimelock.DEFAULT_ADMIN_ROLE[deployer]",
-    await timelock.hasRole(DEFAULT_ADMIN_ROLE, deployer.address),
-    false
-  );
+  // Self-administered: the timelock is its own admin, and nobody else is, neither the multisig
+  // nor the key that deployed it, which would otherwise be a permanent back door around the delay.
+  // The admin of CANCELLER_ROLE is that same DEFAULT_ADMIN_ROLE, so every canceller offer,
+  // withdrawal and revocation is a scheduled operation. The multisig is a permanent canceller
+  // (term end 0), and the term cap and offer window are the decided 180 days and 7 days.
+  for (const [label, actual, expected] of await cancellerShapeChecks(timelock, {
+    timelockAddress: timelockDeploy.address,
+    multisig,
+    deployer: deployer.address,
+  })) {
+    check(label, actual, expected);
+  }
 
   // UUPS keeps the upgrade authority in the implementation, so the ERC-1967 ADMIN slot must be
   // empty on all five proxies. A non-zero value there would mean a transparent proxy's

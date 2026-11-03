@@ -590,12 +590,22 @@ mitigation still has to be a switch a key outside the timelock can throw by itse
 - `contracts/lp-staking/deploy/LPProxy.sol` — OZ `ERC1967Proxy`, nothing added. It exists so the
   repo owns the artifact (the indexer only vendors artifacts whose `sourceName` starts with
   `contracts/lp-staking/`) and so one name means one proxy across script, suites and explorer.
-- `contracts/lp-staking/deploy/LPTimelock.sol` — OZ `TimelockController`, nothing added, for the
-  same two reasons. Constructed with `(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig],
-  address(0))`: the multisig is the only proposer, the only executor — execution is
-  deliberately NOT open — and, because the OZ constructor grants it alongside `PROPOSER_ROLE`,
-  the only canceller. `admin = address(0)` leaves the timelock its own `DEFAULT_ADMIN_ROLE`
-  holder, so even a role change is a scheduled, publicly visible operation.
+- `contracts/lp-staking/deploy/LPTimelock.sol` — OZ `TimelockController` for the same two
+  reasons, with ONE addition since 2026-11-03: a canceller role with a term written on chain
+  (Doublo's audit Q1, see "Q1 — the term-limited canceller role" below). Constructed with
+  `(LP_TIMELOCK_MIN_DELAY, [multisig], [multisig], address(0))`: the multisig (REAL's Safe) is
+  the only proposer and the only executor. Execution is deliberately NOT open. The OZ constructor
+  also grants the multisig `CANCELLER_ROLE`, with no term (`cancellerTermEnd == 0`), so it is a
+  permanent canceller. `admin` must be `address(0)`: any other value reverts
+  `BootstrapAdminNotAllowed`, so the timelock is its only `DEFAULT_ADMIN_ROLE` holder from block
+  one. That role is also the admin of `CANCELLER_ROLE`, so every role change, every canceller
+  offer, withdrawal and revocation included, is a scheduled, publicly visible operation. A
+  second canceller (ApeBonds' Safe) is reached only by an offer and its acceptance, and
+  `grantRole(CANCELLER_ROLE, …)` reverts `CancellerGrantOnlyByAcceptance` for every caller. The
+  constructor signature is OpenZeppelin's, so the explorer verification arguments are unchanged.
+  `schedule` and `scheduleBatch` additionally record `scheduledAt[id]` (one extra storage write
+  per schedule, about 22,000 gas). The contract is not behind a proxy, so its storage layout
+  carries no upgrade concern.
 - The distributor's implementation constructor takes NO arguments (every reward token is proxy
   storage) and only calls `_disableInitializers()`.
   `initialize(owner_, guardian_, operator_, signer_, asset_, RewardTokenInit[] tokens_)` runs on
@@ -679,6 +689,58 @@ mitigation still has to be a switch a key outside the timelock can throw by itse
   constructor seeds `NOT_ENTERED = 1`, which a proxy never runs — harmless, because
   `_reentrancyGuardEntered()` tests for `== ENTERED (2)`, so an unwritten slot reads as
   "not entered".
+
+### Q1 — the term-limited canceller role (Doublo's audit Q1, accepted by ApeBonds 2026-11-03)
+
+Doublo's audit Q1 asks for `CANCELLER_ROLE` on the `LPTimelock` for ApeBonds' Safe, so ApeBonds
+can cancel any owner-tier operation (an upgrade, a parameter change, a role change) during the
+48 hour delay. A plain canceller would be a problem: it can cancel the operation that revokes its
+own role, so a hacked canceller could never be removed. `LPTimelock` therefore binds the cancel
+power to a term. A term canceller may cancel exactly the operations scheduled BEFORE its term end
+(`scheduledAt[id] < cancellerTermEnd[account]`). After the term it can still cancel what was
+proposed during the term, so every such operation keeps its full veto window, and it can never
+cancel anything scheduled at or after the term end, including its own revocation.
+
+The appointment has two steps. REAL's Safe schedules `offerCancellerRole(account, termDays)` on
+the timelock itself and executes it after the delay. That stores an offer, acceptable for 7 days
+from the execution (`CANCELLER_OFFER_WINDOW`), and grants nothing. The offered address then calls
+`acceptCancellerRole(termDays)` inside the window, naming the offered term. The term end is the
+acceptance time plus `termDays` days, with `termDays` in 1 to 180 (`MAX_CANCELLER_TERM_DAYS`). A
+renewal is a new offer and a new acceptance, and the acceptance RESETS the term end to the
+acceptance time plus the new term. During the term a revocation reverts at execution
+(`CancellerTermActive`). The holder may `renounceRole` at any time. A revocation and a
+renouncement both clear the term end and delete any unaccepted offer of that address, so no
+stale offer can be accepted later.
+
+Who can do what:
+
+| Function | Caller | Signatures | Delay |
+|---|---|---|---|
+| `offerCancellerRole(account, termDays)` | the timelock (scheduled by REAL's Safe) | 3 of 5, twice | 48 h. REAL or any canceller can cancel it while pending. Acceptable for 7 days after execution |
+| `acceptCancellerRole(termDays)` | the offered address, inside the window | 3 of 5 of that Safe | none |
+| `withdrawCancellerOffer(account)` | the timelock | 3 of 5, twice | 48 h (cancelling the pending offer operation is instant) |
+| `revokeRole(CANCELLER_ROLE, a)` | the timelock | 3 of 5, twice | 48 h. Reverts at execute while `a`'s term is active. `a` cannot cancel it when it was scheduled after `a`'s term end |
+| `renounceRole(CANCELLER_ROLE, self)` | the canceller | its own Safe | none, at any time |
+| `grantRole(CANCELLER_ROLE, x)` | nobody (reverts) | | |
+| `cancel(id)` | REAL's Safe: any pending id. Term canceller: ids scheduled before its term end | 3 of 5 | none |
+| `schedule`, `execute`, `updateDelay`, other role changes | REAL's Safe through the 48 h path | 3 of 5, twice | 48 h |
+
+Exploit table:
+
+| Actor | Can | Cannot | Way out |
+|---|---|---|---|
+| ApeBonds' Safe hacked, during the term | cancel every pending owner-tier operation, which freezes the owner tier until the term end (at most 180 days from acceptance): no upgrade, no new reward token, no operator rotation, no `setClaimsEnabled` for `$ASSET` if day 90 falls inside | take funds, pause, schedule, block users (unstake is never pausable), be revoked early | wait for the term end, then propose again: operations scheduled after the term end cannot be cancelled by it. Or the lost-timelock path (new proxies, migration) |
+| ApeBonds' Safe hacked, after the term | cancel only operations scheduled before its term end that are still pending | cancel anything scheduled after the term end, including its own revocation | propose again. Revocation is optional housekeeping |
+| ApeBonds in bad faith (not hacked) | the same as a hacked ApeBonds during the term, as commercial leverage: block `setClaimsEnabled`, a bug-fix upgrade, `setOperator`, `setCampaignEnabled` | the same | the same. Business risk accepted by Vladimir (decision 11 of 2026-10-30) |
+| offered address compromised before it accepts | accept inside the 7 day window | accept after the window | cancel the pending offer operation (instant) or withdraw it (48 h) |
+| REAL's Safe hacked (listed for completeness) | schedule malicious operations (ApeBonds vetoes them during the term). Propose offers to its own addresses (ApeBonds can veto these too). Revoke REAL's own permanent canceller | remove ApeBonds during the term. Stop ApeBonds from cancelling anything scheduled during the term | as today: the timelock is lost, new proxies and a migration. Users exit |
+
+The veto covers the owner tier only. The operator tier (pauses, `setSigner`, `recoverExcess`,
+`mintRewardToken`, `rescuePosition`, `setTwapParams`, the epoch functions, `sweep`) is sent
+directly by the operator multisig and never passes through the timelock.
+
+The rules are pinned by `test/forge/unit/LPTimelockCanceller.t.sol` (every revert with its exact
+custom error and arguments) and the script actions by `test/lp-staking/LPTimelockCanceller.test.js`.
 
 ### Three-tier admin
 
@@ -854,13 +916,46 @@ TIMELOCK_ACTION=execute  TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setGuardian 
 TIMELOCK_ACTION=pending npx hardhat run scripts/lp-timelock.js --network mainnet
 TIMELOCK_ACTION=status  TIMELOCK_ID=0x… npx hardhat run scripts/lp-timelock.js --network mainnet
 TIMELOCK_ACTION=cancel  TIMELOCK_ID=0x… CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
+
+# the canceller role: offer (run twice, schedule then execute), accept, check
+TIMELOCK_ACTION=offer-canceller  CANCELLER_ADDRESS=0xApeSafe CANCELLER_TERM_DAYS=180 \
+  CONFIRM=yes npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=accept-canceller CANCELLER_ADDRESS=0xApeSafe CANCELLER_TERM_DAYS=180 \
+  npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=cancellers npx hardhat run scripts/lp-timelock.js --network mainnet
+
+# withdraw an executed offer, revoke a canceller (each run twice, schedule then execute)
+TIMELOCK_ACTION=withdraw-offer   CANCELLER_ADDRESS=0xApeSafe CONFIRM=yes \
+  npx hardhat run scripts/lp-timelock.js --network mainnet
+TIMELOCK_ACTION=revoke-canceller CANCELLER_ADDRESS=0xApeSafe CONFIRM=yes \
+  npx hardhat run scripts/lp-timelock.js --network mainnet
 ```
+
+**`cancel` checks first.** The script calls `canCancel(signer, id)` before it sends. When the
+signer holds no canceller role it prints the `cancel` calldata for the canceller's Safe. When the
+operation is not pending, or a term canceller's term ended before the operation was scheduled, it
+prints the reason and sends nothing. REAL's Safe can cancel any pending operation.
+
+**The canceller actions.** `offer-canceller`, `withdraw-offer` and `revoke-canceller` are calls of
+the timelock on itself, so each is a scheduled operation. The same command runs twice: the first
+run schedules, a run after the delay executes, and a run in between prints the ready time.
+`offer-canceller` refuses the zero address, the timelock, a permanent canceller and a term outside
+1 to 180 days before anything is scheduled. `revoke-canceller` refuses to execute before the
+appointee's term end, where the execute would revert `CancellerTermActive`. `accept-canceller` is
+the appointee's own call, with no delay, inside the 7 days after the offer executed and naming the
+offered term. It is sent when the signer is the appointee, and otherwise the calldata for the
+appointee's Safe is printed. `cancellers` lists every canceller and every offer with its term end,
+`isCancellerActive` and `expiresAt`. A renewal is a new offer and a new acceptance, scheduled at
+least 48 h plus the signing time on both sides before the term end. Before a re-appointment after
+a gap, REAL executes or cancels every pending operation, because operations scheduled in the gap
+and still pending at the acceptance become cancellable by the appointee. A revocation after the
+term is housekeeping: the veto on new operations already ended with the term.
 
 The owner tier is exactly: `acceptOwnership`, `transferOwnership`, `upgradeToAndCall` (all five
 proxies), `setZapper`, `setBonusEscrow`, `setStakeOperator` (vault), `setGuardian` (vault, distributor),
 `setOperator` (vault, distributor, registry, zapper), `addRewardToken`,
 `setRewardTokenEnabled`, `setClaimsEnabled` (distributor), `setMinter` (Overture token),
-`updateDelay` (the timelock) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
+`updateDelay`, `offerCancellerRole`, `withdrawCancellerOffer` and `revokeRole` (the timelock itself) — and, on a stack with the ApeBond route, `upgradeToAndCall`,
 `acceptOwnership`, `transferOwnership`, `setAdapter`, `recoverSurplus` and `recoverSurplusAmount` (escrow) and
 `setCampaign`, `setCampaignEnabled`, `setCampaignCaller`, `setSoulZapCaller`, `setGuardian`,
 `setValuationWindow`, `acceptOwnership` and `transferOwnership` (adapter). `recoverSurplusAmount` is the

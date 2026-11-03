@@ -138,9 +138,15 @@ DEPLOY_TX=0x… npx hardhat run scripts/post-deploy-check.js --network mainnet
 
 Five UUPS proxies behind `LPProxy`, every one of them owned by the `LPTimelock` from its own
 deployment transaction: `LPStakingVault`, `RewardsDistributor`, `LPEpochRegistry`,
-`TokenOverture` (the Overture token, ticker `$OVTR`) and `LPZapper`. The timelock is a plain
-OpenZeppelin `TimelockController`; the multisig (`LP_MULTISIG`) is its only proposer, executor
-and canceller.
+`TokenOverture` (the Overture token, ticker `$OVTR`) and `LPZapper`. The timelock is
+OpenZeppelin's `TimelockController` with one addition, a canceller role with a term. The multisig
+(`LP_MULTISIG`, REAL's Safe) is its only proposer and its only executor, and a permanent canceller
+with no term. The timelock is the only holder of `DEFAULT_ADMIN_ROLE`. A second canceller
+(ApeBonds' Safe) is appointed only in two steps: REAL's Safe offers the role through a scheduled
+call of the timelock on itself (`offer-canceller`, 48 h), and the appointee accepts it inside
+seven days, naming the term (`accept-canceller`). The term is 1 to 180 days. A term canceller can
+cancel only the operations scheduled before its term end, so a revocation scheduled after the term
+end cannot be blocked by it. See "Appointing a canceller" below and the audit notes, item 14.
 
 On Sepolia test stack #6, and in the mainnet launch deploy too, the ApeBond route adds a sixth
 proxy, `BonusEscrow`, and one plain contract, `ApeBondPositionAdapter` — see "The ApeBond route"
@@ -158,7 +164,7 @@ launch deploy runs with `LP_APEBOND_ENABLED=1` and the production campaign —
 | `lp-mint-reward.js` | Operator front end for `RewardsDistributor.mintRewardToken(token, to, amount)`: mint a mintable reward token to ONE wallet outside the claim flow — a user's wallet, or `MINT_TO=distributor` to pre-fund claims. `MINT_TOKEN` (kind, symbol or address), `MINT_TO`, `MINT_AMOUNT` in whole tokens. Simulates the call from the operator first; sends when the signer is the operator, prints the Safe transaction otherwise. See "Minting a reward token to a wallet" below |
 | `lp-epoch.js` | Drive the emission schedule in `LPEpochRegistry`: `EPOCH_ACTION=show\|schedule\|set-amount\|update-bounds\|cancel`. Quantities in whole tokens per symbol (`EPOCH_AMOUNTS="OVTR=1000000,ASSET=3000"`); the grid, the 30-minute margin and the overlap rule are checked against chain time before anything is proposed. Sends when the signer is the registry operator; prints the Safe transaction otherwise |
 | `add-reward-token.js` | Prepare a NEW reward token: deploy an Overture-shaped token proxy (or take `REWARD_TOKEN_ADDRESS`), record `RewardToken:<SYMBOL>` in `deployments.json`, and print the `addRewardToken(token, conditional, claimsEnabled)` timelock operation and the follow-ups. Sends nothing to the timelock |
-| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending`. The two schedules send when the signer holds `PROPOSER_ROLE` and the two executes when it holds `EXECUTOR_ROLE`, otherwise they print the Safe transaction (`to` = the timelock, `value` 0, `data`) and send nothing. Also exports the operation and batch builders the other scripts and the suites use |
+| `lp-timelock.js` | Operate the timelock: `schedule`, `execute`, `schedule-batch`, `execute-batch`, `cancel`, `status`, `pending`, and the canceller actions `offer-canceller`, `accept-canceller`, `withdraw-offer`, `revoke-canceller`, `cancellers`. The two schedules send when the signer holds `PROPOSER_ROLE`, the two executes when it holds `EXECUTOR_ROLE` and `cancel` when it holds `CANCELLER_ROLE`, otherwise they print the Safe transaction (`to` = the timelock, `value` 0, `data`) and send nothing. `cancel` checks `canCancel(signer, id)` first and prints the reason instead of sending a transaction that would revert. Also exports the operation and batch builders the other scripts and the suites use |
 | `lp-switch-timelock.js` | Move everything the old timelock owns — the five proxies, and the escrow, the adapter and every reward token when recorded — to a NEW timelock (planned switch): `SWITCH_ACTION=deploy\|schedule\|execute\|accept\|raise-delay\|verify`. See "Replacing the timelock" below |
 | `deploy-implementation.js` | Deploy ONE new UUPS implementation for a proxy that is already live, and print the two `lp-timelock.js` command lines that activate it. `IMPL_TARGET=LPStakingVault\|RewardsDistributor\|LPEpochRegistry\|TokenOverture\|LPZapper\|BonusEscrow`, one kind per run. It sends exactly one transaction — the implementation deploy — and never calls the timelock or the proxy |
 | `validate-upgrade-safety.js` | UUPS implementation safety for the six (the five and `BonusEscrow`; network-free) plus, against a committed manifest, the storage-layout check. CI runs it on every push |
@@ -254,7 +260,8 @@ and exits non-zero when one fails:
 3. **The deployer key holds nothing:** no timelock role (proposer, executor, canceller, admin), and
    it is not `owner`, `pendingOwner`, `guardian` or `operator` of the five proxies, the escrow, the
    adapter or any recorded reward token. `LP_DEPLOYER` names the key's address (default: the
-   configured signer's).
+   configured signer's). Also, **only the timelock holds `DEFAULT_ADMIN_ROLE`**: the timelock holds
+   it, and no other account named in a `RoleGranted` log for that role still does.
 
 ```bash
 LP_DEPLOYER=0x… npx hardhat run scripts/post-launch-check.js --network mainnet
@@ -374,6 +381,37 @@ keccak256(calldata), tag))`), which is why the two commands above need no shared
 identical call cannot be scheduled twice, so a repeat needs `TIMELOCK_SALT_TAG=<something-new>`.
 A batch derives its salt the same way from all of its calls (`"real.lp.timelock.v1.batch"`).
 The full runbook is in `docs/lp-staking-audit-notes.md` item 14.
+
+#### Appointing a canceller (ApeBonds' Safe)
+
+The appointment is an offer by REAL's Safe and an acceptance by the appointee. `CANCELLER_TERM_DAYS`
+is the term in whole days, 1 to 180.
+
+```bash
+# 1. The offer: a call of the timelock on itself. The first run schedules it, a run after the
+#    delay (48 h on mainnet) executes it. A run in between prints the ready time and sends nothing.
+TIMELOCK_ACTION=offer-canceller CANCELLER_ADDRESS=0xApeSafe CANCELLER_TERM_DAYS=180 \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+
+# 2. The acceptance, inside the 7 days after the offer executed, naming the same term. Sent when
+#    the signer is the appointee. Otherwise the calldata for the appointee's Safe is printed.
+TIMELOCK_ACTION=accept-canceller CANCELLER_ADDRESS=0xApeSafe CANCELLER_TERM_DAYS=180 \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+
+# 3. Check: every canceller and every offer, with term end, isCancellerActive and expiresAt.
+TIMELOCK_ACTION=cancellers npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
+`withdraw-offer` (deletes an executed offer that was not accepted) and `revoke-canceller`
+(`revokeRole(CANCELLER_ROLE, CANCELLER_ADDRESS)`) run the same way as the offer, through a
+schedule and an execute. A revocation executes only after the appointee's term end: before it the
+execute would revert `CancellerTermActive`, so the script refuses it and says until when. A
+pending offer operation is stopped at once with `cancel` on its id. A renewal is a new offer and a
+new acceptance, and the acceptance resets the term end to the acceptance time plus the new term.
+The renewal has to start early enough that 48 h of delay, the Safe signatures on both sides and
+the acceptance all fit before the term end. Before a re-appointment that follows a gap after a term
+end, execute or cancel every pending operation first: operations scheduled in the gap and still
+pending at the acceptance become cancellable by the appointee.
 
 ### Sepolia stack #6 runbook (rehearsal of the mainnet launch)
 

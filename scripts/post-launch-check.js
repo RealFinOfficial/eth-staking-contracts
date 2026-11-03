@@ -21,6 +21,10 @@ const pools = require("./lib/pools");
 //      distributor's voucher signer, which could sign away every funded token) or `minter` (the
 //      Overture token's) of any LP contract: the five proxies, the escrow, the adapter and every
 //      recorded reward token. A contract without one of these seats is skipped for it.
+//      And ONLY THE TIMELOCK HOLDS `DEFAULT_ADMIN_ROLE`: the timelock holds it, and every other
+//      account a `RoleGranted` log ever named for it (scanned like the operations above) no
+//      longer does. That role administers every timelock role, the canceller role included, so a
+//      second holder could appoint or remove cancellers without the delay.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -48,6 +52,7 @@ const TIMELOCK_ABI = [
   "function EXECUTOR_ROLE() view returns (bytes32)",
   "function CANCELLER_ROLE() view returns (bytes32)",
   "function DEFAULT_ADMIN_ROLE() view returns (bytes32)",
+  "event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)",
   "event CallScheduled(bytes32 indexed id, uint256 indexed index, address target, uint256 value, bytes data, bytes32 predecessor, uint256 delay)",
   "event CallExecuted(bytes32 indexed id, uint256 indexed index, address target, uint256 value, bytes data)",
   "event Cancelled(bytes32 indexed id)",
@@ -137,6 +142,24 @@ async function main() {
     const has = await timelock.hasRole(await timelock[roleName](), deployer);
     report(!has, `LPTimelock.${roleName} not held by the deployer`);
   }
+  const adminRole = await timelock.DEFAULT_ADMIN_ROLE();
+  report(await timelock.hasRole(adminRole, timelockAddress), "LPTimelock.DEFAULT_ADMIN_ROLE held by the timelock");
+  const adminGrants = await scanLogs(timelockAddress, iface.getEvent("RoleGranted").topicHash, fromBlock, latest, chunk);
+  const adminHolders = new Set(
+    adminGrants
+      .map((log) => iface.parseLog(log).args)
+      .filter((args) => args.role === adminRole)
+      .map((args) => hre.ethers.getAddress(args.account))
+  );
+  adminHolders.delete(timelockAddress);
+  const others = [];
+  for (const account of adminHolders) {
+    if (await timelock.hasRole(adminRole, account)) others.push(account);
+  }
+  report(
+    others.length === 0,
+    `LPTimelock.DEFAULT_ADMIN_ROLE held by the timelock only (${others.length === 0 ? "no other holder" : `also ${others.join(", ")}`})`
+  );
   const kinds = [
     ...LP_KINDS,
     ...OPTIONAL_KINDS.filter((kind) => registry[kind]),
