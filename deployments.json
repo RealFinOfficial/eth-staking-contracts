@@ -28,7 +28,7 @@
       "name": "Overture",
       "symbol": "OVTR",
       "decimals": 18,
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04"
     },
     "RewardsDistributor": {
@@ -39,7 +39,7 @@
       "implementationTx": "0x74978593f7a109d96a8d42b3cbfd484394a626d34db48d89927d978d02e18219",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "rewardTokens": [
@@ -74,7 +74,7 @@
       "fee": 3000,
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "zapper": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
@@ -94,16 +94,16 @@
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "previousImplementation": "0xbcC6c8E65bAF6Dc2eBf50Fa7e121022AF2fC716a",
       "implementationBlock": 12012087,
       "upgradeTx": "0x527253ca1d68977a17164cf0128d3bb6a0a4342829af53dbcb2bced11f8e4fc8"
     },
     "TimelockController": {
-      "address": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
-      "deployTx": "0xa2fe0432635087a7493499b4e0f16c643dba7df33820cfb2106d02446eccb81c",
-      "block": 11854177,
+      "address": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "deployTx": "0x125ff06610d2c8aef965cc06828a24fb036ee8366c58b79f8a4c53bed4d6b57f",
+      "block": 12061157,
       "minDelay": 300,
       "proposers": [
         "0x5576bD37419dadAab305cca998E16BcD73318A35"
@@ -114,7 +114,8 @@
       "cancellers": [
         "0x5576bD37419dadAab305cca998E16BcD73318A35"
       ],
-      "admin": "0x0000000000000000000000000000000000000000"
+      "admin": "0x0000000000000000000000000000000000000000",
+      "deployer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "LPEpochRegistry": {
       "address": "0x818e60D675d3846cb955065DA2a2292497EBfb5e",
@@ -123,7 +124,7 @@
       "implementation": "0xBbEde547e6Da9AD557083Cd013682f5a8b0aAf0c",
       "implementationTx": "0x95465a872d266c760815de6316423fd7340f4f77baa085afd4c6cb3ce8ed8941",
       "distributor": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "interval": 900,
       "scheduleMargin": 1800
@@ -134,7 +135,7 @@
       "block": 11854199,
       "implementation": "0xbf7070D03840a1B862fDaC5f804eb4acA5A3498A",
       "implementationTx": "0x10df6b4ff8381906bedc3237d0e9f68fad3b27c3c0dd0db83e27aa8683f4dc39",
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "minter": "0xf839BE391803fe7104612bfd39A12EAde5DB7a04",
       "name": "Test Reward Three",
       "symbol": "TRW",
@@ -152,7 +153,7 @@
       "implementationTx": "0x03fd759cc87cfd84892b191e32955ea96e5cd4c3499d7c051b4a2fe7303e8b90",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "adapter": "0xD068cF148B22bB209999B52ddC5e5d80c0b61397"
     },
     "ApeBondPositionAdapter": {
@@ -210,9 +211,26 @@
           "configuredBy": "timelock batch 0x05db08b5c93904084d179fb71075724430d4052fb5acca4b676da0b5fe9bc657, 2026-10-28"
         }
       ],
-      "owner": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "pendingOwner": "0x0000000000000000000000000000000000000000",
       "previousAdapter": "0xC84994647Fa4817bb506bFa0607F927A3b7c46f7"
+    },
+    "TimelockControllerRetired": {
+      "address": "0xfA92F00f9C944fb64Beee19ECAb3609f8C596a8D",
+      "deployTx": "0xa2fe0432635087a7493499b4e0f16c643dba7df33820cfb2106d02446eccb81c",
+      "block": 11854177,
+      "minDelay": 300,
+      "proposers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "executors": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "cancellers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "admin": "0x0000000000000000000000000000000000000000",
+      "retiredInFavourOf": "0xf2F678AC5260BB297682D54DcD945BCB78901E20"
     }
   }
 }
