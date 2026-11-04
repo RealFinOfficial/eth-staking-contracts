@@ -2,7 +2,7 @@ const hre = require("hardhat");
 const pools = require("./lib/pools");
 
 // Read-only overview of any pool on any network, plus optional per-user detail.
-// Needs no signer, so it runs against mainnet without a Ledger attached.
+// Needs no signer, so it runs against mainnet without the mainnet signer attached.
 //   USERS — comma-separated addresses to inspect (optional)
 async function main() {
   const { pool, kind, address, chainId, weighted } = await pools.getPool();
