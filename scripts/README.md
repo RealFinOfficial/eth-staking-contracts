@@ -874,8 +874,11 @@ route: `pool.setBonusVault(bonusVault)`, then `transferOwnership(timelock)` on a
 nomination). The batch, in order: `acceptOwnership()` on the three,
 `WeightedStakingPoolV3.setMigrator(migrator)`, `V3BonusVault.setMigrator(migrator)` (no route works
 before these two, so none works before the timelock owns everything),
-`LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)` (only when the vault has no
-`bonusListener()` yet), `LPStakingVault.setBonusListener(bonusVault)`,
+`LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, initializeV2())` (data `0x5cd8a76b`;
+only when the vault has no `bonusHookGas()` yet: the 746b22c vault and the first v3 vault of
+2026-11-09; `initializeV2` writes the hook gas defaults 400,000 / 1,000,000),
+`LPStakingVault.setBonusHookGas(LP_BONUS_HOOK_GAS, LP_BONUS_LISTENER_GAS)` (only when those differ
+from what the vault holds after the upgrade), `LPStakingVault.setBonusListener(bonusVault)`,
 `LPStakingVault.setStakeOperator(migrator, true)`. A run RESUMES: a kind already recorded in
 deployments.json for the chain is reused (printed "recorded at …, reused") instead of deployed again,
 every wiring step and batch call already on chain is skipped, and an up-to-date stack yields no
@@ -896,13 +899,14 @@ on mainnet.
 | `V3_MAX_TOTAL_RESERVED` | the bonus vault's cap on all reservations, in whole $ASSET | required on mainnet; 100000 on test networks |
 | `V3_REWARDS_WAIVED` | `true` / `false`: the pool pays no USDC reward | `true` |
 | `V3_VAULT_IMPLEMENTATION` | the vault implementation the batch upgrades to | none |
+| `LP_BONUS_HOOK_GAS`, `LP_BONUS_LISTENER_GAS` | the vault's hook gas allowances (see "Measuring the hook gas" below) | 400000, 1000000 |
 | `V3_BATCH_FILE` | where the batch file goes | a file in the OS temp dir |
 
 Owner-tier calls on the new contracts go through `lp-timelock.js` (`setMigrator`, `setBonusVault`,
 `setSigner` on the pool, `setPool`, `setVault`, `setMaxTotalReserved`, `recoverSurplusAmount` on
 the bonus vault,
 `setRates` on the migrator, `upgradeToAndCall`, `transferOwnership`, `acceptOwnership`, and
-`setBonusListener` on the vault). The migrator's `setSigner`, `setTwapParams`, `pauseCompound` and
+`setBonusListener` and `setBonusHookGas` on the vault). The migrator's `setSigner`, `setTwapParams`, `pauseCompound` and
 `unpauseCompound` are operator / guardian tier and are sent directly. `deploy-implementation.js`
 knows the three kinds (the migrator's constructor arguments are read back from `lpVault()`,
 `usdc()`, `asset()`), and `validate-upgrade-safety.js` checks all three (their layout half only
@@ -981,6 +985,60 @@ data at 250,000 gas (`BONUS_LISTENER_GAS`) and succeeds at 1,000,000; `eth_estim
 Sepolia's gas costs are now about ten times the earlier ones (a plain ETH transfer used 204,600
 gas), and the fork suite passed at its older pinned block. `reconcileLp(234214)` (anyone may call
 it) would forfeit B's LP reservation; it was NOT called. Stopped here: no claim, no further step.
+
+### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
+
+The vault calls the ApeBond `BonusEscrow.onUnstake` and the staking v3 listener's `onUnstake` /
+`onRebalance` inside `try` with a gas allowance, and a hook that runs out of it fails OPEN: the
+exit or the rebalance completes and the bonus is silently not forfeited or not moved (only
+`BonusHookFailed` / `BonusListenerFailed` says so). Glamsterdam (EIP-8037, on Sepolia since
+2026-10-06, on mainnet at a date not yet set) makes a new storage slot about ten times dearer, so
+the allowances are owner-set since this fix: `setBonusHookGas(escrowGas, listenerGas)`, each
+100,000..3,000,000, defaults 400,000 / 1,000,000 (`initialize` on a new vault, `initializeV2()` in
+the upgrade of a live one). The script measures what the hooks really cost on the live chain,
+read-only, and prints them next to the allowances:
+
+```bash
+npx hardhat run scripts/measure-hook-gas.js --network sepolia
+npx hardhat run scripts/measure-hook-gas.js --network mainnet
+# optional: MEASURE_VAULT, MEASURE_ESCROW, MEASURE_LISTENER, MEASURE_ESCROW_TOKEN_IDS=1,2,
+#           MEASURE_LISTENER_TOKEN_IDS=3, MEASURE_FROM_BLOCK, MEASURE_MAX_IDS (3)
+```
+
+For each live reservation (found from the escrow's `BonusReserved` / `BonusMoved` and the
+listener's `LpBonusReserved` / `LpBonusMoved`, newest first) it sends `eth_estimateGas` of each
+hook with the VAULT as the sender (a node simulates any sender, nothing is signed or sent) and an
+`eth_call` with the gas limit set to exactly the allowance. `onRebalance` gets the position as
+staked (from the position manager, or from the vault's `Staked` / `Rebalanced` event when the NFT
+is burned) and a tokenId nobody uses as the new id, so it writes a NEW reservation row. The
+estimate includes the 21,000 intrinsic gas and the calldata, so it overstates the hook's need.
+Verdict per row: OK at 1.5x or more, LOW from 1x, FAIL below; a LOW or FAIL row means
+`setBonusHookGas` through `lp-timelock.js` BEFORE the operation. The escrow's `onRebalance` is fail
+closed (all remaining gas, no allowance) and is printed for the record.
+
+Run it: before every mainnet operation that links, upgrades or re-sizes a hook, after every network
+fork, and before every escrow or listener upgrade. The upgrade of a live vault is printed by
+`deploy-implementation.js` with its reinitializer when the proxy needs it
+(`upgradeToAndCall(<impl>, 0x5cd8a76b)`); `deploy-lp-staking.js` and `deploy-staking-v3.js` read
+`LP_BONUS_HOOK_GAS` / `LP_BONUS_LISTENER_GAS` and print them.
+
+```bash
+# raising them on a live vault (owner tier: schedule, wait the delay, execute the same operands)
+TIMELOCK_ACTION=schedule TIMELOCK_TARGET=LPStakingVault TIMELOCK_FN=setBonusHookGas \
+  TIMELOCK_ARGS=400000,1000000 npx hardhat run scripts/lp-timelock.js --network mainnet
+```
+
+Measured on Sepolia, 2026-11-09 ~20:30 Sofia (block 12099306), against stack #6 still on the
+pre-fix vault (allowances = the old fixed constants):
+
+| Contract | Hook | tokenId | `eth_estimateGas` from the vault | Old allowance | At the old allowance | New default |
+|---|---|---|---|---|---|---|
+| `BonusEscrow` | `onUnstake` (forfeits, active reservation) | 233319 | 61,186 | 100,000 | completes (1.63x) | 400,000 (6.5x) |
+| `BonusEscrow` | `onUnstake` (cliff passed, returns at once) | 234119, 234120 | 23,951 | 100,000 | completes | 400,000 |
+| `BonusEscrow` | `onRebalance` (moves, new row) | 233319 | 318,754 | none: fail closed, all gas | n/a | n/a |
+| `BonusEscrow` | `onRebalance` (cliff passed) | 234119, 234120 | 31,993 | fail closed | n/a | n/a |
+| `V3BonusVault` | `onUnstake` (forfeits) | 234214 | 75,901 | 250,000 | completes (3.29x) | 1,000,000 (13x) |
+| `V3BonusVault` | `onRebalance` (moves, new row) | 234214 | 339,336 | 250,000 | OUT OF GAS (0.74x) | 1,000,000 (2.9x) |
 
 ## Test tooling (plain Node, not `hardhat run`)
 

@@ -301,8 +301,12 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
 - **The vault side**: `LPStakingVault.setBonusListener(address)` (owner, C-13 rule:
   `ListenerHasReservations` while the listener's `totalLpReserved()` is above zero), `bonusListener` appended to the namespace,
   `unstake` and `rebalance` notify it FAIL OPEN after the escrow's call, each with
-  `BONUS_LISTENER_GAS` (250,000) behind `BONUS_LISTENER_GAS_FLOOR`, `BonusListenerFailed(tokenId)` on a
+  `bonusListenerGas()` behind `bonusListenerGasFloor()`, `BonusListenerFailed(tokenId)` on a
   revert (alert on it)
+- **Hook gas is owner-set (Glamsterdam, audit notes item 20)**: `setBonusHookGas(escrowGas,
+  listenerGas)` (timelock, 100,000..3,000,000 each), defaults 400,000 / 1,000,000 from `initialize`
+  or `initializeV2()` in a live upgrade; re-measure with `scripts/measure-hook-gas.js` after every
+  fork. Foundry cannot reproduce Glamsterdam pricing
 
 Deploy: `scripts/deploy-staking-v3.js` (see scripts/README.md "Staking v3"); the sw2 rehearsal pool:
 `scripts/deploy-weighted-test.js`. Audit scope note: item 19 of `docs/lp-staking-audit-notes.md`.

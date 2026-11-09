@@ -48,8 +48,14 @@ edge reverts `TickRangeOutsideTolerance`. Item 17 was touched for it.
 Revision 2026-11-09 (the staking v3 campaign): three new UUPS contracts under
 `contracts/staking-v3/` (`WeightedStakingPoolV3`, `V3BonusVault`, `StakingMigrator`) and the vault's
 owner-tier `setBonusListener`, whose two notifications fail open with their own 250,000 gas
-allowance. New item 19 is the scope note for the audit. Its "Changes after the internal security
+allowance (owner-configurable since the same evening, default 1,000,000: item 20). New item 19 is the scope note for the audit. Its "Changes after the internal security
 review" block lists the fix round of the same day.
+
+Revision 2026-11-09, evening (Glamsterdam): the vault's two fail-open hook allowances are no longer
+constants. `setBonusHookGas(escrowGas, listenerGas)` (owner, 100,000..3,000,000 each, event
+`BonusHookGasSet`), defaults 400,000 / 1,000,000 written by `initialize` or, on a live vault, by
+`initializeV2()` inside the upgrade. New item 20; items 15 and 19 and the I-01 operator note point
+to it.
 
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
@@ -904,7 +910,7 @@ operator-tier. The vault's `rescuePosition` IS `nonReentrant`, and that is still
   unowned upgrade path. Each proxy needs TWO `hardhat verify` commands — implementation, then
   proxy (implementation address + the `initialize` calldata) — and the script prints both,
   plus one for the timelock's four constructor arguments.
-- **Escrow upgrades (audit I-01, 27 Oct 2026):** before scheduling an escrow upgrade, run the hook gas tests (`test/forge/unit/VaultBonusHooks.t.sol` `test_HookGas_*`) against the new escrow and confirm the forfeiture figure is under `BONUS_HOOK_GAS` (100,000); if not, raise the vault constant in a vault upgrade first. The vault's
+- **Escrow upgrades (audit I-01, 27 Oct 2026; revised 2026-11-09 for item 20):** before scheduling an escrow or listener upgrade, run `scripts/measure-hook-gas.js` against the live chain (Foundry's `test_HookGas_*` cannot reproduce Glamsterdam pricing) and confirm the forfeiture figure is well under `bonusHookGas()` (default 400,000); if not, raise it with `setBonusHookGas` through the timelock first. The vault's
   `onUnstake` call is fail-open inside that allowance (item 15), so a heavier forfeiture would
   silently keep every bonus an early exit should forfeit; the backend alerts on `BonusHookFailed`.
 - **The proxies have no bootstrap at all** since 2026-09-10 (finding N-7): `initialize` names
@@ -1147,9 +1153,10 @@ nothing else about bonuses (decision A3 of the B.3 document).
   of 14 Oct 2026). While it is zero no notification is sent, and the only cost is one storage
   read per `unstake` / `rebalance`.
 - **`unstake` fails OPEN** (A4: the exit stays unconditional). After `delete stakers[tokenId]`
-  and before the NFT leaves, the vault requires `gasleft() >= BONUS_HOOK_GAS_FLOOR` (106,587) —
+  and before the NFT leaves, the vault requires `gasleft() >= bonusHookGasFloor()` (106,587 at the
+  old fixed 100,000; 411,349 at today's default 400,000, item 20) —
   else `InsufficientGasForBonusHook()` — and calls `onUnstake(tokenId)` inside `try` with
-  `BONUS_HOOK_GAS` (100,000). If the escrow reverts, the exit completes and
+  `bonusHookGas()` (100,000 fixed until item 20, now owner-set). If the escrow reverts, the exit completes and
   `BonusHookFailed(tokenId)` is emitted. That event means a bonus that should have been forfeited
   was not, so the backend's alert on it is MANDATORY whenever an escrow is linked. The floor is
   `100,000 × 64 / 63 + 5,000`: EIP-150 forwards at most 63/64 of the remaining gas, so without it
@@ -1430,8 +1437,8 @@ document is unchanged; the rebalance logic and every valuation of the vault are 
 **In scope, changed:** `LPStakingVault.setBonusListener(address)` (owner), `bonusListener` appended
 after `stakeOperators` in the vault namespace (layout validated against the live Sepolia stack #6
 proxy), and two notifications to it in `unstake` and `rebalance`, right after the escrow's. BOTH are
-FAIL OPEN, unlike the escrow's `onRebalance`: inside `try`, `BONUS_LISTENER_GAS` = 250,000 each,
-behind `BONUS_LISTENER_GAS_FLOOR` (`InsufficientGasForBonusHook` below it), `BonusListenerFailed(tokenId)`
+FAIL OPEN, unlike the escrow's `onRebalance`: inside `try`, `bonusListenerGas()` each (250,000 fixed
+at first, owner-set with default 1,000,000 since item 20), behind `bonusListenerGasFloor()` (`InsufficientGasForBonusHook` below it), `BonusListenerFailed(tokenId)`
 on a revert. `setBonusListener` refuses a code-less address (`NotAContract`) and, by the C-13 rule,
 refuses to unlink or replace a listener whose `totalReserved()` is above zero
 (`ListenerHasReservations`).
@@ -1489,3 +1496,80 @@ I4 a claim pays exactly or the vault is short, I5 `totalLpReserved` equals the s
 reservations), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
 (the three routes end to end on the real Sepolia Uniswap deployment, the timelock batch, the
 rebalance scaling, early-exit forfeiture, claims before and after funding).
+
+## 20. Glamsterdam: fixed hook stipends (found and fixed 2026-11-09)
+
+**What happened.** The Glamsterdam fork is live on Sepolia since 2026-10-06. Its EIP-8037 reprices
+state creation: writing a NEW storage slot costs about ten times more than before; reads, warm
+writes and a plain 21,000 transfer are unchanged. The same timelock initcode estimates 2,228,923 gas
+on mainnet and 15,332,029 on Sepolia (`eth_estimateGas`, measured 2026-11-09 ~21:00 Sofia). The vault
+gave its two fail-open notifications FIXED allowances sized on pre-fork measurements: 100,000
+(`BONUS_HOOK_GAS`) for the ApeBond escrow's `onUnstake`, 250,000 (`BONUS_LISTENER_GAS`) for each
+of the v3 listener's `onUnstake` and `onRebalance`. On Sepolia stack #6 the rebalance of tokenId
+234214 (tx `0xf8406bc0…1f6a`, block 12099214) emitted `BonusListenerFailed(234214)`: the listener's
+`onRebalance` writes a new reservation row under the new tokenId, ran out of gas at 250,000
+(`eth_estimateGas` from the vault on the state of block 12099213: 399,311; succeeds at 1,000,000),
+and the LP reservation stayed under the burned id.
+
+**Measured on Sepolia, read-only** (`scripts/measure-hook-gas.js`, `eth_estimateGas` sent from the
+vault's address, the 21,000 intrinsic and the calldata included, so every figure overstates the
+hook's own need; block 12099306, 2026-11-09 ~20:30 Sofia):
+
+| Contract | Hook | tokenId | Estimate | Old allowance | Result at the old allowance |
+|---|---|---|---|---|---|
+| `BonusEscrow` | `onUnstake`, active reservation (forfeits) | 233319 | 61,186 | 100,000 | completes, 1.63x |
+| `BonusEscrow` | `onUnstake`, cliff passed (returns at once) | 234119, 234120 | 23,951 | 100,000 | completes |
+| `BonusEscrow` | `onRebalance`, active (new row) | 233319 | 318,754 | fail closed, all remaining gas | n/a |
+| `BonusEscrow` | `onRebalance`, cliff passed | 234119, 234120 | 31,993 | fail closed | n/a |
+| `V3BonusVault` | `onUnstake` (forfeits) | 234214 | 75,901 | 250,000 | completes, 3.29x |
+| `V3BonusVault` | `onRebalance` (new row) | 234214 | 339,336 | 250,000 | OUT OF GAS, 0.74x |
+
+The escrow's forfeiture measured 29,952 in Foundry before the fork (item 15) and 61,186 on Sepolia
+after it; its margin fell from 3.3x to 1.6x. The escrow's `onRebalance` has no allowance (fail
+closed, item 15), so it only raises the rebalance's own gas use (318,754 against 31,993 for a matured
+one); it cannot fail silently.
+
+**Consequence on mainnet.** Mainnet has no Glamsterdam date yet, but it will fork. With the old
+100,000 / 250,000 the listener's `onRebalance` would run out on mainnet exactly as on Sepolia, and
+the escrow's `onUnstake` would sit close to its limit: both fail OPEN, so the vault would silently
+skip the LP bonus scaling and the bonus forfeiture, with only `BonusHookFailed` /
+`BonusListenerFailed` to show it.
+
+**The mitigation.** The two allowances are owner-set storage, appended in the vault namespace after
+`bonusListener` (slot 8, `uint128 bonusHookGas | uint128 bonusListenerGas << 128`; layout validated
+against the live stack #6 proxy):
+
+- `setBonusHookGas(uint256 escrowGas, uint256 listenerGas)`, `onlyOwner` (the timelock), each value
+  in [`MIN_BONUS_HOOK_GAS` = 100,000, `MAX_BONUS_HOOK_GAS` = 3,000,000], else
+  `BonusHookGasOutOfBounds(escrowGas, listenerGas)`; event `BonusHookGasSet(escrowGas, listenerGas)`.
+  The upper bound exists because each floor is a gas limit every `unstake` must carry.
+- Views `bonusHookGas()`, `bonusListenerGas()` and the floors `bonusHookGasFloor()`,
+  `bonusListenerGasFloor()` = `gas * 64 / 63 + 5,000`. The floor checks and the fail-open `try`
+  are otherwise unchanged. The old `BONUS_HOOK_GAS_FLOOR` / `BONUS_LISTENER_GAS_FLOOR` constants are
+  gone; `BONUS_HOOK_GAS` (now 400,000) and `BONUS_LISTENER_GAS` (now 1,000,000) are the DEFAULTS.
+- `initialize` takes the two values (deploy scripts: `LP_BONUS_HOOK_GAS` / `LP_BONUS_LISTENER_GAS`,
+  defaults 400000 / 1000000). A live vault gets them from `initializeV2()` (`reinitializer(2)`,
+  `onlyOwner`, calldata `0x5cd8a76b`), which writes the default into each allowance that is still
+  zero, inside `upgradeToAndCall(newImplementation, initializeV2())`: no second operation. A vault
+  upgraded with `0x` still forwards the defaults (the views fall back to them while the slot is zero).
+- Why 400,000 / 1,000,000: 6.5x the escrow's measured forfeiture and 2.5x the worst listener figure
+  (399,311), with room for a further repricing. A larger allowance costs nothing when unused; it only
+  raises the gas LIMIT an `unstake` or `rebalance` must carry (the listener's floor is 1,020,873).
+
+**What the operator must do.** Re-measure with `scripts/measure-hook-gas.js --network mainnet` before
+every mainnet operation that links, upgrades or re-sizes a hook, after every fork (Glamsterdam on
+mainnet first of all), and before every escrow or listener upgrade; raise the allowance with
+`setBonusHookGas` through the timelock when a row is LOW or FAIL. Foundry and the Hardhat network
+price gas by the pre-Glamsterdam schedule and cannot reproduce this: the `test_HookGas_*` tests are
+lower bounds only. Keep alerting on `BonusHookFailed` and `BonusListenerFailed`.
+
+Size: `LPStakingVault` 19,932 B runtime (`forge build --sizes`), 4,644 B under EIP-170 (was 19,044 B).
+
+Tests: `test/forge/unit/VaultBonusHookGas.t.sol` (owner only, bounds inclusive and refused on each
+side, event, floors fuzzed, `initialize` refusing an out-of-range value, `initializeV2` on a pre-fix
+proxy writing the defaults and running once, an upgrade without it using the defaults, values kept
+when already set, slot 8 packing, the configured allowance forwarded behind its floor), the updated
+`VaultBonusHooks.t.sol` / `VaultBranches.t.sol`, the "setBonusHookGas" block of
+`test/lp-staking/LPStakingVault.test.js`, `DeployImplementation.test.js` (the default
+`initializeV2()` data for a pre-fix vault) and `StakingV3SepoliaFork.test.js` (the batch's upgrade
+carries `initializeV2()`; 400,000 / 1,000,000 stored afterwards).
