@@ -10,8 +10,9 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
 
 /**
  * @notice Bounded actor on a bare {V3BonusVault}: the migrator's two reserves, the pool's early
- *         exit, the vault's unstake and rebalance (with random value ratios), clock warps, funding,
- *         claims and surplus recoveries. Per-step properties are checked around the step and kept
+ *         exit, the vault's unstake and rebalance (with random value ratios), the permissionless
+ *         `reconcileLp` (no handler tokenId is staked in the vault, so an active one is forfeited),
+ *         clock warps, funding, claims and surplus recoveries. Per-step properties are checked around the step and kept
  *         as violation counters; state properties are checked by the invariant functions.
  */
 contract V3BonusVaultHandler is Test {
@@ -106,6 +107,11 @@ contract V3BonusVaultHandler is Test {
         }
     }
 
+    function reconcile(uint256 idSeed) external {
+        if (nextId == 1) return;
+        book.reconcileLp(1 + idSeed % (nextId - 1));
+    }
+
     function warp(uint256 by) external {
         vm.warp(block.timestamp + bound(by, 1, 10 days));
     }
@@ -144,6 +150,18 @@ contract V3BonusVaultHandler is Test {
         recovered += amount;
     }
 
+    /// @notice Σ of every open LP amount: each LP reservation in a user's list that is neither
+    ///         claimed nor forfeited.
+    function openLpSum() external view returns (uint256 sum) {
+        for (uint256 i = 0; i < 3; ++i) {
+            uint256[] memory ids = book.lpTokensOf(users[i]);
+            for (uint256 j = 0; j < ids.length; ++j) {
+                (, uint256 lp,, bool claimed, bool forfeited) = book.lpReservation(ids[j]);
+                if (!claimed && !forfeited) sum += lp;
+            }
+        }
+    }
+
     /// @notice Σ of every open amount: each user's v3 reservation plus each LP reservation in the
     ///         user's list that is neither claimed nor forfeited.
     function openSum() external view returns (uint256 sum) {
@@ -179,6 +197,12 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
     /// @dev I1: `totalReserved` is exactly the sum of every open reservation.
     function invariant_TotalReservedIsTheSumOfOpenReservations() public view {
         assertEq(book.totalReserved(), handler.openSum());
+    }
+
+    /// @dev I5: `totalLpReserved` is exactly the LP part of the open reservations.
+    function invariant_TotalLpReservedIsTheSumOfOpenLpReservations() public view {
+        assertEq(book.totalLpReserved(), handler.openLpSum());
+        assertLe(book.totalLpReserved(), book.totalReserved());
     }
 
     /// @dev I2: the balance is what came in less what went out — nothing else moves tokens.

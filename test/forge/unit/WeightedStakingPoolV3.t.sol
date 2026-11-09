@@ -14,7 +14,8 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
  *         plus the migrator's `stakeFor` and the fail-closed early-exit notification.
  *
  *  `p` is a fresh pool whose activation is one day ahead (so both the free and the penalised
- *  withdrawal are reachable), with `carol` as its migrator and the harness bonus vault rebuilt
+ *  withdrawal are reachable), deployed WITHOUT the rewards waiver (v2's reward rules), with
+ *  `carol` as its migrator and the harness bonus vault rebuilt
  *  around it (`book`, migrator `carol`), so a forfeiture is visible end to end.
  */
 contract WeightedStakingPoolV3Test is StakingV3Harness {
@@ -30,7 +31,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         _deployStakingV3();
         start = block.timestamp + 1 days;
         end = start + 30 days;
-        p = _deployPoolV3(address(asset), address(usdcToken), start, end);
+        p = _deployPoolV3(address(asset), address(usdcToken), start, end, false);
         book = _deployBonusVault(address(asset), carol, address(p), address(0));
         p.setMigrator(carol);
         p.setBonusVault(address(book));
@@ -66,6 +67,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(p.owner(), address(this));
         assertEq(p.migrator(), carol);
         assertEq(p.bonusVault(), address(book));
+        assertFalse(p.rewardsWaived());
         assertEq(p.BASE_WEIGHT(), 1000);
         assertEq(p.MAX_WEIGHT(), 2000);
         assertEq(p.PENALTY_RECEIVER(), PENALTY_RECEIVER);
@@ -94,14 +96,14 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.expectRevert(reason);
         new LPProxy(
             address(impl),
-            abi.encodeCall(WeightedStakingPoolV3.initialize, (address(this), staking, reward, s, e, signer_))
+            abi.encodeCall(WeightedStakingPoolV3.initialize, (address(this), staking, reward, s, e, signer_, true))
         );
     }
 
     function test_Initialize_ImplementationIsLocked() public {
         WeightedStakingPoolV3 impl = new WeightedStakingPoolV3();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), address(asset), address(usdcToken), start, end, voucherSigner);
+        impl.initialize(address(this), address(asset), address(usdcToken), start, end, voucherSigner, true);
     }
 
     // ──────────────────────── stake ────────────────────────────
@@ -292,6 +294,74 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.prank(alice);
         vm.expectRevert(bytes("Nothing to unstake"));
         p.emergencyUnstake();
+    }
+
+    // ──────────────────────── Rewards waived (the v3 campaign) ─
+
+    function _waivedPool() internal returns (WeightedStakingPoolV3 w) {
+        w = _deployPoolV3(address(asset), address(usdcToken), start, end, true);
+        w.setMigrator(carol);
+        vm.prank(carol);
+        asset.approve(address(w), type(uint256).max);
+    }
+
+    function test_Waived_InitializeRecordsAndAnnouncesTheFlag() public {
+        WeightedStakingPoolV3 impl = new WeightedStakingPoolV3();
+        vm.expectEmit();
+        emit WeightedStakingPoolV3.RewardsWaivedSet(true);
+        WeightedStakingPoolV3 w = WeightedStakingPoolV3(
+            address(
+                new LPProxy(
+                    address(impl),
+                    abi.encodeCall(
+                        WeightedStakingPoolV3.initialize,
+                        (address(this), address(asset), address(usdcToken), start, end, voucherSigner, true)
+                    )
+                )
+            )
+        );
+        assertTrue(w.rewardsWaived());
+    }
+
+    function test_Waived_UnstakeAfterTheEndPaysThePrincipalWithZeroUsdc() public {
+        WeightedStakingPoolV3 w = _waivedPool();
+        vm.prank(carol);
+        w.stakeFor(alice, AMOUNT, 1500);
+        vm.warp(end);
+
+        uint256 assetBefore = asset.balanceOf(alice);
+        uint256 usdcBefore = usdcToken.balanceOf(alice);
+        uint256 userWeight = w.getUserWeight(alice);
+        uint256 total = w.getTotalEffectiveWeight();
+        vm.expectEmit(address(w));
+        emit WeightedStakingPoolV3.Unstaked(alice, AMOUNT, 0, 0, userWeight, total);
+        vm.prank(alice);
+        uint256 reward = w.unstake();
+
+        assertEq(reward, 0);
+        assertEq(asset.balanceOf(alice) - assetBefore, AMOUNT, "the whole principal");
+        assertEq(usdcToken.balanceOf(alice), usdcBefore, "no USDC");
+        assertEq(w.totalStaked(), 0);
+        vm.prank(alice);
+        vm.expectRevert(bytes("Nothing to unstake"));
+        w.unstake();
+    }
+
+    function test_Waived_AddRewardsReverts() public {
+        WeightedStakingPoolV3 w = _waivedPool();
+        usdcToken.approve(address(w), type(uint256).max);
+        vm.expectRevert(bytes("Rewards waived"));
+        w.addRewards(1_000e6);
+        assertEq(w.totalRewards(), 0);
+    }
+
+    function test_NotWaived_UnstakeStillRevertsRewardsNotFunded() public {
+        assertFalse(p.rewardsWaived());
+        _stakeFor(alice, AMOUNT, 1500);
+        vm.warp(end);
+        vm.prank(alice);
+        vm.expectRevert(bytes("Rewards not funded"));
+        p.unstake();
     }
 
     function test_Unstake_WhenFundedPaysStakeAndReward() public {

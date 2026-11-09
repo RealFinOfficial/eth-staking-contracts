@@ -64,6 +64,25 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(book.vault(), address(mathVault));
         assertEq(book.owner(), address(this));
         assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        assertEq(book.maxTotalReserved(), DEFAULT_BUDGET);
+    }
+
+    function test_Initialize_AnnouncesTheBudget() public {
+        V3BonusVault impl = new V3BonusVault();
+        vm.expectEmit();
+        emit V3BonusVault.MaxTotalReservedSet(0, 5 * BONUS);
+        V3BonusVault b = V3BonusVault(
+            address(
+                new LPProxy(
+                    address(impl),
+                    abi.encodeCall(
+                        V3BonusVault.initialize, (address(this), address(asset), carol, poolStub, address(0), 5 * BONUS)
+                    )
+                )
+            )
+        );
+        assertEq(b.maxTotalReserved(), 5 * BONUS);
     }
 
     function test_Initialize_RejectsZeroTokenOrPool() public {
@@ -71,19 +90,23 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.expectRevert(V3BonusVault.ZeroAddress.selector);
         new LPProxy(
             address(impl),
-            abi.encodeCall(V3BonusVault.initialize, (address(this), address(0), carol, poolStub, address(0)))
+            abi.encodeCall(
+                V3BonusVault.initialize, (address(this), address(0), carol, poolStub, address(0), DEFAULT_BUDGET)
+            )
         );
         vm.expectRevert(V3BonusVault.ZeroAddress.selector);
         new LPProxy(
             address(impl),
-            abi.encodeCall(V3BonusVault.initialize, (address(this), address(asset), carol, address(0), address(0)))
+            abi.encodeCall(
+                V3BonusVault.initialize, (address(this), address(asset), carol, address(0), address(0), DEFAULT_BUDGET)
+            )
         );
     }
 
     function test_Initialize_ImplementationIsLocked() public {
         V3BonusVault impl = new V3BonusVault();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), address(asset), carol, poolStub, address(0));
+        impl.initialize(address(this), address(asset), carol, poolStub, address(0), DEFAULT_BUDGET);
     }
 
     function test_SetVault_RejectsAVaultWithoutTheBonusToken() public {
@@ -446,6 +469,140 @@ contract V3BonusVaultTest is StakingV3Harness {
         book.onEarlyExit(alice);
         book.recoverSurplus(bob, BONUS);
         assertEq(asset.balanceOf(address(book)), 0);
+    }
+
+    // ──────────────────────── The budget (maxTotalReserved) ───
+
+    function test_Budget_ReserveAndReserveLpStopAtTheCap() public {
+        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
+        vm.startPrank(carol);
+        capped.reserve(alice, BONUS, UNLOCK, 1);
+        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
+        assertEq(capped.totalReserved(), 2 * BONUS, "exactly the cap is allowed");
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
+        capped.reserve(bob, 1, UNLOCK, 3);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
+        capped.reserveLp(ID2, bob, 1, UNLOCK);
+        vm.stopPrank();
+    }
+
+    function test_Budget_ReportsTheRemainingRoom() public {
+        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
+        vm.startPrank(carol);
+        capped.reserve(alice, BONUS + 1, UNLOCK, 1);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, BONUS, BONUS - 1));
+        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
+        vm.stopPrank();
+    }
+
+    function test_Budget_AForfeitureFreesRoom() public {
+        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), BONUS);
+        vm.prank(carol);
+        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
+        vm.prank(address(mathVault));
+        capped.onUnstake(ID1);
+        vm.prank(carol);
+        capped.reserve(bob, BONUS, UNLOCK, 3);
+        assertEq(capped.totalReserved(), BONUS);
+    }
+
+    function test_SetMaxTotalReserved_OwnerOnlyAnnouncedAndBelowTheTotalStopsNewOnes() public {
+        _reserve(alice, BONUS);
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        book.setMaxTotalReserved(0);
+
+        vm.expectEmit(address(book));
+        emit V3BonusVault.MaxTotalReservedSet(DEFAULT_BUDGET, BONUS / 2);
+        book.setMaxTotalReserved(BONUS / 2);
+        assertEq(book.maxTotalReserved(), BONUS / 2);
+        vm.prank(carol);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
+        book.reserve(bob, 1, UNLOCK, 3);
+        (uint256 amount,) = book.reservedOf(alice);
+        assertEq(amount, BONUS, "an existing reservation is untouched");
+
+        book.setMaxTotalReserved(2 * BONUS);
+        _reserve(bob, BONUS);
+        assertEq(book.totalReserved(), 2 * BONUS);
+    }
+
+    // ──────────────────────── totalLpReserved ──────────────────
+
+    function test_TotalLpReserved_FollowsEveryLpWriteAndOnlyThose() public {
+        _reserve(alice, BONUS);
+        assertEq(book.totalLpReserved(), 0, "a v3 reservation is not LP");
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, bob, BONUS);
+        assertEq(book.totalLpReserved(), 2 * BONUS);
+
+        uint256 scaled = Math.mulDiv(BONUS, _value(L / 2), _value(L));
+        vm.prank(address(mathVault));
+        book.onRebalance(ID1, ID3, _snap(L), _snap(L / 2));
+        assertEq(book.totalLpReserved(), BONUS + scaled, "a down-scaling lowers it");
+
+        vm.prank(address(mathVault));
+        book.onUnstake(ID2);
+        assertEq(book.totalLpReserved(), scaled, "a forfeiture lowers it");
+
+        book.fund(10 * BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(alice);
+        book.claim();
+        assertEq(book.totalLpReserved(), 0, "a claim lowers it by the LP part only");
+        assertEq(book.totalReserved(), 0);
+    }
+
+    // ──────────────────────── setVault while LP is owed ────────
+
+    function test_SetVault_RefusedWhileAnLpReservationIsOutstanding() public {
+        _reserveLp(ID1, alice, BONUS);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.LpReservationsOutstanding.selector, BONUS));
+        book.setVault(address(0));
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.LpReservationsOutstanding.selector, BONUS));
+        book.setVault(address(mathVault));
+
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        book.setVault(address(0));
+        assertEq(book.vault(), address(0));
+    }
+
+    function test_SetVault_AV3ReservationDoesNotHoldIt() public {
+        _reserve(alice, BONUS);
+        book.setVault(address(0));
+        assertEq(book.vault(), address(0));
+    }
+
+    // ──────────────────────── reconcileLp ──────────────────────
+
+    function test_ReconcileLp_ForfeitsAReservationTheVaultNoLongerHolds() public {
+        // ID1 is not staked in the math vault: stakerOf(ID1) == 0 != alice.
+        _reserveLp(ID1, alice, BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        vm.prank(stranger);
+        assertTrue(book.reconcileLp(ID1), "anyone may call");
+        (, uint256 amount,,, bool forfeited) = book.lpReservation(ID1);
+        assertEq(amount, 0);
+        assertTrue(forfeited);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        assertFalse(book.reconcileLp(ID1), "a second call is a no-op");
+    }
+
+    function test_ReconcileLp_NoOpForUnknownMaturedOrUnlinked() public {
+        assertFalse(book.reconcileLp(ID3), "no reservation");
+        _reserveLp(ID1, alice, BONUS);
+        vm.warp(UNLOCK);
+        assertFalse(book.reconcileLp(ID1), "after the unlock nothing is touched");
+        assertEq(book.totalLpReserved(), BONUS);
+
+        V3BonusVault unlinked = _deployBonusVault(address(asset), carol, poolStub, address(0));
+        vm.prank(carol);
+        unlinked.reserveLp(ID2, alice, BONUS, UNLOCK + 1);
+        assertFalse(unlinked.reconcileLp(ID2), "no vault to ask");
+        assertEq(unlinked.totalLpReserved(), BONUS);
     }
 
     // ──────────────────────── Storage ──────────────────────────

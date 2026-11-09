@@ -10,7 +10,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @notice Property fuzzing of the staking v3 math: the rebalance scaling never raises a bonus, the
- *         route bonuses are exactly their rate of what was staked, the USDC valuation is monotonic,
+ *         route bonuses are exactly their rate of the bonus base (the compound's bought part at
+ *         most at its TWAP value), the USDC valuation is monotonic,
  *         and the recommended band always contains the +-6,932-tick band on the spacing grid.
  */
 contract StakingV3FuzzTest is StakingV3Harness {
@@ -47,9 +48,13 @@ contract StakingV3FuzzTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, principal, reward, 1);
         vm.prank(alice);
         (uint256 staked, uint256 bonus) =
-            migrator.compound(reward, principal, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
-        assertEq(staked, principal + reward * 4e18 / 1e6);
-        assertEq(bonus, Math.mulDiv(staked, bps, 10_000));
+            migrator.compound(reward, principal, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        uint256 bought = reward * 4e18 / 1e6;
+        assertEq(staked, principal + bought);
+        // The bought part enters the bonus base at most at its TWAP value.
+        uint256 base = principal + Math.min(bought, migrator.usdcInAsset(reward));
+        assertEq(bonus, Math.mulDiv(base, bps, 10_000));
+        assertLe(bonus, Math.mulDiv(staked, bps, 10_000), "never above the rate of the stake");
         (uint256 reserved,) = bonusVault.reservedOf(alice);
         assertEq(reserved, bonus);
     }

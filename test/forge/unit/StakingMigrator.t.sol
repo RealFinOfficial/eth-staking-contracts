@@ -38,7 +38,7 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 usdcBefore = usdcToken.balanceOf(alice);
         uint256 bought = REWARD * 4e18 / 1e6; // the router's rate: 4,000 $ASSET
         uint256 staked = PRINCIPAL + bought;
-        uint256 bonus = staked * 1000 / 10_000;
+        uint256 bonus = _compoundBonus(PRINCIPAL, bought, REWARD, 1000);
 
         vm.expectEmit(address(migrator));
         emit StakingMigrator.VoucherUsed(alice, 1, 1);
@@ -70,10 +70,20 @@ contract StakingMigratorTest is StakingV3Harness {
         assertTrue(migrator.isNonceUsed(alice, 1));
     }
 
+    /// @dev The compound bonus: `bps` of principal + min(bought, the USDC at the TWAP).
+    function _compoundBonus(uint256 principal, uint256 bought, uint256 usdcIn, uint256 bps)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 atTwap = migrator.usdcInAsset(usdcIn);
+        return (principal + (bought < atTwap ? bought : atTwap)) * bps / 10_000;
+    }
+
     function test_Compound_WithNoPrincipalStakesTheBoughtAssetOnly() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        (uint256 s,) = migrator.compound(REWARD, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        (uint256 s,) = migrator.compound(REWARD, 0, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
         assertEq(s, 4_000e18);
     }
 
@@ -81,7 +91,7 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.setRates(0, 1000, 500);
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        (, uint256 b) = migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        (, uint256 b) = migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
         assertEq(b, 0);
         assertEq(bonusVault.totalReserved(), 0);
     }
@@ -91,14 +101,14 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
         vm.expectRevert(StakingMigrator.CompoundIsPaused.selector);
-        migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Compound_RevertsOnZeroUsdc() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
         vm.expectRevert(StakingMigrator.ZeroAmount.selector);
-        migrator.compound(0, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        migrator.compound(0, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Compound_RevertsWhenTheSwapIsBelowItsMinimum() public {
@@ -120,7 +130,7 @@ contract StakingMigratorTest is StakingV3Harness {
                 int24(SWAP_DEVIATION_TICKS)
             )
         );
-        migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Compound_UsesAnErc2612PermitWhenTheAllowanceIsShort() public {
@@ -139,7 +149,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
         StakingMigrator.Voucher memory v = _voucher(migrator, dave, 1, PRINCIPAL, REWARD, 1);
         vm.prank(dave);
-        (uint256 s,) = migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, up, ap, v);
+        (uint256 s,) = migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, up, ap, v);
         assertEq(s, PRINCIPAL + 4_000e18);
         assertEq(asset.nonces(dave), 1, "the permit was used");
     }
@@ -150,7 +160,7 @@ contract StakingMigratorTest is StakingV3Harness {
             StakingMigrator.Permit({value: 1, deadline: FAR_DEADLINE, v: 27, r: bytes32(uint256(1)), s: bytes32(0)});
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, junk, junk, v);
+        migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, junk, junk, v);
         assertEq(asset.nonces(alice), 0, "no permit was submitted");
     }
 
@@ -163,6 +173,104 @@ contract StakingMigratorTest is StakingV3Harness {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(StakingMigrator.VoucherNonceUsed.selector, alice, 7));
         migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), v);
+    }
+
+    // ──────────────────────── One transition per wallet ────────
+
+    function test_Migrated_ASecondRouteCallBySameUserReverts() public {
+        assertFalse(migrator.migrated(alice));
+        StakingMigrator.Voucher memory v3 = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
+        vm.prank(alice);
+        migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), v3);
+        assertTrue(migrator.migrated(alice));
+        assertFalse(migrator.migrated(bob));
+
+        // A fresh, validly signed voucher on every route is refused.
+        StakingMigrator.Voucher memory again = _voucher(migrator, alice, 3, PRINCIPAL, 0, 2);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), again);
+
+        StakingMigrator.Voucher memory v1 = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 3);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        migrator.compound(REWARD, 0, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v1);
+
+        StakingMigrator.Voucher memory v2 = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 4);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        migrator.moveToLp(REWARD, PRINCIPAL / 2, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v2);
+    }
+
+    function test_Migrated_AFailedRouteCallDoesNotMarkTheWallet() public {
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(StakingMigrator.PrincipalExceedsEligible.selector, PRINCIPAL + 1, PRINCIPAL)
+        );
+        migrator.claimRestake(PRINCIPAL + 1, FAR_DEADLINE, _noPermit(), v);
+        assertFalse(migrator.migrated(alice));
+        vm.prank(alice);
+        migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
+        assertTrue(migrator.migrated(alice));
+    }
+
+    // ──────────────────────── Compound bonus base (L2) ─────────
+
+    function test_Compound_MinAssetOutZeroReverts() public {
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
+        vm.prank(alice);
+        vm.expectRevert(StakingMigrator.MinAssetOutZero.selector);
+        migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+    }
+
+    function test_Compound_TheBonusNeverExceedsTheTwapValuedFigure() public {
+        // The router pays TWICE the pool price (a spot pushed far from the mean): 8,000 $ASSET for
+        // $1,000. The stake gets all of it, the bonus only the TWAP-valued ~4,000.
+        routerMock.setRate(address(usdcToken), address(asset), 8e18, 1e6);
+        asset.transfer(address(routerMock), 10_000e18);
+        uint256 atTwap = migrator.usdcInAsset(REWARD);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
+        vm.prank(alice);
+        (uint256 s, uint256 b) = migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        assertEq(s, PRINCIPAL + 8_000e18, "everything bought is staked");
+        assertEq(b, (PRINCIPAL + atTwap) * 1000 / 10_000, "the bonus base is capped at the TWAP value");
+        assertLt(b, s * 1000 / 10_000);
+    }
+
+    function test_Compound_ABadFillKeepsTheBonusOnWhatWasBought() public {
+        // The router pays HALF the pool price: the bonus base is what was actually bought.
+        routerMock.setRate(address(usdcToken), address(asset), 2e18, 1e6);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
+        vm.prank(alice);
+        (uint256 s, uint256 b) = migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        assertEq(s, PRINCIPAL + 2_000e18);
+        assertEq(b, s * 1000 / 10_000);
+    }
+
+    // ──────────────────────── Custody assert (L1) ──────────────
+
+    function test_MoveToLp_RevertsWhenTheVaultDoesNotCreditTheCaller() public {
+        // A vault whose `stakerOf` answers someone else: the migrator refuses to finish the route.
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 1);
+        uint256 nextId = mathNpm.nextTokenId();
+        vm.mockCall(
+            address(mathVault), abi.encodeWithSelector(LPStakingVault.stakerOf.selector, nextId), abi.encode(bob)
+        );
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(StakingMigrator.CustodyAssertFailed.selector, nextId, address(mathVault), bob)
+        );
+        migrator.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+    }
+
+    function test_MoveToLp_RevertsWhenThePositionManagerShowsAnotherOwner() public {
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 1);
+        uint256 nextId = mathNpm.nextTokenId();
+        vm.mockCall(address(mathNpm), abi.encodeWithSignature("ownerOf(uint256)", nextId), abi.encode(stranger));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.CustodyAssertFailed.selector, nextId, stranger, alice));
+        migrator.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Voucher_NoncesArePerUser() public {
@@ -237,7 +345,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(StakingMigrator.RewardExceedsEligible.selector, REWARD + 1, REWARD));
-        migrator.compound(REWARD + 1, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        migrator.compound(REWARD + 1, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Call_ExpiredDeadlineIsRejected() public {
@@ -600,6 +708,45 @@ contract StakingMigratorTest is StakingV3Harness {
         }
     }
 
+    function test_Initialize_RejectsAPoolOrBonusVaultOnAnotherToken() public {
+        address impl = _deployMigratorImpl(address(mathVault), address(usdcToken), address(asset));
+        WeightedStakingPoolV3 foreignPool = _deployPoolV3(address(overture), address(usdcToken), v3Start, v3End);
+        V3BonusVault foreignBonus = _deployBonusVault(address(overture), address(0), address(poolV3), address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StakingMigrator.TokenPairMismatch.selector,
+                address(usdcToken),
+                address(asset),
+                address(overture),
+                address(asset)
+            )
+        );
+        new LPProxy(
+            impl,
+            abi.encodeCall(
+                StakingMigrator.initialize,
+                (address(this), address(foreignPool), address(bonusVault), migratorSigner, 300, 953, 1800)
+            )
+        );
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                StakingMigrator.TokenPairMismatch.selector,
+                address(usdcToken),
+                address(asset),
+                address(asset),
+                address(overture)
+            )
+        );
+        new LPProxy(
+            impl,
+            abi.encodeCall(
+                StakingMigrator.initialize,
+                (address(this), address(poolV3), address(foreignBonus), migratorSigner, 300, 953, 1800)
+            )
+        );
+    }
+
     function test_Initialize_RejectsAValuationWindowOutOfBounds() public {
         address impl = _deployMigratorImpl(address(mathVault), address(usdcToken), address(asset));
         vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidValuationWindow.selector, 299, 300, 3600));
@@ -698,14 +845,20 @@ contract StakingMigratorTest is StakingV3Harness {
         (uint256 staked,) = flippedMigrator.compound(
             REWARD,
             PRINCIPAL,
-            0,
+            1,
             FAR_DEADLINE,
             _noPermit(),
             _noPermit(),
             _voucher(flippedMigrator, alice, 1, PRINCIPAL, REWARD, 1)
         );
         assertEq(staked, PRINCIPAL + 4_000e18);
+        flippedAsset.transfer(bob, PRINCIPAL);
+        vm.stopPrank();
 
+        // One transition per wallet: route 2 is bob's.
+        vm.startPrank(bob);
+        flippedAsset.approve(address(flippedMigrator), type(uint256).max);
+        usdcToken.approve(address(flippedMigrator), type(uint256).max);
         uint256 tokenId = flippedMigrator.moveToLp(
             REWARD,
             PRINCIPAL,
@@ -714,10 +867,10 @@ contract StakingMigratorTest is StakingV3Harness {
             FAR_DEADLINE,
             _noPermit(),
             _noPermit(),
-            _voucher(flippedMigrator, alice, 2, PRINCIPAL, REWARD, 2)
+            _voucher(flippedMigrator, bob, 2, PRINCIPAL, REWARD, 1)
         );
         vm.stopPrank();
-        assertEq(flippedVault.stakerOf(tokenId), alice);
+        assertEq(flippedVault.stakerOf(tokenId), bob);
         (, uint256 lpAmount,,,) = flippedBonusVault.lpReservation(tokenId);
         assertApproxEqRel(lpAmount, 800e18, 0.02e18, "10 % of ~$2,000 = ~8,000 $ASSET");
     }

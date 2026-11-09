@@ -14,10 +14,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @dev A listener that owes nothing and rejects every notification.
 contract RevertingListener {
-    uint256 public totalReserved;
+    uint256 public totalLpReserved;
 
-    function setTotalReserved(uint256 value) external {
-        totalReserved = value;
+    function setTotalLpReserved(uint256 value) external {
+        totalLpReserved = value;
     }
 
     function onUnstake(uint256) external pure {
@@ -77,12 +77,83 @@ contract VaultBonusListenerTest is StakingV3Harness {
     function test_SetBonusListener_AListenerThatOwesIsPermanent() public {
         uint256 tokenId = _join();
         (, uint256 lpAmount,,,) = bonusVault.lpReservation(tokenId);
-        uint256 owed = bonusVault.totalReserved();
-        assertGt(lpAmount, 0);
+        uint256 owed = bonusVault.totalLpReserved();
+        assertEq(owed, lpAmount, "the guard reads the LP part only");
+        assertGt(bonusVault.totalReserved(), owed, "the v3 remainder is reserved too");
         vm.expectRevert(
             abi.encodeWithSelector(LPStakingVault.ListenerHasReservations.selector, address(bonusVault), owed)
         );
         mathVault.setBonusListener(address(0));
+    }
+
+    function test_SetBonusListener_AV3OnlyReservationDoesNotHoldTheLink() public {
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
+        vm.prank(alice);
+        migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
+        assertGt(bonusVault.totalReserved(), 0);
+        assertEq(bonusVault.totalLpReserved(), 0);
+        mathVault.setBonusListener(address(0));
+        assertEq(mathVault.bonusListener(), address(0));
+    }
+
+    // ──────────────────────── reconcileLp after a failed notification ─
+
+    /// @dev Runs `action` with the listener's code swapped for {RevertingListener}, then restores
+    ///      it: the storage behind the proxy is untouched, exactly like a listener that was down.
+    function _withListenerDown() internal returns (bytes memory saved) {
+        saved = address(bonusVault).code;
+        vm.etch(address(bonusVault), address(new RevertingListener()).code);
+    }
+
+    function test_ReconcileLp_AFailedRebalanceLeavesAStaleReservationReconcileForfeitsIt() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        uint256 totalBefore = bonusVault.totalReserved();
+
+        bytes memory saved = _withListenerDown();
+        vm.expectEmit(address(mathVault));
+        emit LPStakingVault.BonusListenerFailed(tokenId);
+        vm.prank(alice);
+        uint256 newId =
+            mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        vm.etch(address(bonusVault), saved);
+
+        // The reservation is still under the burned tokenId, active.
+        (address user, uint256 stale,,, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertEq(user, alice);
+        assertEq(stale, owedLp);
+        assertFalse(forfeited);
+        assertEq(mathVault.stakerOf(tokenId), address(0));
+
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(stranger);
+        assertTrue(bonusVault.reconcileLp(tokenId));
+        assertEq(bonusVault.totalReserved(), totalBefore - owedLp);
+        assertEq(bonusVault.totalLpReserved(), 0);
+        assertFalse(bonusVault.reconcileLp(newId), "the new tokenId carries no reservation");
+    }
+
+    function test_ReconcileLp_AFailedUnstakeIsForfeitedByReconcile() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        bytes memory saved = _withListenerDown();
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        vm.etch(address(bonusVault), saved);
+        assertEq(bonusVault.totalLpReserved(), owedLp, "the failed notification left it owed");
+
+        assertTrue(bonusVault.reconcileLp(tokenId));
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    function test_ReconcileLp_AStillStakedPositionIsANoOp() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        assertFalse(bonusVault.reconcileLp(tokenId));
+        (, uint256 amount,,, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertEq(amount, owedLp);
+        assertFalse(forfeited);
     }
 
     // ──────────────────────── The real flows ───────────────────

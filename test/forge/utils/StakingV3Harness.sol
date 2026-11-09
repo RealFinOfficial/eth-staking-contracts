@@ -18,9 +18,10 @@ import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol
  * @title StakingV3Harness
  * @notice The staking v3 stack on top of {ApeBondHarness}'s MATH RUNG: the real `LPStakingVault`
  *         over {MockMathPositionManager} (real Uniswap V3 liquidity math) and a pool mock at $0.25
- *         per $ASSET ($ASSET = token0, tick -290188, spacing 1). The three v3 proxies are wired the
- *         way `scripts/deploy-staking-v3.js` wires them: the pool's migrator and bonus vault, the
- *         bonus vault's migrator, the vault's bonus listener and stake operator.
+ *         per $ASSET ($ASSET = token0, tick -290188, spacing 1). The three v3 proxies are deployed
+ *         and wired the way `scripts/deploy-staking-v3.js` does it: the pool with its rewards
+ *         waived, the bonus vault with a budget ({DEFAULT_BUDGET}), the pool's bonus vault, then (the
+ *         timelock batch) the two migrator links, the vault's bonus listener and stake operator.
  *
  *  The harness is the owner of every contract and the math vault's guardian and operator, so
  *  every admin call is callable without a prank; `migratorSigner` signs the transition vouchers
@@ -36,6 +37,8 @@ abstract contract StakingV3Harness is ApeBondHarness {
     uint256 internal constant WEIGHT = 1500;
     uint32 internal constant VALUATION_WINDOW = 1800;
     uint24 internal constant SWAP_DEVIATION_TICKS = 953;
+    /// @dev The harness bonus vaults' `maxTotalReserved`: far above anything a test reserves.
+    uint256 internal constant DEFAULT_BUDGET = type(uint128).max;
 
     WeightedStakingPoolV3 internal poolV3;
     V3BonusVault internal bonusVault;
@@ -70,7 +73,15 @@ abstract contract StakingV3Harness is ApeBondHarness {
         _wireV3(mathVault, poolV3, bonusVault, migrator);
     }
 
+    /// @dev The deploy script's pool: rewards waived.
     function _deployPoolV3(address staking, address reward, uint256 start, uint256 end)
+        internal
+        returns (WeightedStakingPoolV3)
+    {
+        return _deployPoolV3(staking, reward, start, end, true);
+    }
+
+    function _deployPoolV3(address staking, address reward, uint256 start, uint256 end, bool waived)
         internal
         returns (WeightedStakingPoolV3)
     {
@@ -78,7 +89,7 @@ abstract contract StakingV3Harness is ApeBondHarness {
         LPProxy proxy = new LPProxy(
             address(impl),
             abi.encodeCall(
-                WeightedStakingPoolV3.initialize, (address(this), staking, reward, start, end, voucherSigner)
+                WeightedStakingPoolV3.initialize, (address(this), staking, reward, start, end, voucherSigner, waived)
             )
         );
         return WeightedStakingPoolV3(address(proxy));
@@ -88,9 +99,17 @@ abstract contract StakingV3Harness is ApeBondHarness {
         internal
         returns (V3BonusVault)
     {
+        return _deployBonusVault(token, migrator_, pool_, vault_, DEFAULT_BUDGET);
+    }
+
+    function _deployBonusVault(address token, address migrator_, address pool_, address vault_, uint256 budget)
+        internal
+        returns (V3BonusVault)
+    {
         V3BonusVault impl = new V3BonusVault();
         LPProxy proxy = new LPProxy(
-            address(impl), abi.encodeCall(V3BonusVault.initialize, (address(this), token, migrator_, pool_, vault_))
+            address(impl),
+            abi.encodeCall(V3BonusVault.initialize, (address(this), token, migrator_, pool_, vault_, budget))
         );
         return V3BonusVault(address(proxy));
     }
@@ -125,10 +144,11 @@ abstract contract StakingV3Harness is ApeBondHarness {
         return address(new StakingMigrator(lpVault_, usdc_, asset_));
     }
 
-    /// @dev The deploy script's direct wiring plus the timelock batch, in their order.
+    /// @dev The deploy script's direct wiring (the pool's bonus vault) plus the timelock batch (the
+    ///      two migrator links, then the vault's listener and stake operator), in their order.
     function _wireV3(LPStakingVault v, WeightedStakingPoolV3 p, V3BonusVault b, StakingMigrator m) internal {
-        p.setMigrator(address(m));
         p.setBonusVault(address(b));
+        p.setMigrator(address(m));
         b.setMigrator(address(m));
         v.setBonusListener(address(b));
         v.setStakeOperator(address(m), true);
