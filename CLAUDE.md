@@ -273,25 +273,33 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
   `stakeFor(user, amount, weight)` (only `migrator`; tokens pulled from the migrator; no pool
   voucher, the weight is the one the `TransitionVoucher` attested), `setMigrator`, `setBonusVault`
   (owner), and `bonusVault.onEarlyExit(user)` in `withdraw`, fail closed. Renounce disabled, so v2's
-  "renounced owner" switch is gone. The USDC reward slot is kept and left unfunded: `unstake`
-  reverts "Rewards not funded" and the exit after the end is `emergencyUnstake`
+  "renounced owner" switch is gone. The USDC reward slot is kept; the initializer flag
+  `rewardsWaived` (deploy default true) makes `addRewards` revert "Rewards waived" and `unstake`
+  after the end pay the principal with a zero reward
 - **`V3BonusVault.sol`** — the bonus book: `reserve(user, amount, unlockAt, route)` and
   `reserveLp(tokenId, user, amount, unlockAt)` (migrator only), `onEarlyExit(user)` (pool only:
   forfeits the WHOLE v3 reservation before the unlock), `onUnstake` / `onRebalance` (vault only,
   `BonusEscrow` semantics: move + down-only scaling, forfeit before the unlock, no-op after),
   `fund(amount)` (anyone), `claim()` (the caller's unlocked v3 + LP amounts, all or nothing,
   `InsufficientFunds(requested, available)`), `recoverSurplus(to, amount)`, `setMigrator` /
-  `setPool` / `setVault` (owner). No funding check at the transition
+  `setPool` / `setVault` (owner; `setVault` refused while `totalLpReserved() > 0`). No funding check
+  at the transition, but a budget: `maxTotalReserved` (initializer, owner `setMaxTotalReserved`),
+  `BudgetExceeded(requested, remaining)` above it. `totalLpReserved()` is the LP part of
+  `totalReserved()`. `reconcileLp(tokenId)` (anyone; the backend calls it for every
+  `BonusListenerFailed`) forfeits an active LP reservation whose position the vault no longer holds
+  for its user
 - **`StakingMigrator.sol`** — after the staker's own sw2 `unstake()`, one call: `compound` (route 1,
   USDC swapped to $ASSET under its own TwapGuard, everything staked in v3, `compoundBps` 1000),
   `moveToLp` (route 2, one position on spot ± 6,932 ticks staked in the LP vault, the rest in v3,
   `lpBps` 1000 on both parts, the USDC leg valued at the 1,800 s mean tick), `claimRestake` (route 3,
   principal only, `restakeBps` 500). An EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`)
-  gates each call. Routes 1 and 2: `pauseCompound` (vault guardian or operator) / `unpauseCompound`
-  (vault operator), born paused; route 3 never pauses. `setRates` owner; `setSigner`,
-  `setTwapParams` the vault's operator
+  gates each call; ONE transition per wallet (`migrated(user)`, later calls `AlreadyMigrated`). The
+  compound bonus counts the bought $ASSET at most at its TWAP value, `minAssetOut` must be above zero;
+  `moveToLp` asserts custody after the stake (`CustodyAssertFailed`). Routes 1 and 2:
+  `pauseCompound` (vault guardian or operator) / `unpauseCompound` (vault operator), born paused;
+  route 3 never pauses. `setRates` owner; `setSigner`, `setTwapParams` the vault's operator
 - **The vault side**: `LPStakingVault.setBonusListener(address)` (owner, C-13 rule:
-  `ListenerHasReservations` while the listener owes), `bonusListener` appended to the namespace,
+  `ListenerHasReservations` while the listener's `totalLpReserved()` is above zero), `bonusListener` appended to the namespace,
   `unstake` and `rebalance` notify it FAIL OPEN after the escrow's call, each with
   `BONUS_LISTENER_GAS` (250,000) behind `BONUS_LISTENER_GAS_FLOOR`, `BonusListenerFailed(tokenId)` on a
   revert (alert on it)
@@ -368,13 +376,13 @@ test/                — Hardhat test files (Mocha + Chai). 1063 tests, 0 pendin
                                   deploys via the repo's own scripts and ends with the planned
                                   timelock switch. Same skip rule as fork/
     integration/StakingV3SepoliaFork.test.js
-                                — 10 tests, the staking v3 transition on an in-process Sepolia fork
+                                — 11 tests, the staking v3 transition on an in-process Sepolia fork,
+                                  starting from a vault proxy on the 746b22c implementation
     integration/LPStakingSepoliaFork.test.js
                                 — 101 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 983 tests in 42 suites (2026-11-09, ci profile): 105 fork,
-                       816 unit, 26 fuzz, 36 invariant
+test/forge/          — Foundry tier. 1010 tests in 42 suites (2026-11-09 fix round, ci profile)
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork

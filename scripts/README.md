@@ -797,8 +797,8 @@ closed $ASSET staking window sw2 (`WeightedStakingPool` v2, mainnet
 
 | Route | Function | What moves | Bonus reserved |
 |---|---|---|---|
-| 1. compound into v3 | `compound(usdcAmount, assetAmount, minAssetOut, deadline, usdcPermit, assetPermit, v)` | USDC swapped to $ASSET (SwapRouter02, the vault pool's fee, TWAP-guarded 300 s / 953 ticks); principal + bought staked in v3 | `compoundBps` (1000) of the staked amount |
-| 2. join LP and compound | `moveToLp(usdcAmount, assetAmount, amount0Min, amount1Min, deadline, usdcPermit, assetPermit, v)` | one position on the band 6,932 ticks each side of the spot tick (-50 % / +100 %), from the whole USDC and the matching $ASSET, staked in the LP vault for the caller; USDC dust refunded; the rest of the $ASSET staked in v3 | `lpBps` (1000) of (LP $ASSET leg + LP USDC leg valued at the 1,800 s mean tick), keyed by the tokenId; `lpBps` of the v3 remainder |
+| 1. compound into v3 | `compound(usdcAmount, assetAmount, minAssetOut, deadline, usdcPermit, assetPermit, v)` | USDC swapped to $ASSET (SwapRouter02, the vault pool's fee, TWAP-guarded 300 s / 953 ticks; `minAssetOut` must be above zero, else `MinAssetOutZero`); principal + bought staked in v3 | `compoundBps` (1000) of (principal + min(bought, `usdcInAsset(usdcAmount)`)): the bought part counts at most at its 1,800 s TWAP value |
+| 2. join LP and compound | `moveToLp(usdcAmount, assetAmount, amount0Min, amount1Min, deadline, usdcPermit, assetPermit, v)` | one position on the band 6,932 ticks each side of the spot tick (-50 % / +100 %), from the whole USDC and the matching $ASSET, staked in the LP vault for the caller (custody asserted after the stake: `CustodyAssertFailed(tokenId, owner, staker)` unless the NFT is the vault's and credited to the caller); USDC dust refunded; the rest of the $ASSET staked in v3 | `lpBps` (1000) of (LP $ASSET leg + LP USDC leg valued at the 1,800 s mean tick), keyed by the tokenId; `lpBps` of the v3 remainder |
 | 3. claim and restake | `claimRestake(assetAmount, deadline, assetPermit, v)` | the principal only; the USDC stays in the wallet | `restakeBps` (500) of the principal |
 
 Every route needs the backend's `TransitionVoucher(address user,uint8 route,uint256
@@ -811,6 +811,11 @@ test tokens have no EIP-2612). Routes 1 and 2 are born PAUSED and are switched b
 tiers: `pauseCompound` (guardian or operator), `unpauseCompound` (operator only). Route 3 is never
 paused.
 
+**One transition per wallet.** The first successful route call marks the caller
+`migrated(user) = true`; every later route call by that wallet reverts `AlreadyMigrated(user)`,
+whatever voucher it carries. A replayed nonce still reverts `VoucherNonceUsed` first. The backend
+issues one voucher per sw2 claim and should read `migrated(user)` before it signs.
+
 The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoch`. Nothing is
 paid or checked at the transition. The company funds the vault with $ASSET any time before the
 end (`fund(amount)` or a plain transfer); `claim()` pays the caller's whole unlocked amount and
@@ -819,7 +824,32 @@ before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail c
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
 unlock both are no-ops and it stays claimable. Forfeited amounts stay in the vault as surplus
-(`recoverSurplus(to, amount)`, owner).
+(`recoverSurplus(to, amount)`, owner). `totalLpReserved()` is the LP part of `totalReserved()`.
+
+**The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve` and `reserveLp` revert
+`BudgetExceeded(requested, remaining)` above it, so the route call reverts with them. It is set at
+deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner (`setMaxTotalReserved`, event
+`MaxTotalReservedSet(previousMax, newMax)`, a timelock operation).
+
+**A failed listener notification (`BonusListenerFailed`).** The LP vault's two notifications fail
+open: when one reverts, the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays
+active under that tokenId. The backend MUST call `V3BonusVault.reconcileLp(tokenId)` (permissionless)
+for every `BonusListenerFailed` event: when the vault no longer holds the position for the
+reservation's user (`vault.stakerOf(tokenId) != user`: unstaked, or re-ranged into a new tokenId)
+and the reservation is still before its unlock, it is forfeited (`LpBonusForfeited`); otherwise the
+call changes nothing. A re-range whose notification failed therefore loses the LP bonus instead of
+carrying it to the new tokenId.
+
+**The exit after the end.** The pool is deployed with `rewardsWaived = true`
+(`V3_REWARDS_WAIVED`, default true): `unstake()` after the end pays the principal with a ZERO reward
+(`Unstaked(user, amount, 0, …)`), and `addRewards` reverts "Rewards waived". `emergencyUnstake()`
+still works. A pool initialized with `false` keeps v2's rule (`unstake` reverts "Rewards not funded"
+until rewards are added).
+
+The LP vault refuses to unlink or replace the listener while its `totalLpReserved()` is above zero
+(`ListenerHasReservations`); the v3-pool reservations do not hold the link. The bonus vault itself
+refuses `setVault` while `totalLpReserved()` is above zero (`LpReservationsOutstanding`), and
+`setPool` is only ever sent in the same batch as the pool's `setBonusVault`.
 
 ### Deploying (`scripts/deploy-staking-v3.js`)
 
@@ -829,7 +859,7 @@ IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --ne
 
 # 1. the three proxies, the direct wiring, the nominations and the timelock batch file
 V3_ACTIVATION_EPOCH=<unix> V3_END_EPOCH=<unix> V3_WEIGHT_SIGNER=0xBackendKey \
-  V3_VAULT_IMPLEMENTATION=0xNewVaultImpl \
+  V3_VAULT_IMPLEMENTATION=0xNewVaultImpl V3_MAX_TOTAL_RESERVED=100000 \
   npx hardhat run scripts/deploy-staking-v3.js --network sepolia
 
 # 2. the batch it printed: schedule, wait the delay, execute
@@ -839,13 +869,17 @@ TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=<file> TIMELOCK_SALT_TAG=staking-v
   npx hardhat run scripts/lp-timelock.js --network sepolia
 ```
 
-The deployer owns the three proxies until the batch runs, and sends the direct wiring itself:
-`pool.setMigrator(migrator)`, `pool.setBonusVault(bonusVault)`, `bonusVault.setMigrator(migrator)`,
-then `transferOwnership(timelock)` on all three (a nomination). The batch, in order:
-`acceptOwnership()` on the three, `LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)`
-(only when the vault has no `bonusListener()` yet), `LPStakingVault.setBonusListener(bonusVault)`,
-`LPStakingVault.setStakeOperator(migrator, true)`. A resumed run skips what is on chain and an
-up-to-date stack yields no batch. After the batch: fund the bonus vault, and
+The deployer owns the three proxies until the batch runs, and sends only the wiring that opens no
+route: `pool.setBonusVault(bonusVault)`, then `transferOwnership(timelock)` on all three (a
+nomination). The batch, in order: `acceptOwnership()` on the three,
+`WeightedStakingPoolV3.setMigrator(migrator)`, `V3BonusVault.setMigrator(migrator)` (no route works
+before these two, so none works before the timelock owns everything),
+`LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)` (only when the vault has no
+`bonusListener()` yet), `LPStakingVault.setBonusListener(bonusVault)`,
+`LPStakingVault.setStakeOperator(migrator, true)`. A run RESUMES: a kind already recorded in
+deployments.json for the chain is reused (printed "recorded at …, reused") instead of deployed again,
+every wiring step and batch call already on chain is skipped, and an up-to-date stack yields no
+batch. To deploy afresh, remove the three registry entries first. After the batch: fund the bonus vault, and
 `StakingMigrator.unpauseCompound()` (the vault's operator) once the pool has the liquidity routes 1
 and 2 need. Registry kinds: `WeightedStakingPoolV3`, `V3BonusVault`, `StakingMigrator`. `CONFIRM=yes`
 on mainnet.
@@ -858,12 +892,15 @@ on mainnet.
 | `V3_ASSET`, `V3_USDC` | the two tokens | the `LPZapper` entry's `asset`, `usdc` |
 | `V3_LP_VAULT`, `V3_TIMELOCK` | the vault and the owner | the registry entries |
 | `V3_TWAP_WINDOW`, `V3_TWAP_MAX_DEVIATION_TICKS` | the migrator's swap guard | 300, 953 |
-| `V3_VALUATION_WINDOW` | the mean tick valuing the LP USDC leg | 1800 |
+| `V3_VALUATION_WINDOW` | the mean tick valuing the LP USDC leg (and capping the compound bonus) | 1800 |
+| `V3_MAX_TOTAL_RESERVED` | the bonus vault's cap on all reservations, in whole $ASSET | required on mainnet; 100000 on test networks |
+| `V3_REWARDS_WAIVED` | `true` / `false`: the pool pays no USDC reward | `true` |
 | `V3_VAULT_IMPLEMENTATION` | the vault implementation the batch upgrades to | none |
 | `V3_BATCH_FILE` | where the batch file goes | a file in the OS temp dir |
 
 Owner-tier calls on the new contracts go through `lp-timelock.js` (`setMigrator`, `setBonusVault`,
-`setSigner` on the pool, `setPool`, `setVault`, `recoverSurplusAmount` on the bonus vault,
+`setSigner` on the pool, `setPool`, `setVault`, `setMaxTotalReserved`, `recoverSurplusAmount` on
+the bonus vault,
 `setRates` on the migrator, `upgradeToAndCall`, `transferOwnership`, `acceptOwnership`, and
 `setBonusListener` on the vault). The migrator's `setSigner`, `setTwapParams`, `pauseCompound` and
 `unpauseCompound` are operator / guardian tier and are sent directly. `deploy-implementation.js`

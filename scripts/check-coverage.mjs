@@ -49,6 +49,14 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-09, second time (the security-review fix round) ── only
+//    the three staking v3 denominators moved, every new branch is hit and the uncovered lines are
+//    the SAME artefacts as below: WeightedStakingPoolV3 lines 317 -> 322 (303 hit), branches 90 -> 92
+//    (30 hit; `rewardsWaived` in `unstake` and `addRewards`); V3BonusVault lines 181 -> 216 (213),
+//    branches 31 -> 35 (35; the budget, `reconcileLp`, the `setVault` guard, `totalLpReserved`);
+//    StakingMigrator lines 225 -> 238 (232), branches 33 -> 37 (37; `AlreadyMigrated`,
+//    `MinAssetOutZero`, the custody assert, the initializer's token cross-check). LPStakingVault is
+//    unchanged (the listener guard reads `totalLpReserved()` instead of `totalReserved()`).
 // ── Pinned floors, re-measured 2026-11-09 (staking v3) ── LPStakingVault lines 209 -> 233,
 //    branches 37 -> 48 (`setBonusListener`, `bonusListener()`, the two fail-open listener
 //    notifications with their gas floor); all new branches covered, the four uncovered lines are
@@ -254,16 +262,16 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 317, minHit: 298},
-    branches: {found: 90, minHit: 28},
+    lines: {found: 322, minHit: 303},
+    branches: {found: 92, minHit: 30},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 181, minHit: 178},
-    branches: {found: 31, minHit: 31},
+    lines: {found: 216, minHit: 213},
+    branches: {found: 35, minHit: 35},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
-    lines: {found: 225, minHit: 219},
-    branches: {found: 33, minHit: 33},
+    lines: {found: 238, minHit: 232},
+    branches: {found: 37, minHit: 37},
   },
 };
 
