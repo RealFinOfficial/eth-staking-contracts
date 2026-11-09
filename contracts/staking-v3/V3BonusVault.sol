@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -76,7 +77,8 @@ contract V3BonusVault is
         bool claimed;
         bool forfeited;
         /// Position of this tokenId in `lpTokens[user]`; the slot a rebalance rewrites in place.
-        uint32 index;
+        /// uint16 keeps the five fields in ONE slot (a cheaper fail-open rebalance hook).
+        uint16 index;
         uint256 amount;
     }
 
@@ -262,7 +264,7 @@ contract V3BonusVault is
         r.user = user;
         r.unlockAt = unlockAt;
         r.amount = amount;
-        r.index = uint32(ids.length);
+        r.index = SafeCast.toUint16(ids.length);
         ids.push(tokenId);
         $.totalReserved += amount;
 
@@ -319,7 +321,7 @@ contract V3BonusVault is
         uint256 newAmount = _scaled(amount, old_, new_);
 
         address user = r.user;
-        uint32 index = r.index;
+        uint16 index = r.index;
         moved.user = user;
         moved.unlockAt = r.unlockAt;
         moved.amount = newAmount;

@@ -163,6 +163,21 @@ contract LPStakingVault is
     ///         hook run short and fail silently.
     uint256 public constant BONUS_HOOK_GAS_FLOOR = (BONUS_HOOK_GAS * 64) / 63 + 5_000;
 
+    /// @notice Gas forwarded to EACH of the bonus listener's two notifications (staking v3,
+    ///         {setBonusListener}). Larger than {BONUS_HOOK_GAS} because the listener's
+    ///         `onRebalance` is FAIL OPEN, so running out of gas would leave the LP bonus unscaled
+    ///         under the burned tokenId: it reads this vault's TWAP (`observe` on the real pool is
+    ///         a binary search over the oracle's slots) and writes a new reservation. Measured on
+    ///         the mock pool at 80,759 gas from the caller with a live reservation
+    ///         (`test/forge/unit/VaultBonusListener.t.sol`, `test_HookGas_*`); 250,000 leaves room
+    ///         for the real pool's `observe`.
+    uint256 public constant BONUS_LISTENER_GAS = 250_000;
+
+    /// @notice Minimum `gasleft()` before each listener notification, by the rule of
+    ///         {BONUS_HOOK_GAS_FLOOR}: below it the `unstake` or `rebalance` reverts
+    ///         {InsufficientGasForBonusHook} instead of letting the listener run short.
+    uint256 public constant BONUS_LISTENER_GAS_FLOOR = (BONUS_LISTENER_GAS * 64) / 63 + 5_000;
+
     // ──────────────────────── Immutables ───────────────────────
 
     /// @notice Uniswap V3 NonfungiblePositionManager holding the staked NFTs.
@@ -786,8 +801,8 @@ contract LPStakingVault is
      * @notice Links the staking v3 bonus listener (`V3BonusVault`) notified on `unstake` and
      *         `rebalance` beside the bonus escrow, or unlinks it.
      * @dev Owner tier, for the reasons of {setBonusEscrow}. Both notifications to the listener
-     *      FAIL OPEN, each inside `try` with its own {BONUS_HOOK_GAS} allowance and behind the
-     *      {BONUS_HOOK_GAS_FLOOR} check, and emit {BonusListenerFailed} on a revert. Neither the
+     *      FAIL OPEN, each inside `try` with its own {BONUS_LISTENER_GAS} allowance and behind the
+     *      {BONUS_LISTENER_GAS_FLOOR} check, and emit {BonusListenerFailed} on a revert. Neither the
      *      rebalance logic nor any valuation changes: the listener receives the same two
      *      snapshots the escrow receives and values them itself. A non-zero address must carry
      *      code, and a listener that still owes `totalReserved()` cannot be unlinked or replaced
@@ -1260,8 +1275,8 @@ contract LPStakingVault is
     /// @dev The listener's `unstake` notification: the escrow's fail-open pattern, its own allowance.
     function _notifyListenerUnstake(address listener, uint256 tokenId) private {
         if (listener == address(0)) return;
-        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
-        try IBonusEscrowHooks(listener).onUnstake{gas: BONUS_HOOK_GAS}(tokenId) {} catch {
+        if (gasleft() < BONUS_LISTENER_GAS_FLOOR) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onUnstake{gas: BONUS_LISTENER_GAS}(tokenId) {} catch {
             emit BonusListenerFailed(tokenId);
         }
     }
@@ -1276,8 +1291,8 @@ contract LPStakingVault is
         IBonusEscrowHooks.Snapshot memory newPosition
     ) private {
         if (listener == address(0)) return;
-        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
-        try IBonusEscrowHooks(listener).onRebalance{gas: BONUS_HOOK_GAS}(oldTokenId, newTokenId, oldPosition, newPosition) {}
+        if (gasleft() < BONUS_LISTENER_GAS_FLOOR) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onRebalance{gas: BONUS_LISTENER_GAS}(oldTokenId, newTokenId, oldPosition, newPosition) {}
         catch {
             emit BonusListenerFailed(oldTokenId);
         }
