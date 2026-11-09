@@ -307,6 +307,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.prank(alice);
         uint256 reward = p.unstake();
         assertEq(reward, 500e6);
+        assertEq(p.totalRewards(), 1_000e6);
         assertEq(usdcToken.balanceOf(alice) - usdcBefore, 500e6);
         assertEq(p.claimedRewards(alice), 500e6);
         assertEq(p.totalRewardsClaimed(), 500e6);

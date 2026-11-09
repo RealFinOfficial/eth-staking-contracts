@@ -49,6 +49,22 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-09 (staking v3) ── LPStakingVault lines 209 -> 233,
+//    branches 37 -> 48 (`setBonusListener`, `bonusListener()`, the two fail-open listener
+//    notifications with their gas floor); all new branches covered, the four uncovered lines are
+//    the same `--ir-minimum` artefacts (accessor body, `_disableInitializers`, `__Ownable2Step_init`,
+//    `_checkTwapDeviation`). Three new files enter the gate:
+//      * V3BonusVault.sol 178/181 lines, 31/31 branches; StakingMigrator.sol 219/225 lines, 33/33
+//        branches. The uncovered lines are the same artefact classes (accessor bodies,
+//        `_disableInitializers`, `__Ownable2Step_init`, the two `_checkTwapDeviation()` call sites,
+//        one constructor local).
+//      * WeightedStakingPoolV3.sol 298/317 lines, 28/90 branches. It keeps v2's `require(cond,
+//        "reason")` checks verbatim (the revert strings are what the backend and front end decode),
+//        and under `--ir-minimum` those requires and the inlined `_calculatePenalty` / `_update*`
+//        call sites lose their attribution: every one of the 62 unhit branch items is exercised by a
+//        passing test in `test/forge/unit/WeightedStakingPoolV3.t.sol` (each revert string is
+//        asserted with `vm.expectRevert`). The floors pin what this basis can measure, so a drop
+//        still fails the gate.
 // ── Pinned floors, re-measured 2026-11-03, third time (`LPTimelock._revokeRole` emits
 //    `CancellerOfferWithdrawn` when it deletes a stored offer) ── LPTimelock lines 50 -> 51,
 //    branches 14 -> 15 (the emit and its `expiresAt != 0` condition). The emit line and the
@@ -194,8 +210,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 26, minHit: 26},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 209, minHit: 205},
-    branches: {found: 37, minHit: 37},
+    lines: {found: 233, minHit: 229},
+    branches: {found: 48, minHit: 48},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},
@@ -236,6 +252,18 @@ export const PER_FILE_FLOORS = {
   "contracts/lp-staking/deploy/LPTimelock.sol": {
     lines: {found: 51, minHit: 51},
     branches: {found: 15, minHit: 15},
+  },
+  "contracts/staking-v3/WeightedStakingPoolV3.sol": {
+    lines: {found: 317, minHit: 298},
+    branches: {found: 90, minHit: 28},
+  },
+  "contracts/staking-v3/V3BonusVault.sol": {
+    lines: {found: 181, minHit: 178},
+    branches: {found: 31, minHit: 31},
+  },
+  "contracts/staking-v3/StakingMigrator.sol": {
+    lines: {found: 225, minHit: 219},
+    branches: {found: 33, minHit: 33},
   },
 };
 

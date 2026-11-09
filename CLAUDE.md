@@ -262,6 +262,43 @@ operation, then funding and `lp-epoch.js set-amount`.
 - **`BonusHookFailed` must be alerted on** whenever a bonus escrow is linked: it means an exit
   completed while the escrow's forfeiture failed
 
+## Staking v3 (the transition campaign, 2026-11-09)
+
+Three more UUPS proxies under `contracts/staking-v3/`, owned by the `LPTimelock` after a two-step
+handover (the deployer wires them, nominates the timelock, the timelock batch accepts):
+
+- **`WeightedStakingPoolV3.sol`** — `WeightedStakingPool` (v2) as a UUPS implementation: the same
+  lifecycle, `Stake` / `Withdraw` / `UpdateWeight` vouchers (domain `WeightedStakingPool` / `1`),
+  penalty, `unstake` / `emergencyUnstake` and events, all state in one ERC-7201 namespace. Adds
+  `stakeFor(user, amount, weight)` (only `migrator`; tokens pulled from the migrator; no pool
+  voucher, the weight is the one the `TransitionVoucher` attested), `setMigrator`, `setBonusVault`
+  (owner), and `bonusVault.onEarlyExit(user)` in `withdraw`, fail closed. Renounce disabled, so v2's
+  "renounced owner" switch is gone. The USDC reward slot is kept and left unfunded: `unstake`
+  reverts "Rewards not funded" and the exit after the end is `emergencyUnstake`
+- **`V3BonusVault.sol`** — the bonus book: `reserve(user, amount, unlockAt, route)` and
+  `reserveLp(tokenId, user, amount, unlockAt)` (migrator only), `onEarlyExit(user)` (pool only:
+  forfeits the WHOLE v3 reservation before the unlock), `onUnstake` / `onRebalance` (vault only,
+  `BonusEscrow` semantics: move + down-only scaling, forfeit before the unlock, no-op after),
+  `fund(amount)` (anyone), `claim()` (the caller's unlocked v3 + LP amounts, all or nothing,
+  `InsufficientFunds(requested, available)`), `recoverSurplus(to, amount)`, `setMigrator` /
+  `setPool` / `setVault` (owner). No funding check at the transition
+- **`StakingMigrator.sol`** — after the staker's own sw2 `unstake()`, one call: `compound` (route 1,
+  USDC swapped to $ASSET under its own TwapGuard, everything staked in v3, `compoundBps` 1000),
+  `moveToLp` (route 2, one position on spot ± 6,932 ticks staked in the LP vault, the rest in v3,
+  `lpBps` 1000 on both parts, the USDC leg valued at the 1,800 s mean tick), `claimRestake` (route 3,
+  principal only, `restakeBps` 500). An EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`)
+  gates each call. Routes 1 and 2: `pauseCompound` (vault guardian or operator) / `unpauseCompound`
+  (vault operator), born paused; route 3 never pauses. `setRates` owner; `setSigner`,
+  `setTwapParams` the vault's operator
+- **The vault side**: `LPStakingVault.setBonusListener(address)` (owner, C-13 rule:
+  `ListenerHasReservations` while the listener owes), `bonusListener` appended to the namespace,
+  `unstake` and `rebalance` notify it FAIL OPEN after the escrow's call, each with
+  `BONUS_LISTENER_GAS` (250,000) behind `BONUS_LISTENER_GAS_FLOOR`, `BonusListenerFailed(tokenId)` on a
+  revert (alert on it)
+
+Deploy: `scripts/deploy-staking-v3.js` (see scripts/README.md "Staking v3"); the sw2 rehearsal pool:
+`scripts/deploy-weighted-test.js`. Audit scope note: item 19 of `docs/lp-staking-audit-notes.md`.
+
 ## Project Structure
 
 ```
@@ -303,7 +340,12 @@ contracts/           — Solidity source files
                                 and the two swap harnesses LPStakingVaultSwapHarness.sol /
                                 LPZapperSwapHarness.sol, which expose their parent's internal
                                 `_executeSwap` so the ZeroAmount arm can be reached
-test/                — Hardhat test files (Mocha + Chai). 942 tests, 0 pending (2026-10-05, lane 2)
+  staking-v3/          — The staking v3 campaign (see "Staking v3" above); UUPS, timelock-owned
+    WeightedStakingPoolV3.sol — v2 as UUPS + the migrator's stakeFor + the early-exit notification
+    V3BonusVault.sol          — reserve now, fund later; v3 and LP (tokenId) reservations
+    StakingMigrator.sol       — the three transition routes behind a TransitionVoucher
+    interfaces/IStakingV3.sol — the cross-contract calls
+test/                — Hardhat test files (Mocha + Chai). 1063 tests, 0 pending (2026-11-09, staking v3)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
   lp-staking/
@@ -325,12 +367,14 @@ test/                — Hardhat test files (Mocha + Chai). 942 tests, 0 pending
                                 — 102 tests on a spawned `hardhat node --fork`, mainnet-pinned;
                                   deploys via the repo's own scripts and ends with the planned
                                   timelock switch. Same skip rule as fork/
+    integration/StakingV3SepoliaFork.test.js
+                                — 10 tests, the staking v3 transition on an in-process Sepolia fork
     integration/LPStakingSepoliaFork.test.js
                                 — 101 tests, the same scenario driven through the profile
 test-live/           — REAL transactions. Never in CI, never in `npx hardhat test`
   sepolia/SepoliaLive.test.js — gated smoke run against live Sepolia; see "Test tiers"
-test/forge/          — Foundry tier. 721 tests in 34 suites: 104 fork, 564 unit, 21 fuzz,
-                       32 invariant
+test/forge/          — Foundry tier. 983 tests in 42 suites (2026-11-09, ci profile): 105 fork,
+                       816 unit, 26 fuzz, 36 invariant
   utils/                      — plain .sol scaffolding; forge ignores it as non-test
     BaseForge.sol               — constants, the active profile, the skip-vs-fail rule
     ForkHarness.sol             — the stack against real Uniswap on a pinned fork
@@ -378,7 +422,11 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               vault first) | replace-adapter | upgrade-vault | verify
   fund-escrow.js            — Sends $ASSET into the escrow; TARGET=0 covers what is owed
   apebond-rehearsal.js      — Test-stack rehearsal: caller, deposit, loop, withdrawal, claim
-  deploy-implementation.js  — One new implementation for a live proxy (six kinds, BonusEscrow incl.)
+  deploy-implementation.js  — One new implementation for a live proxy (nine kinds: the six LP and
+                              ApeBond proxies and the three staking v3 proxies)
+  deploy-staking-v3.js      — The staking v3 proxies beside a live LP stack: deploy, direct wiring,
+                              nominations, and the timelock batch file (listener, stake operator)
+  deploy-weighted-test.js   — A short-window v2 pool (sw2 rehearsal) on Sepolia; refuses mainnet
   validate-upgrade-safety.js — UUPS implementation safety (network-free) and, against a
                               committed manifest, the storage-layout check. CI runs it
   create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
@@ -432,13 +480,14 @@ numbers and `vm.createSelectFork` reaches live Uniswap without spawning a node.
 | Hardhat in-process mainnet fork | `test/lp-staking/fork/LPStakingFork.test.js` | `npx hardhat test` | mainnet archive RPC |
 | Hardhat local-fork integration, mainnet-pinned | `test/lp-staking/integration/LPStakingLocalFork.test.js` | `npm run test:integration` | mainnet archive RPC |
 | Hardhat fork integration, profile-driven | `test/lp-staking/integration/LPStakingSepoliaFork.test.js` | `npm run test:integration:sepolia` | archive RPC for the profile's chain |
+| Hardhat staking v3 fork, in-process (Sepolia) | `test/lp-staking/integration/StakingV3SepoliaFork.test.js` | `npx hardhat test <file>` | archive RPC for Sepolia |
 | Live Sepolia smoke — gated, **never CI** | `test-live/sepolia/SepoliaLive.test.js` | `npm run test:sepolia:live` | `SEPOLIA_LIVE=1` + `PRIVATE_KEY` + endpoint |
 | Foundry fork (real state) | `test/forge/fork/` | `npm run test:forge` | archive RPC for the profile's chain |
 | Foundry unit (deterministic) | `test/forge/unit/` | `npm run test:forge` | nothing |
 | Foundry fuzz (properties) | `test/forge/fuzz/` | `npm run test:forge` | nothing |
 | Foundry invariant (campaigns) | `test/forge/invariant/` | `npm run test:forge` | nothing |
 
-`npx hardhat test` runs the first five (`paths.tests` is `./test`). It does **not** and must
+`npx hardhat test` runs the first six (`paths.tests` is `./test`). It does **not** and must
 never run `test-live/`.
 
 The **ApeBond route has no tier of its own.** Its unit coverage sits in the Hardhat unit tier
@@ -452,6 +501,14 @@ the operator scripts that follow (`fund-escrow.js`, `apebond-rehearsal.js`) are
 ApeBond section of the two fork-integration suites, which deploy a SECOND stack with
 `LP_APEBOND_ENABLED=1`, link it with `deploy-apebond.js`, and assert that the first, un-flagged
 stack has no ApeBond route at all.
+
+**Staking v3** has no tier of its own either: the Foundry unit suites
+`{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`, `fuzz/StakingV3Fuzz.t.sol`,
+`invariant/V3BonusVaultInvariants.t.sol`, and the in-process Sepolia-fork suite
+`integration/StakingV3SepoliaFork.test.js` (a fresh tREAL/tUSDC pool on the real Sepolia Uniswap
+deployment, a one-hour sw2 test pool, `deploy-staking-v3.js` run in-process against a scratch
+registry, the timelock batch, the three routes, the rebalance scaling, the early exit and the
+claims). It skips only when no Sepolia endpoint is reachable AND none is configured.
 
 **Test maps** — generated from the test files at the branch head on 2026-08-25; private
 artifacts, shared by the repository owner on request.

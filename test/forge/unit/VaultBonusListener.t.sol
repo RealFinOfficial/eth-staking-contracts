@@ -2,6 +2,7 @@
 pragma solidity 0.8.38;
 
 import {console} from "forge-std/console.sol";
+import {VmSafe} from "forge-std/Vm.sol";
 
 import {StakingV3Harness} from "../utils/StakingV3Harness.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
@@ -238,7 +239,11 @@ contract VaultBonusListenerTest is StakingV3Harness {
 
         console.log("listener onRebalance gas (caller-measured)", usedRebalance);
         console.log("listener onUnstake gas (caller-measured)", usedUnstake);
-        assertLt(usedRebalance, mathVault.BONUS_LISTENER_GAS() / 2, "rebalance hook inside the allowance with room");
-        assertLt(usedUnstake, mathVault.BONUS_LISTENER_GAS() / 10, "unstake hook far inside the allowance");
+        // The coverage build is unoptimized and instrumented (measured 180,550 there): it only has
+        // to stay inside the allowance; the optimized build has to leave half of it free.
+        bool coverage = vm.isContext(VmSafe.ForgeContext.Coverage);
+        uint256 allowance = mathVault.BONUS_LISTENER_GAS();
+        assertLt(usedRebalance, coverage ? allowance * 4 / 5 : allowance / 2, "rebalance hook inside the allowance");
+        assertLt(usedUnstake, allowance / 10, "unstake hook far inside the allowance");
     }
 }

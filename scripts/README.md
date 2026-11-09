@@ -787,6 +787,102 @@ The stack: vault proxy `0x6Ed8b565A61807591616e42263D91eBfA67Ddd56`, distributor
    longer matches what it was told to expect. The indexer needs nothing: it already handles the
    `Upgraded` event, and the proxy addresses it indexes do not change.
 
+## Staking v3
+
+The staking v3 campaign (decisions of Brandon and Vladimir, 2026-11-09) moves stakers from the
+closed $ASSET staking window sw2 (`WeightedStakingPool` v2, mainnet
+`0xE570E438C1278A15305dE03f67E095fAcbF35A86`, immutable) into a new pool. The staker first calls
+`unstake()` on sw2 (it pays principal and USDC reward to the staker only). Then ONE call on the
+`StakingMigrator` runs one of three routes:
+
+| Route | Function | What moves | Bonus reserved |
+|---|---|---|---|
+| 1. compound into v3 | `compound(usdcAmount, assetAmount, minAssetOut, deadline, usdcPermit, assetPermit, v)` | USDC swapped to $ASSET (SwapRouter02, the vault pool's fee, TWAP-guarded 300 s / 953 ticks); principal + bought staked in v3 | `compoundBps` (1000) of the staked amount |
+| 2. join LP and compound | `moveToLp(usdcAmount, assetAmount, amount0Min, amount1Min, deadline, usdcPermit, assetPermit, v)` | one position on the band 6,932 ticks each side of the spot tick (-50 % / +100 %), from the whole USDC and the matching $ASSET, staked in the LP vault for the caller; USDC dust refunded; the rest of the $ASSET staked in v3 | `lpBps` (1000) of (LP $ASSET leg + LP USDC leg valued at the 1,800 s mean tick), keyed by the tokenId; `lpBps` of the v3 remainder |
+| 3. claim and restake | `claimRestake(assetAmount, deadline, assetPermit, v)` | the principal only; the USDC stays in the wallet | `restakeBps` (500) of the principal |
+
+Every route needs the backend's `TransitionVoucher(address user,uint8 route,uint256
+eligiblePrincipal,uint256 eligibleReward,uint256 weight,uint256 nonce,uint256 deadline)`, EIP-712
+domain `("StakingMigrator", "1", chainId, migrator proxy)`, signed by `migrator.signer()`. The
+migrator checks the route, the deadline, `assetAmount <= eligiblePrincipal`, `usdcAmount <=
+eligibleReward`, the per-user nonce and the signature, then passes `weight` to the v3 pool as the
+user's multiplier. A permit is optional: `deadline == 0` means "already approved" (the Sepolia
+test tokens have no EIP-2612). Routes 1 and 2 are born PAUSED and are switched by the LP vault's
+tiers: `pauseCompound` (guardian or operator), `unpauseCompound` (operator only). Route 3 is never
+paused.
+
+The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoch`. Nothing is
+paid or checked at the transition. The company funds the vault with $ASSET any time before the
+end (`fund(amount)` or a plain transfer); `claim()` pays the caller's whole unlocked amount and
+reverts `InsufficientFunds(requested, available)` while the balance is short. A `withdraw` from v3
+before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed). The LP
+reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
+min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
+unlock both are no-ops and it stays claimable. Forfeited amounts stay in the vault as surplus
+(`recoverSurplus(to, amount)`, owner).
+
+### Deploying (`scripts/deploy-staking-v3.js`)
+
+```bash
+# 0. a live vault older than the listener needs the new implementation first
+IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --network sepolia
+
+# 1. the three proxies, the direct wiring, the nominations and the timelock batch file
+V3_ACTIVATION_EPOCH=<unix> V3_END_EPOCH=<unix> V3_WEIGHT_SIGNER=0xBackendKey \
+  V3_VAULT_IMPLEMENTATION=0xNewVaultImpl \
+  npx hardhat run scripts/deploy-staking-v3.js --network sepolia
+
+# 2. the batch it printed: schedule, wait the delay, execute
+TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=<file> TIMELOCK_SALT_TAG=staking-v3 \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=<file> TIMELOCK_SALT_TAG=staking-v3 \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
+The deployer owns the three proxies until the batch runs, and sends the direct wiring itself:
+`pool.setMigrator(migrator)`, `pool.setBonusVault(bonusVault)`, `bonusVault.setMigrator(migrator)`,
+then `transferOwnership(timelock)` on all three (a nomination). The batch, in order:
+`acceptOwnership()` on the three, `LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)`
+(only when the vault has no `bonusListener()` yet), `LPStakingVault.setBonusListener(bonusVault)`,
+`LPStakingVault.setStakeOperator(migrator, true)`. A resumed run skips what is on chain and an
+up-to-date stack yields no batch. After the batch: fund the bonus vault, and
+`StakingMigrator.unpauseCompound()` (the vault's operator) once the pool has the liquidity routes 1
+and 2 need. Registry kinds: `WeightedStakingPoolV3`, `V3BonusVault`, `StakingMigrator`. `CONFIRM=yes`
+on mainnet.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `V3_ACTIVATION_EPOCH`, `V3_END_EPOCH` | the v3 active period; the end is the bonus unlock | required |
+| `V3_WEIGHT_SIGNER` | the v3 pool's weight-voucher signer | required |
+| `V3_MIGRATOR_SIGNER` | the `TransitionVoucher` signer | `V3_WEIGHT_SIGNER` |
+| `V3_ASSET`, `V3_USDC` | the two tokens | the `LPZapper` entry's `asset`, `usdc` |
+| `V3_LP_VAULT`, `V3_TIMELOCK` | the vault and the owner | the registry entries |
+| `V3_TWAP_WINDOW`, `V3_TWAP_MAX_DEVIATION_TICKS` | the migrator's swap guard | 300, 953 |
+| `V3_VALUATION_WINDOW` | the mean tick valuing the LP USDC leg | 1800 |
+| `V3_VAULT_IMPLEMENTATION` | the vault implementation the batch upgrades to | none |
+| `V3_BATCH_FILE` | where the batch file goes | a file in the OS temp dir |
+
+Owner-tier calls on the new contracts go through `lp-timelock.js` (`setMigrator`, `setBonusVault`,
+`setSigner` on the pool, `setPool`, `setVault`, `recoverSurplusAmount` on the bonus vault,
+`setRates` on the migrator, `upgradeToAndCall`, `transferOwnership`, `acceptOwnership`, and
+`setBonusListener` on the vault). The migrator's `setSigner`, `setTwapParams`, `pauseCompound` and
+`unpauseCompound` are operator / guardian tier and are sent directly. `deploy-implementation.js`
+knows the three kinds (the migrator's constructor arguments are read back from `lpVault()`,
+`usdc()`, `asset()`), and `validate-upgrade-safety.js` checks all three (their layout half only
+where the registry records them).
+
+### The sw2 rehearsal pool (`scripts/deploy-weighted-test.js`)
+
+```bash
+# a v2 pool on Sepolia, activation now, end in one hour, 1,000 tUSDC of rewards
+SW2_TEST_REWARD=1000 WEIGHT_SIGNER=0xBackendKey \
+  npx hardhat run scripts/deploy-weighted-test.js --network sepolia
+```
+
+`SW2_TEST_START_DELAY` (default 0) and `SW2_TEST_DURATION` (default 3600) move the window;
+`STAKING_TOKEN` / `REWARD_TOKEN` default to the `LPZapper` entry's tokens. It refuses mainnet and
+records the pool as `WeightedStakingPoolTest`.
+
 ## Test tooling (plain Node, not `hardhat run`)
 
 Two scripts here are not deployment scripts at all. They take no network and no signer; run

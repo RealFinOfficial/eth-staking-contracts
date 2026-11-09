@@ -45,6 +45,11 @@ minBonusAmount}` places the band around the pool's spot tick at each purchase (`
 defaults 6932 / 6932 / 500 ticks), and an NFT edge further than `toleranceTicks` from the band's
 edge reverts `TickRangeOutsideTolerance`. Item 17 was touched for it.
 
+Revision 2026-11-09 (the staking v3 campaign): three new UUPS contracts under
+`contracts/staking-v3/` (`WeightedStakingPoolV3`, `V3BonusVault`, `StakingMigrator`) and the vault's
+owner-tier `setBonusListener`, whose two notifications fail open with their own 250,000 gas
+allowance. New item 19 is the scope note for the audit.
+
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
 ---
@@ -1405,3 +1410,57 @@ Tests: `test/forge/unit/BonusEscrowBranches.t.sol`, `test/forge/unit/BonusEscrow
 loop, P3, value-keeping and fee-compounding rebalances, the after-cliff orderings, the oracle,
 funding, gas), `test/forge/unit/PositionValue.t.sol`, the invariant suite above,
 `test/lp-staking/BonusEscrow.test.js`, and the integration suites.
+
+## 19. Staking v3 — scope note for the audit (new contracts and the vault listener, 2026-11-09)
+
+The staking v3 campaign (decisions of Brandon and Vladimir, 2026-11-09) adds three UUPS contracts
+under `contracts/staking-v3/` and one owner-tier link on `LPStakingVault`. Everything else in this
+document is unchanged; the rebalance logic and every valuation of the vault are untouched.
+
+**In scope, new:**
+
+| File | What it is |
+|---|---|
+| `contracts/staking-v3/WeightedStakingPoolV3.sol` | `WeightedStakingPool` (v2) as a UUPS implementation in one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): the same lifecycle, vouchers (domain `WeightedStakingPool` / `1`), penalty, exits and events; plus `stakeFor(user, amount, weight)` callable only by `migrator`, and a FAIL-CLOSED `bonusVault.onEarlyExit(user)` in `withdraw` (after the state changes, before the transfers). Ownership two-step, `renounceOwnership` reverts, so v2's "owner renounced" switch and its branches are gone |
+| `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user (forfeited whole by `onEarlyExit` before the unlock) and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). Reserve now, fund later; `claim()` all or nothing, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
+| `contracts/staking-v3/StakingMigrator.sol` | The one-call transition after the staker's own sw2 `unstake()`: `compound` (USDC swapped through SwapRouter02 under its own `TwapGuard`, 300 s / 953 ticks), `moveToLp` (one position on spot ± 6,932 ticks rounded outward, the adapter's `_campaignRange` math, staked through `vault.stakeFor`; the USDC leg valued at the 1,800 s mean tick, `OracleHistory`), `claimRestake`. Each checks an EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`) and spends its per-user nonce before any token moves. Routes 1 and 2 behind `pauseCompound` (vault guardian or operator) / `unpauseCompound` (operator), born paused; route 3 never paused. Namespace `real.staking.storage.StakingMigrator` |
+| `contracts/staking-v3/interfaces/IStakingV3.sol` | The three cross-contract interfaces |
+
+**In scope, changed:** `LPStakingVault.setBonusListener(address)` (owner), `bonusListener` appended
+after `stakeOperators` in the vault namespace (layout validated against the live Sepolia stack #6
+proxy), and two notifications to it in `unstake` and `rebalance`, right after the escrow's. BOTH are
+FAIL OPEN, unlike the escrow's `onRebalance`: inside `try`, `BONUS_LISTENER_GAS` = 250,000 each,
+behind `BONUS_LISTENER_GAS_FLOOR` (`InsufficientGasForBonusHook` below it), `BonusListenerFailed(tokenId)`
+on a revert. `setBonusListener` refuses a code-less address (`NotAContract`) and, by the C-13 rule,
+refuses to unlink or replace a listener whose `totalReserved()` is above zero
+(`ListenerHasReservations`).
+
+**Deliberate properties a reviewer is expected to flag:**
+
+- **The listener's rebalance notification fails open.** A listener that reverts or runs out of its
+  250,000 gas leaves the LP reservation under the burned tokenId, unscaled; it then pays at the
+  unlock. The allowance is 3x the measured cost on the mock pool (80,759 gas optimized, 180,550 in
+  the coverage build) and the Sepolia-fork suite proves the real pool's `observe` fits.
+  `BonusListenerFailed` must be alerted on, like `BonusHookFailed`.
+- **The v3 pool trusts the migrator for the weight.** `stakeFor` verifies no pool voucher: a
+  compound's amount is known only after its swap. The weight is the one the backend signed in the
+  `TransitionVoucher`; the pool still bounds it to 1000..2000.
+- **The migrator's `setSigner` is operator tier** (undelayed, the LP vault's operator), like the
+  distributor's: a leaked voucher key must be replaceable without the 48 h delay. A leaked key lets
+  its holder reserve bonuses on their own deposits only; the reservation still needs the tokens
+  staked to the end and the vault funded.
+- **`moveToLp` mints with the whole USDC and the whole $ASSET as desired amounts.** The position
+  manager takes the matching pair at the spot price; the USDC it leaves is refunded, the $ASSET it
+  leaves is staked in v3. The spot is bounded by the migrator's TWAP guard before the mint, and the
+  caller's `amount0Min` / `amount1Min` bound the mint itself.
+- **v3 holds no USDC.** The reward slot is kept and left unfunded, so `unstake` reverts "Rewards not
+  funded" exactly like an unfunded v2 pool and the exit after the end is `emergencyUnstake`.
+- **The bonus unlock is the v3 pool's `endEpoch`,** read by the migrator at each transition; the
+  bonus vault keeps the latest unlock per user.
+
+Tests: `test/forge/unit/{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`,
+`test/forge/fuzz/StakingV3Fuzz.t.sol`, `test/forge/invariant/V3BonusVaultInvariants.t.sol` (I1
+`totalReserved` equals the sum of open reservations, I2 balance conservation, I3 scaling never raises,
+I4 a claim pays exactly or the vault is short), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
+(the three routes end to end on the real Sepolia Uniswap deployment, the timelock batch, the
+rebalance scaling, early-exit forfeiture, claims before and after funding).
