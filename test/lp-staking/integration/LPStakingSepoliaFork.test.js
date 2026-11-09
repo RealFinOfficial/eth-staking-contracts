@@ -1208,6 +1208,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
           "DepositsPausedSet",
           "RebalancePausedSet",
           "TwapParamsSet",
+          "BonusHookGasSet",
           "Initialized",
         ],
         [zapperAddr.toLowerCase()]: [
@@ -2667,6 +2668,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         "DepositsPausedSet",
         "RebalancePausedSet",
         "TwapParamsSet",
+        "BonusHookGasSet",
         "Initialized",
       ]);
     });

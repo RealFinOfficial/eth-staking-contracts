@@ -29,8 +29,9 @@ import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonus
  *      until the escrow holds the whole amount, then pays exactly it; `recoverSurplus` reverts
  *      `NoSurplus` while more is owed than held; its two-argument form moves a named amount of
  *      the surplus and reverts `SurplusExceeded` above it.
- *    - GAS: the real escrow's `onUnstake`, measured from the caller, against the vault's
- *      `BONUS_HOOK_GAS` (100,000).
+ *    - GAS: the real escrow's `onUnstake`, measured from the caller, against the vault's old
+ *      fixed allowance (100,000, now `MIN_BONUS_HOOK_GAS`). Foundry cannot reproduce the
+ *      Glamsterdam repricing (audit notes item 20); `scripts/measure-hook-gas.js` measures live.
  */
 contract BonusEscrowHooksTest is ApeBondHarness {
     uint256 internal constant ONE = 1e18;
@@ -416,7 +417,7 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         (,,,, bool forfeited) = escrow.reservationOf(tokenId);
         assertTrue(forfeited, "the measured call really forfeited");
         console.log("BonusEscrow.onUnstake gas, forfeiting a live reservation (caller-measured)", used);
-        assertLt(used, _measuredBound(), "a fraction of the vault's BONUS_HOOK_GAS");
+        assertLt(used, _measuredBound(), "a fraction of the vault's old 100,000 allowance");
     }
 
     function test_HookGas_NoReservationAndMaturedAreCheaper() public {
@@ -461,6 +462,7 @@ contract BonusEscrowHooksTest is ApeBondHarness {
     /// @dev A third of the allowance in the optimized build; half under `forge coverage`, which
     ///      compiles without the optimizer (same bound lane 1 used for its measurement).
     function _measuredBound() private view returns (uint256) {
-        return vm.isContext(VmSafe.ForgeContext.Coverage) ? vault.BONUS_HOOK_GAS() / 2 : vault.BONUS_HOOK_GAS() / 3;
+        return
+            vm.isContext(VmSafe.ForgeContext.Coverage) ? vault.MIN_BONUS_HOOK_GAS() / 2 : vault.MIN_BONUS_HOOK_GAS() / 3;
     }
 }

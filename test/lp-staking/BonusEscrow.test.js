@@ -65,7 +65,7 @@ describe("BonusEscrow", function () {
     const Vault = await ethers.getContractFactory("LPStakingVault");
     return upgrades.deployProxy(
       Vault,
-      [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+      [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS, 400000, 1000000],
       {
         kind: "uups",
         constructorArgs: [npm, poolAddress, t0, t1, FEE, routerAddr],

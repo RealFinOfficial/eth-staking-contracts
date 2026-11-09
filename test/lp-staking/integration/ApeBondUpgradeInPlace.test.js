@@ -206,7 +206,11 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
     });
 
     it("lets the position staked before the activation exit, with nothing to forfeit", async function () {
-      await chain.send(vault.connect(w.alice).unstake(stakedTokenId));
+      // Explicit gas limit: since the Glamsterdam fix the exit must carry the hook's floor
+      // (bonusHookGasFloor(), 411,349 at the 400,000 default), and this spawned node's
+      // eth_estimateGas binary search probes 30 M, above its own EIP-7825 cap of 16,777,216, and
+      // fails. A real node caps the search; this is the local estimator, not the vault.
+      await chain.send(vault.connect(w.alice).unstake(stakedTokenId, { gasLimit: 1_500_000 }));
       expect(await nfpm.ownerOf(stakedTokenId)).to.equal(w.alice.address);
       const [beneficiary] = await escrow.reservationOf(stakedTokenId);
       expect(beneficiary).to.equal(ethers.ZeroAddress);
@@ -230,7 +234,8 @@ describe("ApeBond activated on a live, mainnet-shaped stack (lane-1 vault)", fun
 
     it("forfeits the bonus on the immediate exit — the vault reports it, the escrow acts", async function () {
       const reserved = await escrow.totalReserved();
-      const receipt = await chain.send(vault.connect(w.bob).unstake(tokenId));
+      // Explicit gas limit, for the estimator reason given in the first exit above.
+      const receipt = await chain.send(vault.connect(w.bob).unstake(tokenId, { gasLimit: 1_500_000 }));
       const forfeited = receipt.logs
         .filter((log) => log.address === escrowAddr)
         .map((log) => escrow.interface.parseLog(log))

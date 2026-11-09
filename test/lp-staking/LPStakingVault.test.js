@@ -100,6 +100,8 @@ describe("LPStakingVault", function () {
         args.zapper,
         args.twapWindow,
         args.maxDeviationTicks,
+        400000,
+        1000000,
       ],
       {
         kind: "uups",
@@ -261,6 +263,7 @@ describe("LPStakingVault", function () {
         "DepositsPausedSet",
         "RebalancePausedSet",
         "TwapParamsSet",
+        "BonusHookGasSet", // the two hook gas allowances (audit notes item 20)
         "Initialized", // OZ, closing the initializer
       ]);
 
@@ -310,6 +313,8 @@ describe("LPStakingVault", function () {
           predicted,
           TWAP_WINDOW,
           MAX_DEVIATION_TICKS,
+          400000,
+          1000000,
         ])
       );
       await proxy.waitForDeployment();
@@ -2058,7 +2063,7 @@ describe("LPStakingVault", function () {
      *
      * The mock records five fields on every `onUnstake`. On a fresh mock four of them are
      * zero -> non-zero SSTOREs at ~22,100 gas each, which with its two external reads use more
-     * than the whole BONUS_HOOK_GAS (100,000) the vault forwards — so through the vault the
+     * than the old fixed 100,000 hook allowance the vault forwarded — so through the vault the
      * Record mode would itself run out of gas and be caught as a failed hook. One priming call
      * pays the zero -> non-zero price outside the measured path, leaving the slots warm-priced
      * as a real escrow's long-lived storage is. Returns the call count after priming (1).
@@ -2109,11 +2114,39 @@ describe("LPStakingVault", function () {
       });
 
       it("exposes the hook gas and its floor, floor >= gas * 64 / 63", async function () {
-        const gas = await vault.BONUS_HOOK_GAS();
-        const floor = await vault.BONUS_HOOK_GAS_FLOOR();
-        expect(gas).to.equal(100_000n);
+        const gas = await vault.bonusHookGas();
+        const floor = await vault.bonusHookGasFloor();
+        expect(await vault.BONUS_HOOK_GAS()).to.equal(400_000n);
+        expect(gas).to.equal(400_000n);
         expect(floor).to.equal((gas * 64n) / 63n + 5_000n);
         expect(floor).to.be.gte((gas * 64n) / 63n);
+        expect(await vault.bonusListenerGas()).to.equal(1_000_000n);
+        expect(await vault.bonusListenerGasFloor()).to.equal((1_000_000n * 64n) / 63n + 5_000n);
+      });
+    });
+
+    describe("setBonusHookGas (Glamsterdam fix, audit notes item 20)", function () {
+      it("is owner only and emits BonusHookGasSet", async function () {
+        for (const caller of [operatorSafe, guardian, stranger]) {
+          await expect(vault.connect(caller).setBonusHookGas(500_000, 1_500_000))
+            .to.be.revertedWithCustomError(vault, "OwnableUnauthorizedAccount")
+            .withArgs(caller.address);
+        }
+        await expect(vault.setBonusHookGas(500_000, 1_500_000))
+          .to.emit(vault, "BonusHookGasSet")
+          .withArgs(500_000n, 1_500_000n);
+        expect(await vault.bonusHookGas()).to.equal(500_000n);
+        expect(await vault.bonusListenerGas()).to.equal(1_500_000n);
+      });
+
+      it("accepts 100,000..3,000,000 on each side and refuses anything outside", async function () {
+        await vault.setBonusHookGas(100_000, 3_000_000);
+        await vault.setBonusHookGas(3_000_000, 100_000);
+        for (const [e, l] of [[99_999, 400_000], [400_000, 99_999], [3_000_001, 400_000], [400_000, 3_000_001]]) {
+          await expect(vault.setBonusHookGas(e, l))
+            .to.be.revertedWithCustomError(vault, "BonusHookGasOutOfBounds")
+            .withArgs(e, l);
+        }
       });
     });
 
@@ -2142,14 +2175,14 @@ describe("LPStakingVault", function () {
         expect(await nfpm.ownerOf(tokenId)).to.equal(alice.address);
       });
 
-      it("hands the hook its whole allowance, at most BONUS_HOOK_GAS", async function () {
+      it("hands the hook its whole allowance, at most bonusHookGas()", async function () {
         await linkEscrow();
         await primeEscrowStorage();
         const tokenId = await stakePosition(alice);
         await expect(vault.connect(alice).unstake(tokenId)).to.not.emit(vault, "BonusHookFailed");
 
         const seen = await escrow.lastUnstakeGasLeft();
-        const allowance = await vault.BONUS_HOOK_GAS();
+        const allowance = await vault.bonusHookGas();
         expect(seen).to.be.lte(allowance);
         // The callee's first instruction runs a few hundred gas into the frame.
         expect(seen).to.be.gt(allowance - 5_000n);
@@ -2167,7 +2200,7 @@ describe("LPStakingVault", function () {
         expect(await vault.stakerOf(tokenId)).to.equal(ZERO);
       });
 
-      it("an escrow that burns its whole allowance is cut off at BONUS_HOOK_GAS and the exit still completes", async function () {
+      it("an escrow that burns its whole allowance is cut off at bonusHookGas() and the exit still completes", async function () {
         await linkEscrow(BURN_GAS_ON_UNSTAKE);
         const tokenId = await stakePosition(alice);
 
@@ -2344,13 +2377,13 @@ describe("LPStakingVault", function () {
       const impl = await ethers.getContractAt("LPStakingVault", implAddr);
 
       await expect(
-        impl.initialize(alice.address, alice.address, alice.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+        impl.initialize(alice.address, alice.address, alice.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS, 400000, 1000000)
       ).to.be.revertedWithCustomError(impl, "InvalidInitialization");
     });
 
     it("cannot initialise the proxy a second time", async function () {
       await expect(
-        vault.initialize(alice.address, alice.address, alice.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS)
+        vault.initialize(alice.address, alice.address, alice.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS, 400000, 1000000)
       ).to.be.revertedWithCustomError(vault, "InvalidInitialization");
     });
 

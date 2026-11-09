@@ -199,6 +199,8 @@ describe("LPZapper", function () {
         ethers.ZeroAddress,
         TWAP_WINDOW,
         MAX_DEVIATION_TICKS,
+        400000,
+        1000000,
       ],
       {
         kind: "uups",

@@ -65,6 +65,22 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "escrowGas",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "listenerGas",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusHookGasOutOfBounds",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint16",
         "name": "cardinality",
         "type": "uint16"
@@ -192,6 +208,22 @@
       }
     ],
     "name": "InvalidTwapWindow",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "listener",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "totalLpReserved",
+        "type": "uint256"
+      }
+    ],
+    "name": "ListenerHasReservations",
     "type": "error"
   },
   {
@@ -580,6 +612,57 @@
     "inputs": [
       {
         "indexed": false,
+        "internalType": "uint256",
+        "name": "escrowGas",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "listenerGas",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusHookGasSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "tokenId",
+        "type": "uint256"
+      }
+    ],
+    "name": "BonusListenerFailed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "previousListener",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "newListener",
+        "type": "address"
+      }
+    ],
+    "name": "BonusListenerSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
         "internalType": "bool",
         "name": "depositsPaused",
         "type": "bool"
@@ -929,7 +1012,20 @@
   },
   {
     "inputs": [],
-    "name": "BONUS_HOOK_GAS_FLOOR",
+    "name": "BONUS_LISTENER_GAS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_BONUS_HOOK_GAS",
     "outputs": [
       {
         "internalType": "uint256",
@@ -961,6 +1057,19 @@
         "internalType": "uint32",
         "name": "",
         "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "MIN_BONUS_HOOK_GAS",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1007,6 +1116,71 @@
         "internalType": "address",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusHookGas",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusHookGasFloor",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusListener",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusListenerGas",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "bonusListenerGasFloor",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1082,9 +1256,26 @@
         "internalType": "uint24",
         "name": "maxDeviationTicks_",
         "type": "uint24"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bonusHookGas_",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bonusListenerGas_",
+        "type": "uint256"
       }
     ],
     "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "initializeV2",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1383,6 +1574,37 @@
       }
     ],
     "name": "setBonusEscrow",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "escrowGas",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "listenerGas",
+        "type": "uint256"
+      }
+    ],
+    "name": "setBonusHookGas",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newListener",
+        "type": "address"
+      }
+    ],
+    "name": "setBonusListener",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

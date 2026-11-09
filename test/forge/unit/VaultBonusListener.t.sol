@@ -313,7 +313,10 @@ contract VaultBonusListenerTest is StakingV3Harness {
         // The coverage build is unoptimized and instrumented (measured 180,550 there): it only has
         // to stay inside the allowance; the optimized build has to leave half of it free.
         bool coverage = vm.isContext(VmSafe.ForgeContext.Coverage);
-        uint256 allowance = mathVault.BONUS_LISTENER_GAS();
+        // Held to the OLD fixed 250,000: Foundry prices gas by the pre-Glamsterdam schedule and
+        // cannot reproduce EIP-8037 (audit notes item 20); the live vault forwards
+        // `bonusListenerGas()` (default 1,000,000) and `scripts/measure-hook-gas.js` measures it.
+        uint256 allowance = 250_000;
         assertLt(usedRebalance, coverage ? allowance * 4 / 5 : allowance / 2, "rebalance hook inside the allowance");
         assertLt(usedUnstake, allowance / 10, "unstake hook far inside the allowance");
     }

@@ -108,7 +108,7 @@ contract VaultBranchesTest is LocalHarness {
             new LPStakingVault(address(npmMock), address(poolMock), token0, token1, FEE, address(routerMock));
 
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 500);
+        impl.initialize(address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 500, 400_000, 1_000_000);
     }
 
     function test_Constructor_StoresTheWholeConfiguration() public view {
@@ -131,7 +131,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(0), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 500)
+                LPStakingVault.initialize,
+                (address(0), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 500, 400_000, 1_000_000)
             )
         );
     }
@@ -143,7 +144,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(this), address(0), operatorSafe, address(0), MIN_TWAP_WINDOW, 500)
+                LPStakingVault.initialize,
+                (address(this), address(0), operatorSafe, address(0), MIN_TWAP_WINDOW, 500, 400_000, 1_000_000)
             )
         );
     }
@@ -158,7 +160,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(this), multisig, address(0), address(0), MIN_TWAP_WINDOW, 500)
+                LPStakingVault.initialize,
+                (address(this), multisig, address(0), address(0), MIN_TWAP_WINDOW, 500, 400_000, 1_000_000)
             )
         );
     }
@@ -188,7 +191,16 @@ contract VaultBranchesTest is LocalHarness {
                     impl,
                     abi.encodeCall(
                         LPStakingVault.initialize,
-                        (address(this), multisig, operatorSafe, predictedZapper, MIN_TWAP_WINDOW, 500)
+                        (
+                            address(this),
+                            multisig,
+                            operatorSafe,
+                            predictedZapper,
+                            MIN_TWAP_WINDOW,
+                            500,
+                            400_000,
+                            1_000_000
+                        )
                     )
                 )
             )
@@ -237,7 +249,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW - 1, 500)
+                LPStakingVault.initialize,
+                (address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW - 1, 500, 400_000, 1_000_000)
             )
         );
 
@@ -249,7 +262,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(this), multisig, operatorSafe, address(0), MAX_TWAP_WINDOW + 1, 500)
+                LPStakingVault.initialize,
+                (address(this), multisig, operatorSafe, address(0), MAX_TWAP_WINDOW + 1, 500, 400_000, 1_000_000)
             )
         );
 
@@ -259,7 +273,8 @@ contract VaultBranchesTest is LocalHarness {
         new LPProxy(
             impl,
             abi.encodeCall(
-                LPStakingVault.initialize, (address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 0)
+                LPStakingVault.initialize,
+                (address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, 0, 400_000, 1_000_000)
             )
         );
 
@@ -272,7 +287,16 @@ contract VaultBranchesTest is LocalHarness {
             impl,
             abi.encodeCall(
                 LPStakingVault.initialize,
-                (address(this), multisig, operatorSafe, address(0), MIN_TWAP_WINDOW, MAX_TWAP_DEVIATION_TICKS + 1)
+                (
+                    address(this),
+                    multisig,
+                    operatorSafe,
+                    address(0),
+                    MIN_TWAP_WINDOW,
+                    MAX_TWAP_DEVIATION_TICKS + 1,
+                    400_000,
+                    1_000_000
+                )
             )
         );
     }
@@ -300,13 +324,24 @@ contract VaultBranchesTest is LocalHarness {
         emit LPStakingVault.RebalancePausedSet(false);
         vm.expectEmit(false, false, false, true);
         emit TwapGuard.TwapParamsSet(MIN_TWAP_WINDOW, 500);
+        vm.expectEmit(false, false, false, true);
+        emit LPStakingVault.BonusHookGasSet(400_000, 1_000_000);
         LPStakingVault fresh = LPStakingVault(
             address(
                 new LPProxy(
                     address(impl),
                     abi.encodeCall(
                         LPStakingVault.initialize,
-                        (address(this), multisig, operatorSafe, address(0xcafe), MIN_TWAP_WINDOW, 500)
+                        (
+                            address(this),
+                            multisig,
+                            operatorSafe,
+                            address(0xcafe),
+                            MIN_TWAP_WINDOW,
+                            500,
+                            400_000,
+                            1_000_000
+                        )
                     )
                 )
             )
@@ -320,12 +355,14 @@ contract VaultBranchesTest is LocalHarness {
         assertFalse(fresh.depositsPaused(), "the deposit switch must be what DepositsPausedSet announced");
         assertFalse(fresh.rebalancePaused(), "the rebalance switch must be what RebalancePausedSet announced");
         assertEq(fresh.twapWindow(), MIN_TWAP_WINDOW, "the window must be what TwapParamsSet announced");
+        assertEq(fresh.bonusHookGas(), 400_000, "the escrow allowance must be what BonusHookGasSet announced");
+        assertEq(fresh.bonusListenerGas(), 1_000_000, "and the listener allowance");
     }
 
     /// @dev A proxy is initialised exactly once; a second call cannot re-seat the owner.
     function test_Initialize_CannotRunTwiceOnTheProxy() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        vault.initialize(alice, alice, alice, alice, MIN_TWAP_WINDOW, 500);
+        vault.initialize(alice, alice, alice, alice, MIN_TWAP_WINDOW, 500, 400_000, 1_000_000);
     }
 
     /**

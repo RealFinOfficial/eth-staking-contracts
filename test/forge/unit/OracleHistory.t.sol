@@ -102,7 +102,8 @@ contract OracleHistoryTest is LocalHarness {
         LPStakingVault vaultImpl =
             new LPStakingVault(address(npmMock), address(poolMock), token0, token1, FEE, address(routerMock));
         bytes memory vaultInit = abi.encodeCall(
-            LPStakingVault.initialize, (address(this), address(this), address(this), address(0), 300, 500)
+            LPStakingVault.initialize,
+            (address(this), address(this), address(this), address(0), 300, 500, 400_000, 1_000_000)
         );
         LPZapper zapperImpl = new LPZapper(
             address(vault),

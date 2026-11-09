@@ -1022,6 +1022,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
           "DepositsPausedSet",
           "RebalancePausedSet",
           "TwapParamsSet",
+          "BonusHookGasSet",
           "Initialized",
         ],
         [zapperAddr.toLowerCase()]: [
@@ -2454,6 +2455,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         "DepositsPausedSet",
         "RebalancePausedSet",
         "TwapParamsSet",
+        "BonusHookGasSet",
         "Initialized",
       ]);
     });

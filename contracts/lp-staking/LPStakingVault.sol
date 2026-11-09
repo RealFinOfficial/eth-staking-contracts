@@ -59,12 +59,14 @@ interface IBonusListenerReservations {
  *  unset). The vault reports every `unstake` and every `rebalance` to the escrow AT THE MOMENT
  *  IT HAPPENS, through {IBonusEscrowHooks}, and knows nothing else about bonuses:
  *    - `unstake` -> `onUnstake(tokenId)`, after the staker record is deleted and before the NFT
- *      leaves. FAIL OPEN: called inside `try` with a fixed allowance of {BONUS_HOOK_GAS}; a
+ *      leaves. FAIL OPEN: called inside `try` with the owner-set allowance {bonusHookGas}; a
  *      reverting escrow never blocks an exit, and the vault emits {BonusHookFailed} instead —
  *      which must be monitored, because it means a bonus that should have been forfeited was
- *      not. Before the call the vault requires `gasleft() >= BONUS_HOOK_GAS_FLOOR`
+ *      not. Before the call the vault requires `gasleft() >= bonusHookGasFloor()`
  *      ({InsufficientGasForBonusHook} otherwise), so a caller cannot starve the hook of gas on
- *      purpose and have the exit complete while the hook fails.
+ *      purpose and have the exit complete while the hook fails. The allowance is storage, not a
+ *      constant, because a fork can reprice storage writes (EIP-8037 on Sepolia since
+ *      2026-10-06 made a new storage slot about ten times dearer): {setBonusHookGas}.
  *    - `rebalance` -> `onRebalance(oldTokenId, newTokenId, old, new)`, after the staker record
  *      has moved, with the old position's range and liquidity read BEFORE its liquidity was
  *      withdrawn. FAIL CLOSED: no `try`; a reverting escrow reverts the rebalance. `rebalance`
@@ -153,38 +155,35 @@ contract LPStakingVault is
     uint256 private constant NOT_RECEIVING = 1;
     uint256 private constant RECEIVING = 2;
 
-    /// @notice Gas forwarded to `IBonusEscrowHooks.onUnstake`. Sized from a measurement: a
-    ///         realistic escrow `onUnstake` behind an ERC-1967 proxy
-    ///         (`mocks/MockForfeitingBonusEscrow.sol`: vault check from storage, two cold
-    ///         reservation slots, `totalReserved` read and write, the forfeiture writes, the
-    ///         `BonusForfeited` event) forfeiting a live reservation measured 29,952 gas from the
-    ///         caller, the 2,600 cold-account charge included; a position with no reservation
-    ///         measured 14,606 (`test/forge/unit/VaultBonusHooks.t.sol`, `test_HookGas_*`).
-    ///         100,000 is 3.3 times the larger figure, room for the real escrow's code to differ.
-    uint256 public constant BONUS_HOOK_GAS = 100_000;
+    /// @notice DEFAULT gas forwarded to the bonus escrow's `onUnstake`: what {initialize} is
+    ///         normally given and what {initializeV2} writes into a live vault that has no value
+    ///         yet. The LIVE allowance is {bonusHookGas}, set by the owner with {setBonusHookGas}.
+    ///         The pre-fork measurement was 29,952 gas for a forfeiture behind an ERC-1967 proxy
+    ///         (`test/forge/unit/VaultBonusHooks.t.sol`, `test_HookGas_*`) and the old fixed
+    ///         allowance was 100,000; Glamsterdam (EIP-8037, live on Sepolia since 2026-10-06)
+    ///         reprices state creation, so the default is four times the old allowance. See audit
+    ///         notes item 20 and `scripts/measure-hook-gas.js`.
+    uint256 public constant BONUS_HOOK_GAS = 400_000;
 
-    /// @notice Minimum `gasleft()` at the moment the vault is about to call `onUnstake`.
-    ///         EIP-150 forwards at most 63/64 of the remaining gas to a callee, so the hook is
-    ///         guaranteed its full {BONUS_HOOK_GAS} only when `gasleft() >= BONUS_HOOK_GAS * 64 / 63`
-    ///         plus the cost of the call itself (cold account access 2,600 + call setup); 5,000
-    ///         covers that overhead. Below the floor the unstake reverts instead of letting the
-    ///         hook run short and fail silently.
-    uint256 public constant BONUS_HOOK_GAS_FLOOR = (BONUS_HOOK_GAS * 64) / 63 + 5_000;
+    /// @notice DEFAULT gas forwarded to EACH of the bonus listener's two notifications (staking
+    ///         v3, {setBonusListener}); the live value is {bonusListenerGas}. The old fixed
+    ///         250,000 ran out on Sepolia after Glamsterdam: the listener's `onRebalance` writes a
+    ///         new reservation row, and `eth_estimateGas` of it from the vault measured 399,311
+    ///         on 2026-11-09 (audit notes item 20). 1,000,000 is 2.5 times that figure.
+    uint256 public constant BONUS_LISTENER_GAS = 1_000_000;
 
-    /// @notice Gas forwarded to EACH of the bonus listener's two notifications (staking v3,
-    ///         {setBonusListener}). Larger than {BONUS_HOOK_GAS} because the listener's
-    ///         `onRebalance` is FAIL OPEN, so running out of gas would leave the LP bonus unscaled
-    ///         under the burned tokenId: it reads this vault's TWAP (`observe` on the real pool is
-    ///         a binary search over the oracle's slots) and writes a new reservation. Measured on
-    ///         the mock pool at 80,759 gas from the caller with a live reservation
-    ///         (`test/forge/unit/VaultBonusListener.t.sol`, `test_HookGas_*`); 250,000 leaves room
-    ///         for the real pool's `observe`.
-    uint256 public constant BONUS_LISTENER_GAS = 250_000;
+    /// @notice Lowest allowance {setBonusHookGas} accepts, for either hook: the old fixed escrow
+    ///         allowance, so the owner can never set less than the pre-fork code always had.
+    uint256 public constant MIN_BONUS_HOOK_GAS = 100_000;
 
-    /// @notice Minimum `gasleft()` before each listener notification, by the rule of
-    ///         {BONUS_HOOK_GAS_FLOOR}: below it the `unstake` or `rebalance` reverts
-    ///         {InsufficientGasForBonusHook} instead of letting the listener run short.
-    uint256 public constant BONUS_LISTENER_GAS_FLOOR = (BONUS_LISTENER_GAS * 64) / 63 + 5_000;
+    /// @notice Highest allowance {setBonusHookGas} accepts, for either hook. Each hook's floor
+    ///         ({bonusHookGasFloor}) is a gas limit every `unstake` must carry, so an unbounded
+    ///         value would let the owner make exits cost more than a block can hold.
+    uint256 public constant MAX_BONUS_HOOK_GAS = 3_000_000;
+
+    /// @dev Call overhead added to each floor on top of the 64/63 rule: cold account access
+    ///      2,600 plus call setup. See {bonusHookGasFloor}.
+    uint256 private constant HOOK_CALL_OVERHEAD = 5_000;
 
     // ──────────────────────── Immutables ───────────────────────
 
@@ -233,8 +232,16 @@ contract LPStakingVault is
         mapping(address => bool) stakeOperators;
         /// The staking v3 bonus listener (`V3BonusVault`), notified on `unstake` and `rebalance`
         /// BESIDE the bonus escrow, both calls fail open (see {setBonusListener}). Zero = off.
-        /// APPENDED after `stakeOperators` (staking v3 upgrade); it must stay last.
+        /// APPENDED after `stakeOperators` (staking v3 upgrade).
         address bonusListener;
+        /// Gas forwarded to the escrow's `onUnstake` ({setBonusHookGas}). Zero only on a live
+        /// vault upgraded without {initializeV2}; the hook calls then use {BONUS_HOOK_GAS}.
+        /// APPENDED after `bonusListener` (Glamsterdam fix, 2026-11-09). Both gas fields share
+        /// one slot (uint128 each), read together on every exit.
+        uint128 bonusHookGas;
+        /// Gas forwarded to each listener notification ({setBonusHookGas}); zero as above,
+        /// then {BONUS_LISTENER_GAS} is used. APPENDED with `bonusHookGas`; it must stay last.
+        uint128 bonusListenerGas;
     }
 
     /**
@@ -321,6 +328,10 @@ contract LPStakingVault is
     ///         LP bonus that should have been forfeited or moved was not: alert on it.
     event BonusListenerFailed(uint256 indexed tokenId);
 
+    /// @notice The two hook gas allowances changed ({setBonusHookGas}, {initialize},
+    ///         {initializeV2}). Carries the new values.
+    event BonusHookGasSet(uint256 escrowGas, uint256 listenerGas);
+
     // ──────────────────────── Errors ───────────────────────────
 
     error ZeroAddress();
@@ -361,9 +372,11 @@ contract LPStakingVault is
     error NotOwnerOrOperator(address caller, address owner, address operator);
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
-    /// @dev `unstake` reached the escrow notification with less than {BONUS_HOOK_GAS_FLOOR} gas
-    ///      left. Retry with a higher gas limit.
+    /// @dev `unstake` or `rebalance` reached a fail-open notification with less than its floor
+    ///      ({bonusHookGasFloor} / {bonusListenerGasFloor}) left. Retry with a higher gas limit.
     error InsufficientGasForBonusHook();
+    /// @dev A hook gas allowance outside [{MIN_BONUS_HOOK_GAS}, {MAX_BONUS_HOOK_GAS}].
+    error BonusHookGasOutOfBounds(uint256 escrowGas, uint256 listenerGas);
     /// @dev `setBonusEscrow` was given a non-zero address with no code.
     error NotAContract(address account);
     /// @dev `setBonusEscrow` would unlink or replace `escrow` while it still owes `totalReserved`
@@ -483,6 +496,9 @@ contract LPStakingVault is
      *        the timelock with the zap path already open. Zero leaves the path disabled.
      * @param twapWindow_ Initial TWAP window in seconds.
      * @param maxDeviationTicks_ Initial spot-vs-TWAP deviation ceiling, in ticks.
+     * @param bonusHookGas_ Gas for the escrow's `onUnstake` ({setBonusHookGas} bounds); the deploy
+     *        scripts pass {BONUS_HOOK_GAS} unless `LP_BONUS_HOOK_GAS` says otherwise.
+     * @param bonusListenerGas_ Gas for each listener notification; default {BONUS_LISTENER_GAS}.
      * @dev Every mutable field is written here AND emitted here — including the ones whose
      *      initial value is the type's default — so an indexer can rebuild the whole state
      *      from this transaction's logs without assuming anything about the implementation.
@@ -496,7 +512,9 @@ contract LPStakingVault is
         address operator_,
         address zapper_,
         uint32 twapWindow_,
-        uint24 maxDeviationTicks_
+        uint24 maxDeviationTicks_,
+        uint256 bonusHookGas_,
+        uint256 bonusListenerGas_
     ) external initializer {
         __Ownable_init(owner_);
         __Ownable2Step_init();
@@ -524,6 +542,24 @@ contract LPStakingVault is
         emit RebalancePausedSet(false);
 
         _setTwapParams(twapWindow_, maxDeviationTicks_); // emits TwapParamsSet
+        _setBonusHookGas(bonusHookGas_, bonusListenerGas_); // emits BonusHookGasSet
+    }
+
+    /**
+     * @notice The Glamsterdam upgrade step of a LIVE vault, run once inside
+     *         `upgradeToAndCall(newImplementation, abi.encodeCall(initializeV2, ()))`.
+     * @dev Writes {BONUS_HOOK_GAS} / {BONUS_LISTENER_GAS} into each allowance that is still zero,
+     *      so the upgrade itself leaves the vault with safe values and no second timelock
+     *      operation is needed; a value already set (a vault born with {initialize}) is kept.
+     *      `reinitializer(2)` makes it run once; owner only, which inside the timelock's
+     *      `upgradeToAndCall` is the caller.
+     */
+    function initializeV2() external reinitializer(2) onlyOwner {
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        _setBonusHookGas(
+            $.bonusHookGas == 0 ? BONUS_HOOK_GAS : $.bonusHookGas,
+            $.bonusListenerGas == 0 ? BONUS_LISTENER_GAS : $.bonusListenerGas
+        );
     }
 
     // ──────────────────────── User functions ───────────────────
@@ -809,8 +845,8 @@ contract LPStakingVault is
      * @notice Links the staking v3 bonus listener (`V3BonusVault`) notified on `unstake` and
      *         `rebalance` beside the bonus escrow, or unlinks it.
      * @dev Owner tier, for the reasons of {setBonusEscrow}. Both notifications to the listener
-     *      FAIL OPEN, each inside `try` with its own {BONUS_LISTENER_GAS} allowance and behind the
-     *      {BONUS_LISTENER_GAS_FLOOR} check, and emit {BonusListenerFailed} on a revert. Neither the
+     *      FAIL OPEN, each inside `try` with its own {bonusListenerGas} allowance and behind the
+     *      {bonusListenerGasFloor} check, and emit {BonusListenerFailed} on a revert. Neither the
      *      rebalance logic nor any valuation changes: the listener receives the same two
      *      snapshots the escrow receives and values them itself. A non-zero address must carry
      *      code, and a listener that still owes `totalLpReserved()` — the reservations that depend
@@ -828,6 +864,24 @@ contract LPStakingVault is
         }
         emit BonusListenerSet(current, newListener);
         $.bonusListener = newListener;
+    }
+
+    /**
+     * @notice Sets the gas forwarded to the bonus escrow's `onUnstake` and to each of the bonus
+     *         listener's two notifications.
+     * @dev Owner tier (the timelock). Both values within [{MIN_BONUS_HOOK_GAS},
+     *      {MAX_BONUS_HOOK_GAS}], else {BonusHookGasOutOfBounds}. Both notifications fail open, so
+     *      an allowance below what the hook really costs skips the bonus forfeiture or scaling
+     *      SILENTLY apart from {BonusHookFailed} / {BonusListenerFailed}. A fork that reprices
+     *      storage changes what the hooks cost: re-measure with `scripts/measure-hook-gas.js`
+     *      after every fork and before every escrow or listener upgrade (audit notes item 20).
+     *      Each floor follows its allowance ({bonusHookGasFloor}); a larger allowance raises the
+     *      gas limit an `unstake` must carry, not the gas it uses.
+     * @param escrowGas Gas for the escrow's `onUnstake`.
+     * @param listenerGas Gas for each of the listener's `onUnstake` and `onRebalance`.
+     */
+    function setBonusHookGas(uint256 escrowGas, uint256 listenerGas) external onlyOwner {
+        _setBonusHookGas(escrowGas, listenerGas);
     }
 
     /**
@@ -1114,6 +1168,33 @@ contract LPStakingVault is
         return _vaultStorage().bonusListener;
     }
 
+    /// @notice Gas forwarded to the escrow's `onUnstake` ({setBonusHookGas}).
+    function bonusHookGas() public view returns (uint256) {
+        uint256 gas_ = _vaultStorage().bonusHookGas;
+        return gas_ == 0 ? BONUS_HOOK_GAS : gas_;
+    }
+
+    /// @notice Gas forwarded to each of the bonus listener's notifications ({setBonusHookGas}).
+    function bonusListenerGas() public view returns (uint256) {
+        uint256 gas_ = _vaultStorage().bonusListenerGas;
+        return gas_ == 0 ? BONUS_LISTENER_GAS : gas_;
+    }
+
+    /// @notice Minimum `gasleft()` at the moment the vault is about to call the escrow's
+    ///         `onUnstake`: `bonusHookGas() * 64 / 63 + 5,000`. EIP-150 forwards at most 63/64
+    ///         of the remaining gas to a callee, so the hook is guaranteed its full allowance
+    ///         only above `allowance * 64 / 63` plus the call's own cost (cold account 2,600 +
+    ///         setup); below the floor the unstake reverts instead of letting the hook run short.
+    function bonusHookGasFloor() external view returns (uint256) {
+        return _gasFloor(bonusHookGas());
+    }
+
+    /// @notice Minimum `gasleft()` before each listener notification, by the rule of
+    ///         {bonusHookGasFloor}.
+    function bonusListenerGasFloor() external view returns (uint256) {
+        return _gasFloor(bonusListenerGas());
+    }
+
     // ──────────────────────── Internal helpers ─────────────────
 
     /// @dev Shared body of every stake path. Validates the position, records the staker,
@@ -1270,13 +1351,31 @@ contract LPStakingVault is
         IERC20(token1).forceApprove(address(positionManager), 0);
     }
 
+    /// @dev Writes both hook gas allowances after the bounds check, and announces them.
+    function _setBonusHookGas(uint256 escrowGas, uint256 listenerGas) private {
+        if (
+            escrowGas < MIN_BONUS_HOOK_GAS || escrowGas > MAX_BONUS_HOOK_GAS || listenerGas < MIN_BONUS_HOOK_GAS
+                || listenerGas > MAX_BONUS_HOOK_GAS
+        ) revert BonusHookGasOutOfBounds(escrowGas, listenerGas);
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        $.bonusHookGas = uint128(escrowGas);
+        $.bonusListenerGas = uint128(listenerGas);
+        emit BonusHookGasSet(escrowGas, listenerGas);
+    }
+
+    /// @dev The `gasleft()` floor for a hook call with `allowance`: the 64/63 rule plus overhead.
+    function _gasFloor(uint256 allowance) private pure returns (uint256) {
+        return (allowance * 64) / 63 + HOOK_CALL_OVERHEAD;
+    }
+
     /// @dev The `unstake` notification: fail open, with a gas floor. See the header.
     ///      `catch` without a payload on purpose — a return-data copy is a gas sink an escrow
     ///      could use against the exit, and the event names the position, which is enough.
     function _notifyUnstake(address escrow, uint256 tokenId) private {
         if (escrow == address(0)) return;
-        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
-        try IBonusEscrowHooks(escrow).onUnstake{gas: BONUS_HOOK_GAS}(tokenId) {} catch {
+        uint256 allowance = bonusHookGas();
+        if (gasleft() < _gasFloor(allowance)) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(escrow).onUnstake{gas: allowance}(tokenId) {} catch {
             emit BonusHookFailed(tokenId);
         }
     }
@@ -1284,8 +1383,9 @@ contract LPStakingVault is
     /// @dev The listener's `unstake` notification: the escrow's fail-open pattern, its own allowance.
     function _notifyListenerUnstake(address listener, uint256 tokenId) private {
         if (listener == address(0)) return;
-        if (gasleft() < BONUS_LISTENER_GAS_FLOOR) revert InsufficientGasForBonusHook();
-        try IBonusEscrowHooks(listener).onUnstake{gas: BONUS_LISTENER_GAS}(tokenId) {} catch {
+        uint256 allowance = bonusListenerGas();
+        if (gasleft() < _gasFloor(allowance)) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onUnstake{gas: allowance}(tokenId) {} catch {
             emit BonusListenerFailed(tokenId);
         }
     }
@@ -1300,8 +1400,9 @@ contract LPStakingVault is
         IBonusEscrowHooks.Snapshot memory newPosition
     ) private {
         if (listener == address(0)) return;
-        if (gasleft() < BONUS_LISTENER_GAS_FLOOR) revert InsufficientGasForBonusHook();
-        try IBonusEscrowHooks(listener).onRebalance{gas: BONUS_LISTENER_GAS}(oldTokenId, newTokenId, oldPosition, newPosition) {}
+        uint256 allowance = bonusListenerGas();
+        if (gasleft() < _gasFloor(allowance)) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onRebalance{gas: allowance}(oldTokenId, newTokenId, oldPosition, newPosition) {}
         catch {
             emit BonusListenerFailed(oldTokenId);
         }

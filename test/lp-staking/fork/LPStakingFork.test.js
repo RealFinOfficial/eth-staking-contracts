@@ -708,6 +708,8 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
           predictedZapper, // zapper — the address the next transaction deploys to
           TWAP_WINDOW,
           MAX_DEVIATION_TICKS,
+          400000,
+          1000000,
         ])
       );
       await vaultProxy.waitForDeployment();

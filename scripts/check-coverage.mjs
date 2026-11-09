@@ -57,6 +57,11 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //    StakingMigrator lines 225 -> 238 (232), branches 33 -> 37 (37; `AlreadyMigrated`,
 //    `MinAssetOutZero`, the custody assert, the initializer's token cross-check). LPStakingVault is
 //    unchanged (the listener guard reads `totalLpReserved()` instead of `totalReserved()`).
+// ── Pinned floors, re-measured 2026-11-09 evening (Glamsterdam, audit notes item 20) ──
+//    LPStakingVault lines 233 -> 262 (258 hit), branches 48 -> 49 (49): `setBonusHookGas` and its
+//    bounds branch, `initializeV2`, the four gas views and the configurable floors. Every new line
+//    and branch is covered; the four uncovered lines are the same `--ir-minimum` artefacts as below
+//    (accessor body, `_disableInitializers`, `__Ownable2Step_init`, `_checkTwapDeviation`).
 // ── Pinned floors, re-measured 2026-11-09 (staking v3) ── LPStakingVault lines 209 -> 233,
 //    branches 37 -> 48 (`setBonusListener`, `bonusListener()`, the two fail-open listener
 //    notifications with their gas floor); all new branches covered, the four uncovered lines are
@@ -218,8 +223,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 26, minHit: 26},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 233, minHit: 229},
-    branches: {found: 48, minHit: 48},
+    lines: {found: 262, minHit: 258},
+    branches: {found: 49, minHit: 49},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},

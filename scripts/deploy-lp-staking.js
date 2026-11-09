@@ -137,6 +137,12 @@ const {
 //                               stores TICKS; this script converts exactly with
 //                               floor(ln(1 + bps/1e4) / ln(1.0001)) and logs both numbers.
 //                               500 bps = 487 ticks, 1000 = 953, 2000 = 1823
+//   LP_BONUS_HOOK_GAS         — gas the vault forwards to the bonus escrow's onUnstake,
+//                               100000..3000000 (400000). Both hook calls fail open: measure
+//                               them first with scripts/measure-hook-gas.js (audit notes item 20,
+//                               Glamsterdam reprices new storage about tenfold)
+//   LP_BONUS_LISTENER_GAS     — gas the vault forwards to each staking v3 listener call,
+//                               100000..3000000 (1000000)
 //   LP_TIMELOCK_MIN_DELAY     — seconds between a scheduled operation and its earliest
 //                               execution (172800 = 48 h, the mainnet figure). Sepolia
 //                               staging runs 300 so the flow can be rehearsed end to end;
@@ -221,6 +227,11 @@ const MAX_TWAP_DEVIATION_TICKS = 1823; // TwapGuard.MAX_TWAP_DEVIATION_TICKS
 // primary protection; see `libraries/TwapGuard.sol`.
 const DEFAULT_TWAP_WINDOW = 300;
 const DEFAULT_TWAP_MAX_DEVIATION_BPS = 1000;
+/** `LPStakingVault.BONUS_HOOK_GAS` / `BONUS_LISTENER_GAS` and the setter's bounds. */
+const DEFAULT_BONUS_HOOK_GAS = 400000;
+const DEFAULT_BONUS_LISTENER_GAS = 1000000;
+const MIN_BONUS_HOOK_GAS = 100000;
+const MAX_BONUS_HOOK_GAS = 3000000;
 
 // Observation slots. The rule is the one the contracts enforce on chain when a window is set
 // (`libraries/OracleHistory.sol`, audit L-04): a pool writes at most one observation per block
@@ -343,6 +354,9 @@ async function main() {
     process.env.LP_TWAP_MAX_DEVIATION_BPS || DEFAULT_TWAP_MAX_DEVIATION_BPS
   );
   const twapMaxDeviationTicks = bpsToTicks(twapMaxDeviationBps);
+  // The vault's two fail-open hook allowances (Glamsterdam fix, audit notes item 20).
+  const bonusHookGas = Number(process.env.LP_BONUS_HOOK_GAS || DEFAULT_BONUS_HOOK_GAS);
+  const bonusListenerGas = Number(process.env.LP_BONUS_LISTENER_GAS || DEFAULT_BONUS_LISTENER_GAS);
   // The longest window this run configures on chain: the vault's and the zapper's TWAP window,
   // and with the ApeBond route the adapter's valuation window (audit L-02, default 1800 s).
   const apeBondValuationWindow = apebond.readApeBondFlag() ? apebond.readValuationWindow() : null;
@@ -413,6 +427,14 @@ async function main() {
         `got ${twapMaxDeviationBps} bps = ${twapMaxDeviationTicks} ticks`
     );
   }
+  for (const [name, value] of [
+    ["LP_BONUS_HOOK_GAS", bonusHookGas],
+    ["LP_BONUS_LISTENER_GAS", bonusListenerGas],
+  ]) {
+    if (!Number.isInteger(value) || value < MIN_BONUS_HOOK_GAS || value > MAX_BONUS_HOOK_GAS) {
+      throw new Error(`${name} must be an integer in ${MIN_BONUS_HOOK_GAS}..${MAX_BONUS_HOOK_GAS} — got ${value}`);
+    }
+  }
   if (!Number.isInteger(observationCardinality) || observationCardinality < 1 || observationCardinality > 65535) {
     throw new Error(`LP_OBSERVATION_CARDINALITY must be a uint16 — got ${observationCardinality}`);
   }
@@ -473,6 +495,9 @@ async function main() {
       `${overtureSymbol} (unconditional, claims open)`
   );
   console.log(`TWAP window:        ${twapWindow}s`);
+  console.log(
+    `Hook gas:           escrow ${bonusHookGas} / listener ${bonusListenerGas} (LP_BONUS_HOOK_GAS / LP_BONUS_LISTENER_GAS)`
+  );
   console.log(
     `TWAP max deviation: ${twapMaxDeviationBps} bps = ${twapMaxDeviationTicks} ticks (what the contract stores)`
   );
@@ -857,7 +882,10 @@ async function main() {
   const vaultDeploy = await deployProxyPair(
     vaultContract,
     [positionManager, poolAddress, token0, token1, fee, swapRouter],
-    [timelockDeploy.address, guardian, operator, predictedZapper, twapWindow, twapMaxDeviationTicks],
+    // The pre-route test vault (LP_VAULT_CONTRACT) predates the gas arguments.
+    vaultContract === "LPStakingVault"
+      ? [timelockDeploy.address, guardian, operator, predictedZapper, twapWindow, twapMaxDeviationTicks, bonusHookGas, bonusListenerGas]
+      : [timelockDeploy.address, guardian, operator, predictedZapper, twapWindow, twapMaxDeviationTicks],
     deployer
   );
   pools.recordDeployment(chainId, "LPStakingVault", vaultDeploy.address, {
@@ -871,6 +899,7 @@ async function main() {
     fee,
     twapWindow,
     maxTwapDeviationTicks: twapMaxDeviationTicks,
+    ...(vaultContract === "LPStakingVault" ? { bonusHookGas, bonusListenerGas } : {}),
     owner: timelockDeploy.address,
     guardian,
     operator,
@@ -1048,6 +1077,10 @@ async function main() {
   check("LPStakingVault.rebalancePaused", await vault.rebalancePaused(), false);
   check("LPStakingVault.twapWindow", await vault.twapWindow(), twapWindow);
   check("LPStakingVault.maxTwapDeviationTicks", await vault.maxTwapDeviationTicks(), twapMaxDeviationTicks);
+  if (vaultContract === "LPStakingVault") {
+    check("LPStakingVault.bonusHookGas", await vault.bonusHookGas(), bonusHookGas);
+    check("LPStakingVault.bonusListenerGas", await vault.bonusListenerGas(), bonusListenerGas);
+  }
   check("LPStakingVault.guardian", await vault.guardian(), guardian);
   check("LPStakingVault.operator", await vault.operator(), operator);
   check("LPStakingVault.owner", await vault.owner(), expectedProxyOwner);

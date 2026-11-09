@@ -30,8 +30,13 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
  *    - {MockBonusEscrow} reverts or burns its gas on demand, and records the rebalance hook
  *      (which has no gas cap) in storage;
  *    - {MockForfeitingBonusEscrow} does the real escrow's forfeiture work in the real storage
- *      shape, behind an {LPProxy}, and is what the vault's {LPStakingVault-BONUS_HOOK_GAS} was
- *      sized against (`test_HookGas_*`).
+ *      shape, behind an {LPProxy}, and is what the vault's old fixed 100,000 allowance (now
+ *      {LPStakingVault-MIN_BONUS_HOOK_GAS}) was sized against (`test_HookGas_*`).
+ *
+ *  Foundry prices gas by the pre-Glamsterdam schedule: it CANNOT reproduce EIP-8037's state
+ *  creation repricing (live on Sepolia since 2026-10-06), so the `test_HookGas_*` figures here
+ *  are lower bounds. The real figures come from `scripts/measure-hook-gas.js` against the live
+ *  chain (audit notes item 20).
  */
 contract VaultBonusHooksTest is LocalHarness {
     /// @dev `real.lp.storage.LPStakingVault`, the vault's ERC-7201 base.
@@ -77,14 +82,17 @@ contract VaultBonusHooksTest is LocalHarness {
     // ──────────────────────── Constants ────────────────────────
 
     /// @dev EIP-150 forwards at most 63/64 of the remaining gas, so the floor is the allowance
-    ///      scaled by 64/63 plus the call's own overhead — the vault's NatSpec, as numbers.
+    ///      scaled by 64/63 plus the call's own overhead — the vault's NatSpec, as numbers. The
+    ///      allowance is storage since the Glamsterdam fix (audit notes item 20); the harness vault
+    ///      is born with the defaults, 400,000 for the escrow.
     function test_Constants_TheFloorCoversTheAllowanceAfterTheSixtyFourthRule() public view {
-        assertEq(vault.BONUS_HOOK_GAS(), 100_000, "the hook's allowance");
-        assertEq(vault.BONUS_HOOK_GAS_FLOOR(), (uint256(100_000) * 64) / 63 + 5_000, "the floor's formula");
-        assertEq(vault.BONUS_HOOK_GAS_FLOOR(), 106_587, "the floor's value");
+        assertEq(vault.bonusHookGas(), 400_000, "the default allowance");
+        assertEq(vault.bonusHookGas(), 400_000, "the harness vault runs the default");
+        assertEq(vault.bonusHookGasFloor(), (uint256(400_000) * 64) / 63 + 5_000, "the floor's formula");
+        assertEq(vault.bonusHookGasFloor(), 411_349, "the floor's value");
         assertGe(
-            (vault.BONUS_HOOK_GAS_FLOOR() - 5_000) * 63 / 64,
-            vault.BONUS_HOOK_GAS() - 1,
+            (vault.bonusHookGasFloor() - 5_000) * 63 / 64,
+            vault.bonusHookGas() - 1,
             "63/64 of the floor minus the overhead is the allowance (to the wei of integer division)"
         );
     }
@@ -273,7 +281,7 @@ contract VaultBonusHooksTest is LocalHarness {
     ///      with no escrow an exit runs on far less gas than the floor.
     function test_Unstake_WithNoEscrowNeedsNoGasFloor() public {
         uint256 tokenId = _stakePosition(alice);
-        uint256 limit = vault.BONUS_HOOK_GAS_FLOOR() / 2;
+        uint256 limit = vault.bonusHookGasFloor() / 2;
 
         vm.prank(alice);
         vault.unstake{gas: limit}(tokenId);
@@ -328,8 +336,8 @@ contract VaultBonusHooksTest is LocalHarness {
         vault.unstake(tokenId);
 
         uint256 atEntry = _unstakeSeen(vm.getRecordedLogs())[0].gasAtEntry;
-        assertLe(atEntry, vault.BONUS_HOOK_GAS(), "never more than the allowance");
-        assertGe(atEntry, vault.BONUS_HOOK_GAS() - HOOK_ENTRY_OVERHEAD, "and the whole allowance, less dispatch");
+        assertLe(atEntry, vault.bonusHookGas(), "never more than the allowance");
+        assertGe(atEntry, vault.bonusHookGas() - HOOK_ENTRY_OVERHEAD, "and the whole allowance, less dispatch");
         console.log("gasleft() at the hook's first instruction", atEntry);
     }
 
@@ -381,10 +389,10 @@ contract VaultBonusHooksTest is LocalHarness {
         uint256 withBurningEscrow = before - gasleft();
 
         assertEq(npmMock.ownerOf(second), alice, "the exit completed");
-        assertGt(withBurningEscrow, withoutEscrow + vault.BONUS_HOOK_GAS() / 2, "the escrow really burned its gas");
+        assertGt(withBurningEscrow, withoutEscrow + vault.bonusHookGas() / 2, "the escrow really burned its gas");
         assertLe(
             withBurningEscrow,
-            withoutEscrow + vault.BONUS_HOOK_GAS() + 10_000,
+            withoutEscrow + vault.bonusHookGas() + 10_000,
             "but never more than its allowance plus the call and the event"
         );
         console.log("unstake gas without an escrow", withoutEscrow);
@@ -402,7 +410,7 @@ contract VaultBonusHooksTest is LocalHarness {
         uint256 tokenId = _stakePosition(alice);
 
         // Read before the prank: a view call in the call options would consume the cheatcodes.
-        uint256 floor = vault.BONUS_HOOK_GAS_FLOOR();
+        uint256 floor = vault.bonusHookGasFloor();
 
         // The whole call gets exactly the floor; the record lookup and deletion before the
         // check spend some of it, so `gasleft()` at the check is below the floor.
@@ -420,7 +428,7 @@ contract VaultBonusHooksTest is LocalHarness {
         Seen[] memory seen = _unstakeSeen(vm.getRecordedLogs());
         assertEq(npmMock.ownerOf(tokenId), alice, "a retry with enough gas completes");
         assertEq(seen.length, 1, "and the escrow heard of it");
-        assertGe(seen[0].gasAtEntry, vault.BONUS_HOOK_GAS() - HOOK_ENTRY_OVERHEAD, "with its whole allowance");
+        assertGe(seen[0].gasAtEntry, vault.bonusHookGas() - HOOK_ENTRY_OVERHEAD, "with its whole allowance");
     }
 
     /**
@@ -433,8 +441,8 @@ contract VaultBonusHooksTest is LocalHarness {
     function testFuzz_Unstake_ASuccessfulExitAlwaysGaveTheHookItsAllowance(uint256 limitSeed) public {
         vault.setBonusEscrow(address(light));
         uint256 tokenId = _stakePosition(alice);
-        uint256 allowance = vault.BONUS_HOOK_GAS();
-        uint256 limit = bound(limitSeed, vault.BONUS_HOOK_GAS_FLOOR() - 20_000, vault.BONUS_HOOK_GAS_FLOOR() + 250_000);
+        uint256 allowance = vault.bonusHookGas();
+        uint256 limit = bound(limitSeed, vault.bonusHookGasFloor() - 20_000, vault.bonusHookGasFloor() + 250_000);
 
         vm.recordLogs();
         vm.prank(alice);
@@ -538,7 +546,7 @@ contract VaultBonusHooksTest is LocalHarness {
     // ──────────────────────── Measurements ─────────────────────
 
     /**
-     * @dev The measurement {LPStakingVault-BONUS_HOOK_GAS} was sized from: the real escrow's
+     * @dev The measurement the old fixed 100,000 allowance was sized from: the real escrow's
      *      forfeiture of a live reservation, behind an ERC-1967 proxy, everything cold, measured
      *      from the caller (the cold-account charge of the escrow proxy included). Measured
      *      29,941 gas in the optimized build; asserted below a third of the allowance, so the
@@ -596,14 +604,16 @@ contract VaultBonusHooksTest is LocalHarness {
     // ──────────────────────── Helpers ──────────────────────────
 
     /**
-     * @dev The ceiling the measurements are held to: a third of the allowance in the optimized
-     *      build the vault ships with. `forge coverage --ir-minimum` compiles WITHOUT the
+     * @dev The ceiling the measurements are held to: a third of {LPStakingVault-MIN_BONUS_HOOK_GAS}
+     *      (the old fixed 100,000) in the optimized build, kept at the old figure so the assertion
+     *      stays as strict as before the allowance became configurable. `forge coverage --ir-minimum` compiles WITHOUT the
      *      optimizer, and the same escrow code costs about 16 % more there (34,876 vs 29,941 measured),
      *      so under coverage — and only there — the ceiling is half the allowance. The
      *      optimized figure is the one the allowance was sized against.
      */
     function _measuredBound() private view returns (uint256) {
-        return vm.isContext(VmSafe.ForgeContext.Coverage) ? vault.BONUS_HOOK_GAS() / 2 : vault.BONUS_HOOK_GAS() / 3;
+        return
+            vm.isContext(VmSafe.ForgeContext.Coverage) ? vault.MIN_BONUS_HOOK_GAS() / 2 : vault.MIN_BONUS_HOOK_GAS() / 3;
     }
 
     /// @dev Every `UnstakeSeen` the light escrow ({light}) emitted in `logs`, decoded.

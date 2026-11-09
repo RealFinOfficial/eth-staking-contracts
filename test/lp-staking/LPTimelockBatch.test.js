@@ -116,6 +116,8 @@ describe("lp-timelock.js — batches", function () {
         ethers.ZeroAddress,
         TWAP_WINDOW,
         MAX_DEVIATION_TICKS,
+        400000,
+        1000000,
       ],
       { kind: "uups", constructorArgs, unsafeAllow: UUPS_UNSAFE_ALLOW }
     );

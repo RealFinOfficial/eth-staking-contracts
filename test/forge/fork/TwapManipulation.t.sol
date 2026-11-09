@@ -35,8 +35,9 @@ contract TwapColdOracleTest is ForkHarness {
     ///      revert binds to the proxy's construction, which runs `initialize`.
     function _expectVaultRefused(bytes memory reason) internal {
         LPStakingVault impl = new LPStakingVault(profile.npm, address(poolRef), token0, token1, FEE, profile.router);
-        bytes memory init =
-            abi.encodeCall(LPStakingVault.initialize, (address(this), multisig, multisig, address(0), WINDOW, 953));
+        bytes memory init = abi.encodeCall(
+            LPStakingVault.initialize, (address(this), multisig, multisig, address(0), WINDOW, 953, 400_000, 1_000_000)
+        );
         vm.expectRevert(reason);
         new LPProxy(address(impl), init);
     }

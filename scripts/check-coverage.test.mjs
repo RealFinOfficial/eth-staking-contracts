@@ -92,7 +92,7 @@ test("a run exactly at every pinned floor passes", () => {
 test("coverage above the floor passes, and the wrong LF/LH summary lines are ignored", () => {
   // One more line covered than the floor demands, on the file with the widest gap.
   const lcov = buildLcov({
-    "contracts/lp-staking/LPStakingVault.sol": {lines: [230, 233], branches: [48, 48]},
+    "contracts/lp-staking/LPStakingVault.sol": {lines: [259, 262], branches: [49, 49]},
   });
   assert.equal(runChecker(lcov).code, 0);
 });

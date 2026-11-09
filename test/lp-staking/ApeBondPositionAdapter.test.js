@@ -118,7 +118,7 @@ describe("ApeBondPositionAdapter", function () {
     const Vault = await ethers.getContractFactory("LPStakingVault");
     return upgrades.deployProxy(
       Vault,
-      [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+      [owner.address, guardian.address, owner.address, ZERO, TWAP_WINDOW, MAX_DEVIATION_TICKS, 400000, 1000000],
       {
         kind: "uups",
         constructorArgs: [nfpmAddr, poolAddress, token0Addr, token1Addr, FEE, routerAddr],

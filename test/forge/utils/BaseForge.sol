@@ -306,7 +306,7 @@ abstract contract BaseForge is Test {
             impl,
             abi.encodeCall(
                 LPStakingVault.initialize,
-                (p.owner, p.guardian, p.operator, p.zapper, p.twapWindow, p.maxDeviationTicks)
+                (p.owner, p.guardian, p.operator, p.zapper, p.twapWindow, p.maxDeviationTicks, 400_000, 1_000_000)
             )
         );
         return LPStakingVault(address(proxy));
