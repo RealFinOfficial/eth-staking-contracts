@@ -25,6 +25,8 @@ import "./interfaces/IStakingV3.sol";
 interface IMigratorLpVault {
     function stakeFor(address user, uint256 tokenId) external;
 
+    function stakerOf(uint256 tokenId) external view returns (address);
+
     function positionManager() external view returns (address);
 
     function swapRouter() external view returns (address);
@@ -55,14 +57,18 @@ interface IMigratorPoolSpacing {
  *
  *    1. {compound}: pulls the USDC reward and the $ASSET principal, swaps the USDC into $ASSET
  *       through SwapRouter02 `exactInputSingle` on the LP vault's pool under this contract's
- *       {TwapGuard}, stakes principal + bought $ASSET in the v3 pool FOR the caller, and reserves
- *       `compoundBps` of it in the bonus vault.
+ *       {TwapGuard} (a non-zero `minAssetOut` is required), stakes principal + bought $ASSET in the
+ *       v3 pool FOR the caller, and reserves `compoundBps` of (principal + min(bought, the USDC
+ *       valued at the mean tick of {valuationWindow})) in the bonus vault, so a swap at a moved
+ *       spot price can never raise the bonus above the TWAP-valued figure.
  *    2. {moveToLp}: pulls the USDC reward and the $ASSET principal, mints ONE position on the
  *       recommended band (6,932 ticks each side of the spot tick = -50 % / +100 % in price, rounded
  *       outward to the tick spacing; the ApeBond adapter's `_campaignRange` math) from the whole USDC
  *       and the matching $ASSET (the position manager takes what the band needs), stakes the NFT in
  *       the LP vault FOR the caller (`vault.stakeFor`; this contract is a stake operator), refunds
- *       the USDC dust, stakes the remaining $ASSET in v3 FOR the caller, and reserves `lpBps` of
+ *       the USDC dust, stakes the remaining $ASSET in v3 FOR the caller, asserts the custody (the
+ *       position manager says the vault owns the NFT, the vault says the caller staked it;
+ *       {CustodyAssertFailed} otherwise, the adapter's check), and reserves `lpBps` of
  *       (LP $ASSET leg + LP USDC leg valued in $ASSET at the mean tick of {valuationWindow}) under
  *       the position's tokenId and `lpBps` of the v3 remainder for the caller. No top-up from the
  *       wallet, and no swap of $ASSET into USDC, ever.
@@ -76,6 +82,10 @@ interface IMigratorPoolSpacing {
  *  this route, `assetAmount <= eligiblePrincipal`, `usdcAmount <= eligibleReward`, the nonce is
  *  unused for the caller, the deadline has not passed, the signature. `weight` is passed through to
  *  the v3 pool as the caller's multiplier. `user` is always `msg.sender`.
+ *
+ *  ONE TRANSITION PER WALLET. A sw2 claim is converted once: the first successful route call marks
+ *  the caller {migrated}, and every later route call by that wallet reverts {AlreadyMigrated},
+ *  whatever voucher it carries (the per-user nonce check stays as well).
  *
  *  PAUSE. Routes 1 and 2 trade against the pool, so they stop behind one switch while the pool has
  *  no liquidity: {pauseCompound} (the LP vault's guardian or operator, read live) and
@@ -160,6 +170,8 @@ contract StakingMigrator is
         bool compoundPaused;
         uint32 valuationWindow;
         mapping(address => mapping(uint256 => bool)) usedNonces;
+        /// One transition per wallet: set by the first successful route call.
+        mapping(address => bool) migrated;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.StakingMigrator")) - 1)) & ~0xff
@@ -214,6 +226,9 @@ contract StakingMigrator is
     error NotOperator(address caller, address operator);
     error NotGuardianOrOperator(address caller, address guardian, address operator);
     error RenounceDisabled();
+    error AlreadyMigrated(address user);
+    error MinAssetOutZero();
+    error CustodyAssertFailed(uint256 tokenId, address owner, address staker);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -280,7 +295,9 @@ contract StakingMigrator is
      * @param maxDeviationTicks_ The swap guard's ceiling (953 ticks, like the zapper).
      * @param valuationWindow_ The window whose mean tick values the LP USDC leg (1,800 s, the
      *        adapter's); bounded to 300..3600 s and checked against the pool's history.
-     * @dev Born with the compound routes PAUSED and the rates 1000 / 1000 / 500 bps.
+     * @dev Born with the compound routes PAUSED and the rates 1000 / 1000 / 500 bps. The pool's
+     *      staking token and the bonus vault's bonus token must both be {asset}
+     *      ({TokenPairMismatch}(usdc, asset, poolStakingToken, bonusToken) otherwise).
      */
     function initialize(
         address owner_,
@@ -292,6 +309,9 @@ contract StakingMigrator is
         uint32 valuationWindow_
     ) external initializer {
         if (stakingPool_ == address(0) || bonusVault_ == address(0) || signer_ == address(0)) revert ZeroAddress();
+        address poolToken = IWeightedStakingPoolV3Migration(stakingPool_).stakingToken();
+        address bonusToken = IV3BonusVaultReservations(bonusVault_).bonusToken();
+        if (poolToken != asset || bonusToken != asset) revert TokenPairMismatch(usdc, asset, poolToken, bonusToken);
         __Ownable_init(owner_);
         __Ownable2Step_init();
         __EIP712_init("StakingMigrator", "1");
@@ -321,7 +341,7 @@ contract StakingMigrator is
      * @notice Route 1: swap the USDC reward into $ASSET and stake everything in v3.
      * @param usdcAmount USDC pulled and swapped (<= the voucher's eligibleReward; > 0).
      * @param assetAmount $ASSET principal pulled (<= the voucher's eligiblePrincipal).
-     * @param minAssetOut The swap's `amountOutMinimum`.
+     * @param minAssetOut The swap's `amountOutMinimum`; must be above zero ({MinAssetOutZero}).
      * @param deadline The call's own expiry.
      * @return staked The amount staked in v3 for the caller.
      * @return bonus The v3 reservation added.
@@ -336,6 +356,7 @@ contract StakingMigrator is
         Voucher calldata v
     ) external nonReentrant whenCompoundOpen returns (uint256 staked, uint256 bonus) {
         if (usdcAmount == 0) revert ZeroAmount();
+        if (minAssetOut == 0) revert MinAssetOutZero();
         _checkDeadline(deadline);
         _useVoucher(ROUTE_COMPOUND, assetAmount, usdcAmount, v);
 
@@ -347,7 +368,8 @@ contract StakingMigrator is
 
         MigratorStorage storage $ = _migratorStorage();
         uint64 unlockAt = _stakeV3(msg.sender, staked, v.weight);
-        bonus = Math.mulDiv(staked, $.compoundBps, BPS);
+        // The bonus base values the bought part at the TWAP, never above what was actually bought.
+        bonus = Math.mulDiv(assetAmount + Math.min(bought, usdcInAsset(usdcAmount)), $.compoundBps, BPS);
         _reserve(msg.sender, bonus, unlockAt, ROUTE_COMPOUND);
 
         emit Compounded(msg.sender, assetAmount, usdcAmount, bought, staked, bonus);
@@ -387,6 +409,7 @@ contract StakingMigrator is
 
         positionManager.approve(address(lpVault), tokenId);
         lpVault.stakeFor(msg.sender, tokenId);
+        _assertCustody(tokenId);
 
         _finishLp(tokenId, usdcAmount, usdcUsed, assetAmount, assetUsed, v.weight);
     }
@@ -475,6 +498,11 @@ contract StakingMigrator is
         return _migratorStorage().usedNonces[user][nonce];
     }
 
+    /// @notice True once `user` has made their one transition (any route).
+    function migrated(address user) external view returns (bool) {
+        return _migratorStorage().migrated[user];
+    }
+
     /// @notice The EIP-712 digest the signer signs for `user`'s voucher.
     function voucherDigest(
         address user,
@@ -550,7 +578,9 @@ contract StakingMigrator is
         if (block.timestamp > deadline) revert DeadlineExpired(deadline, block.timestamp);
     }
 
-    /// @dev The whole eligibility check, then the nonce is spent — before any token moves.
+    /// @dev The whole eligibility check, then the nonce is spent and the wallet marked migrated —
+    ///      before any token moves. A replayed nonce reports {VoucherNonceUsed}; a fresh voucher of
+    ///      a wallet that already moved reports {AlreadyMigrated}.
     function _useVoucher(uint8 route, uint256 assetAmount, uint256 usdcAmount, Voucher calldata v) private {
         if (v.route != route) revert WrongRoute(route, v.route);
         if (block.timestamp > v.deadline) revert VoucherExpired(v.deadline, block.timestamp);
@@ -559,6 +589,7 @@ contract StakingMigrator is
 
         MigratorStorage storage $ = _migratorStorage();
         if ($.usedNonces[msg.sender][v.nonce]) revert VoucherNonceUsed(msg.sender, v.nonce);
+        if ($.migrated[msg.sender]) revert AlreadyMigrated(msg.sender);
 
         bytes32 digest =
             voucherDigest(msg.sender, route, v.eligiblePrincipal, v.eligibleReward, v.weight, v.nonce, v.deadline);
@@ -566,6 +597,7 @@ contract StakingMigrator is
         if (err != ECDSA.RecoverError.NoError || recovered != $.signer) revert InvalidVoucherSignature();
 
         $.usedNonces[msg.sender][v.nonce] = true;
+        $.migrated[msg.sender] = true;
         emit VoucherUsed(msg.sender, v.nonce, route);
     }
 
@@ -597,6 +629,14 @@ contract StakingMigrator is
         );
         IERC20(usdc).forceApprove(address(swapRouter), 0);
         bought = IERC20(asset).balanceOf(address(this)) - before;
+    }
+
+    /// @dev The adapter's custody check after `vault.stakeFor`: the NFT is the vault's and the vault
+    ///      credits it to the caller.
+    function _assertCustody(uint256 tokenId) private view {
+        address owner_ = positionManager.ownerOf(tokenId);
+        address staker = lpVault.stakerOf(tokenId);
+        if (owner_ != address(lpVault) || staker != msg.sender) revert CustodyAssertFailed(tokenId, owner_, staker);
     }
 
     /// @dev Mints on {lpRange} with the whole USDC and the whole $ASSET as the desired amounts; the

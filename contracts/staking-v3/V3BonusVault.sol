@@ -15,9 +15,12 @@ import "../lp-staking/interfaces/IBonusEscrowHooks.sol";
 import "../lp-staking/libraries/PositionValue.sol";
 import "./interfaces/IStakingV3.sol";
 
-/// @dev The three LP-vault reads the bonus vault makes: its pool pair (to orient the valuation)
-///      and its TWAP (to value a rebalanced position), exactly as `BonusEscrow` reads them.
+/// @dev The LP-vault reads the bonus vault makes: its pool pair (to orient the valuation), its
+///      TWAP (to value a rebalanced position), exactly as `BonusEscrow` reads them, and the staker
+///      of a position ({V3BonusVault-reconcileLp}).
 interface IV3BonusLpVault {
+    function stakerOf(uint256 tokenId) external view returns (address);
+
     function token0() external view returns (address);
 
     function token1() external view returns (address);
@@ -49,11 +52,22 @@ interface IV3BonusLpVault {
  *  {InsufficientFunds} — all or nothing — while the balance is short.
  *
  *  ACCOUNTING. `totalReserved` is the sum of every reservation that is neither claimed nor
- *  forfeited. A forfeiture or a down-scaling lowers it and leaves the tokens here, so the surplus
+ *  forfeited; `totalLpReserved` is the LP part of it (the amount the LP vault's listener link
+ *  protects). A forfeiture or a down-scaling lowers them and leaves the tokens here, so the surplus
  *  (`balance - totalReserved`) grows and only {recoverSurplus} (owner) can move it.
  *
+ *  THE BUDGET. `maxTotalReserved` caps `totalReserved`: {reserve} and {reserveLp} revert
+ *  {BudgetExceeded} when a reservation would take it above the cap, so the migrator's route call
+ *  reverts with them. Set by the initializer and by the owner ({setMaxTotalReserved}).
+ *
+ *  A MISSED NOTIFICATION. The LP vault's notifications to this contract fail open: when one reverts
+ *  the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays where it was, still
+ *  active. {reconcileLp} (anyone; the backend calls it for every `BonusListenerFailed`) compares
+ *  the reservation with the vault: when the position is no longer staked there by the reservation's
+ *  user (unstaked, or re-ranged into a new tokenId), the stale reservation is forfeited.
+ *
  *  ADMIN: owner (the timelock) only — upgrades, `setMigrator`, `setPool`, `setVault`,
- *  `recoverSurplus`. No pause and no function that touches a reservation.
+ *  `setMaxTotalReserved`, `recoverSurplus`. No pause and no function that raises a reservation.
  */
 contract V3BonusVault is
     Initializable,
@@ -93,6 +107,10 @@ contract V3BonusVault is
         mapping(address => UserReservation) reservations;
         mapping(uint256 => LpReservation) lpReservations;
         mapping(address => uint256[]) lpTokens;
+        /// The cap on `totalReserved` ({reserve} and {reserveLp} revert above it).
+        uint256 maxTotalReserved;
+        /// The LP part of `totalReserved`: every LP reservation neither claimed nor forfeited.
+        uint256 totalLpReserved;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.V3BonusVault")) - 1)) & ~0xff
@@ -120,6 +138,7 @@ contract V3BonusVault is
     event MigratorSet(address previousMigrator, address newMigrator);
     event PoolSet(address previousPool, address newPool);
     event VaultSet(address previousVault, address newVault);
+    event MaxTotalReservedSet(uint256 previousMax, uint256 newMax);
 
     // ──────────────────────── Errors ───────────────────────────
 
@@ -135,6 +154,8 @@ contract V3BonusVault is
     error NoSurplus();
     error SurplusExceeded(uint256 requested, uint256 available);
     error RenounceDisabled();
+    error BudgetExceeded(uint256 requested, uint256 remaining);
+    error LpReservationsOutstanding(uint256 totalLpReserved);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -164,11 +185,16 @@ contract V3BonusVault is
      * @param pool_ The `WeightedStakingPoolV3` proxy (the {onEarlyExit} caller).
      * @param vault_ The `LPStakingVault` proxy (the {onUnstake} / {onRebalance} caller). Its pool
      *        must hold `bonusToken_`.
+     * @param maxTotalReserved_ The cap on `totalReserved`, in bonus-token wei.
      */
-    function initialize(address owner_, address bonusToken_, address migrator_, address pool_, address vault_)
-        external
-        initializer
-    {
+    function initialize(
+        address owner_,
+        address bonusToken_,
+        address migrator_,
+        address pool_,
+        address vault_,
+        uint256 maxTotalReserved_
+    ) external initializer {
         if (bonusToken_ == address(0) || pool_ == address(0)) revert ZeroAddress();
         __Ownable_init(owner_);
         __Ownable2Step_init();
@@ -178,6 +204,7 @@ contract V3BonusVault is
         _setMigrator(migrator_);
         _setPool(pool_);
         _setVault(vault_);
+        _setMaxTotalReserved(maxTotalReserved_);
     }
 
     // ──────────────────────── Views ────────────────────────────
@@ -201,6 +228,17 @@ contract V3BonusVault is
     /// @notice The sum of every reservation neither claimed nor forfeited.
     function totalReserved() external view returns (uint256) {
         return _bonusStorage().totalReserved;
+    }
+
+    /// @notice The LP part of {totalReserved}: every LP reservation neither claimed nor forfeited.
+    ///         The LP vault refuses to unlink this listener while it is above zero.
+    function totalLpReserved() external view returns (uint256) {
+        return _bonusStorage().totalLpReserved;
+    }
+
+    /// @notice The cap on {totalReserved}.
+    function maxTotalReserved() external view returns (uint256) {
+        return _bonusStorage().maxTotalReserved;
     }
 
     /// @notice `user`'s v3 reservation: the amount still owed and its unlock time.
@@ -245,6 +283,7 @@ contract V3BonusVault is
         if (user == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         V3BonusVaultStorage storage $ = _bonusStorage();
+        _checkBudget($, amount);
         UserReservation storage r = $.reservations[user];
         r.amount += amount;
         if (unlockAt > r.unlockAt) r.unlockAt = unlockAt;
@@ -259,6 +298,7 @@ contract V3BonusVault is
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[tokenId];
         if (r.user != address(0)) revert DuplicateReservation(tokenId);
+        _checkBudget($, amount);
 
         uint256[] storage ids = $.lpTokens[user];
         r.user = user;
@@ -267,6 +307,7 @@ contract V3BonusVault is
         r.index = SafeCast.toUint16(ids.length);
         ids.push(tokenId);
         $.totalReserved += amount;
+        $.totalLpReserved += amount;
 
         emit LpBonusReserved(tokenId, user, amount, unlockAt);
     }
@@ -296,13 +337,7 @@ contract V3BonusVault is
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[tokenId];
         if (!_isActive(r)) return;
-
-        uint256 amount = r.amount;
-        $.totalReserved -= amount;
-        r.amount = 0;
-        r.forfeited = true;
-
-        emit LpBonusForfeited(tokenId, r.user, amount);
+        _forfeitLp($, r, tokenId);
     }
 
     /// @inheritdoc IBonusEscrowHooks
@@ -328,11 +363,34 @@ contract V3BonusVault is
         moved.index = index;
         if (newAmount == 0) moved.forfeited = true;
         $.totalReserved -= amount - newAmount;
+        $.totalLpReserved -= amount - newAmount;
         $.lpTokens[user][index] = newTokenId;
 
         delete $.lpReservations[oldTokenId];
 
         emit LpBonusMoved(oldTokenId, newTokenId, user, amount, newAmount);
+    }
+
+    // ──────────────────────── Reconciliation ───────────────────
+
+    /**
+     * @notice Forfeits the LP reservation of `tokenId` when the LP vault no longer holds the
+     *         position for the reservation's user — the state a failed (fail-open) `onUnstake` or
+     *         `onRebalance` notification leaves behind. Anyone may call; the backend calls it for
+     *         every `BonusListenerFailed(tokenId)` the vault emits.
+     * @dev A no-op unless the reservation is active (recorded, not claimed, not forfeited, before
+     *      its unlock) AND `vault.stakerOf(tokenId) != user`. After the unlock nothing is touched,
+     *      exactly like {onUnstake}. No-op while no vault is linked.
+     * @return forfeited True when the reservation was forfeited by this call.
+     */
+    function reconcileLp(uint256 tokenId) external nonReentrant returns (bool forfeited) {
+        V3BonusVaultStorage storage $ = _bonusStorage();
+        LpReservation storage r = $.lpReservations[tokenId];
+        address vault_ = $.vault;
+        if (vault_ == address(0) || !_isActive(r)) return false;
+        if (IV3BonusLpVault(vault_).stakerOf(tokenId) == r.user) return false;
+        _forfeitLp($, r, tokenId);
+        return true;
     }
 
     // ──────────────────────── Funding and claim ────────────────
@@ -359,21 +417,24 @@ contract V3BonusVault is
             r.amount = 0;
         }
 
+        uint256 lpTotal;
         uint256[] storage ids = $.lpTokens[msg.sender];
         for (uint256 i = 0; i < ids.length; ++i) {
             LpReservation storage lp = $.lpReservations[ids[i]];
             uint256 lpAmount = _lpClaimable(lp);
             if (lpAmount > 0) {
-                amount += lpAmount;
+                lpTotal += lpAmount;
                 lp.claimed = true;
             }
         }
+        amount += lpTotal;
 
         if (amount == 0) revert NothingToClaim();
         uint256 balance = $.bonusToken.balanceOf(address(this));
         if (balance < amount) revert InsufficientFunds(amount, balance);
 
         $.totalReserved -= amount;
+        $.totalLpReserved -= lpTotal;
         $.bonusToken.safeTransfer(msg.sender, amount);
 
         emit BonusClaimed(msg.sender, amount);
@@ -385,13 +446,28 @@ contract V3BonusVault is
         _setMigrator(migrator_);
     }
 
+    /// @notice Moves the {onEarlyExit} caller. Only TOGETHER with the pool's own `setBonusVault`
+    ///         (one timelock batch): a pool that still notifies this contract while it is no
+    ///         longer the registered pool has every early exit revert (fail closed), and a new pool
+    ///         without the notification would let an early exit keep its bonus.
     function setPool(address pool_) external onlyOwner {
         if (pool_ == address(0)) revert ZeroAddress();
         _setPool(pool_);
     }
 
+    /// @notice Moves (or clears) the LP vault whose notifications this contract accepts. Refused
+    ///         while any LP reservation is outstanding ({LpReservationsOutstanding}): its exits and
+    ///         re-ranges are reported only by the vault that holds the position.
     function setVault(address vault_) external onlyOwner {
+        uint256 lpReserved = _bonusStorage().totalLpReserved;
+        if (lpReserved != 0) revert LpReservationsOutstanding(lpReserved);
         _setVault(vault_);
+    }
+
+    /// @notice Sets the cap on {totalReserved}. A cap below the current total stops new
+    ///         reservations and touches none of the existing ones.
+    function setMaxTotalReserved(uint256 maxTotalReserved_) external onlyOwner {
+        _setMaxTotalReserved(maxTotalReserved_);
     }
 
     /// @notice Moves `amount` of the surplus (`balance - totalReserved`) to `to`. No reservation
@@ -423,6 +499,29 @@ contract V3BonusVault is
         $.migrator = migrator_;
     }
 
+    function _setMaxTotalReserved(uint256 maxTotalReserved_) private {
+        V3BonusVaultStorage storage $ = _bonusStorage();
+        emit MaxTotalReservedSet($.maxTotalReserved, maxTotalReserved_);
+        $.maxTotalReserved = maxTotalReserved_;
+    }
+
+    /// @dev Reverts {BudgetExceeded} when `amount` more would take `totalReserved` above the cap.
+    function _checkBudget(V3BonusVaultStorage storage $, uint256 amount) private view {
+        uint256 reserved = $.totalReserved;
+        uint256 cap = $.maxTotalReserved;
+        if (reserved + amount > cap) revert BudgetExceeded(amount, cap > reserved ? cap - reserved : 0);
+    }
+
+    /// @dev Forfeits an active LP reservation: both totals drop, the tokens stay as surplus.
+    function _forfeitLp(V3BonusVaultStorage storage $, LpReservation storage r, uint256 tokenId) private {
+        uint256 amount = r.amount;
+        $.totalReserved -= amount;
+        $.totalLpReserved -= amount;
+        r.amount = 0;
+        r.forfeited = true;
+        emit LpBonusForfeited(tokenId, r.user, amount);
+    }
+
     function _setPool(address pool_) private {
         V3BonusVaultStorage storage $ = _bonusStorage();
         emit PoolSet($.pool, pool_);
@@ -444,6 +543,7 @@ contract V3BonusVault is
         $.vault = vault_;
     }
 
+    /// @dev Recorded, not claimed, not forfeited, before its unlock.
     function _isActive(LpReservation storage r) private view returns (bool) {
         return r.user != address(0) && !r.claimed && !r.forfeited && block.timestamp < r.unlockAt;
     }

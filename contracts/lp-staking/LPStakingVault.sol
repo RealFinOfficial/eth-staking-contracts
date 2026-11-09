@@ -22,6 +22,14 @@ interface IBonusEscrowReservations {
     function totalReserved() external view returns (uint256);
 }
 
+/// @dev The one listener read the vault makes outside the two notifications: what the CURRENT
+///      staking v3 listener still owes on LP positions (its `totalLpReserved()`), read by
+///      `setBonusListener` before the link moves. Its v3-pool reservations do not depend on this
+///      vault and do not hold the link.
+interface IBonusListenerReservations {
+    function totalLpReserved() external view returns (uint256);
+}
+
 /**
  * @title LPStakingVault
  * @notice Custody vault for Uniswap V3 ASSET-USDC liquidity positions.
@@ -362,8 +370,8 @@ contract LPStakingVault is
     ///      in reservations that are neither claimed nor forfeited (audit C-13).
     error EscrowHasReservations(address escrow, uint256 totalReserved);
     /// @dev `setBonusListener` would unlink or replace `listener` while it still owes
-    ///      `totalReserved` (the C-13 rule of {setBonusEscrow}, applied to the listener).
-    error ListenerHasReservations(address listener, uint256 totalReserved);
+    ///      `totalLpReserved` (the C-13 rule of {setBonusEscrow}, applied to the listener's LP part).
+    error ListenerHasReservations(address listener, uint256 totalLpReserved);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -805,8 +813,9 @@ contract LPStakingVault is
      *      {BONUS_LISTENER_GAS_FLOOR} check, and emit {BonusListenerFailed} on a revert. Neither the
      *      rebalance logic nor any valuation changes: the listener receives the same two
      *      snapshots the escrow receives and values them itself. A non-zero address must carry
-     *      code, and a listener that still owes `totalReserved()` cannot be unlinked or replaced
-     *      ({ListenerHasReservations}, the C-13 rule of {setBonusEscrow}).
+     *      code, and a listener that still owes `totalLpReserved()` — the reservations that depend
+     *      on this vault's reports — cannot be unlinked or replaced ({ListenerHasReservations},
+     *      the C-13 rule of {setBonusEscrow}).
      * @param newListener The listener (a contract implementing {IBonusEscrowHooks}), or zero.
      */
     function setBonusListener(address newListener) external onlyOwner {
@@ -814,7 +823,7 @@ contract LPStakingVault is
         LPStakingVaultStorage storage $ = _vaultStorage();
         address current = $.bonusListener;
         if (current != address(0)) {
-            uint256 reserved = IBonusEscrowReservations(current).totalReserved();
+            uint256 reserved = IBonusListenerReservations(current).totalLpReserved();
             if (reserved != 0) revert ListenerHasReservations(current, reserved);
         }
         emit BonusListenerSet(current, newListener);

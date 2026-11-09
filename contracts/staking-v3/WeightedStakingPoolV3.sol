@@ -40,9 +40,11 @@ import "./interfaces/IStakingV3.sol";
  *    - `withdraw` before `endEpoch` calls `bonusVault.onEarlyExit(user)` after its state changes and
  *      before its transfers. FAIL CLOSED (no `try`): the bonus vault is our own upgradeable contract,
  *      and an early exit that kept its bonus would be the one outcome the campaign forbids.
- *    - The reward slot is kept for compatibility. The v3 campaign pays no USDC: the reward token is
- *      configured but stays unfunded, so `unstake` reverts "Rewards not funded" exactly like an
- *      unfunded v2 pool, and a staker leaves after the end with `emergencyUnstake` (stake only).
+ *    - The reward slot is kept for compatibility. The v3 campaign pays no USDC, and says so on chain
+ *      with the initializer flag {rewardsWaived}: when it is set, `addRewards` reverts "Rewards
+ *      waived" and `unstake` after the end pays the principal with a ZERO reward (it emits
+ *      `Unstaked` with `reward = 0`) instead of reverting "Rewards not funded". Without the flag the
+ *      v2 rule holds: `unstake` needs funded rewards. `emergencyUnstake` (stake only) works either way.
  *
  *  ADMIN: owner (the timelock) only — upgrades, `setSigner`, `setMigrator`, `setBonusVault`,
  *  `addRewards`, `recoverERC20`, `recoverExcessRewards`.
@@ -108,6 +110,9 @@ contract WeightedStakingPoolV3 is
         address migrator;
         /// Notified by `withdraw` before `endEpoch`. Zero switches the notification off.
         address bonusVault;
+        /// Set once by the initializer: the pool pays no reward (`addRewards` refused, `unstake`
+        /// pays the principal with a zero reward after the end).
+        bool rewardsWaived;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.WeightedStakingPoolV3")) - 1)) & ~0xff
@@ -164,6 +169,8 @@ contract WeightedStakingPoolV3 is
     event MigratorSet(address previousMigrator, address newMigrator);
     /// @notice The early-exit listener changed. Both sides; zero switches it off.
     event BonusVaultSet(address previousBonusVault, address newBonusVault);
+    /// @notice The initializer's reward flag: true = no reward is ever paid (see {rewardsWaived}).
+    event RewardsWaivedSet(bool waived);
 
     // ──────────────────────── Errors ───────────────────────────
 
@@ -188,6 +195,8 @@ contract WeightedStakingPoolV3 is
      * @param activationEpoch_ Start of the active period.
      * @param endEpoch_ End of the active period; also the bonus unlock time.
      * @param signer_ The weight-voucher signer (the backend key).
+     * @param rewardsWaived_ True when the pool pays no reward (the v3 campaign): `addRewards` is
+     *        refused and `unstake` after the end pays the principal with a zero reward.
      */
     function initialize(
         address owner_,
@@ -195,7 +204,8 @@ contract WeightedStakingPoolV3 is
         address rewardToken_,
         uint256 activationEpoch_,
         uint256 endEpoch_,
-        address signer_
+        address signer_,
+        bool rewardsWaived_
     ) external initializer {
         require(stakingToken_ != address(0), "Invalid staking token");
         require(rewardToken_ != address(0), "Invalid reward token");
@@ -215,6 +225,7 @@ contract WeightedStakingPoolV3 is
         $.poolDuration = endEpoch_ - activationEpoch_;
         $.globalLastUpdateTime = activationEpoch_;
         $.signer = signer_;
+        $.rewardsWaived = rewardsWaived_;
 
         emit PoolInitialized(
             stakingToken_, rewardToken_, activationEpoch_, endEpoch_, MAX_PENALTY_BPS, MIN_PENALTY_BPS, BPS_DENOMINATOR
@@ -222,6 +233,7 @@ contract WeightedStakingPoolV3 is
         emit SignerChanged(address(0), signer_);
         emit MigratorSet(address(0), address(0));
         emit BonusVaultSet(address(0), address(0));
+        emit RewardsWaivedSet(rewardsWaived_);
     }
 
     // ──────────────────────── Internal helpers ─────────────────
@@ -464,11 +476,12 @@ contract WeightedStakingPoolV3 is
         _emitGlobal();
     }
 
-    /// @notice Unstake after endEpoch: stake + pro-rata rewards. Reverts until rewards are funded.
+    /// @notice Unstake after endEpoch: stake + pro-rata rewards. Reverts until rewards are funded,
+    ///         unless the rewards are waived: then it pays the stake with a zero reward.
     function unstake() external nonReentrant returns (uint256 userReward) {
         PoolStorage storage $ = _poolStorage();
         require(block.timestamp >= $.endEpoch, "Pool not ended yet");
-        require($.totalRewards > 0, "Rewards not funded");
+        require($.totalRewards > 0 || $.rewardsWaived, "Rewards not funded");
 
         _updateGlobal();
         _updateUser(msg.sender);
@@ -551,10 +564,11 @@ contract WeightedStakingPoolV3 is
         $.bonusVault = bonusVault_;
     }
 
-    /// @notice Fund the reward pool (v2 semantics). The v3 campaign leaves it unfunded.
+    /// @notice Fund the reward pool (v2 semantics). Refused when the rewards are waived.
     function addRewards(uint256 amount) external onlyOwner {
-        require(amount > 0, "Amount must be > 0");
         PoolStorage storage $ = _poolStorage();
+        require(!$.rewardsWaived, "Rewards waived");
+        require(amount > 0, "Amount must be > 0");
         $.rewardToken.safeTransferFrom(msg.sender, address(this), amount);
         $.totalRewards += amount;
         emit RewardsAdded(amount, $.totalRewards);
@@ -624,6 +638,12 @@ contract WeightedStakingPoolV3 is
 
     function bonusVault() external view returns (address) {
         return _poolStorage().bonusVault;
+    }
+
+    /// @notice True when the pool pays no reward: `addRewards` reverts and `unstake` pays the
+    ///         principal with a zero reward after the end. Fixed by the initializer.
+    function rewardsWaived() external view returns (bool) {
+        return _poolStorage().rewardsWaived;
     }
 
     function totalStaked() external view returns (uint256) {
