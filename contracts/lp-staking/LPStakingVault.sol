@@ -208,6 +208,10 @@ contract LPStakingVault is
         /// stay last: an upgrade may add fields to this namespace but may never reorder it.
         /// See {setStakeOperator} for what an operator is trusted with.
         mapping(address => bool) stakeOperators;
+        /// The staking v3 bonus listener (`V3BonusVault`), notified on `unstake` and `rebalance`
+        /// BESIDE the bonus escrow, both calls fail open (see {setBonusListener}). Zero = off.
+        /// APPENDED after `stakeOperators` (staking v3 upgrade); it must stay last.
+        address bonusListener;
     }
 
     /**
@@ -286,6 +290,14 @@ contract LPStakingVault is
     ///         anyway (fail open). A bonus that should have been forfeited was not: alert on it.
     event BonusHookFailed(uint256 indexed tokenId);
 
+    /// @notice The staking v3 bonus listener changed. Both sides; zero means notifications off.
+    event BonusListenerSet(address previousListener, address newListener);
+
+    /// @notice The bonus listener's `onUnstake(tokenId)` or `onRebalance(tokenId, …)` reverted
+    ///         inside its gas allowance and the exit or rebalance completed anyway (fail open). An
+    ///         LP bonus that should have been forfeited or moved was not: alert on it.
+    event BonusListenerFailed(uint256 indexed tokenId);
+
     // ──────────────────────── Errors ───────────────────────────
 
     error ZeroAddress();
@@ -334,6 +346,9 @@ contract LPStakingVault is
     /// @dev `setBonusEscrow` would unlink or replace `escrow` while it still owes `totalReserved`
     ///      in reservations that are neither claimed nor forfeited (audit C-13).
     error EscrowHasReservations(address escrow, uint256 totalReserved);
+    /// @dev `setBonusListener` would unlink or replace `listener` while it still owes
+    ///      `totalReserved` (the C-13 rule of {setBonusEscrow}, applied to the listener).
+    error ListenerHasReservations(address listener, uint256 totalReserved);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -579,6 +594,7 @@ contract LPStakingVault is
         delete $.stakers[tokenId];
 
         _notifyUnstake($.bonusEscrow, tokenId);
+        _notifyListenerUnstake($.bonusListener, tokenId);
 
         positionManager.transferFrom(address(this), msg.sender, tokenId);
 
@@ -658,6 +674,13 @@ contract LPStakingVault is
 
         _notifyRebalance(
             $.bonusEscrow,
+            tokenId,
+            newTokenId,
+            oldPosition,
+            IBonusEscrowHooks.Snapshot({tickLower: newTickLower, tickUpper: newTickUpper, liquidity: newLiquidity})
+        );
+        _notifyListenerRebalance(
+            $.bonusListener,
             tokenId,
             newTokenId,
             oldPosition,
@@ -757,6 +780,30 @@ contract LPStakingVault is
         }
         emit BonusEscrowSet(current, newEscrow);
         $.bonusEscrow = newEscrow;
+    }
+
+    /**
+     * @notice Links the staking v3 bonus listener (`V3BonusVault`) notified on `unstake` and
+     *         `rebalance` beside the bonus escrow, or unlinks it.
+     * @dev Owner tier, for the reasons of {setBonusEscrow}. Both notifications to the listener
+     *      FAIL OPEN, each inside `try` with its own {BONUS_HOOK_GAS} allowance and behind the
+     *      {BONUS_HOOK_GAS_FLOOR} check, and emit {BonusListenerFailed} on a revert. Neither the
+     *      rebalance logic nor any valuation changes: the listener receives the same two
+     *      snapshots the escrow receives and values them itself. A non-zero address must carry
+     *      code, and a listener that still owes `totalReserved()` cannot be unlinked or replaced
+     *      ({ListenerHasReservations}, the C-13 rule of {setBonusEscrow}).
+     * @param newListener The listener (a contract implementing {IBonusEscrowHooks}), or zero.
+     */
+    function setBonusListener(address newListener) external onlyOwner {
+        if (newListener != address(0) && newListener.code.length == 0) revert NotAContract(newListener);
+        LPStakingVaultStorage storage $ = _vaultStorage();
+        address current = $.bonusListener;
+        if (current != address(0)) {
+            uint256 reserved = IBonusEscrowReservations(current).totalReserved();
+            if (reserved != 0) revert ListenerHasReservations(current, reserved);
+        }
+        emit BonusListenerSet(current, newListener);
+        $.bonusListener = newListener;
     }
 
     /**
@@ -1038,6 +1085,11 @@ contract LPStakingVault is
         return _vaultStorage().bonusEscrow;
     }
 
+    /// @notice The staking v3 bonus listener notified on `unstake` and `rebalance`. Zero = off.
+    function bonusListener() external view returns (address) {
+        return _vaultStorage().bonusListener;
+    }
+
     // ──────────────────────── Internal helpers ─────────────────
 
     /// @dev Shared body of every stake path. Validates the position, records the staker,
@@ -1202,6 +1254,32 @@ contract LPStakingVault is
         if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
         try IBonusEscrowHooks(escrow).onUnstake{gas: BONUS_HOOK_GAS}(tokenId) {} catch {
             emit BonusHookFailed(tokenId);
+        }
+    }
+
+    /// @dev The listener's `unstake` notification: the escrow's fail-open pattern, its own allowance.
+    function _notifyListenerUnstake(address listener, uint256 tokenId) private {
+        if (listener == address(0)) return;
+        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onUnstake{gas: BONUS_HOOK_GAS}(tokenId) {} catch {
+            emit BonusListenerFailed(tokenId);
+        }
+    }
+
+    /// @dev The listener's `rebalance` notification: FAIL OPEN (unlike the escrow's), its own
+    ///      allowance and the same gas floor. The event names the OLD tokenId.
+    function _notifyListenerRebalance(
+        address listener,
+        uint256 oldTokenId,
+        uint256 newTokenId,
+        IBonusEscrowHooks.Snapshot memory oldPosition,
+        IBonusEscrowHooks.Snapshot memory newPosition
+    ) private {
+        if (listener == address(0)) return;
+        if (gasleft() < BONUS_HOOK_GAS_FLOOR) revert InsufficientGasForBonusHook();
+        try IBonusEscrowHooks(listener).onRebalance{gas: BONUS_HOOK_GAS}(oldTokenId, newTokenId, oldPosition, newPosition) {}
+        catch {
+            emit BonusListenerFailed(oldTokenId);
         }
     }
 
