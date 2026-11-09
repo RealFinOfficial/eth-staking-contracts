@@ -261,7 +261,9 @@ const OWNER_TIER = {
   setMigrator: {
     signature: "function setMigrator(address migrator_)",
     kinds: [V3_POOL_KIND, V3_BONUS_KIND],
-    note: "the only caller of the v3 pool's stakeFor / of the bonus vault's reserve and reserveLp",
+    note:
+      "the only caller of the v3 pool's stakeFor / of the bonus vault's reserve and reserveLp; " +
+      "deploy-staking-v3.js sets both in its batch, after the three acceptOwnership calls",
   },
   setBonusVault: {
     signature: "function setBonusVault(address bonusVault_)",
@@ -278,12 +280,23 @@ const OWNER_TIER = {
   setPool: {
     signature: "function setPool(address pool_)",
     kinds: [V3_BONUS_KIND],
-    note: "the v3 pool allowed to report early exits to the bonus vault",
+    note:
+      "the v3 pool allowed to report early exits to the bonus vault; only in the same batch as " +
+      "that pool's setBonusVault",
   },
   setVault: {
     signature: "function setVault(address vault_)",
     kinds: [V3_BONUS_KIND],
-    note: "the LP vault allowed to report unstakes and rebalances to the bonus vault, or address(0)",
+    note:
+      "the LP vault allowed to report unstakes and rebalances to the bonus vault, or address(0); " +
+      "refused while totalLpReserved() is above zero (LpReservationsOutstanding)",
+  },
+  setMaxTotalReserved: {
+    signature: "function setMaxTotalReserved(uint256 maxTotalReserved_)",
+    kinds: [V3_BONUS_KIND],
+    note:
+      "the bonus vault's cap on totalReserved, in wei (18 decimals); reserve and reserveLp revert " +
+      "BudgetExceeded above it. A cap below the current total stops new reservations only",
   },
   setRates: {
     signature: "function setRates(uint16 compoundBps_, uint16 lpBps_, uint16 restakeBps_)",

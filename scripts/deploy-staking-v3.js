@@ -9,28 +9,33 @@ const lpTimelock = require("./lp-timelock");
 
 // Deploys the staking v3 campaign beside a LIVE LP stack: the three UUPS proxies
 // `WeightedStakingPoolV3`, `V3BonusVault` and `StakingMigrator`, wires what the deployer may wire
-// while it still owns them, nominates the `LPTimelock` as their owner, and writes the ONE timelock
-// batch that finishes the job.
+// while it still owns them (nothing that opens a route), nominates the `LPTimelock` as their owner,
+// and writes the ONE timelock batch that finishes the job. No route works before that batch: the
+// pool's and the bonus vault's `migrator` stay zero until the timelock owns all three.
 //
 // ──────────────────────── what it does, in order ────────────────────────
 //
 //   1. config and the on-chain checks: the LP vault's pool pair must be exactly {V3_ASSET, V3_USDC},
 //      the activation must be before the end, the end in the future
 //   2. `WeightedStakingPoolV3` + `LPProxy`, `initialize(deployer, $ASSET, USDC, activation, end,
-//      weightSigner)` — the USDC reward slot is kept and left UNFUNDED (decision of 2026-11-09)
-//   3. `V3BonusVault` + `LPProxy`, `initialize(deployer, $ASSET, migrator = 0, pool, lpVault)`
+//      weightSigner, rewardsWaived)` — the USDC reward slot is kept and never funded (decision of
+//      2026-11-09); `rewardsWaived = true` makes `unstake` after the end pay the principal with a
+//      zero reward and refuses `addRewards`
+//   3. `V3BonusVault` + `LPProxy`, `initialize(deployer, $ASSET, migrator = 0, pool, lpVault,
+//      maxTotalReserved)` — the cap on what all reservations together may owe
 //   4. `StakingMigrator(lpVault, USDC, $ASSET)` + `LPProxy`, `initialize(deployer, pool, bonusVault,
 //      migratorSigner, twapWindow, maxDeviationTicks, valuationWindow)` — born with routes 1 and 2
 //      PAUSED (`compoundPaused = true`) and the rates 1000 / 1000 / 500 bps
-//   5. the DIRECT wiring, sent by the deployer while it owns the three proxies (each skipped when
-//      already on chain): `pool.setMigrator(migrator)`, `pool.setBonusVault(bonusVault)`,
-//      `bonusVault.setMigrator(migrator)`; then `transferOwnership(timelock)` on all three — a
-//      NOMINATION (Ownable2Step), the deployer stays owner until the timelock accepts
+//   5. the DIRECT wiring, sent by the deployer while it owns the three proxies (skipped when
+//      already on chain): `pool.setBonusVault(bonusVault)`; then `transferOwnership(timelock)` on
+//      all three — a NOMINATION (Ownable2Step), the deployer stays owner until the timelock accepts
 //   6. the TIMELOCK batch (owner tier, one operation, in this order), written to a file
 //      `lp-timelock.js` reads:
 //        WeightedStakingPoolV3.acceptOwnership()
 //        V3BonusVault.acceptOwnership()
 //        StakingMigrator.acceptOwnership()
+//        WeightedStakingPoolV3.setMigrator(migrator)   the routes open only here, after the timelock
+//        V3BonusVault.setMigrator(migrator)            owns all three contracts
 //        LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)   only when the live vault
 //                                                                       has no bonusListener() yet
 //        LPStakingVault.setBonusListener(bonusVault)
@@ -40,7 +45,10 @@ const lpTimelock = require("./lp-timelock");
 //      liquidity routes 1 and 2 need (the vault's operator)
 //
 // The three proxies are recorded in deployments.json (kinds `WeightedStakingPoolV3`,
-// `V3BonusVault`, `StakingMigrator`) as each one exists, so a failed run loses no address.
+// `V3BonusVault`, `StakingMigrator`) as each one exists, so a failed run loses no address. A run
+// RESUMES: every kind already recorded for the chain (with code at its address) is reused and
+// printed as "recorded" instead of being deployed again, and every wiring step and batch call is
+// skipped when its effect is already on chain. To deploy afresh, remove the three entries first.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -54,6 +62,9 @@ const lpTimelock = require("./lp-timelock");
 //   V3_TWAP_WINDOW            the migrator's swap guard window, default 300 (the zapper's)
 //   V3_TWAP_MAX_DEVIATION_TICKS  default 953 (the zapper's 1000 bps)
 //   V3_VALUATION_WINDOW       default 1800 (the adapter's): the mean tick valuing the LP USDC leg
+//   V3_MAX_TOTAL_RESERVED     whole $ASSET: the bonus vault's cap on all reservations together;
+//                             REQUIRED on mainnet, default 100000 on test networks
+//   V3_REWARDS_WAIVED         true | false, default true: the pool pays no USDC reward
 //   V3_VAULT_IMPLEMENTATION   the new LPStakingVault implementation (deploy-implementation.js,
 //                             IMPL_TARGET=LPStakingVault) when the live vault predates the listener
 //   V3_BATCH_FILE             where to write the timelock batch; default a file in the OS temp dir
@@ -86,6 +97,14 @@ function readAddress(name, fallback) {
   return hre.ethers.getAddress(raw);
 }
 
+function readBoolean(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`${name} must be true or false — got ${raw}`);
+}
+
 function readInteger(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") {
@@ -98,6 +117,7 @@ function readInteger(name, fallback) {
 
 /** The configuration, from the environment and the registry. Pure apart from the registry read. */
 function readConfig(chainId) {
+  const mainnet = pools.isMainnet(Number(chainId));
   const registry = pools.readRegistry()[String(chainId)] || {};
   const zapper = registry.LPZapper || {};
   const weightSigner = readAddress("V3_WEIGHT_SIGNER");
@@ -113,6 +133,8 @@ function readConfig(chainId) {
     twapWindow: readInteger("V3_TWAP_WINDOW", 300),
     maxDeviationTicks: readInteger("V3_TWAP_MAX_DEVIATION_TICKS", 953),
     valuationWindow: readInteger("V3_VALUATION_WINDOW", 1800),
+    maxTotalReservedTokens: BigInt(readInteger("V3_MAX_TOTAL_RESERVED", mainnet ? undefined : 100000)),
+    rewardsWaived: readBoolean("V3_REWARDS_WAIVED", true),
     vaultImplementation: process.env.V3_VAULT_IMPLEMENTATION
       ? readAddress("V3_VAULT_IMPLEMENTATION")
       : null,
@@ -150,14 +172,56 @@ async function vaultHasListener(vaultAddress) {
 }
 
 /**
- * Steps 2-4. Each proxy is recorded as soon as it exists.
- * @returns {{pool, bonusVault, migrator}} the three `deployProxyPair` results
+ * A kind the registry already records for this chain, with code at its address, or `null`.
+ * Reused instead of deployed again (the resume path); printed as "recorded".
+ */
+async function recordedProxy(chainId, kind) {
+  const address = pools.registryAddress(chainId, kind);
+  if (!address) return null;
+  const code = await hre.ethers.provider.getCode(address);
+  if (code === "0x") {
+    throw new Error(
+      `deployments.json records ${kind} at ${address} for chain ${chainId}, but there is no code there — ` +
+        "remove the stale entry or fix the network"
+    );
+  }
+  console.log(`${kind}: recorded at ${address}, reused (not deployed again)`);
+  return { address: hre.ethers.getAddress(address), recorded: true };
+}
+
+/** `config.maxTotalReservedTokens` whole $ASSET in wei, at the token's own decimals. */
+async function maxTotalReservedWei(config) {
+  const token = new hre.ethers.Contract(config.asset, ["function decimals() view returns (uint8)"], hre.ethers.provider);
+  return BigInt(config.maxTotalReservedTokens) * 10n ** BigInt(await token.decimals());
+}
+
+/**
+ * Steps 2-4. Each proxy is recorded as soon as it exists; a kind already recorded is reused.
+ * @returns {{pool, bonusVault, migrator}} `deployProxyPair` results, or `{address, recorded}`
  */
 async function deployContracts({ chainId, deployer, config }) {
+  const pool = (await recordedProxy(chainId, POOL_KIND)) || (await deployPool({ chainId, deployer, config }));
+  const bonusVault =
+    (await recordedProxy(chainId, BONUS_KIND)) || (await deployBonusVault({ chainId, deployer, config, pool }));
+  const migrator =
+    (await recordedProxy(chainId, MIGRATOR_KIND)) ||
+    (await deployMigrator({ chainId, deployer, config, pool, bonusVault }));
+  return { pool, bonusVault, migrator };
+}
+
+async function deployPool({ chainId, deployer, config }) {
   const pool = await deployProxyPair(
     POOL_KIND,
     [],
-    [deployer.address, config.asset, config.usdc, config.activationEpoch, config.endEpoch, config.weightSigner],
+    [
+      deployer.address,
+      config.asset,
+      config.usdc,
+      config.activationEpoch,
+      config.endEpoch,
+      config.weightSigner,
+      config.rewardsWaived,
+    ],
     deployer
   );
   pools.recordDeployment(chainId, POOL_KIND, pool.address, {
@@ -170,13 +234,18 @@ async function deployContracts({ chainId, deployer, config }) {
     activationEpoch: config.activationEpoch,
     endEpoch: config.endEpoch,
     signer: config.weightSigner,
+    rewardsWaived: config.rewardsWaived,
     owner: deployer.address,
   });
+  return pool;
+}
 
+async function deployBonusVault({ chainId, deployer, config, pool }) {
+  const maxTotalReserved = await maxTotalReservedWei(config);
   const bonusVault = await deployProxyPair(
     BONUS_KIND,
     [],
-    [deployer.address, config.asset, hre.ethers.ZeroAddress, pool.address, config.lpVault],
+    [deployer.address, config.asset, hre.ethers.ZeroAddress, pool.address, config.lpVault, maxTotalReserved],
     deployer
   );
   pools.recordDeployment(chainId, BONUS_KIND, bonusVault.address, {
@@ -187,9 +256,13 @@ async function deployContracts({ chainId, deployer, config }) {
     bonusToken: config.asset,
     pool: pool.address,
     vault: config.lpVault,
+    maxTotalReserved: maxTotalReserved.toString(),
     owner: deployer.address,
   });
+  return bonusVault;
+}
 
+async function deployMigrator({ chainId, deployer, config, pool, bonusVault }) {
   const migrator = await deployProxyPair(
     MIGRATOR_KIND,
     [config.lpVault, config.usdc, config.asset],
@@ -220,29 +293,21 @@ async function deployContracts({ chainId, deployer, config }) {
     valuationWindow: config.valuationWindow,
     owner: deployer.address,
   });
-
-  return { pool, bonusVault, migrator };
+  return migrator;
 }
 
 /**
  * Step 5: what the deployer sends while it owns the three proxies, then the nominations. Every
- * call is skipped when its effect is already on chain, so a resumed run sends nothing twice.
+ * call is skipped when its effect is already on chain, so a resumed run sends nothing twice. The
+ * two `setMigrator` calls are NOT here: they open the routes, so they go in the timelock batch.
  */
 async function wireDirect({ deployer, addresses, timelock }) {
   const pool = await hre.ethers.getContractAt(POOL_KIND, addresses.pool, deployer);
   const bonusVault = await hre.ethers.getContractAt(BONUS_KIND, addresses.bonusVault, deployer);
   const migrator = await hre.ethers.getContractAt(MIGRATOR_KIND, addresses.migrator, deployer);
 
-  if (!sameAddress(await pool.migrator(), addresses.migrator)) {
-    await pools.send("pool.setMigrator(migrator)", deployer, (o) => pool.setMigrator(addresses.migrator, o));
-  }
   if (!sameAddress(await pool.bonusVault(), addresses.bonusVault)) {
     await pools.send("pool.setBonusVault(bonusVault)", deployer, (o) => pool.setBonusVault(addresses.bonusVault, o));
-  }
-  if (!sameAddress(await bonusVault.migrator(), addresses.migrator)) {
-    await pools.send("bonusVault.setMigrator(migrator)", deployer, (o) =>
-      bonusVault.setMigrator(addresses.migrator, o)
-    );
   }
   for (const [label, contract] of [
     [POOL_KIND, pool],
@@ -272,6 +337,15 @@ async function timelockOps({ addresses, lpVault, timelock, vaultImplementation }
     if (!sameAddress(await contract.owner(), timelock) && sameAddress(await contract.pendingOwner(), timelock)) {
       ops.push({ target: address, kind, fn: "acceptOwnership", args: [] });
     }
+  }
+  // The two links that open the routes, only once the timelock owns everything.
+  const pool = await hre.ethers.getContractAt(POOL_KIND, addresses.pool);
+  const bonusVault = await hre.ethers.getContractAt(BONUS_KIND, addresses.bonusVault);
+  if (!sameAddress(await pool.migrator(), addresses.migrator)) {
+    ops.push({ target: addresses.pool, kind: POOL_KIND, fn: "setMigrator", args: [addresses.migrator] });
+  }
+  if (!sameAddress(await bonusVault.migrator(), addresses.migrator)) {
+    ops.push({ target: addresses.bonusVault, kind: BONUS_KIND, fn: "setMigrator", args: [addresses.migrator] });
   }
   const hasListener = await vaultHasListener(lpVault);
   if (!hasListener) {
@@ -348,6 +422,8 @@ async function main() {
   console.log(`Migrator signer:    ${config.migratorSigner}`);
   console.log(`Swap guard:         ${config.twapWindow} s / ${config.maxDeviationTicks} ticks`);
   console.log(`Valuation window:   ${config.valuationWindow} s`);
+  console.log(`Bonus budget:       ${config.maxTotalReservedTokens} $ASSET (maxTotalReserved)`);
+  console.log(`Rewards waived:     ${config.rewardsWaived}`);
   if (config.vaultImplementation) console.log(`Vault upgrade to:   ${config.vaultImplementation}`);
 
   pools.requireConfirmation(chainId, "deploy the staking v3 campaign");
@@ -379,7 +455,9 @@ async function main() {
     "\n── After the batch executes (the operator, no delay) ──\n" +
       `  1. fund the bonus vault with $ASSET before the end: V3BonusVault(${addresses.bonusVault}).fund(amount)\n` +
       `  2. once the pool has the liquidity routes 1 and 2 need: StakingMigrator(${addresses.migrator}).unpauseCompound()\n` +
-      "     (the LP vault's operator; route 3 is open from the batch onwards)"
+      "     (the LP vault's operator; route 3 is open from the batch onwards)\n" +
+      "  3. for every BonusListenerFailed(tokenId) the LP vault emits, the backend calls\n" +
+      `     V3BonusVault(${addresses.bonusVault}).reconcileLp(tokenId) (anyone may)`
   );
 }
 
@@ -388,6 +466,7 @@ module.exports = {
   BONUS_KIND,
   MIGRATOR_KIND,
   readConfig,
+  recordedProxy,
   checkMarket,
   deployContracts,
   wireDirect,
