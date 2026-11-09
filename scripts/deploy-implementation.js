@@ -91,7 +91,13 @@ const pools = require("./lib/pools");
 //                            calldata. Default `0x` (none). The RewardsDistributor v1 -> v2
 //                            upgrade of 2026-10-07 needs `initializeV2(<$ASSET>)` here: without
 //                            it the proxy runs the new code with no `asset` recorded (see
-//                            scripts/README.md, "Activating mintRewardToken on a live stack")
+//                            scripts/README.md, "Activating mintRewardToken on a live stack").
+//                            For IMPL_TARGET=LPStakingVault with the vault's own artifact and
+//                            IMPL_UPGRADE_DATA unset, the default is `initializeV2()` when the
+//                            live proxy holds no hook gas allowances yet (namespace slot 8 is
+//                            zero: the 746b22c vault and the first v3 vault of 2026-11-09), so
+//                            the Glamsterdam upgrade writes 400000 / 1000000 in the same call
+//                            (audit notes item 20)
 //   RECORD=1                 write `pendingImplementation` / `pendingImplementationBlock`
 //                            into the proxy's entry in deployments.json
 //   CONFIRM=yes              required on mainnet, like every other state-changing script here
@@ -378,25 +384,58 @@ async function stripImplTxHash(implementation) {
  * @param {string} [options.contractName]       artifact to deploy; defaults to `kind`
  * @param {string[]} [options.unsafeAllowExtra] extra plugin flags on top of the spec's two
  * @param {string} [options.upgradeData]        `data` of the printed `upgradeToAndCall`
- *                                              commands (hex calldata); `0x` by default
+ *                                              commands (hex calldata); when omitted, `0x`,
+ *                                              or `initializeV2()` for a vault that needs it
+ *                                              (see {defaultUpgradeData})
  * @param {object} [options.deployer]           signer; defaults to `pools.getSigner()`
  * @param {boolean} [options.quiet]             suppress the console output
  */
+/** `LPStakingVault` namespace slot 8: `bonusHookGas` | `bonusListenerGas` << 128 (Glamsterdam fix). */
+const VAULT_HOOK_GAS_SLOT = "0x4c835a63e69815f7352ca18e845a5d8023cea9abbc2e923eb7a3a481844a6508";
+const VAULT_INITIALIZE_V2_DATA = new hre.ethers.Interface(["function initializeV2()"]).encodeFunctionData(
+  "initializeV2",
+  []
+);
+
+/**
+ * The `data` of the upgrade when the caller named none: `0x`, except for the vault's own artifact
+ * on a proxy whose hook gas slot is still zero (the 746b22c vault and the first v3 vault). That
+ * upgrade must carry `initializeV2()`, which writes the defaults 400000 / 1000000, or the vault
+ * runs on the views' fallback values until someone schedules `setBonusHookGas` (audit notes item 20).
+ */
+async function defaultUpgradeData({ kind, contractName, proxyAddress, upgradeData }) {
+  if (upgradeData !== undefined) return { upgradeData, note: null };
+  if (kind !== "LPStakingVault" || contractName !== "LPStakingVault") return { upgradeData: "0x", note: null };
+  const stored = BigInt(await hre.ethers.provider.getStorage(proxyAddress, VAULT_HOOK_GAS_SLOT));
+  if (stored !== 0n) return { upgradeData: "0x", note: null };
+  return {
+    upgradeData: VAULT_INITIALIZE_V2_DATA,
+    note:
+      `Reinitializer:  initializeV2() = ${VAULT_INITIALIZE_V2_DATA}. The proxy holds no hook gas\n` +
+      "                allowances yet (namespace slot 8 is zero), so the upgrade must be\n" +
+      `                upgradeToAndCall(<new implementation>, ${VAULT_INITIALIZE_V2_DATA}); it writes\n` +
+      "                400000 (escrow) / 1000000 (listener). Measure first: scripts/measure-hook-gas.js",
+  };
+}
+
 async function deployImplementation(options) {
   const {
     kind,
     proxyAddress: proxyOverride,
     contractName = kind,
     unsafeAllowExtra = [],
-    upgradeData = "0x",
+    upgradeData: upgradeDataOption,
     deployer: deployerOverride,
     quiet = false,
   } = options;
 
   const log = quiet ? () => {} : (line = "") => console.log(line);
 
-  if (!hre.ethers.isHexString(upgradeData) || upgradeData.includes(",")) {
-    throw new Error(`IMPL_UPGRADE_DATA must be hex calldata (0x for none) — got ${upgradeData}`);
+  if (
+    upgradeDataOption !== undefined &&
+    (!hre.ethers.isHexString(upgradeDataOption) || upgradeDataOption.includes(","))
+  ) {
+    throw new Error(`IMPL_UPGRADE_DATA must be hex calldata (0x for none) — got ${upgradeDataOption}`);
   }
 
   if (!IMPL_KINDS.includes(kind)) {
@@ -421,6 +460,13 @@ async function deployImplementation(options) {
     await hre.upgrades.erc1967.getImplementationAddress(proxyAddress)
   );
 
+  const { upgradeData, note: upgradeDataNote } = await defaultUpgradeData({
+    kind,
+    contractName,
+    proxyAddress,
+    upgradeData: upgradeDataOption,
+  });
+
   const { args: constructorArgs, rows } = await readConstructorArgs(
     kind,
     proxyAddress,
@@ -437,6 +483,7 @@ async function deployImplementation(options) {
   log(`Proxy:          ${proxyAddress}`);
   log(`  ${pools.explorerAddress(chainId, proxyAddress)}`);
   log(`Current impl:   ${currentImplementation} (ERC-1967 slot)`);
+  if (upgradeDataNote) log(upgradeDataNote);
   log(`  ${pools.explorerAddress(chainId, currentImplementation)}`);
   log(`unsafeAllow:    ${unsafeAllow.join(", ")}`);
   if (unsafeAllowExtra.length > 0) {
@@ -618,6 +665,7 @@ async function deployImplementation(options) {
     codeSize,
     scheduleCommand,
     executeCommand,
+    upgradeData,
   };
 }
 
@@ -635,7 +683,7 @@ async function main() {
     proxyAddress: process.env.IMPL_PROXY_ADDRESS,
     contractName: process.env.IMPL_CONTRACT,
     unsafeAllowExtra,
-    upgradeData: process.env.IMPL_UPGRADE_DATA || "0x",
+    upgradeData: process.env.IMPL_UPGRADE_DATA || undefined,
   });
 
   if (sameValue(result.implementation, result.currentImplementation)) {

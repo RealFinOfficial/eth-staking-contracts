@@ -351,6 +351,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       vaultAddress,
     ]);
     expect(JSON.parse(fs.readFileSync(batchFile, "utf8"))).to.have.length(8);
+    expect(result.batch.calls[5].args[1]).to.equal(vault.interface.encodeFunctionData("initializeV2", []));
 
     const recorded = JSON.parse(fs.readFileSync(path.join(scratch, "deployments.json"), "utf8"));
     const chainKey = String((await ethers.provider.getNetwork()).chainId);
@@ -381,6 +382,10 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(await vault.owner()).to.equal(await timelock.getAddress(), "the vault's state survived the upgrade");
     expect(await vault.operator()).to.equal(multisig.address);
     expect(await vault.bonusListener()).to.equal(result.addresses.bonusVault);
+    // The upgrade carried initializeV2(): the Glamsterdam gas defaults are stored, not just served.
+    expect(await vault.bonusHookGas()).to.equal(400_000n);
+    expect(await vault.bonusListenerGas()).to.equal(1_000_000n);
+    await expect(vault.connect(multisig).initializeV2()).to.be.reverted; // runs once
     expect(await vault.isStakeOperator(result.addresses.migrator)).to.equal(true);
     expect(await poolV3.migrator()).to.equal(result.addresses.migrator);
     expect(await poolV3.bonusVault()).to.equal(result.addresses.bonusVault);
@@ -523,7 +528,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const hookGas = await listenerGas((b) =>
       b.onRebalance.estimateGas(bobTokenId, 2n ** 64n, snap(live.liquidity), snap(live.liquidity / 2n))
     );
-    expect(hookGas).to.be.lessThan(await vault.BONUS_LISTENER_GAS());
+    expect(hookGas).to.be.lessThan(await vault.bonusListenerGas());
 
     const tx = await vault.connect(bob).rebalance(bobTokenId, newLower, newUpper, noSwap, FAR);
     const receipt = await tx.wait();
@@ -541,7 +546,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     notes.push(
       `rebalance: LP bonus ${ethers.formatUnits(before, 18)} -> ${ethers.formatUnits(moved.amount, 18)} tREAL, ` +
         `tx gas ${receipt.gasUsed}, listener onRebalance ${hookGas} gas (eth_estimateGas from the vault, incl. ` +
-        `the 21,000 intrinsic; allowance ${await vault.BONUS_LISTENER_GAS()})`
+        `the 21,000 intrinsic; allowance ${await vault.bonusListenerGas()})`
     );
   });
 

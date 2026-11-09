@@ -258,6 +258,14 @@ const OWNER_TIER = {
       "links the staking v3 V3BonusVault notified (fail open) on unstake and rebalance, or " +
       "address(0) to unlink it; refused while the linked listener still owes totalReserved()",
   },
+  setBonusHookGas: {
+    signature: "function setBonusHookGas(uint256 escrowGas, uint256 listenerGas)",
+    kinds: ["LPStakingVault"],
+    note:
+      "the gas the vault forwards to the escrow's onUnstake and to each listener notification, " +
+      "100000..3000000 each (Glamsterdam fix, audit notes item 20). Measure first with " +
+      "scripts/measure-hook-gas.js: both calls fail open, so too little gas silently skips the bonus",
+  },
   setMigrator: {
     signature: "function setMigrator(address migrator_)",
     kinds: [V3_POOL_KIND, V3_BONUS_KIND],

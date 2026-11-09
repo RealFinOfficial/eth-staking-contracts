@@ -36,8 +36,11 @@ const lpTimelock = require("./lp-timelock");
 //        StakingMigrator.acceptOwnership()
 //        WeightedStakingPoolV3.setMigrator(migrator)   the routes open only here, after the timelock
 //        V3BonusVault.setMigrator(migrator)            owns all three contracts
-//        LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, 0x)   only when the live vault
-//                                                                       has no bonusListener() yet
+//        LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, initializeV2())   only when the
+//                       live vault has no bonusHookGas() yet (746b22c and the first v3 build of
+//                       2026-11-09); initializeV2 writes the gas defaults 400,000 / 1,000,000
+//        LPStakingVault.setBonusHookGas(LP_BONUS_HOOK_GAS, LP_BONUS_LISTENER_GAS)   only when they
+//                       differ from what the vault will hold after the upgrade
 //        LPStakingVault.setBonusListener(bonusVault)
 //        LPStakingVault.setStakeOperator(migrator, true)
 //   7. the operator's steps after the batch: fund the bonus vault with $ASSET any time before the
@@ -58,6 +61,10 @@ const lpTimelock = require("./lp-timelock");
 //   V3_MIGRATOR_SIGNER        the TransitionVoucher signer; defaults to V3_WEIGHT_SIGNER
 //   V3_ASSET / V3_USDC        default: the LPZapper entry's `asset` / `usdc` in deployments.json
 //   V3_LP_VAULT               default: the LPStakingVault entry
+//   LP_BONUS_HOOK_GAS         gas the vault forwards to the ApeBond escrow's onUnstake; default
+//                             400000 (bounds 100000..3000000). Glamsterdam fix, audit notes item 20
+//   LP_BONUS_LISTENER_GAS     gas the vault forwards to each listener notification; default 1000000.
+//                             Measure both first: scripts/measure-hook-gas.js
 //   V3_TIMELOCK               default: the TimelockController entry
 //   V3_TWAP_WINDOW            the migrator's swap guard window, default 300 (the zapper's)
 //   V3_TWAP_MAX_DEVIATION_TICKS  default 953 (the zapper's 1000 bps)
@@ -77,6 +84,11 @@ const POOL_KIND = lpTimelock.V3_POOL_KIND;
 const BONUS_KIND = lpTimelock.V3_BONUS_KIND;
 const MIGRATOR_KIND = lpTimelock.MIGRATOR_KIND;
 
+/** The vault's defaults (`BONUS_HOOK_GAS` / `BONUS_LISTENER_GAS`), written by `initializeV2`. */
+const DEFAULT_BONUS_HOOK_GAS = 400000;
+const DEFAULT_BONUS_LISTENER_GAS = 1000000;
+const INITIALIZE_V2_DATA = new hre.ethers.Interface(["function initializeV2()"]).encodeFunctionData("initializeV2", []);
+
 const VAULT_ABI = [
   "function token0() view returns (address)",
   "function token1() view returns (address)",
@@ -84,6 +96,8 @@ const VAULT_ABI = [
   "function owner() view returns (address)",
   "function bonusListener() view returns (address)",
   "function isStakeOperator(address) view returns (bool)",
+  "function bonusHookGas() view returns (uint256)",
+  "function bonusListenerGas() view returns (uint256)",
 ];
 
 function sameAddress(a, b) {
@@ -135,6 +149,8 @@ function readConfig(chainId) {
     valuationWindow: readInteger("V3_VALUATION_WINDOW", 1800),
     maxTotalReservedTokens: BigInt(readInteger("V3_MAX_TOTAL_RESERVED", mainnet ? undefined : 100000)),
     rewardsWaived: readBoolean("V3_REWARDS_WAIVED", true),
+    bonusHookGas: readInteger("LP_BONUS_HOOK_GAS", DEFAULT_BONUS_HOOK_GAS),
+    bonusListenerGas: readInteger("LP_BONUS_LISTENER_GAS", DEFAULT_BONUS_LISTENER_GAS),
     vaultImplementation: process.env.V3_VAULT_IMPLEMENTATION
       ? readAddress("V3_VAULT_IMPLEMENTATION")
       : null,
@@ -168,6 +184,16 @@ async function vaultHasListener(vaultAddress) {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** The vault's two hook gas allowances, or `null` when its code predates them (no `bonusHookGas()`). */
+async function vaultHookGas(vaultAddress) {
+  const vault = new hre.ethers.Contract(vaultAddress, VAULT_ABI, hre.ethers.provider);
+  try {
+    return { escrow: Number(await vault.bonusHookGas()), listener: Number(await vault.bonusListenerGas()) };
+  } catch {
+    return null;
   }
 }
 
@@ -326,7 +352,14 @@ async function wireDirect({ deployer, addresses, timelock }) {
  * Step 6: the batch, only the calls whose effect is NOT already on chain (a finished run computes
  * an empty batch).
  */
-async function timelockOps({ addresses, lpVault, timelock, vaultImplementation }) {
+async function timelockOps({
+  addresses,
+  lpVault,
+  timelock,
+  vaultImplementation,
+  bonusHookGas = DEFAULT_BONUS_HOOK_GAS,
+  bonusListenerGas = DEFAULT_BONUS_LISTENER_GAS,
+}) {
   const ops = [];
   for (const [kind, address] of [
     [POOL_KIND, addresses.pool],
@@ -348,15 +381,32 @@ async function timelockOps({ addresses, lpVault, timelock, vaultImplementation }
     ops.push({ target: addresses.bonusVault, kind: BONUS_KIND, fn: "setMigrator", args: [addresses.migrator] });
   }
   const hasListener = await vaultHasListener(lpVault);
-  if (!hasListener) {
+  // The Glamsterdam fix (audit notes item 20): a vault without configurable hook gas is upgraded,
+  // and the upgrade carries `initializeV2()`, which writes the defaults in the same call.
+  let gas = await vaultHookGas(lpVault);
+  if (gas === null) {
     if (!vaultImplementation) {
       throw new Error(
-        `The LP vault ${lpVault} predates the bonus listener (no bonusListener()). Deploy the new ` +
+        `The LP vault ${lpVault} predates the configurable hook gas (no bonusHookGas()). Deploy the new ` +
           "implementation first (IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js) " +
           "and pass it as V3_VAULT_IMPLEMENTATION; the batch upgrades the vault before linking."
       );
     }
-    ops.push({ target: lpVault, kind: "LPStakingVault", fn: "upgradeToAndCall", args: [vaultImplementation, "0x"] });
+    ops.push({
+      target: lpVault,
+      kind: "LPStakingVault",
+      fn: "upgradeToAndCall",
+      args: [vaultImplementation, INITIALIZE_V2_DATA],
+    });
+    gas = { escrow: DEFAULT_BONUS_HOOK_GAS, listener: DEFAULT_BONUS_LISTENER_GAS };
+  }
+  if (gas.escrow !== Number(bonusHookGas) || gas.listener !== Number(bonusListenerGas)) {
+    ops.push({
+      target: lpVault,
+      kind: "LPStakingVault",
+      fn: "setBonusHookGas",
+      args: [String(bonusHookGas), String(bonusListenerGas)],
+    });
   }
   const vault = new hre.ethers.Contract(lpVault, VAULT_ABI, hre.ethers.provider);
   const linked = hasListener && sameAddress(await vault.bonusListener(), addresses.bonusVault);
@@ -395,6 +445,8 @@ async function deployStakingV3({ config, deployer, batchFile = null }) {
     lpVault: config.lpVault,
     timelock: config.timelock,
     vaultImplementation: config.vaultImplementation,
+    bonusHookGas: config.bonusHookGas,
+    bonusListenerGas: config.bonusListenerGas,
   });
   const batch = ops.length > 0 ? lpTimelock.buildBatch(ops, "staking-v3") : null;
   if (batch && batchFile) {
@@ -424,7 +476,10 @@ async function main() {
   console.log(`Valuation window:   ${config.valuationWindow} s`);
   console.log(`Bonus budget:       ${config.maxTotalReservedTokens} $ASSET (maxTotalReserved)`);
   console.log(`Rewards waived:     ${config.rewardsWaived}`);
-  if (config.vaultImplementation) console.log(`Vault upgrade to:   ${config.vaultImplementation}`);
+  console.log(`Hook gas:           escrow ${config.bonusHookGas} / listener ${config.bonusListenerGas} (LP_BONUS_HOOK_GAS / LP_BONUS_LISTENER_GAS)`);
+  if (config.vaultImplementation) {
+    console.log(`Vault upgrade to:   ${config.vaultImplementation} (upgradeToAndCall with initializeV2())`);
+  }
 
   pools.requireConfirmation(chainId, "deploy the staking v3 campaign");
 

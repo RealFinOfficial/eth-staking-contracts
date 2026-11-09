@@ -237,6 +237,8 @@ describe("deploy-implementation.js", function () {
         ethers.ZeroAddress,
         TWAP_WINDOW,
         MAX_DEVIATION_TICKS,
+        400000,
+        1000000,
       ],
       {
         kind: "uups",
@@ -612,6 +614,37 @@ describe("deploy-implementation.js", function () {
       expect(fromCommand.data).to.equal(
         vault.interface.encodeFunctionData("upgradeToAndCall", [result.implementation, "0x"])
       );
+    });
+
+    it("defaults the vault upgrade to initializeV2() on a pre-fix vault, which writes the hook gas defaults", async function () {
+      // A vault on the 746b22c code (no gas fields): the live stack #6 / mainnet shape.
+      const OldVault = await ethers.getContractFactory("LPStakingVaultPreListenerMock");
+      const old = await upgrades.deployProxy(
+        OldVault,
+        [timelockAddr, guardian.address, operatorSafe.address, ethers.ZeroAddress, TWAP_WINDOW, MAX_DEVIATION_TICKS],
+        {
+          kind: "uups",
+          constructorArgs: [nfpmAddr, poolAddr, token0Addr, token1Addr, FEE, routerAddr],
+          unsafeAllow: UUPS_UNSAFE_ALLOW,
+        }
+      );
+      const oldAddr = await old.getAddress();
+
+      const result = await deployImplementation({ kind: "LPStakingVault", proxyAddress: oldAddr, deployer, quiet: true });
+      const initV2 = vault.interface.encodeFunctionData("initializeV2", []);
+      expect(result.upgradeData).to.equal(initV2);
+      for (const command of [result.scheduleCommand, result.executeCommand]) {
+        expect(command).to.include(`TIMELOCK_ARGS=${result.implementation},${initV2}`);
+      }
+
+      await scheduleAndExecute(oldAddr, "upgradeToAndCall", [result.implementation, initV2]);
+      const upgraded = await ethers.getContractAt("LPStakingVault", oldAddr);
+      expect(await upgraded.bonusHookGas()).to.equal(400_000n);
+      expect(await upgraded.bonusListenerGas()).to.equal(1_000_000n);
+
+      // A vault that already holds the allowances keeps the plain 0x default.
+      const again = await deployImplementation({ kind: "LPStakingVault", proxyAddress: vaultAddr, deployer, quiet: true });
+      expect(again.upgradeData).to.equal("0x");
     });
 
     it("records the implementation in the manifest with no transaction hash", async function () {
