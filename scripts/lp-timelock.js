@@ -126,7 +126,8 @@
 //                             withdraw-offer | revoke-canceller | cancellers
 //   TIMELOCK_TARGET           registry kind (LPStakingVault, RewardsDistributor,
 //                             LPEpochRegistry, TokenOverture, LPZapper, BonusEscrow,
-//                             ApeBondPositionAdapter, TimelockController) or a raw address
+//                             ApeBondPositionAdapter, WeightedStakingPoolV3, V3BonusVault,
+//                             StakingMigrator, TimelockController) or a raw address
 //   TIMELOCK_TARGET_ADDRESS   overrides the registry lookup for the target
 //   TIMELOCK_FN               one of the owner-tier functions listed in OWNER_TIER below
 //   TIMELOCK_ARGS             comma-separated arguments, in the function's own order
@@ -208,17 +209,28 @@ const PROXY_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", 
 const ESCROW_KIND = "BonusEscrow";
 const ADAPTER_KIND = "ApeBondPositionAdapter";
 
+/**
+ * The staking v3 contracts (`scripts/deploy-staking-v3.js`): three more UUPS proxies, Ownable2Step,
+ * handed to the timelock by a nomination the timelock's batch accepts. Their operator-tier calls
+ * (`StakingMigrator.pauseCompound` / `unpauseCompound` / `setSigner` / `setTwapParams`, read from the
+ * LP vault's guardian and operator) are sent directly and are not here.
+ */
+const V3_POOL_KIND = "WeightedStakingPoolV3";
+const V3_BONUS_KIND = "V3BonusVault";
+const MIGRATOR_KIND = "StakingMigrator";
+const V3_KINDS = [V3_POOL_KIND, V3_BONUS_KIND, MIGRATOR_KIND];
+
 const OWNER_TIER = {
   acceptOwnership: {
     signature: "function acceptOwnership()",
-    kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND],
+    kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND, ...V3_KINDS],
     note:
       "the second half of the Ownable2Step handover; the NEW owner (a timelock) sends it. On the " +
       "adapter it is the first call of the activation and replace-adapter batches",
   },
   transferOwnership: {
     signature: "function transferOwnership(address newOwner)",
-    kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND],
+    kinds: [...PROXY_KINDS, ESCROW_KIND, ADAPTER_KIND, ...V3_KINDS],
     note:
       "nominates a new owner on the Ownable2Step contracts (the five proxies, the escrow and the " +
       "adapter, used to move them to a new timelock); the nominee holds nothing until it sends " +
@@ -238,6 +250,45 @@ const OWNER_TIER = {
     signature: "function setStakeOperator(address stakeOperator, bool allowed)",
     kinds: ["LPStakingVault"],
     note: "adds or removes one trusted periphery contract on the `stakeFor` allowlist",
+  },
+  setBonusListener: {
+    signature: "function setBonusListener(address newListener)",
+    kinds: ["LPStakingVault"],
+    note:
+      "links the staking v3 V3BonusVault notified (fail open) on unstake and rebalance, or " +
+      "address(0) to unlink it; refused while the linked listener still owes totalReserved()",
+  },
+  setMigrator: {
+    signature: "function setMigrator(address migrator_)",
+    kinds: [V3_POOL_KIND, V3_BONUS_KIND],
+    note: "the only caller of the v3 pool's stakeFor / of the bonus vault's reserve and reserveLp",
+  },
+  setBonusVault: {
+    signature: "function setBonusVault(address bonusVault_)",
+    kinds: [V3_POOL_KIND],
+    note: "the bonus vault the v3 pool notifies on an early withdraw, or address(0) to stop it",
+  },
+  setSigner: {
+    signature: "function setSigner(address signer_)",
+    kinds: [V3_POOL_KIND],
+    note:
+      "the v3 pool's weight-voucher signer. The StakingMigrator's voucher signer is operator-tier " +
+      "(sent directly by the vault's operator), like the RewardsDistributor's",
+  },
+  setPool: {
+    signature: "function setPool(address pool_)",
+    kinds: [V3_BONUS_KIND],
+    note: "the v3 pool allowed to report early exits to the bonus vault",
+  },
+  setVault: {
+    signature: "function setVault(address vault_)",
+    kinds: [V3_BONUS_KIND],
+    note: "the LP vault allowed to report unstakes and rebalances to the bonus vault, or address(0)",
+  },
+  setRates: {
+    signature: "function setRates(uint16 compoundBps_, uint16 lpBps_, uint16 restakeBps_)",
+    kinds: [MIGRATOR_KIND],
+    note: "the three route bonus rates in bps, each <= 10,000 (launch: 1000, 1000, 500)",
   },
   setGuardian: {
     signature: "function setGuardian(address newGuardian)",
@@ -287,7 +338,7 @@ const OWNER_TIER = {
   },
   recoverSurplusAmount: {
     signature: "function recoverSurplus(address to, uint256 amount)",
-    kinds: [ESCROW_KIND],
+    kinds: [ESCROW_KIND, V3_BONUS_KIND],
     note:
       "moves a named amount of `balance - totalReserved` out; reverts SurplusExceeded above it, " +
       "so no reservation is reachable. The amount is in wei, 18 decimals: " +
@@ -327,7 +378,7 @@ const OWNER_TIER = {
   },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",
-    kinds: [...PROXY_KINDS, ESCROW_KIND],
+    kinds: [...PROXY_KINDS, ESCROW_KIND, ...V3_KINDS],
     note: "the upgrade itself; `data` is the reinitializer call, or 0x for none",
   },
   updateDelay: {
@@ -1777,6 +1828,10 @@ module.exports = {
   PROXY_KINDS,
   ESCROW_KIND,
   ADAPTER_KIND,
+  V3_POOL_KIND,
+  V3_BONUS_KIND,
+  MIGRATOR_KIND,
+  V3_KINDS,
   OWNER_TIER,
   OWNER_TIER_INTERFACE,
   TIMELOCK_INTERFACE,

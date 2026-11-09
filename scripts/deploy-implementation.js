@@ -73,7 +73,8 @@ const pools = require("./lib/pools");
 // ──────────────────────── environment ────────────────────────
 //
 //   IMPL_TARGET              LPStakingVault | RewardsDistributor | LPEpochRegistry |
-//                            TokenOverture | LPZapper | BonusEscrow. One kind per run, because each is a
+//                            TokenOverture | LPZapper | BonusEscrow | WeightedStakingPoolV3 |
+//                            V3BonusVault | StakingMigrator. One kind per run, because each is a
 //                            separate implementation, a separate deploy and a separate
 //                            timelock operation
 //   IMPL_PROXY_ADDRESS       overrides the registry lookup of the proxy
@@ -106,7 +107,18 @@ const pools = require("./lib/pools");
  * The UUPS proxies: the five of the LP stack and, on a stack that carries the ApeBond route, the
  * `BonusEscrow`. Each name is both a registry kind and an artifact name.
  */
-const IMPL_KINDS = ["LPStakingVault", "RewardsDistributor", "LPEpochRegistry", "TokenOverture", "LPZapper", "BonusEscrow"];
+const IMPL_KINDS = [
+  "LPStakingVault",
+  "RewardsDistributor",
+  "LPEpochRegistry",
+  "TokenOverture",
+  "LPZapper",
+  "BonusEscrow",
+  // The staking v3 proxies (scripts/deploy-staking-v3.js).
+  "WeightedStakingPoolV3",
+  "V3BonusVault",
+  "StakingMigrator",
+];
 
 /**
  * The two exceptions the spec grants the proxies (`docs/specs/01-contracts.md` §1): the
@@ -159,6 +171,21 @@ const CONSTRUCTOR_SOURCES = {
     getters: ["bonusToken", "vault"],
     registryKeys: ["bonusToken", "vault"],
   },
+  WeightedStakingPoolV3: {
+    // constructor() — every value is proxy storage
+    getters: [],
+    registryKeys: [],
+  },
+  V3BonusVault: {
+    // constructor() — every value is proxy storage
+    getters: [],
+    registryKeys: [],
+  },
+  StakingMigrator: {
+    // constructor(lpVault, usdc, asset); the market references are read from the vault
+    getters: ["lpVault", "usdc", "asset"],
+    registryKeys: ["lpVault", "usdc", "asset"],
+  },
 };
 
 /** The view surface the constructor arguments are read through. Nothing else is called. */
@@ -186,6 +213,13 @@ const IMMUTABLE_ABI = {
     "function asset() view returns (address)",
   ],
   BonusEscrow: ["function bonusToken() view returns (address)", "function vault() view returns (address)"],
+  WeightedStakingPoolV3: [],
+  V3BonusVault: [],
+  StakingMigrator: [
+    "function lpVault() view returns (address)",
+    "function usdc() view returns (address)",
+    "function asset() view returns (address)",
+  ],
 };
 
 /** Compares two constructor values the way Solidity would: addresses case-insensitively. */

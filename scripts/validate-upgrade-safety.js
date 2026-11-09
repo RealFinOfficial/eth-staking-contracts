@@ -3,8 +3,9 @@ const path = require("path");
 
 const hre = require("hardhat");
 
-// Upgrade-safety gate for the six UUPS implementations: the five LP proxies (LPStakingVault,
-// RewardsDistributor, LPEpochRegistry, TokenOverture, LPZapper) and the ApeBond BonusEscrow.
+// Upgrade-safety gate for the nine UUPS implementations: the five LP proxies (LPStakingVault,
+// RewardsDistributor, LPEpochRegistry, TokenOverture, LPZapper), the ApeBond BonusEscrow and the
+// three staking v3 proxies (WeightedStakingPoolV3, V3BonusVault, StakingMigrator).
 // Runs in CI on every push, with no secrets and no network access of its own.
 //
 // Two questions, and they are not the same question:
@@ -102,6 +103,27 @@ const CONTRACTS = [
       "0x0000000000000000000000000000000000000002",
     ],
   },
+  // The staking v3 proxies (scripts/deploy-staking-v3.js). `newKind: true`: their layout half
+  // runs only on a network whose deployments.json records the kind, because before their first
+  // deploy the manifest holds no proxy of theirs to grade against.
+  {
+    name: "WeightedStakingPoolV3",
+    // no constructor arguments: every value is proxy storage
+    constructorArgs: [],
+    newKind: true,
+  },
+  {
+    name: "V3BonusVault",
+    // no constructor arguments
+    constructorArgs: [],
+    newKind: true,
+  },
+  {
+    name: "StakingMigrator",
+    // (lpVault, usdc, asset). The constructor reads the vault's market; never run here.
+    constructorArgs: [DUMMY.address, DUMMY.address, "0x0000000000000000000000000000000000000002"],
+    newKind: true,
+  },
 ];
 
 const MANIFEST_DIR = path.join(__dirname, "..", ".openzeppelin");
@@ -117,6 +139,14 @@ const MANIFEST_DIR = path.join(__dirname, "..", ".openzeppelin");
 function manifestFor(networkName) {
   const named = path.join(MANIFEST_DIR, `${networkName}.json`);
   return fs.existsSync(named) ? named : null;
+}
+
+/** The registry kinds deployments.json records for `chainId` (an empty set when none). */
+function readRecordedKinds(chainId) {
+  const file = path.join(__dirname, "..", "deployments.json");
+  if (!fs.existsSync(file)) return new Set();
+  const entry = JSON.parse(fs.readFileSync(file, "utf8"))[String(chainId)] || {};
+  return new Set(Object.keys(entry));
 }
 
 async function main() {
@@ -161,7 +191,12 @@ async function main() {
     if (proxies.length === 0) {
       console.log("  the manifest records no proxies — nothing to compare against");
     }
-    for (const { name, constructorArgs } of CONTRACTS) {
+    const recordedKinds = readRecordedKinds(chainId);
+    for (const { name, constructorArgs, newKind } of CONTRACTS) {
+      if (newKind && !recordedKinds.has(name)) {
+        console.log(`SKIP  ${name}: not deployed on this network yet — no layout baseline`);
+        continue;
+      }
       // The manifest keys proxies by address, not by name, so each recorded proxy is tried
       // against each factory: the one it really implements validates, the other one does not
       // and is reported as a mismatch only when NO proxy matched.

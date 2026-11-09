@@ -690,7 +690,7 @@ describe("deploy-implementation.js", function () {
 
   // ─────────────────────────────────────────────────────────────
   describe("inputs", function () {
-    it("knows exactly the five LP proxies and the ApeBond escrow", function () {
+    it("knows exactly the five LP proxies, the ApeBond escrow and the three staking v3 proxies", function () {
       expect(IMPL_KINDS).to.deep.equal([
         "LPStakingVault",
         "RewardsDistributor",
@@ -698,6 +698,9 @@ describe("deploy-implementation.js", function () {
         "TokenOverture",
         "LPZapper",
         "BonusEscrow",
+        "WeightedStakingPoolV3",
+        "V3BonusVault",
+        "StakingMigrator",
       ]);
       // The escrow's two immutables are read back off the live proxy, in constructor order,
       // and both are cross-checked against its registry entry.

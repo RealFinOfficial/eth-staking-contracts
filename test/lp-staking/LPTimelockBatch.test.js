@@ -626,7 +626,7 @@ describe("lp-timelock.js — batches", function () {
         setStakeOperator: ["LPStakingVault"],
         setAdapter: ["BonusEscrow"],
         recoverSurplus: ["BonusEscrow"],
-        recoverSurplusAmount: ["BonusEscrow"],
+        recoverSurplusAmount: ["BonusEscrow", "V3BonusVault"],
         setCampaign: ["ApeBondPositionAdapter"],
         setCampaignEnabled: ["ApeBondPositionAdapter"],
         setCampaignCaller: ["ApeBondPositionAdapter"],
