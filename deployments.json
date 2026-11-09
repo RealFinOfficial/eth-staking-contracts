@@ -66,8 +66,8 @@
       "address": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "deployTx": "0xb03f61c5bced266621ff14325fc83cd5342aaf4fd15b197d521c6838874f8467",
       "block": 11854185,
-      "implementation": "0x5Ffee21075634aD6DC541EC66F8C169888602283",
-      "implementationTx": "0x30e2e830ceb9eb68e02fdab8860659f4b1d92a0d70663840e28b2fc2f5b724a8",
+      "implementation": "0xDa50c33088CD9d172480d85E9946AaF6A456D09c",
+      "implementationTx": "0x44507de0d41d35b2185b00f8ab655d2839d20b74311a9a8bb05f9bda4b89b30f",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
@@ -79,9 +79,14 @@
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "zapper": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
       "bonusEscrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
-      "previousImplementation": "0x144806aC0bB6580B897885276F9d42C37EA12D30",
-      "implementationBlock": 12012085,
-      "upgradeTx": "0x38de47903d1662f28978f3063f0bdd6f0b21d541d5e5a51733813e8f47edc104"
+      "previousImplementation": "0x5Ffee21075634aD6DC541EC66F8C169888602283",
+      "implementationBlock": 12098956,
+      "upgradeTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+      "bonusListener": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
+      "stakeOperators": [
+        "0x2e72f57f494daDc9fA266a518361F103cD1fc493"
+      ],
+      "bonusListenerLinkTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2"
     },
     "LPZapper": {
       "address": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
@@ -231,6 +236,96 @@
       ],
       "admin": "0x0000000000000000000000000000000000000000",
       "retiredInFavourOf": "0xf2F678AC5260BB297682D54DcD945BCB78901E20"
+    },
+    "WeightedStakingPoolTest": {
+      "address": "0xdB382c591420C3b7F38FEf6BD9EFd23fCaFD0298",
+      "deployTx": "0x60fb621c064751e164ad75d6857e5d8d1b1d8b48b5766a0cc0c3a1d0f0a1c680",
+      "block": 12098897,
+      "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "rewardToken": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "activationEpoch": 1794244008,
+      "endEpoch": 1794247608,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "purpose": "sw2-test: short-window v2 pool (60 min) for the staking v3 rehearsal of 2026-11-09; not sw2",
+      "rewardsAdded": "1000000000",
+      "addRewardsTx": "0x4f6e90eb241a2abcc47605379e8f99676ccec561cb4bb493fb9b26bb4a1807a0"
+    },
+    "WeightedStakingPoolV3": {
+      "address": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
+      "deployTx": "0x8134104f25c7c40a387ba7180ae03ecf4257a49005dc6151afb5066545b5b5ba",
+      "block": 12098916,
+      "implementation": "0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06",
+      "implementationTx": "0xdf460fa880249e0a9d12d980a8d4a3998b6518c8254725b8000f35ff5fc82eec",
+      "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "rewardToken": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "activationEpoch": 1794244212,
+      "endEpoch": 1794503412,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "rewardsWaived": true,
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0x2992fad97ac5d8f88fcb0230eb3cd6a350e243e2f2075e80ec13812deb8cc2a3",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x65e37625aee82e1f1dfa70b3cb9bd999c35736bf1d44b668adc33158ec4554da",
+        "scheduleBlock": 12098926,
+        "executeTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+        "executeBlock": 12098956
+      },
+      "bonusVault": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
+      "setBonusVaultTx": "0x2c8dd859f31349b681e3bef5c1162a02bfc77016372771c1c3b7c284b7345108",
+      "migrator": "0x2e72f57f494daDc9fA266a518361F103cD1fc493"
+    },
+    "V3BonusVault": {
+      "address": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
+      "deployTx": "0x43cf25b7cba5e850fc0055f4b1a19929635c020f5de59fdbb2108808f0865c25",
+      "block": 12098918,
+      "implementation": "0xB395ed72D08c072df4ED4900b80A0a78a30c1478",
+      "implementationTx": "0x8c56304e31a989299fb144873aac1eeff4bf212c72c1986ff50f78aa05fd70fd",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "pool": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
+      "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "maxTotalReserved": "100000000000000000000000",
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0x2992fad97ac5d8f88fcb0230eb3cd6a350e243e2f2075e80ec13812deb8cc2a3",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x65e37625aee82e1f1dfa70b3cb9bd999c35736bf1d44b668adc33158ec4554da",
+        "scheduleBlock": 12098926,
+        "executeTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+        "executeBlock": 12098956
+      },
+      "migrator": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
+      "funded": "20000000000000000000000",
+      "fundTx": "0x8f2e011075fdfe89fb9610a8789c9f3c5d6f81d5b0998ed377adff7e3e995ad0",
+      "fundBlock": 12098960
+    },
+    "StakingMigrator": {
+      "address": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
+      "deployTx": "0xee704ffbacb4c6de41ca4f8281f178295f3c32bd10bf0abf42abb41ae435561c",
+      "block": 12098920,
+      "implementation": "0x33c9d0298D99aa801Bfc9B0bc540F65E8e7F6E70",
+      "implementationTx": "0x97fdab0e34bb72a363045f6c75db64496276ef036ab154278955dcf8f6020cf4",
+      "lpVault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "stakingPool": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
+      "bonusVault": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "valuationWindow": 1800,
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0x2992fad97ac5d8f88fcb0230eb3cd6a350e243e2f2075e80ec13812deb8cc2a3",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x65e37625aee82e1f1dfa70b3cb9bd999c35736bf1d44b668adc33158ec4554da",
+        "scheduleBlock": 12098926,
+        "executeTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+        "executeBlock": 12098956
+      },
+      "compoundPaused": false,
+      "unpauseCompoundTx": "0x6f270141d6b085471672fa7a31448f86bee28bc2f82e02721d4e8dfa1e3f7052",
+      "unpauseCompoundBlock": 12098961
     }
   }
 }

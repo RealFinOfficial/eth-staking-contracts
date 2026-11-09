@@ -920,6 +920,68 @@ SW2_TEST_REWARD=1000 WEIGHT_SIGNER=0xBackendKey \
 `STAKING_TOKEN` / `REWARD_TOKEN` default to the `LPZapper` entry's tokens. It refuses mainnet and
 records the pool as `WeightedStakingPoolTest`.
 
+### Staking v3 on stack #6 (2026-11-09)
+
+Deployed and rehearsed on Sepolia test stack #6 on 2026-11-09 by the deployer / operator
+`0x5576bD37419dadAab305cca998E16BcD73318A35`, owner = the live `LPTimelock`
+`0xf2F678AC5260BB297682D54DcD945BCB78901E20` (300 s). The rehearsal STOPPED at the rebalance
+(see "Open finding" below); nothing was claimed.
+
+| What | Address | Block | Transaction |
+|---|---|---|---|
+| `LPStakingVault` implementation (new, with the listener) | `0xDa50c33088CD9d172480d85E9946AaF6A456D09c` | 12098887 | `0x44507de0d41d35b2185b00f8ab655d2839d20b74311a9a8bb05f9bda4b89b30f` |
+| sw2-test (`WeightedStakingPoolTest`, the v2 contract, 60 min) | `0xdB382c591420C3b7F38FEf6BD9EFd23fCaFD0298` | 12098897 | `0x60fb621c064751e164ad75d6857e5d8d1b1d8b48b5766a0cc0c3a1d0f0a1c680` |
+| sw2-test `addRewards(1,000 tUSDC)` | | 12098899 | `0x4f6e90eb241a2abcc47605379e8f99676ccec561cb4bb493fb9b26bb4a1807a0` |
+| `WeightedStakingPoolV3` proxy (impl `0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06`) | `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` | 12098916 | `0x8134104f25c7c40a387ba7180ae03ecf4257a49005dc6151afb5066545b5b5ba` |
+| `V3BonusVault` proxy (impl `0xB395ed72D08c072df4ED4900b80A0a78a30c1478`) | `0x72035F4BD96AcF498030E9A39eDc3546F3815221` | 12098918 | `0x43cf25b7cba5e850fc0055f4b1a19929635c020f5de59fdbb2108808f0865c25` |
+| `StakingMigrator` proxy (impl `0x33c9d0298D99aa801Bfc9B0bc540F65E8e7F6E70`) | `0x2e72f57f494daDc9fA266a518361F103cD1fc493` | 12098920 | `0xee704ffbacb4c6de41ca4f8281f178295f3c32bd10bf0abf42abb41ae435561c` |
+| `pool.setBonusVault`, then the three nominations | | 12098921-24 | `0x2c8dd859…5108`, `0xe55f7f07…335b`, `0x84da6a6d…88bf`, `0x69586ddc…0f0c` |
+| timelock `scheduleBatch` (8 calls, tag `staking-v3`, id `0x2992fad9…c2a3`) | | 12098926 | `0x65e37625aee82e1f1dfa70b3cb9bd999c35736bf1d44b668adc33158ec4554da` |
+| timelock `executeBatch` | | 12098956 | `0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2` |
+| `V3BonusVault.fund(20,000 tREAL)` | | 12098960 | `0x8f2e011075fdfe89fb9610a8789c9f3c5d6f81d5b0998ed377adff7e3e995ad0` |
+| `StakingMigrator.unpauseCompound()` | | 12098961 | `0x6f270141d6b085471672fa7a31448f86bee28bc2f82e02721d4e8dfa1e3f7052` |
+
+Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
+(2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
+migrator signer = the deployer (the backend's key is rotated in later by the operator); rates
+1000 / 1000 / 500 bps; valuation window 1,800 s. sw2-test: activation 1794244008, end
+1794247608, signer = the deployer. The batch, executed in this order: 3x `acceptOwnership`,
+`pool.setMigrator`, `bonusVault.setMigrator`, `vault.upgradeToAndCall(0xDa50…D09c, 0x)`,
+`vault.setBonusListener(bonusVault)`, `vault.setStakeOperator(migrator, true)`. Read back after
+it: the three proxies' `owner()` = the timelock and `pendingOwner()` = 0; the vault's ERC-1967
+slot = `0xDa50…D09c` (previous `0x5Ffee21075634aD6DC541EC66F8C169888602283`), its owner,
+operator and guardian unchanged; `bonusListener()` = the bonus vault; `isStakeOperator(migrator)`;
+`pool.migrator()`, `bonusVault.migrator()/pool()/vault()` as wired; `compoundPaused()` true
+until the unpause; `rewardsWaived()` true. Before the unpause `usdcInAsset(1 tUSDC)` = 3.5252
+tREAL (the 1,800 s mean tick served).
+
+**The rehearsal** (`scripts/v3-rehearsal.js`, three wallets: A = the deployer, B =
+`0x4C90A72Fc1f0f9CEC6434CA0db95b20f1B863796`, C = `0x70d9A745F9814816Fc1895d8D017aA3811825e27`,
+each B and C funded with 0.05 ETH, 20,000 tREAL, 2,000 tUSDC). Each staked 10,000 tREAL in
+sw2-test at weight 1500 (blocks 12098908-12), unstaked after the end (blocks 12099198-200:
+rewards 335.672514 / 333.333333 / 330.994152 tUSDC), then ran one route with a TransitionVoucher
+(nonce 1, weight 1500):
+
+| Wallet | Route, tx | Result read back |
+|---|---|---|
+| A | `compound(335.672514 tUSDC, 10,000 tREAL, minAssetOut 1,147.81)`, block 12099207, `0xdd207076cc0a7519bff0be6da40d7073c44bc9e2acd1a3c1cc23618cd4a28986` | bought 1,179.170 tREAL (TWAP value 1,183.309); v3 stake 11,179.170; `reservedOf` 1,117.917 = 10 % |
+| B | `moveToLp(333.333333 tUSDC, 10,000 tREAL)`, block 12099208, `0x28878643a36ceeb0a2c3eb04afeeb584d9fd07d126bcf3d5b68653c62ea4e6eb` | tokenId 234214 on -295860 .. -281940, `stakerOf` = B; LP leg 1,178.084 tREAL + 333.333333 tUSDC; `lpReservation` 235.315 = 10 %; v3 stake 8,821.916, `reservedOf` 882.192 = 10 % |
+| C | `claimRestake(10,000 tREAL)`, block 12099209, `0x58d4fb165cf6889b951a63ae76244db8861cec16fff06e2fce8ac8437d2bef51` | v3 stake 10,000; `reservedOf` 500 = 5 %; tUSDC stayed in the wallet |
+
+`migrated()` true for all three, `totalReserved()` 2,735.423 tREAL (`totalLpReserved` 235.315).
+C's early `withdraw(1 tREAL)` (block 12099212, `0x4187b9e844267502a4ef218d0b757d592efa923c3d1ba4519179634d0348234a`):
+`BonusForfeited(C, 500)`, `reservedOf(C)` = 0, `totalReserved` 2,235.423; penalty 0.4937 tREAL.
+
+**Open finding: the listener runs out of gas on Sepolia.** B's `rebalance(234214)` to
+-288780 .. -285180, no swap (block 12099214, `0xf8406bc0c085fffb6da13e08b37074766c063a9abfb105b36c37aa33a4031f6a`)
+succeeded and minted 234216 for B, but emitted `BonusListenerFailed(234214)`: the reservation
+(235.315 tREAL) stayed under the burned id 234214 and nothing moved to 234216. Cause, measured by
+`eth_call` of `onRebalance` from the vault on the state of block 12099213: it reverts with empty
+data at 250,000 gas (`BONUS_LISTENER_GAS`) and succeeds at 1,000,000; `eth_estimateGas` 399,311.
+Sepolia's gas costs are now about ten times the earlier ones (a plain ETH transfer used 204,600
+gas), and the fork suite passed at its older pinned block. `reconcileLp(234214)` (anyone may call
+it) would forfeit B's LP reservation; it was NOT called. Stopped here: no claim, no further step.
+
 ## Test tooling (plain Node, not `hardhat run`)
 
 Two scripts here are not deployment scripts at all. They take no network and no signer; run
