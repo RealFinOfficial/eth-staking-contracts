@@ -871,11 +871,13 @@ no USDC reward and no penalty. Its whole surface:
 | `stakeFor(user, amount)` | the `migrator()` only, before `endEpoch` | pulls from the migrator, credits `user` (`Staked` then `StakedFor`) |
 | `withdraw(amount)` | a staker, before `endEpoch` | the principal back in full; `bonusVault().onEarlyExit(user)` forfeits the whole v3 reservation, fail closed (also before the activation) |
 | `unstake()` / `emergencyUnstake()` | a staker, from `endEpoch` | the whole principal (`Unstaked` / `EmergencyUnstaked`); `emergencyUnstake` is kept on purpose and can be removed by a later upgrade |
-| `setSigner`, `setMigrator`, `setBonusVault`, `recoverERC20` (never the staking token), `upgradeToAndCall`, `transferOwnership` | the owner (the timelock) | `renounceOwnership` reverts |
+| `setSigner`, `setMigrator`, `setBonusVault`, `recoverERC20`, `upgradeToAndCall`, `transferOwnership` | the owner (the timelock) | `renounceOwnership` reverts. `setBonusVault`: before `endEpoch` a linked vault can be neither unlinked nor replaced (`BonusVaultLocked(current, endEpoch)`); linking from zero is always allowed. If the bonus vault reverts, upgrade it, never unlink it. `recoverERC20`: any token in full; of $ASSET only `balanceOf(pool) - totalStaked` (`SurplusExceeded(requested, available)` above it) |
 
 Views: `stakingToken()`, `activationEpoch()`, `endEpoch()`, `signer()`, `migrator()`, `bonusVault()`,
-`totalStaked()`, `stakes(user)` (the principal, one value), `nonces(user)`,
-`STAKE_VOUCHER_TYPEHASH()`. Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
+`totalStaked()`, `stakes(user)` (the principal, ONE word under the old selector: vendor the new ABI
+with the upgrade), `nonces(user)`,
+`STAKE_VOUCHER_TYPEHASH()`. `activationEpoch` gates nothing; it is shown for information only.
+Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
 signer)`, `Staked(user, amount)`, `StakedFor(user, by, amount)`, `Withdrawn(user, amount)`,
 `Unstaked(user, amount)`, `EmergencyUnstaked(user, amount)`, `NonceUsed(user, nonce)`,
 `SignerChanged(oldSigner, newSigner)`, `MigratorSet(previous, new)`, `BonusVaultSet(previous, new)`.

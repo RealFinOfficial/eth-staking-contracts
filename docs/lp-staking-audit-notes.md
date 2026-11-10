@@ -1638,7 +1638,8 @@ spent as before, `setSigner` by the owner); `stakeFor(user, amount)` for the mig
 `withdraw(amount)` before the end (principal in full, `onEarlyExit` fail closed, before and after
 the activation alike); `unstake()` and `emergencyUnstake()` after the end (both pay the principal;
 `emergencyUnstake` is kept on purpose and can be removed by a later upgrade); `recoverERC20`
-(refuses the staking token); `migrator`, `bonusVault`, `setMigrator`, `setBonusVault`; UUPS, two-step
+(any token; of the staking token only the surplus, see below); `migrator`, `bonusVault`,
+`setMigrator`, `setBonusVault` (locked during the window, see below); UUPS, two-step
 ownership by the timelock, `renounceOwnership` disabled. Accounting: `stakes(user)` (the principal,
 one value) and `totalStaked()`. Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
 signer)`, `Staked(user, amount)`, `StakedFor(user, by, amount)`, `Withdrawn(user, amount)`,
@@ -1660,6 +1661,34 @@ earlier implementations wrote. The live fields keep their slots: `stakingToken` 
 `migrator` +17, `bonusVault` +18. Pinned by `test_Storage_*` in
 `test/forge/unit/WeightedStakingPoolV3.t.sol`, including an upgrade from a verbatim copy of the
 previous implementation (`contracts/lp-staking/mocks/WeightedStakingPoolV3WeightedMock.sol`).
+
+**Review of 2026-11-10 (two Low findings, closed).**
+
+1. `recoverERC20` refused the staking token entirely, so $ASSET sent to the pool by a plain
+   transfer was stuck forever. It now follows `V3BonusVault.recoverSurplus`: for the staking token
+   it moves at most `balanceOf(this) - totalStaked` and reverts `SurplusExceeded(requested,
+   available)` above it, so a staked principal is never reachable; any other token is recoverable
+   in full, including USDC still held by a proxy from the v2-era reward slot (the previous
+   implementation refused it as "the reward token").
+2. `setBonusVault(address(0))` while the window was open would have let every early exit skip
+   `onEarlyExit` and keep its reservation (the bonus vault pays an unforfeited reservation after
+   the end without a further check). While `block.timestamp < endEpoch` a linked bonus vault can
+   now be neither unlinked nor replaced: `BonusVaultLocked(current, endEpoch)`. Linking one from
+   zero (the deploy script's first wiring) is allowed at any time, re-setting the same vault is a
+   no-op, and from `endEpoch` on any change is allowed. **If the bonus vault reverts, the recovery
+   is an upgrade of the bonus vault, never an unlink.**
+
+**Info (accepted, by design):**
+
+- `activationEpoch` gates nothing in v3. It is stored and read for information only (the UI and
+  the indexer show the window); stake, withdraw, the early-exit forfeit and both exits key on
+  `endEpoch` alone.
+- `stakes(address)` keeps its selector (`0x16934fc4`) but now returns ONE word (the principal)
+  instead of v2's four. A client decoding the old four-word tuple against the upgraded proxy
+  fails, so every client vendors the new ABI together with the upgrade.
+- The direct `StakeVoucher(user, nonce, deadline)` binds no amount, by design: it says "this wallet
+  may stake now". The pool itself pays nothing on a stake; the only bonus is the one the migrator
+  reserves under the `TransitionVoucher`, which does bind the eligible amounts.
 
 The migrator's `TransitionVoucher` lost its `weight` field: `TransitionVoucher(address user,uint8
 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain

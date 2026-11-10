@@ -276,7 +276,10 @@ const OWNER_TIER = {
   setBonusVault: {
     signature: "function setBonusVault(address bonusVault_)",
     kinds: [V3_POOL_KIND],
-    note: "the bonus vault the v3 pool notifies on an early withdraw, or address(0) to stop it",
+    note:
+      "the bonus vault the v3 pool notifies on an early withdraw; a linked one can be unlinked " +
+      "(address(0)) or replaced only from the pool's endEpoch on (BonusVaultLocked before). If the " +
+      "bonus vault reverts, upgrade it, never unlink it",
   },
   setSigner: {
     signature: "function setSigner(address signer_)",

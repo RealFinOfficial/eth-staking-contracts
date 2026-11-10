@@ -49,6 +49,10 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-10, fourth time (review closure of the minimal v3 pool) ──
+//    WeightedStakingPoolV3 lines 110 -> 117 (114 hit), branches 40 -> 41 (5 hit): the
+//    `BonusVaultLocked` guard in `setBonusVault` and the staking-token surplus check in
+//    `recoverERC20`, both hit; the three unhit lines are the same `--ir-minimum` artefacts.
 // ── Pinned floors, re-measured 2026-11-10, third time (the minimal v3 pool, audit notes item 19) ──
 //    WeightedStakingPoolV3 lines 298 -> 110 (107 hit), branches 85 -> 40 (2 hit): the weight
 //    accrual, `updateWeight`, the USDC reward path and their views are gone. The three unhit lines
@@ -293,8 +297,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 110, minHit: 107},
-    branches: {found: 40, minHit: 2},
+    lines: {found: 117, minHit: 114},
+    branches: {found: 41, minHit: 5},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
     lines: {found: 248, minHit: 245},

@@ -38,6 +38,13 @@ import "./interfaces/IStakingV3.sol";
  *      be removed later).
  *
  *  ACCOUNTING. The per-wallet principal is {stakes}(user) and the sum is {totalStaked}.
+ *  `activationEpoch` gates nothing: it is stored and read for information only (the UI and the
+ *  indexer show the window); every rule above keys on `endEpoch` alone.
+ *
+ *  THE BONUS VAULT LINK. While the window is open (`block.timestamp < endEpoch`) a linked bonus
+ *  vault cannot be unlinked or replaced ({BonusVaultLocked}): an unlinked pool would let every early
+ *  exit skip `onEarlyExit` and keep its reservation. If the bonus vault reverts, the recovery is an
+ *  upgrade of the bonus vault, never an unlink. Linking one from zero is allowed at any time.
  *
  *  STORAGE. The live Sepolia stack #6 proxy was deployed with the v2-shaped layout (weight, USDC
  *  reward, penalty). Every field of that layout stays in place, under its old name (the upgrades
@@ -45,7 +52,7 @@ import "./interfaces/IStakingV3.sol";
  *  never read. A fresh deploy leaves them zero.
  *
  *  ADMIN: owner (the timelock) only — upgrades, `setSigner`, `setMigrator`, `setBonusVault`,
- *  `recoverERC20`. Ownership is two-step and `renounceOwnership` reverts (it would freeze the
+ *  `recoverERC20` (any token; of the staking token only the surplus above {totalStaked}). Ownership is two-step and `renounceOwnership` reverts (it would freeze the
  *  upgrade path).
  */
 contract WeightedStakingPoolV3 is
@@ -152,6 +159,10 @@ contract WeightedStakingPoolV3 is
     error NotMigrator(address caller, address migrator);
     /// @dev `renounceOwnership` is disabled: it would freeze the upgrade path forever.
     error RenounceDisabled();
+    /// @dev {setBonusVault} would unlink or replace `current` before `endEpoch`.
+    error BonusVaultLocked(address current, uint256 endEpoch);
+    /// @dev {recoverERC20} of the staking token above the surplus (`balance - totalStaked`).
+    error SurplusExceeded(uint256 requested, uint256 available);
 
     // ──────────────────────── Constructor / initializer ────────
 
@@ -165,7 +176,7 @@ contract WeightedStakingPoolV3 is
      * @param owner_ The owner: the deployer while the deploy script wires the three v3 contracts,
      *        then the `LPTimelock` (two-step handover).
      * @param stakingToken_ $ASSET.
-     * @param activationEpoch_ Start of the window.
+     * @param activationEpoch_ Start of the window, for information only (it gates nothing).
      * @param endEpoch_ End of the window; also the bonus unlock time.
      * @param signer_ The `StakeVoucher` signer (the backend key).
      * @dev The migrator and the bonus vault do not exist yet when the pool is deployed (both take
@@ -290,16 +301,31 @@ contract WeightedStakingPoolV3 is
         $.migrator = migrator_;
     }
 
-    /// @notice Sets the bonus vault notified by an early `withdraw`, or zero to switch it off.
+    /// @notice Sets the bonus vault notified by an early `withdraw`. Before `endEpoch` a linked vault
+    ///         can be neither unlinked (zero) nor replaced ({BonusVaultLocked}); linking one from
+    ///         zero is always allowed, and after the end any change is. If the bonus vault reverts,
+    ///         the recovery is an upgrade of the bonus vault, never an unlink.
     function setBonusVault(address bonusVault_) external onlyOwner {
         PoolStorage storage $ = _poolStorage();
-        emit BonusVaultSet($.bonusVault, bonusVault_);
+        address current = $.bonusVault;
+        if (current != address(0) && bonusVault_ != current && block.timestamp < $.endEpoch) {
+            revert BonusVaultLocked(current, $.endEpoch);
+        }
+        emit BonusVaultSet(current, bonusVault_);
         $.bonusVault = bonusVault_;
     }
 
-    /// @notice Recover ERC20 tokens accidentally sent here; never the staking token.
+    /// @notice Recover ERC20 tokens sent here by mistake, to the owner. Any token in full (USDC
+    ///         from the v2-era reward slot included); of the staking token only the surplus
+    ///         `balanceOf(this) - totalStaked` (a plain transfer), never a staked principal
+    ///         ({SurplusExceeded} above it).
     function recoverERC20(address token, uint256 amount) external onlyOwner {
-        require(token != address(_poolStorage().stakingToken), "Cannot recover staking token");
+        PoolStorage storage $ = _poolStorage();
+        if (token == address($.stakingToken)) {
+            uint256 balance = $.stakingToken.balanceOf(address(this));
+            uint256 available = balance > $.totalStaked ? balance - $.totalStaked : 0;
+            if (amount > available) revert SurplusExceeded(amount, available);
+        }
         IERC20(token).safeTransfer(owner(), amount);
     }
 
@@ -317,6 +343,7 @@ contract WeightedStakingPoolV3 is
         return address(_poolStorage().stakingToken);
     }
 
+    /// @notice The window's start, for information only: no rule of this pool reads it.
     function activationEpoch() external view returns (uint256) {
         return _poolStorage().activationEpoch;
     }

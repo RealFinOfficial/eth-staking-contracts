@@ -359,21 +359,33 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(p.totalStaked(), AMOUNT - AMOUNT / 4);
     }
 
+    /// @dev A pool like `p` that was never linked to a bonus vault.
+    function _unlinkedPool() internal returns (WeightedStakingPoolV3 q) {
+        q = _deployPoolV3(address(asset), start, end);
+        vm.prank(alice);
+        asset.approve(address(q), type(uint256).max);
+    }
+
     function test_Withdraw_AFailingBonusVaultBlocksTheExit() public {
-        _stake(alice, AMOUNT);
-        p.setBonusVault(address(new MockERC20Permit("NoHook", "NH", 0, 18)));
+        WeightedStakingPoolV3 q = _unlinkedPool();
+        q.setBonusVault(address(new MockERC20Permit("NoHook", "NH", 0, 18)));
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
+        vm.prank(alice);
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
         vm.prank(alice);
         vm.expectRevert();
-        p.withdraw(AMOUNT);
-        assertEq(p.stakes(alice), AMOUNT, "fail closed: nothing moved");
+        q.withdraw(AMOUNT);
+        assertEq(q.stakes(alice), AMOUNT, "fail closed: nothing moved");
     }
 
     function test_Withdraw_WithoutABonusVaultStillWorks() public {
-        p.setBonusVault(address(0));
-        _stake(alice, AMOUNT);
+        WeightedStakingPoolV3 q = _unlinkedPool();
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
         vm.prank(alice);
-        p.withdraw(AMOUNT);
-        assertEq(p.totalStaked(), 0);
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
+        vm.prank(alice);
+        q.withdraw(AMOUNT);
+        assertEq(q.totalStaked(), 0);
     }
 
     function test_Withdraw_Rejections() public {
@@ -456,10 +468,6 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.expectEmit(address(p));
         emit WeightedStakingPoolV3.MigratorSet(carol, bob);
         p.setMigrator(bob);
-        vm.expectEmit(address(p));
-        emit WeightedStakingPoolV3.BonusVaultSet(address(book), bob);
-        p.setBonusVault(bob);
-
         MockERC20Permit stray = new MockERC20Permit("Stray", "STR", 1e24, 18);
         stray.transfer(address(p), 5e18);
         p.recoverERC20(address(stray), 5e18);
@@ -469,7 +477,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         uint256 usdcBefore = usdcToken.balanceOf(address(this));
         p.recoverERC20(address(usdcToken), 3e6);
         assertEq(usdcToken.balanceOf(address(this)) - usdcBefore, 3e6);
-        vm.expectRevert(bytes("Cannot recover staking token"));
+        vm.expectRevert(abi.encodeWithSelector(WeightedStakingPoolV3.SurplusExceeded.selector, 1, 0));
         p.recoverERC20(address(asset), 1);
 
         vm.startPrank(stranger);
@@ -483,6 +491,116 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.expectRevert(unauthorized);
         p.recoverERC20(address(stray), 1);
         vm.stopPrank();
+    }
+
+    // ──────────────────────── The bonus vault lock ─────────────
+
+    function test_BonusVault_LockedWhileTheWindowIsOpen() public {
+        bytes memory locked =
+            abi.encodeWithSelector(WeightedStakingPoolV3.BonusVaultLocked.selector, address(book), end);
+        vm.expectRevert(locked);
+        p.setBonusVault(address(0));
+        vm.expectRevert(locked);
+        p.setBonusVault(bob);
+
+        vm.warp(start + 10 days);
+        vm.expectRevert(locked);
+        p.setBonusVault(address(0));
+
+        vm.warp(end - 1); // the last second of the window
+        vm.expectRevert(locked);
+        p.setBonusVault(address(0));
+        vm.expectRevert(locked);
+        p.setBonusVault(bob);
+
+        // Re-setting the same vault is no change and passes.
+        vm.expectEmit(address(p));
+        emit WeightedStakingPoolV3.BonusVaultSet(address(book), address(book));
+        p.setBonusVault(address(book));
+        assertEq(p.bonusVault(), address(book));
+    }
+
+    function test_BonusVault_FreeFromTheEnd() public {
+        vm.warp(end); // the first second after the window
+        vm.expectEmit(address(p));
+        emit WeightedStakingPoolV3.BonusVaultSet(address(book), bob);
+        p.setBonusVault(bob);
+        vm.expectEmit(address(p));
+        emit WeightedStakingPoolV3.BonusVaultSet(bob, address(0));
+        p.setBonusVault(address(0));
+        assertEq(p.bonusVault(), address(0));
+    }
+
+    function test_BonusVault_LinkingFromZeroIsAlwaysAllowed() public {
+        WeightedStakingPoolV3 q = _unlinkedPool();
+        vm.warp(start + 1 days);
+        vm.expectEmit(address(q));
+        emit WeightedStakingPoolV3.BonusVaultSet(address(0), address(book));
+        q.setBonusVault(address(book));
+        vm.expectRevert(abi.encodeWithSelector(WeightedStakingPoolV3.BonusVaultLocked.selector, address(book), end));
+        q.setBonusVault(address(0));
+    }
+
+    // ──────────────────────── recoverERC20 surplus ─────────────
+
+    function test_Recover_StrayAssetUpToTheSurplusNeverBelowTotalStaked() public {
+        _stake(alice, AMOUNT);
+        _stakeFor(bob, 2 * AMOUNT);
+        asset.transfer(address(p), 7e18); // a plain transfer, not a stake
+
+        vm.expectRevert(abi.encodeWithSelector(WeightedStakingPoolV3.SurplusExceeded.selector, 7e18 + 1, 7e18));
+        p.recoverERC20(address(asset), 7e18 + 1);
+
+        uint256 before = asset.balanceOf(address(this));
+        p.recoverERC20(address(asset), 3e18);
+        p.recoverERC20(address(asset), 4e18);
+        assertEq(asset.balanceOf(address(this)) - before, 7e18);
+        assertEq(asset.balanceOf(address(p)), p.totalStaked(), "exactly the principals stay");
+
+        vm.expectRevert(abi.encodeWithSelector(WeightedStakingPoolV3.SurplusExceeded.selector, 1, 0));
+        p.recoverERC20(address(asset), 1);
+
+        // Every staker still exits in full after the recovery.
+        vm.warp(end);
+        vm.prank(alice);
+        p.unstake();
+        vm.prank(bob);
+        p.unstake();
+        assertEq(asset.balanceOf(address(p)), 0);
+    }
+
+    function test_Recover_ZeroAssetIsAllowedWithNoSurplus() public {
+        _stake(alice, AMOUNT);
+        p.recoverERC20(address(asset), 0);
+        assertEq(asset.balanceOf(address(p)), AMOUNT);
+    }
+
+    /// @dev A proxy that still holds a USDC balance from the v2-era reward slot (the previous
+    ///      implementation refused to recover it) gives it back after the upgrade.
+    function test_Recover_TheV2EraUsdcBalanceAfterTheUpgrade() public {
+        WeightedStakingPoolV3WeightedMock oldImpl = new WeightedStakingPoolV3WeightedMock();
+        WeightedStakingPoolV3WeightedMock old = WeightedStakingPoolV3WeightedMock(
+            address(
+                new LPProxy(
+                    address(oldImpl),
+                    abi.encodeCall(
+                        WeightedStakingPoolV3WeightedMock.initialize,
+                        (address(this), address(asset), address(usdcToken), start, end, voucherSigner, false)
+                    )
+                )
+            )
+        );
+        usdcToken.approve(address(old), type(uint256).max);
+        old.addRewards(250e6);
+        vm.expectRevert(bytes("Cannot recover reward token"));
+        old.recoverERC20(address(usdcToken), 250e6);
+
+        old.upgradeToAndCall(address(new WeightedStakingPoolV3()), "");
+        WeightedStakingPoolV3 upgraded = WeightedStakingPoolV3(address(old));
+        uint256 before = usdcToken.balanceOf(address(this));
+        upgraded.recoverERC20(address(usdcToken), 250e6);
+        assertEq(usdcToken.balanceOf(address(this)) - before, 250e6);
+        assertEq(usdcToken.balanceOf(address(upgraded)), 0);
     }
 
     function test_Owner_RenounceDisabledUpgradeOwnerOnly() public {
