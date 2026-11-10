@@ -16,10 +16,13 @@ import "../lp-staking/libraries/PositionValue.sol";
 import "./interfaces/IStakingV3.sol";
 
 /// @dev The LP-vault reads the bonus vault makes: its pool pair (to orient the valuation), its
-///      TWAP (to value a rebalanced position), exactly as `BonusEscrow` reads them, and the staker
-///      of a position ({V3BonusVault-reconcileLp}).
+///      TWAP (to value a rebalanced position), exactly as `BonusEscrow` reads them, the staker of a
+///      position, and when the vault's fail-open `onUnstake` notification to this contract was
+///      first missed for a tokenId ({V3BonusVault-reconcileLp}, {V3BonusVault-claim}).
 interface IV3BonusLpVault {
     function stakerOf(uint256 tokenId) external view returns (address);
+
+    function listenerMissedAt(uint256 tokenId) external view returns (uint64);
 
     function token0() external view returns (address);
 
@@ -45,7 +48,10 @@ interface IV3BonusLpVault {
  *      scaled by min(1, valueNew / valueOld) at the vault's TWAP, so it never grows; the vault's
  *      {onUnstake} before the unlock forfeits it; after the unlock either hook SETTLES it
  *      ({LpBonusSettled}: the user left or re-ranged after the unlock, the bonus is theirs) and
- *      touches nothing else, so it stays claimable under the tokenId it had.
+ *      touches nothing else. After its unlock an LP reservation pays only when it is SETTLED,
+ *      MISSED-AFTER (the vault's `onUnstake` failed at or after the unlock) or still HELD by the
+ *      vault for its user, and never when it is DEAD (a failed `onUnstake` before the unlock);
+ *      see "A MISSED NOTIFICATION" below.
  *
  *  RESERVE NOW, FUND LATER. No tokens move at the transition and no balance is checked there. The
  *  company funds this contract with $ASSET ({fund}, or a plain transfer) any time before the end.
@@ -61,18 +67,29 @@ interface IV3BonusLpVault {
  *  {BudgetExceeded} when a reservation would take it above the cap, so the migrator's route call
  *  reverts with them. Set by the initializer and by the owner ({setMaxTotalReserved}).
  *
- *  WHEN AN LP RESERVATION PAYS. {claim} pays an unlocked LP reservation only while the LP vault
- *  still holds that tokenId for the reservation's user (`stakerOf(tokenId) == user`) OR the
- *  reservation was settled by a vault notification after the unlock. Any other record is STALE —
- *  its position left or was re-ranged without this contract being told — and pays nothing.
- *
  *  A MISSED NOTIFICATION. The LP vault's `onRebalance` to this contract fails CLOSED (since
  *  2026-11-10; a revert reverts the rebalance), its `onUnstake` fails OPEN: when that one reverts
- *  the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays where it was.
- *  {reconcileLp} (anyone; the backend calls it for every `BonusListenerFailed`) compares the
- *  reservation with the vault: when the position is no longer staked there by the reservation's
- *  user and the reservation is not settled, it is forfeited (before or after the unlock), so
- *  `totalLpReserved` never stays inflated by a stale record.
+ *  the vault emits `BonusListenerFailed(tokenId)`, the LP reservation stays where it was, and the
+ *  vault records the FIRST such moment per tokenId (`vault.listenerMissedAt(tokenId)`, never
+ *  overwritten). Against a record's unlock that timestamp tells what was missed:
+ *    - DEAD: `missedAt != 0 && missedAt < unlockAt`. The forfeit was missed: the user left before
+ *      the unlock. The record never pays, even if the same NFT is staked again by the same user.
+ *    - MISSED-AFTER: `missedAt != 0 && missedAt >= unlockAt`. The settle was missed: the user left
+ *      after the unlock, legitimately. The record pays as if it had been settled.
+ *
+ *  WHEN AN LP RESERVATION PAYS. {claim} pays an unlocked, unclaimed, unforfeited LP reservation
+ *  that is not dead and is either SETTLED (a vault notification after the unlock), MISSED-AFTER, or
+ *  still HELD by the LP vault for its user (`stakerOf(tokenId) == user`). Any other record is
+ *  STALE and pays nothing. An after-unlock notification never settles a dead record: it forfeits
+ *  it; a before-unlock re-range never moves a dead record: it forfeits it.
+ *
+ *  {reconcileLp} (permissionless) makes the state explicit. The backend sends no transaction: for
+ *  every `BonusListenerFailed` it raises the alert `lp.vault.bonus_listener_failed` with the action
+ *  "call V3BonusVault.reconcileLp(tokenId) from any wallet", and the operator (or anyone) sends it,
+ *  before or after the unlock. It does this: before the unlock it forfeits a dead record or one the vault no longer holds for its
+ *  user; after the unlock it settles a missed-after record and forfeits any record that is neither
+ *  settled, nor missed-after, nor held (a dead one included), so `totalLpReserved` never stays
+ *  inflated by a stale record. A settled record is never touched.
  *
  *  ADMIN: owner (the timelock) only — upgrades, `setMigrator`, `setPool`, `setVault`,
  *  `setMaxTotalReserved`, `recoverSurplus`. No pause and no function that raises a reservation.
@@ -283,8 +300,8 @@ contract V3BonusVault is
         return _bonusStorage().lpTokens[user];
     }
 
-    /// @notice What {claim} would pay `user` now, before the funding check. A stale LP record
-    ///         (position not held for `user` and not settled) counts zero.
+    /// @notice What {claim} would pay `user` now, before the funding check. A dead or stale LP
+    ///         record (see the header) counts zero, exactly as {claim} skips it.
     function claimable(address user) external view returns (uint256 amount) {
         V3BonusVaultStorage storage $ = _bonusStorage();
         UserReservation storage r = $.reservations[user];
@@ -355,7 +372,8 @@ contract V3BonusVault is
     // ──────────────────────── Vault notifications ──────────────
 
     /// @inheritdoc IBonusEscrowHooks
-    /// @dev Before the unlock: forfeits. After it: settles (the bonus is the user's).
+    /// @dev Before the unlock: forfeits. After it: settles (the bonus is the user's), unless the
+    ///      record is DEAD (a forfeit missed before the unlock), which is forfeited instead.
     function onUnstake(uint256 tokenId) external onlyVault {
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[tokenId];
@@ -364,6 +382,9 @@ contract V3BonusVault is
     }
 
     /// @inheritdoc IBonusEscrowHooks
+    /// @dev Before the unlock: moves and scales, except a DEAD record (an early exit whose forfeit
+    ///      was missed, then a re-stake of the same NFT), which is forfeited. After it: settles,
+    ///      or forfeits a dead record.
     function onRebalance(uint256 oldTokenId, uint256 newTokenId, Snapshot calldata old_, Snapshot calldata new_)
         external
         onlyVault
@@ -373,6 +394,10 @@ contract V3BonusVault is
         if (!_isActive(r)) {
             // After the unlock the record stays under the old id, settled (pays without the vault).
             _settleLp($, r, oldTokenId);
+            return;
+        }
+        if (_isDead(r, _missedAt($, oldTokenId))) {
+            _forfeitLp($, r, oldTokenId);
             return;
         }
 
@@ -401,16 +426,21 @@ contract V3BonusVault is
     // ──────────────────────── Reconciliation ───────────────────
 
     /**
-     * @notice Forfeits the LP reservation of `tokenId` when the LP vault no longer holds the
-     *         position for the reservation's user — the state a failed (fail-open) `onUnstake`
-     *         notification leaves behind, or a failed `onRebalance` of the vault before
-     *         2026-11-10. Anyone may call; the backend calls it for every
-     *         `BonusListenerFailed(tokenId)` the vault emits. The tokens stay as surplus.
-     * @dev A no-op unless the reservation is open (recorded, not claimed, not forfeited), NOT
-     *      settled, AND `vault.stakerOf(tokenId) != user`. Before the unlock that is the early
-     *      exit {onUnstake} would have forfeited; after it, a stale record {claim} would never
-     *      pay, cleaned so `totalLpReserved` does not stay inflated. A settled record is never
-     *      touched. No-op while no vault is linked.
+     * @notice Makes the state of the LP reservation of `tokenId` explicit after a missed
+     *         notification — a failed (fail-open) `onUnstake` of the vault, or a failed
+     *         `onRebalance` of the vault before 2026-11-10. Anyone may call, before or after the
+     *         unlock. The backend sends no transaction: for every `BonusListenerFailed(tokenId)`
+     *         it raises the alert `lp.vault.bonus_listener_failed` with this call as the action,
+     *         and the operator (or anyone) sends it. Forfeited tokens stay as surplus.
+     * @dev A no-op for a missing, claimed, forfeited or settled record, and while no vault is
+     *      linked. Otherwise, with `missedAt = vault.listenerMissedAt(tokenId)`:
+     *        - before the unlock: forfeits when the record is DEAD (`missedAt != 0`, necessarily
+     *          before the unlock) OR `vault.stakerOf(tokenId) != user` — the early exit
+     *          {onUnstake} would have forfeited, even when the same NFT was staked again;
+     *        - after the unlock: SETTLES a MISSED-AFTER record (`missedAt >= unlockAt`: the user
+     *          left legitimately, {LpBonusSettled}, returns false); forfeits a DEAD record
+     *          (`missedAt < unlockAt`) whoever holds the NFT now; otherwise forfeits when
+     *          `stakerOf(tokenId) != user` (a stale record {claim} would never pay).
      * @return forfeited True when the reservation was forfeited by this call.
      */
     function reconcileLp(uint256 tokenId) external nonReentrant returns (bool forfeited) {
@@ -418,7 +448,12 @@ contract V3BonusVault is
         LpReservation storage r = $.lpReservations[tokenId];
         address vault_ = $.vault;
         if (vault_ == address(0) || !_isOpen(r) || $.lpSettled[tokenId]) return false;
-        if (IV3BonusLpVault(vault_).stakerOf(tokenId) == r.user) return false;
+        uint64 missedAt = IV3BonusLpVault(vault_).listenerMissedAt(tokenId);
+        if (_isMissedAfter(r, missedAt)) {
+            _settleLp($, r, tokenId);
+            return false;
+        }
+        if (!_isDead(r, missedAt) && IV3BonusLpVault(vault_).stakerOf(tokenId) == r.user) return false;
         _forfeitLp($, r, tokenId);
         return true;
     }
@@ -436,9 +471,9 @@ contract V3BonusVault is
     /**
      * @notice Pays the caller everything of theirs that is unlocked: the v3 reservation once its
      *         unlock time has passed, plus every LP reservation that is unlocked, not claimed, not
-     *         forfeited AND either still held by the vault for the caller or settled. A stale LP
-     *         record is skipped (left for {reconcileLp}). All or nothing: reverts
-     *         {InsufficientFunds} while the balance is short.
+     *         forfeited, not DEAD, AND settled, missed-after or still held by the vault for the
+     *         caller (see the header). A stale LP record is skipped (left for {reconcileLp}). All
+     *         or nothing: reverts {InsufficientFunds} while the balance is short.
      */
     function claim() external nonReentrant returns (uint256 amount) {
         V3BonusVaultStorage storage $ = _bonusStorage();
@@ -575,12 +610,36 @@ contract V3BonusVault is
     }
 
     /// @dev Settles an open reservation after its unlock (once): the vault reported an unstake or
-    ///      a re-range then, so the bonus pays without the vault holding the tokenId. No-op for a
-    ///      missing, claimed, forfeited or already settled record.
+    ///      a re-range then, so the bonus pays without the vault holding the tokenId. A DEAD
+    ///      record (its forfeit was missed before the unlock) is forfeited instead, never
+    ///      settled. No-op for a missing, claimed, forfeited or already settled record.
     function _settleLp(V3BonusVaultStorage storage $, LpReservation storage r, uint256 tokenId) private {
         if (!_isOpen(r) || $.lpSettled[tokenId]) return;
+        if (_isDead(r, _missedAt($, tokenId))) {
+            _forfeitLp($, r, tokenId);
+            return;
+        }
         $.lpSettled[tokenId] = true;
         emit LpBonusSettled(tokenId, r.user);
+    }
+
+    /// @dev When the vault first missed its `onUnstake` notification for `tokenId` (zero = never).
+    ///      Called only inside the two vault hooks ({onlyVault}), so `$.vault` is the caller and
+    ///      never zero there.
+    function _missedAt(V3BonusVaultStorage storage $, uint256 tokenId) private view returns (uint64) {
+        return IV3BonusLpVault($.vault).listenerMissedAt(tokenId);
+    }
+
+    /// @dev DEAD: a notification was missed before the unlock, so the forfeit of an early exit
+    ///      never ran. The record never pays.
+    function _isDead(LpReservation storage r, uint64 missedAt) private view returns (bool) {
+        return missedAt != 0 && missedAt < r.unlockAt;
+    }
+
+    /// @dev MISSED-AFTER: the first missed notification came at or after the unlock, so the
+    ///      settlement of a legitimate exit never ran. The record pays as if settled.
+    function _isMissedAfter(LpReservation storage r, uint64 missedAt) private view returns (bool) {
+        return missedAt != 0 && missedAt >= r.unlockAt;
     }
 
     /// @dev Recorded, not claimed, not forfeited.
@@ -593,15 +652,20 @@ contract V3BonusVault is
         return _isOpen(r) && block.timestamp < r.unlockAt;
     }
 
-    /// @dev What the LP reservation of `tokenId` pays now: its amount when it is open, unlocked
-    ///      and either settled or still held by the vault for its user; zero otherwise (a stale
-    ///      record pays nothing). The vault read comes last, after every storage check.
+    /// @dev What the LP reservation of `tokenId` pays now: zero when it is claimed, forfeited,
+    ///      before its unlock or DEAD; its amount when it is settled or MISSED-AFTER, or else while
+    ///      the vault still holds it for its user; zero otherwise (a stale record pays nothing).
+    ///      The vault reads come after the storage checks. With no vault linked only a settled
+    ///      record pays.
     function _lpClaimable(V3BonusVaultStorage storage $, uint256 tokenId) private view returns (uint256) {
         LpReservation storage r = $.lpReservations[tokenId];
         if (r.claimed || r.forfeited || block.timestamp < r.unlockAt) return 0;
-        if ($.lpSettled[tokenId]) return r.amount;
         address vault_ = $.vault;
-        if (vault_ == address(0) || IV3BonusLpVault(vault_).stakerOf(tokenId) != r.user) return 0;
+        if (vault_ == address(0)) return $.lpSettled[tokenId] ? r.amount : 0;
+        uint64 missedAt = IV3BonusLpVault(vault_).listenerMissedAt(tokenId);
+        if (_isDead(r, missedAt)) return 0;
+        if ($.lpSettled[tokenId] || _isMissedAfter(r, missedAt)) return r.amount;
+        if (IV3BonusLpVault(vault_).stakerOf(tokenId) != r.user) return 0;
         return r.amount;
     }
 

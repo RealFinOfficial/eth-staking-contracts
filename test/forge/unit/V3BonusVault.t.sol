@@ -56,6 +56,12 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.mockCall(address(mathVault), abi.encodeCall(mathVault.stakerOf, (id)), abi.encode(user));
     }
 
+    /// @dev The math vault reports that its fail-open `onUnstake` to the listener was first missed
+    ///      for `id` at `at` (`listenerMissedAt`, review closure 2026-11-10).
+    function _missedAt(uint256 id, uint64 at) internal {
+        vm.mockCall(address(mathVault), abi.encodeCall(mathVault.listenerMissedAt, (id)), abi.encode(at));
+    }
+
     function _reserve(address user, uint256 amount) internal {
         vm.prank(carol);
         book.reserve(user, amount, UNLOCK, 3);
@@ -704,6 +710,99 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(asset.balanceOf(address(book)), BONUS, "the tokens stay, as surplus");
         assertFalse(book.reconcileLp(ID1));
         assertFalse(book.lpSettled(ID1));
+    }
+
+    // ──────────────────────── listenerMissedAt: dead / missed-after ─
+
+    /// @dev DEAD (missed before the unlock): never pays, even while the vault holds the NFT for
+    ///      the user again; MISSED-AFTER (missed at or after the unlock): pays without the vault.
+    function test_MissedAt_DeadNeverPaysMissedAfterPays() public {
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, BONUS);
+        _holdFor(ID1, alice); // re-staked by the same user
+        _missedAt(ID1, UNLOCK - 1);
+        _missedAt(ID2, UNLOCK); // the boundary counts as "after"
+        book.fund(2 * BONUS);
+        vm.warp(UNLOCK);
+        assertEq(book.claimable(alice), BONUS, "only the missed-after record");
+        vm.prank(alice);
+        assertEq(book.claim(), BONUS);
+        (,,, bool claimed1,) = book.lpReservation(ID1);
+        (,,, bool claimed2,) = book.lpReservation(ID2);
+        assertFalse(claimed1, "the dead record is skipped");
+        assertTrue(claimed2);
+    }
+
+    function test_MissedAt_AnAfterUnlockNotificationForfeitsADeadRecord() public {
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, BONUS);
+        _missedAt(ID1, UNLOCK - 1);
+        _missedAt(ID2, UNLOCK - 1);
+        vm.warp(UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID2, alice, BONUS);
+        vm.prank(address(mathVault));
+        book.onRebalance(ID2, ID3, _snap(L), _snap(L));
+        assertFalse(book.lpSettled(ID1), "never settled");
+        assertFalse(book.lpSettled(ID2));
+        assertEq(book.totalLpReserved(), 0);
+        assertEq(book.claimable(alice), 0);
+    }
+
+    function test_MissedAt_ARebalanceBeforeTheUnlockForfeitsADeadRecordInsteadOfMovingIt() public {
+        _reserveLp(ID1, alice, BONUS);
+        _missedAt(ID1, 1);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        vm.prank(address(mathVault));
+        book.onRebalance(ID1, ID2, _snap(L), _snap(L));
+        (address moved,,,,) = book.lpReservation(ID2);
+        assertEq(moved, address(0), "nothing moved to the new id");
+        (, uint256 amount,,, bool forfeited) = book.lpReservation(ID1);
+        assertEq(amount, 0);
+        assertTrue(forfeited);
+        assertEq(book.totalReserved(), 0);
+    }
+
+    function test_ReconcileLp_BeforeTheUnlockForfeitsADeadRecordEvenWhileHeld() public {
+        _reserveLp(ID1, alice, BONUS);
+        _holdFor(ID1, alice);
+        _missedAt(ID1, 1);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        assertTrue(book.reconcileLp(ID1));
+        assertEq(book.totalLpReserved(), 0);
+    }
+
+    function test_ReconcileLp_AfterTheUnlockForfeitsDeadSettlesMissedAfter() public {
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, BONUS);
+        _holdFor(ID1, alice);
+        _missedAt(ID1, UNLOCK - 1);
+        _missedAt(ID2, UNLOCK + 5);
+        vm.warp(UNLOCK + 10);
+
+        assertTrue(book.reconcileLp(ID1), "dead: forfeited whoever holds the NFT");
+
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusSettled(ID2, alice);
+        vm.prank(stranger);
+        assertFalse(book.reconcileLp(ID2), "missed-after: settled, not forfeited");
+        assertTrue(book.lpSettled(ID2));
+        vm.recordLogs();
+        assertFalse(book.reconcileLp(ID2));
+        assertEq(vm.getRecordedLogs().length, 0, "settled once, then never touched");
+
+        book.fund(BONUS);
+        vm.prank(alice);
+        assertEq(book.claim(), BONUS);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claim();
     }
 
     // ──────────────────────── Storage ──────────────────────────

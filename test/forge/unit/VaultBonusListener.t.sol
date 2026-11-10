@@ -44,6 +44,21 @@ contract SilentListener {
         external {}
 }
 
+/// @dev An idle listener bound to whatever vault it is told (the {setBonusListener} guard).
+contract BoundListener {
+    uint256 public totalLpReserved;
+    address public vault;
+
+    constructor(address vault_) {
+        vault = vault_;
+    }
+
+    function onUnstake(uint256) external {}
+
+    function onRebalance(uint256, uint256, IBonusEscrowHooks.Snapshot calldata, IBonusEscrowHooks.Snapshot calldata)
+        external {}
+}
+
 /**
  * @notice The vault's staking v3 bonus listener ({LPStakingVault-setBonusListener}): the owner-tier
  *         link with its code and reservation rules, the FAIL-OPEN `onUnstake` with its gas floor,
@@ -107,6 +122,35 @@ contract VaultBonusListenerTest is StakingV3Harness {
         assertEq(bonusVault.totalLpReserved(), 0);
         mathVault.setBonusListener(address(0));
         assertEq(mathVault.bonusListener(), address(0));
+    }
+
+    /// @dev The listener must be bound to this vault: another vault reverts, zero is allowed, the
+    ///      right one passes (review closure 2026-11-10).
+    function test_SetBonusListener_RefusesAListenerBoundToAnotherVault() public {
+        BoundListener elsewhere = new BoundListener(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(LPStakingVault.ListenerVaultMismatch.selector, address(elsewhere), stranger)
+        );
+        mathVault.setBonusListener(address(elsewhere));
+
+        BoundListener unbound = new BoundListener(address(0));
+        vm.expectRevert(
+            abi.encodeWithSelector(LPStakingVault.ListenerVaultMismatch.selector, address(unbound), address(0))
+        );
+        mathVault.setBonusListener(address(unbound));
+
+        // A contract with no `vault()` at all cannot be linked either.
+        vm.expectRevert();
+        mathVault.setBonusListener(address(asset));
+
+        mathVault.setBonusListener(address(0));
+        assertEq(mathVault.bonusListener(), address(0), "zero is allowed");
+
+        BoundListener here = new BoundListener(address(mathVault));
+        mathVault.setBonusListener(address(here));
+        assertEq(mathVault.bonusListener(), address(here));
+        mathVault.setBonusListener(address(bonusVault));
+        assertEq(mathVault.bonusListener(), address(bonusVault), "the real bonus vault is bound to this vault");
     }
 
     // ──────────────────────── reconcileLp after a failed notification ─
@@ -186,25 +230,172 @@ contract VaultBonusListenerTest is StakingV3Harness {
         assertGt(owedLp, 0);
     }
 
-    /// @dev A missed `onUnstake` after the unlock (fail open) leaves an unsettled record for a
-    ///      position the user took out: not payable, and reconciled.
-    function test_StaleRecord_AFailedUnstakeAfterTheUnlockIsNotPaid() public {
-        uint256 tokenId = _join();
-        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
-        (uint256 owedV3,) = bonusVault.reservedOf(alice);
-        vm.warp(v3End);
+    /// @dev Unstakes `tokenId` as alice with the listener's code swapped for {RevertingListener}
+    ///      (fail open: `BonusListenerFailed`, `listenerMissedAt` written once), then restores it.
+    function _unstakeWithListenerDown(uint256 tokenId) internal {
         bytes memory saved = _withListenerDown();
         vm.expectEmit(address(mathVault));
         emit LPStakingVault.BonusListenerFailed(tokenId);
         vm.prank(alice);
         mathVault.unstake(tokenId);
         vm.etch(address(bonusVault), saved);
+    }
 
+    function _restake(uint256 tokenId) internal {
+        vm.startPrank(alice);
+        mathNpm.approve(address(mathVault), tokenId);
+        mathVault.stake(tokenId);
+        vm.stopPrank();
+        assertEq(mathVault.stakerOf(tokenId), alice, "re-staked by the same user");
+    }
+
+    /// @dev (3) A missed `onUnstake` AFTER the unlock is a legitimate exit: `listenerMissedAt` is at
+    ///      or after the unlock, `claim()` pays it, `reconcileLp` settles it (event), paid once.
+    function test_MissedAfter_AFailedUnstakeAfterTheUnlockPaysAndIsSettled() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp, uint64 unlockAt,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        vm.warp(v3End);
+        _unstakeWithListenerDown(tokenId);
+
+        assertEq(mathVault.listenerMissedAt(tokenId), uint64(block.timestamp));
+        assertGe(mathVault.listenerMissedAt(tokenId), unlockAt, "missed after the unlock");
         assertFalse(bonusVault.lpSettled(tokenId));
-        assertEq(bonusVault.claimable(alice), owedV3);
+        assertEq(bonusVault.claimable(alice), owedLp + owedV3, "missed-after pays");
+
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusSettled(tokenId, alice);
+        vm.prank(stranger);
+        assertFalse(bonusVault.reconcileLp(tokenId), "settled, not forfeited");
+        assertTrue(bonusVault.lpSettled(tokenId));
+        assertEq(bonusVault.totalLpReserved(), owedLp, "still owed");
+
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedLp + owedV3);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        bonusVault.claim();
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    /// @dev (1) An EARLY exit whose forfeit failed, then a re-stake of the same NFT: the record is
+    ///      DEAD — not payable after the unlock, and `reconcileLp` forfeits it while re-staked.
+    function test_Dead_AnEarlyExitWithAFailedListenerThenARestakeIsNotPayable() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp, uint64 unlockAt,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        _unstakeWithListenerDown(tokenId);
+        assertLt(mathVault.listenerMissedAt(tokenId), unlockAt, "missed before the unlock");
+        _restake(tokenId);
+
+        vm.warp(v3End);
+        assertEq(bonusVault.claimable(alice), owedV3, "the dead LP record counts zero");
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedV3, "only the v3 part");
+
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(stranger);
+        assertTrue(bonusVault.reconcileLp(tokenId), "forfeited while re-staked");
+        assertEq(mathVault.stakerOf(tokenId), alice);
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    /// @dev (1, before the unlock) `reconcileLp` forfeits the dead record while it is re-staked.
+    function test_Dead_ReconciledBeforeTheUnlockWhileRestaked() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        _unstakeWithListenerDown(tokenId);
+        _restake(tokenId);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
         assertTrue(bonusVault.reconcileLp(tokenId));
         assertEq(bonusVault.totalLpReserved(), 0);
-        assertGt(owedLp, 0);
+    }
+
+    /// @dev (1, re-range) A dead record re-staked and re-ranged before the unlock is forfeited,
+    ///      not moved to the new tokenId; the rebalance itself completes.
+    function test_Dead_ARestakedRebalanceBeforeTheUnlockForfeitsInsteadOfMoving() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        _unstakeWithListenerDown(tokenId);
+        _restake(tokenId);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(alice);
+        uint256 newId =
+            mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        (address moved,,,,) = bonusVault.lpReservation(newId);
+        assertEq(moved, address(0));
+        assertEq(mathVault.stakerOf(newId), alice);
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    /// @dev (2) The same dead record, then an unstake AFTER the unlock with a WORKING listener:
+    ///      not settled, forfeited, no payment.
+    function test_Dead_ALaterUnstakeAfterTheUnlockForfeitsInsteadOfSettling() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        _unstakeWithListenerDown(tokenId);
+        _restake(tokenId);
+
+        vm.warp(v3End);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        assertFalse(bonusVault.lpSettled(tokenId), "a dead record is never settled");
+        (, uint256 amount,,, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertEq(amount, 0);
+        assertTrue(forfeited);
+
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedV3, "no LP payment");
+    }
+
+    /// @dev (4) Never overwritten: a tokenId missed before the unlock and missed again after it
+    ///      stays "missed before", so the record stays dead.
+    function test_ListenerMissedAt_IsNeverOverwritten() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp, uint64 unlockAt,,) = bonusVault.lpReservation(tokenId);
+        _unstakeWithListenerDown(tokenId);
+        uint64 first = mathVault.listenerMissedAt(tokenId);
+        assertEq(first, uint64(block.timestamp));
+        assertLt(first, unlockAt);
+        _restake(tokenId);
+
+        vm.warp(v3End);
+        _unstakeWithListenerDown(tokenId);
+        assertEq(mathVault.listenerMissedAt(tokenId), first, "still the first miss");
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        assertEq(bonusVault.claimable(alice), owedV3, "still dead: the LP part counts zero");
+        assertTrue(bonusVault.reconcileLp(tokenId));
+    }
+
+    /// @dev `listenerMissedAt` is APPENDED in slot 9 of the vault namespace, after the gas slot 8:
+    ///      the entry for `tokenId` lives at keccak256(tokenId . (base + 9)).
+    function test_Storage_ListenerMissedAtIsAppendedInSlotNine() public {
+        uint256 tokenId = _join();
+        _unstakeWithListenerDown(tokenId);
+        bytes32 base = 0x4c835a63e69815f7352ca18e845a5d8023cea9abbc2e923eb7a3a481844a6500;
+        bytes32 entry = keccak256(abi.encode(tokenId, uint256(base) + 9));
+        assertEq(uint256(vm.load(address(mathVault), entry)), block.timestamp, "slot 9 = listenerMissedAt");
+        assertGt(uint256(vm.load(address(mathVault), bytes32(uint256(base) + 8))), 0, "slot 8 = the gas fields");
+    }
+
+    /// @dev A successful notification records nothing.
+    function test_ListenerMissedAt_StaysZeroWhenTheNotificationSucceeds() public {
+        uint256 tokenId = _join();
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        assertEq(mathVault.listenerMissedAt(tokenId), 0);
     }
 
     function test_ReconcileLp_AFailedUnstakeIsForfeitedByReconcile() public {

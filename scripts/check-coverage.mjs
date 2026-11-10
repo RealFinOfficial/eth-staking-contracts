@@ -49,6 +49,13 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-10, second time (review closure, audit notes item 19) ──
+//    LPStakingVault lines 255 -> 262 (258 hit), branches 45 -> 48 (48): `listenerMissedAt` (the
+//    write-once branch in the listener's `catch`, the view) and the `ListenerVaultMismatch` guard
+//    in `setBonusListener`. V3BonusVault lines 229 -> 248 (245 hit), branches 39 -> 44 (44): the
+//    dead / missed-after rule in `_lpClaimable`, `_settleLp`, `onRebalance` and `reconcileLp`.
+//    Every new line and branch is hit; the uncovered lines are the same `--ir-minimum` artefacts
+//    (accessor body, `_disableInitializers`, `__Ownable2Step_init`, `_checkTwapDeviation`).
 // ── Pinned floors, re-measured 2026-11-10 (stale LP record fix, audit notes items 19 and 20) ──
 //    LPStakingVault lines 262 -> 255 (251 hit), branches 49 -> 45 (45): the listener's fail-open
 //    `onRebalance` wrapper (its `try`, floor check and `catch`) is gone, the call is fail closed.
@@ -230,8 +237,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 26, minHit: 26},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 255, minHit: 251},
-    branches: {found: 45, minHit: 45},
+    lines: {found: 262, minHit: 258},
+    branches: {found: 48, minHit: 48},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},
@@ -278,8 +285,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 92, minHit: 30},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 229, minHit: 226},
-    branches: {found: 39, minHit: 39},
+    lines: {found: 248, minHit: 245},
+    branches: {found: 44, minHit: 44},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
     lines: {found: 238, minHit: 232},

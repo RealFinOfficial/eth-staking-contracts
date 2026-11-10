@@ -22,12 +22,15 @@ interface IBonusEscrowReservations {
     function totalReserved() external view returns (uint256);
 }
 
-/// @dev The one listener read the vault makes outside the two notifications: what the CURRENT
-///      staking v3 listener still owes on LP positions (its `totalLpReserved()`), read by
-///      `setBonusListener` before the link moves. Its v3-pool reservations do not depend on this
-///      vault and do not hold the link.
-interface IBonusListenerReservations {
+/// @dev The two listener reads the vault makes outside the two notifications, both in
+///      `setBonusListener`: what the CURRENT staking v3 listener still owes on LP positions (its
+///      `totalLpReserved()`), read before the link moves (its v3-pool reservations do not depend
+///      on this vault and do not hold the link), and the vault a NEW listener is bound to (its
+///      `vault()`), which must be this vault.
+interface IV3BonusListener {
     function totalLpReserved() external view returns (uint256);
+
+    function vault() external view returns (address);
 }
 
 /**
@@ -76,7 +79,8 @@ interface IBonusListenerReservations {
  *  Staking v3 bonus listener notifications (`bonusListener`, owner-set, zero = off; see
  *  {setBonusListener}). The same two reports go to the listener BESIDE the escrow, with the
  *  escrow's split: `unstake` -> `onUnstake` FAILS OPEN inside `try` with its own allowance
- *  {bonusListenerGas} behind {bonusListenerGasFloor} ({BonusListenerFailed} on a revert), and
+ *  {bonusListenerGas} behind {bonusListenerGasFloor} ({BonusListenerFailed} on a revert, and the
+ *  first such moment per tokenId kept in {listenerMissedAt} for the listener), and
  *  `rebalance` -> `onRebalance` FAILS CLOSED (no `try`, all remaining gas). Until 2026-11-10 the
  *  listener's `onRebalance` failed open too; on Sepolia a run out of gas left an LP reservation
  *  under the burned tokenId and the rebalance completed (audit notes items 19 and 20).
@@ -250,8 +254,14 @@ contract LPStakingVault is
         /// one slot (uint128 each), read together on every exit.
         uint128 bonusHookGas;
         /// Gas forwarded to the listener's `onUnstake` ({setBonusHookGas}); zero as above,
-        /// then {BONUS_LISTENER_GAS} is used. APPENDED with `bonusHookGas`; it must stay last.
+        /// then {BONUS_LISTENER_GAS} is used. APPENDED with `bonusHookGas`.
         uint128 bonusListenerGas;
+        /// tokenId => the `block.timestamp` at which the listener's fail-open `onUnstake` FIRST
+        /// reverted for it ({listenerMissedAt}); zero = never. Written once, never overwritten:
+        /// the listener compares it with its record's unlock to tell a missed forfeit from a
+        /// missed settlement. APPENDED after the gas slot (stale-record review, 2026-11-10); it
+        /// must stay last.
+        mapping(uint256 => uint64) listenerMissedAt;
     }
 
     /**
@@ -335,7 +345,8 @@ contract LPStakingVault is
 
     /// @notice The bonus listener's `onUnstake(tokenId)` reverted inside its gas allowance and
     ///         the exit completed anyway (fail open). An LP bonus that should have been forfeited
-    ///         was not: alert on it, and call the listener's `reconcileLp(tokenId)`. Emitted by
+    ///         or settled was not: alert on it, and call the listener's `reconcileLp(tokenId)`.
+    ///         The first such moment per tokenId is kept in {listenerMissedAt}. Emitted by
     ///         `unstake` only: the listener's `onRebalance` fails closed since 2026-11-10.
     event BonusListenerFailed(uint256 indexed tokenId);
 
@@ -396,6 +407,9 @@ contract LPStakingVault is
     /// @dev `setBonusListener` would unlink or replace `listener` while it still owes
     ///      `totalLpReserved` (the C-13 rule of {setBonusEscrow}, applied to the listener's LP part).
     error ListenerHasReservations(address listener, uint256 totalLpReserved);
+    /// @dev `setBonusListener` was given a listener bound to another vault (`itsVault`): its
+    ///      fail-closed `onRebalance` would revert every rebalance here (`NotVault`).
+    error ListenerVaultMismatch(address listener, address itsVault);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -866,15 +880,29 @@ contract LPStakingVault is
      *      snapshots the escrow receives and values them itself. A non-zero address must carry
      *      code, and a listener that still owes `totalLpReserved()` — the reservations that depend
      *      on this vault's reports — cannot be unlinked or replaced ({ListenerHasReservations},
-     *      the C-13 rule of {setBonusEscrow}).
-     * @param newListener The listener (a contract implementing {IBonusEscrowHooks}), or zero.
+     *      the C-13 rule of {setBonusEscrow}). A non-zero listener must also be bound to THIS
+     *      vault (`newListener.vault() == address(this)`, else {ListenerVaultMismatch}): its
+     *      fail-closed `onRebalance` accepts calls from its own vault only, so a listener bound
+     *      elsewhere would revert every rebalance.
+     *
+     *      Order of operations. To link: first bind the listener to this vault (the listener's
+     *      own `setVault(thisVault)`, or its initializer), then call `setBonusListener(listener)`.
+     *      To unlink: `setBonusListener(address(0))` first, then (if wanted) the listener's
+     *      `setVault`. The staking v3 deploy satisfies it: `V3BonusVault.initialize` already sets
+     *      the vault before the timelock batch runs `setBonusListener(bonusVault)`.
+     * @param newListener The listener (a contract implementing {IBonusEscrowHooks} and
+     *        {IV3BonusListener}), or zero.
      */
     function setBonusListener(address newListener) external onlyOwner {
-        if (newListener != address(0) && newListener.code.length == 0) revert NotAContract(newListener);
+        if (newListener != address(0)) {
+            if (newListener.code.length == 0) revert NotAContract(newListener);
+            address itsVault = IV3BonusListener(newListener).vault();
+            if (itsVault != address(this)) revert ListenerVaultMismatch(newListener, itsVault);
+        }
         LPStakingVaultStorage storage $ = _vaultStorage();
         address current = $.bonusListener;
         if (current != address(0)) {
-            uint256 reserved = IBonusListenerReservations(current).totalLpReserved();
+            uint256 reserved = IV3BonusListener(current).totalLpReserved();
             if (reserved != 0) revert ListenerHasReservations(current, reserved);
         }
         emit BonusListenerSet(current, newListener);
@@ -1190,6 +1218,14 @@ contract LPStakingVault is
         return gas_ == 0 ? BONUS_HOOK_GAS : gas_;
     }
 
+    /// @notice When the bonus listener's fail-open `onUnstake(tokenId)` FIRST reverted (the
+    ///         `block.timestamp` of that {BonusListenerFailed}); zero = never. Never overwritten,
+    ///         so a notification missed before a bonus unlock stays "missed before". The
+    ///         listener reads it to tell a missed forfeit (an early exit) from a missed settlement.
+    function listenerMissedAt(uint256 tokenId) external view returns (uint64) {
+        return _vaultStorage().listenerMissedAt[tokenId];
+    }
+
     /// @notice Gas forwarded to the bonus listener's `onUnstake` ({setBonusHookGas}).
     function bonusListenerGas() public view returns (uint256) {
         uint256 gas_ = _vaultStorage().bonusListenerGas;
@@ -1396,12 +1432,18 @@ contract LPStakingVault is
         }
     }
 
-    /// @dev The listener's `unstake` notification: the escrow's fail-open pattern, its own allowance.
+    /// @dev The listener's `unstake` notification: the escrow's fail-open pattern, its own
+    ///      allowance. On a revert it records the FIRST miss per tokenId ({listenerMissedAt}),
+    ///      never overwriting an earlier one, and emits {BonusListenerFailed}. The write runs on
+    ///      the caller's gas left after the allowance; when it does not fit, the whole unstake
+    ///      reverts and can be retried with a higher gas limit (the exit is never lost).
     function _notifyListenerUnstake(address listener, uint256 tokenId) private {
         if (listener == address(0)) return;
         uint256 allowance = bonusListenerGas();
         if (gasleft() < _gasFloor(allowance)) revert InsufficientGasForBonusHook();
         try IBonusEscrowHooks(listener).onUnstake{gas: allowance}(tokenId) {} catch {
+            LPStakingVaultStorage storage $ = _vaultStorage();
+            if ($.listenerMissedAt[tokenId] == 0) $.listenerMissedAt[tokenId] = uint64(block.timestamp);
             emit BonusListenerFailed(tokenId);
         }
     }
