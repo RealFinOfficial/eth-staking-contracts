@@ -114,6 +114,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
   let rpcUsed = null;
   /** Test accounts whose real-chain code establishFork cleared (forkNode.clearTestAccountCode). */
   let clearedCode = [];
+  /** The relay in front of the upstream: reads "from the upstream" go through it. */
+  let upstreamReadUrl = null;
   let scratchDir = null;
   let registryFile = null;
   let fees = null;
@@ -310,6 +312,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     provider = established.provider;
     rpcUsed = established.url;
     clearedCode = established.clearedCode;
+    upstreamReadUrl = established.relay.url;
     // The node's log opens with its `--fork <url>` line; mask the endpoint's key in place.
     redact.scrubDirectory(scratchDir);
 
@@ -699,7 +702,9 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
     it("serves block 25750000 exactly as the upstream endpoint does", async function () {
       const local = await rpc.getBlockByNumber(provider, C.PINNED_BLOCK);
-      const upstream = await fetchUpstreamBlock(rpcUsed, C.PINNED_BLOCK);
+      // Through the relay: the same upstream endpoint, answered unchanged, but a throttled
+      // request (a public gateway's 429) is retried with backoff instead of failing the test.
+      const upstream = await fetchUpstreamBlock(upstreamReadUrl, C.PINNED_BLOCK, rpcUsed);
 
       expect(local.hash).to.equal(upstream.hash);
       expect(local.parentHash).to.equal(upstream.parentHash);
@@ -3498,12 +3503,12 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 });
 
 /**
- * Reads a block straight from the upstream endpoint, bypassing the fork, so the local
+ * Reads a block from the upstream endpoint (through the relay, never the fork), so the local
  * block can be compared against the source of truth. Retried, because the fork itself may
  * have been served entirely from the on-disk RPC cache and a public endpoint can throttle
  * a cold request.
  */
-async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
+async function fetchUpstreamBlock(url, blockNumber, upstreamUrl = url, attempts = 3) {
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -3516,7 +3521,7 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
           method: "eth_getBlockByNumber",
           params: ["0x" + blockNumber.toString(16), false],
         }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(150_000), // the relay's 5 attempts and their backoff fit inside
       });
       const body = await response.json();
       if (body.error) throw new Error(`${body.error.code}: ${body.error.message}`);
@@ -3528,6 +3533,6 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
     }
   }
   throw new Error(
-    `could not read block ${blockNumber} from ${redact.redactRpc(url)}: ${redact.redactRpcText(lastError.message)}`
+    `could not read block ${blockNumber} from ${redact.redactRpc(upstreamUrl)} (via ${url}): ${redact.redactRpcText(lastError.message)}`
   );
 }

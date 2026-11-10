@@ -805,7 +805,9 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 
     it(`serves block ${P.pinnedBlock} exactly as the upstream endpoint does`, async function () {
       const local = await rpc.getBlockByNumber(provider, P.pinnedBlock);
-      const upstream = await fetchUpstreamBlock(rpcUsed, P.pinnedBlock);
+      // Through the relay: the same upstream endpoint, answered unchanged, but a throttled
+      // request (a public gateway's 429) is retried with backoff instead of failing the test.
+      const upstream = await fetchUpstreamBlock(upstreamReadUrl, P.pinnedBlock, rpcUsed);
 
       expect(local.hash).to.equal(upstream.hash);
       expect(local.parentHash).to.equal(upstream.parentHash);
@@ -3490,12 +3492,12 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
 });
 
 /**
- * Reads a block straight from the upstream endpoint, bypassing the fork, so the local block
+ * Reads a block from the upstream endpoint (through the relay, never the fork), so the local block
  * can be compared against the source of truth. Retried, because the fork itself may have
  * been served entirely from the on-disk RPC cache and a public endpoint can throttle a cold
  * request.
  */
-async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
+async function fetchUpstreamBlock(url, blockNumber, upstreamUrl = url, attempts = 3) {
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -3508,7 +3510,7 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
           method: "eth_getBlockByNumber",
           params: ["0x" + blockNumber.toString(16), false],
         }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(150_000), // the relay's 5 attempts and their backoff fit inside
       });
       const body = await response.json();
       if (body.error) throw new Error(`${body.error.code}: ${body.error.message}`);
@@ -3520,6 +3522,6 @@ async function fetchUpstreamBlock(url, blockNumber, attempts = 3) {
     }
   }
   throw new Error(
-    `could not read block ${blockNumber} from ${redactRpc(url)}: ${redactRpcText(lastError.message)}`
+    `could not read block ${blockNumber} from ${redactRpc(upstreamUrl)} (via ${url}): ${redactRpcText(lastError.message)}`
   );
 }
