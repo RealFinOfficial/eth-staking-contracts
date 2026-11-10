@@ -1697,7 +1697,8 @@ migrator's storage is untouched. Because the old migrator calls `stakeFor(addres
 and the new pool has only `stakeFor(address,uint256)`, the two proxies are upgraded in ONE timelock
 batch on stack #6: `WeightedStakingPoolV3.upgradeToAndCall(newImpl, 0x)` and
 `StakingMigrator.upgradeToAndCall(newImpl, 0x)`, no reinitializer (scripts/README.md, "Upgrade
-pending on stack #6").
+of the stack #6 v3 pool and migrator").
+Live on stack #6 since block 12105028 (2026-11-10 15:48 Sofia, 13:48 UTC), built from bd31c48: the two Low fixes above (ed33613) are not on stack #6 yet.
 
 ## 20. Glamsterdam: fixed hook stipends (found and fixed 2026-11-09)
 

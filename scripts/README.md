@@ -1005,6 +1005,10 @@ upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below
 | 2026-11-10: `WeightedStakingPoolV3` implementation (no principal penalty; built from 62f6165) | `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A` | 12104529 | `0x8dc4e15b7cba9cca5b29089efedee6621e170646de4ef979d1cc9aeebd2f12b2` |
 | 2026-11-10: timelock `schedule` pool `upgradeToAndCall(0x2E7b…860A, 0x)` (tag `v3-pool-no-penalty`, id `0x509e4c2b…df07`) | | 12104548 | `0xf1a62d8af73045335ae238fd7638972d68186d4a765cc66de0c01736e61d0745` |
 | 2026-11-10: timelock `execute` (pool `Upgraded`) | | 12104575 | `0x0d8374fe444ae33f3a10c976b3186e7449d1a0d8c82d7e7896331e55df421e4d` |
+| 2026-11-10: `WeightedStakingPoolV3` implementation (the minimal pool; built from bd31c48) | `0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316` | 12104969 | `0xd8aaf8053588e3b8bb5ebefca6681a52569c316eddf89ad2c0106be0bc18883f` |
+| 2026-11-10: `StakingMigrator` implementation (`TransitionVoucher` without `weight`; built from bd31c48) | `0x0c1522dE805cE814F776086Fa4B6dBfcEadFeB77` | 12104972 | `0x7d8d584ed4ae058ee2ee850379ef1758c2ca2a435f35d359b57000d34e42f17b` |
+| 2026-11-10: timelock `scheduleBatch` (2 calls: pool then migrator `upgradeToAndCall(<impl>, 0x)`, tag `v3-minimal-pool`, id `0x0677e6ea…9fb9`) | | 12105001 | `0x526320429a8ebbb5e841ab84c1208e4bdb7ef09f22b36677b5e060df565dbd1a` |
+| 2026-11-10: timelock `executeBatch` (two `Upgraded` events) | | 12105028 | `0x31c60f220690c43623a3b93522a5352a7947acea86450d946b6408b79d127076` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
@@ -1164,9 +1168,33 @@ B 8,821.915741, C 9,999.000000, D 8,939.724166 tREAL) identical to the read befo
 `totalPenalized()` stays 0.493729166666666666 tREAL (C's rehearsal penalty, never grows again);
 `PENALTY_RECEIVER()` and `getCurrentPenaltyPct()` now revert.
 
-### Upgrade pending on stack #6 (the minimal v3 pool and the voucher without weight)
+### Upgrade of the stack #6 v3 pool and migrator (the minimal v3 pool and the voucher without weight): done 2026-11-10
 
-Not deployed yet (nothing sent on any chain). The v3 pool proxy
+Done 2026-11-10 by the deployer `0x5576…8A35` from bd31c48 (the review fixes of ed33613, the
+bonus vault lock and the surplus `recoverERC20`, are NOT in these implementations), all
+transactions in the stack #6 table above. Implementations deployed with `deploy-implementation.js`:
+pool `0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316` (15:36:48 Sofia, 13:36:48 UTC, block 12104969;
+9,609 B runtime) and migrator `0x0c1522dE805cE814F776086Fa4B6dBfcEadFeB77` (15:37:24 Sofia, 13:37:24
+UTC, block 12104972; 21,446 B); `prepareUpgrade` validated both against the live proxies and
+`validate-upgrade-safety.js --network sepolia` passed ("storage layout is a legal successor" for
+both). ONE timelock batch, tag `v3-minimal-pool`, id
+`0x0677e6ea74c7614462c3d4f0d8c16acaaad3f77ff256e3b09aa4096fe7839fb9`: scheduled 15:43:12 Sofia
+(13:43:12 UTC, block 12105001, gas 261,950), executed 15:48:36 Sofia (13:48:36 UTC, block 12105028,
+gas 104,538; `Upgraded` on the pool, then on the migrator). Read back after it: ERC-1967 slots =
+`0x2a48…0316` (pool) and `0x0c15…eB77` (migrator); `owner()` = the timelock on both; pool
+`signer()` and migrator `signer()` = the deployer, `migrator()` = `0x2e72…c493`, `bonusVault()` =
+`0x7203…5221` on both, `stakingPool()` = the v3 pool, `activationEpoch()` 1794244212, `endEpoch()`
+1794503412; `totalStaked()` 38,939.809930771574143787 tREAL and `stakes(user)` (one value) A
+11,179.170023359140263473, B 8,821.915741301426174657, C 9,999, D 8,939.724166111007705657 tREAL,
+identical to the read before; pool `nonces(A..D)` 0; migrator `isNonceUsed(A..D, 1)` true,
+`migrated(A..D)` true; `compoundPaused()` false; `usdcInAsset(1000000)` 3.522019 tREAL;
+`TRANSITION_VOUCHER_TYPEHASH()` `0x6ab4f966…dbd4` = keccak256 of the six-field type; the six-argument
+`voucherDigest` answers and the old seven-argument one reverts; `rewardsWaived()`,
+`totalPenalized()`, `getPendingReward(address)` and `getUserMultiplier(address)` revert.
+
+The record of the plan as it was written before the upgrade:
+
+The v3 pool proxy
 `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` (implementation `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A`)
 moves to the minimal pool of 2026-11-10, and the migrator proxy
 `0x2e72f57f494daDc9fA266a518361F103cD1fc493` (implementation `0x33c9d0298D99aa801Bfc9B0bc540F65E8e7F6E70`)
