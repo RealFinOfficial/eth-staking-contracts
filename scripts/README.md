@@ -976,6 +976,11 @@ upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below
 | 2026-11-10: wallet D funded by A: 0.05 ETH, 20,000 tREAL, 2,000 tUSDC | `0xdbE0379cC79bBD2Fa9719274D6cB30499829E251` | 12103750-52 | `0x70152d93…4e14`, `0x3492b531…ae13`, `0xe69fb8dc…bd83` |
 | 2026-11-10: D `moveToLp(300 tUSDC, 10,000 tREAL)` -> tokenId 234225 | | 12103757 | `0x44ccb633e237b8b5e891610134ca4382063c7d59353384ed135ffb6b14910d93` |
 | 2026-11-10: D `rebalance(234225)` -> tokenId 234226, `LpBonusMoved`, no `BonusListenerFailed` | | 12103759 | `0x78650e89be486d24b86042e611f5fe6011e6781fa31166ad6d224f0e24732111` |
+| 2026-11-10: `V3BonusVault` implementation (review closure: `lpSettled`, dead / missed-after rule; built from 14104db) | `0xFC95A85622E68EDd006E380dB8dE458F0BB7f9C2` | 12104215 | `0x0e6c6e4d63ea317a41578c831d31c644c4c14365cccbbdcd935bc021df79634a` |
+| 2026-11-10: `LPStakingVault` implementation (review closure: `listenerMissedAt`, fail-closed listener `onRebalance`, `setBonusListener` vault check; built from 14104db) | `0x5517F740a223808756f9CbDd25233BE46f840D73` | 12104217 | `0x85456262e26d75a1f454fbad61a0195935f5df887d4ebcfaa16df3f3e04acd8c` |
+| 2026-11-10: timelock `scheduleBatch` (2 calls: bonus vault then vault `upgradeToAndCall(<impl>, 0x)`, tag `v3-review-closure`, id `0x29ebca62…efb8`) | | 12104236 | `0x0a5a5ddd4c993f3b9f8a662ada94f4a55f9c9ab26a6eaa152ebf89eb46623aec` |
+| 2026-11-10: timelock `executeBatch` (two `Upgraded` events) | | 12104265 | `0x513c575e69b674188f2973f74ef6312c1af371109ab104f2368ebc7c0868df6e` |
+| 2026-11-10: `V3BonusVault.reconcileLp(234214)` from the deployer -> `LpBonusForfeited(234214, B, 235.314762005877517222)` | | 12104270 | `0x0862b0256b4148576fdb58a0061d247fe32aad93c51b0e244ac0bfb33ee76730` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
@@ -1050,29 +1055,34 @@ restaked 8,939.724 tREAL in v3 (`v3Bonus` 893.972) and reserved `lpBonus` 211.68
 `lpReservation(234226)` = D, 106.028 tREAL (scaled to the tREAL-only band); `lpReservation(234225)`
 deleted; `totalLpReserved` 447.003 -> 341.342 (down by exactly 211.688 - 106.028); `stakerOf(234226)`
 = D. Afterwards `totalReserved` 3,235.423 tREAL, bonus vault balance 20,000 tREAL. B's stranded
-reservation under 234214 (235.315 tREAL) is untouched; `reconcileLp(234214)` was NOT called.
+reservation under 234214 (235.315 tREAL) is untouched; `reconcileLp(234214)` was NOT called here
+(it was called after the upgrade, block 12104270, see the next section).
 
-### Upgrade of the stack #6 bonus vault and vault (pending)
+### Upgrade of the stack #6 bonus vault and vault (done 2026-11-10)
 
 The 2026-11-10 fix and its review closure (audit notes items 19 and 20: the listener's
 `onRebalance` fails closed; the vault records `listenerMissedAt`; `setBonusListener` checks the
 listener's `vault()`; the bonus vault pays an LP record that is settled, missed-after or held, never
-a dead one) need both implementations replaced on Sepolia stack #6, in ONE batch (the new bonus
-vault reads `listenerMissedAt`, which only the new vault has). Not done yet; for the operator.
-Neither upgrade needs a reinitializer: `V3BonusVault` only APPENDS `lpSettled` (zero = not settled)
-and the vault only APPENDS `listenerMissedAt` (slot base + 9; zero = never missed), the right
-values for every existing record; the vault's hook gas slot is already set, so
-`deploy-implementation.js` prints `data` = `0x`. Both layouts were validated against the live
-proxies with `upgrades.validateUpgrade` (bonus vault `0x7203…5221`, vault `0x4B2f…2eac`).
+a dead one) replaced both implementations on Sepolia stack #6 in ONE timelock batch (the new bonus
+vault reads `listenerMissedAt`, which only the new vault has). Neither upgrade needed a
+reinitializer: `V3BonusVault` only APPENDS `lpSettled` (zero = not settled) and the vault only
+APPENDS `listenerMissedAt` (slot base + 9; zero = never missed); the vault's hook gas slot was
+already set, so `deploy-implementation.js` printed `data` = `0x` for both. `prepareUpgrade`
+validated both layouts against the live proxies and `validate-upgrade-safety.js --network sepolia`
+passed. Done by the deployer `0x5576…8A35` from HEAD 14104db, all transactions in the stack #6 table
+above:
 
-```bash
-IMPL_TARGET=V3BonusVault  npx hardhat run scripts/deploy-implementation.js --network sepolia
-IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --network sepolia
-```
-
-Then ONE timelock batch (owner tier, `LPTimelock` `0xf2F678AC5260BB297682D54DcD945BCB78901E20`,
-300 s), the two upgrades in this order, as a `TIMELOCK_BATCH` file for `lp-timelock.js`
-(`schedule-batch`, wait 300 s, `execute-batch` with the same file):
+1. Implementations deployed with `deploy-implementation.js`: `V3BonusVault` `0xFC95A85622E68EDd006E380dB8dE458F0BB7f9C2`
+   (13:04:36 Sofia, 11:04:36 UTC, block 12104215; 13,634 B runtime) and `LPStakingVault`
+   `0x5517F740a223808756f9CbDd25233BE46f840D73` (13:05:00 Sofia, 11:05:00 UTC, block 12104217; 20,076 B).
+2. Timelock batch (`LPTimelock` `0xf2F6…1E20`, 300 s, tag `v3-review-closure`, id
+   `0x29ebca621fe7c3b42894ba92e3af9b297cc43e910f2d4b0903c0a1942e9fefb8`), in this order:
+   `V3BonusVault(0x7203…5221).upgradeToAndCall(0xFC95…f9C2, 0x)`, then
+   `LPStakingVault(0x4B2f…2eac).upgradeToAndCall(0x5517…0D73, 0x)`. Scheduled 13:08:48 Sofia
+   (11:08:48 UTC, block 12104236, gas 261,950); executed 13:14:36 Sofia (11:14:36 UTC, block
+   12104265, gas 104,536).
+3. `V3BonusVault.reconcileLp(234214)` as a plain transaction from the deployer, 13:15:36 Sofia
+   (11:15:36 UTC, block 12104270, gas 80,940): `LpBonusForfeited(234214, B, 235314762005877517222)`.
 
 ```json
 [
@@ -1081,31 +1091,34 @@ Then ONE timelock batch (owner tier, `LPTimelock` `0xf2F678AC5260BB297682D54DcD9
 ]
 ```
 
-1. `V3BonusVault(0x72035F4BD96AcF498030E9A39eDc3546F3815221).upgradeToAndCall(<new bonus vault impl>, 0x)`
-2. `LPStakingVault(0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac).upgradeToAndCall(<new vault impl>, 0x)`
+Read back after the execute: the ERC-1967 slots = `0xFC95…f9C2` (bonus vault, previous
+`0xB395…1478`) and `0x5517…0D73` (vault, previous `0x2eBA…86Ba`); vault `bonusHookGas()` 400,000,
+`bonusListenerGas()` 1,000,000, `bonusListener()` = the bonus vault, `bonusEscrow()` `0xcd15…CaC1`,
+`owner()` = the timelock, operator `0x5576…8A35` and guardian `0x2b98…BEA` unchanged,
+`isStakeOperator(migrator)` true, `listenerMissedAt(234214)` = 0 and `listenerMissedAt(234226)` = 0;
+bonus vault `vault()`, `pool()`, `migrator()`, `owner()` unchanged, `totalReserved()`
+3,235.423338696820762992 tREAL, `totalLpReserved()` 341.342345619663348615, `lpSettled(234214)` and
+`lpSettled(234226)` false, `claimable(B)` 0 (before the unlock).
 
-Then, after the execute, ONE plain transaction from any wallet (the operator), not through the
-timelock (`reconcileLp` is permissionless and `lp-timelock.js` routes owner-tier functions only):
+Read back after the reconcile: `lpReservation(234214)` = B, amount 0, unlock 1794503412, not claimed,
+forfeited; `totalLpReserved()` 106.027583613785831393 tREAL (= D's record `lpReservation(234226)`,
+active, `stakerOf(234226)` = D); `totalReserved()` 3,000.108576690943245770 tREAL (down by exactly
+235.314762005877517222); `claimable(B)` 0.
 
-3. `V3BonusVault(0x7203…5221).reconcileLp(234214)`: FORFEITS B's stranded 235.315 tREAL (read on
-   2026-11-10, block 12104019: user B, unlock 1794503412 = 12 Nov 19:10 Sofia, not claimed, not
-   forfeited; `stakerOf(234214)` = 0). Its `listenerMissedAt(234214)` is ZERO after the upgrade:
-   its failure was the listener's `onRebalance` in the OLD vault code, which wrote nothing. So the
-   new rule is neither dead nor missed-after and falls back to `stakerOf(234214) == 0 != B`:
-   forfeit, before the unlock and after it alike, and the new `claim()` never pays it.
+`measure-hook-gas.js` before (block 12104201, 13:01:48 Sofia, 11:01:48 UTC) and after (block
+12104272, 13:16:00 Sofia, 11:16:00 UTC); allowances 400,000 / 1,000,000 both times:
 
-   ```bash
-   cast send 0x72035F4BD96AcF498030E9A39eDc3546F3815221 "reconcileLp(uint256)" 234214 --rpc-url <sepolia> --private-key <operator>
-   ```
+| Contract | Hook | tokenId | Estimate before | Verdict before | Estimate after | Verdict after |
+|---|---|---|---|---|---|---|
+| `BonusEscrow` | `onUnstake` | 233319 | 61,186 (6.54x) | OK | 61,186 (6.54x) | OK |
+| `BonusEscrow` | `onRebalance` | 233319 | 318,827 | fail closed (no stipend) | 318,827 | fail closed (no stipend) |
+| `V3BonusVault` | `onUnstake` | 234226 | 76,316 (13.10x) | OK | 75,935 (13.17x) | OK |
+| `V3BonusVault` | `onRebalance` | 234226 | 338,486 | fail closed (no stipend) | 342,304 | fail closed (no stipend) |
+| `V3BonusVault` | `onUnstake` | 234214 | 76,316 (13.10x) | OK | (forfeited, not measured) | |
+| `V3BonusVault` | `onRebalance` | 234214 | 339,409 | fail closed (no stipend) | (forfeited, not measured) | |
 
-Timing: execute the batch BEFORE the unlock (12 Nov 19:10 Sofia, 17:10 UTC). An LP record whose
-position is unstaked or re-ranged after the unlock while the OLD bonus vault still runs is not
-settled (the old hooks return without writing), so after the upgrade it would count as stale and
-pay nothing.
-
-Read back after it: both ERC-1967 slots; `lpReservation(234214)` forfeited with amount 0;
-`totalLpReserved()` down by 235.315 tREAL (341.342 -> 106.028 on the 2026-11-10 state);
-`lpSettled(234226)` false and `stakerOf(234226)` = D (D's record pays at the unlock while D stays).
+D's record under 234226 (106.028 tREAL) is untouched and pays at the unlock (12 Nov 19:10 Sofia,
+17:10 UTC) while D stays staked.
 
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 

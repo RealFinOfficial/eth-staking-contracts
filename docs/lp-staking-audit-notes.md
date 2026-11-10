@@ -1595,6 +1595,10 @@ failure was the listener's `onRebalance` in the OLD vault code, which wrote noth
 therefore falls back to `stakerOf(234214) == 0 != B` and `reconcileLp(234214)` FORFEITS it, before
 the unlock and after it alike.
 
+Live on stack #6 since block 12104265 (2026-11-10 13:14 Sofia, 11:14 UTC): bonus vault implementation
+`0xFC95…f9C2`, vault implementation `0x5517…0D73`, one timelock batch; `reconcileLp(234214)` then
+forfeited B's 235.314762005877517222 tREAL (block 12104270). Records: scripts/README.md.
+
 Tests: `test/forge/unit/{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`,
 `test/forge/fuzz/StakingV3Fuzz.t.sol`, `test/forge/invariant/V3BonusVaultInvariants.t.sol` (I1
 `totalReserved` equals the sum of open reservations, I2 balance conservation, I3 scaling never raises,
