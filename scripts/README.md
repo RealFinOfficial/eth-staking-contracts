@@ -824,9 +824,11 @@ before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail c
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
 unlock either one SETTLES it (`LpBonusSettled(tokenId, user)`, view `lpSettled(tokenId)`): it stays
-under the tokenId it had, unscaled, and pays. `claim()` pays an unlocked LP reservation only while
-the vault still holds that tokenId for the reservation's user (`stakerOf(tokenId) == user`) or once
-it is settled; any other record is stale and pays nothing (2026-11-10, see below). Forfeited amounts stay in the vault as surplus
+under the tokenId it had, unscaled, and pays. After the unlock `claim()` pays an LP reservation that
+is SETTLED, MISSED-AFTER (the vault's `onUnstake` to the listener failed at or after the unlock) or
+still HELD by the vault for its user (`stakerOf(tokenId) == user`), and never one that is DEAD (that
+notification failed before the unlock); any other record is stale and pays nothing (2026-11-10, see
+below). Forfeited amounts stay in the vault as surplus
 (`recoverSurplus(to, amount)`, owner). `totalLpReserved()` is the LP part of `totalReserved()`.
 
 **The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve` and `reserveLp` revert
@@ -838,13 +840,24 @@ deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner (`setMaxTotalReserved`, event
 `onRebalance` notification to the listener FAILS CLOSED like the escrow's (no `try`, all the
 remaining gas): a rebalance whose bonus re-scaling cannot run reverts, and the reservation never
 stays behind under the burned tokenId. The `onUnstake` notification still fails OPEN (an exit is
-never blocked): when it reverts, the vault emits `BonusListenerFailed(tokenId)` and the LP
-reservation stays under that tokenId, unsettled. Such a stale record is never paid by `claim()`.
-The backend MUST call `V3BonusVault.reconcileLp(tokenId)` (permissionless) for every
-`BonusListenerFailed` event: when the vault no longer holds the position for the reservation's
-user (`vault.stakerOf(tokenId) != user`) and the reservation is not settled, it is forfeited
-(`LpBonusForfeited`), before or after the unlock, so `totalLpReserved()` does not stay inflated;
-otherwise the call changes nothing. An exit whose notification failed therefore loses the LP bonus.
+never blocked): when it reverts, the vault emits `BonusListenerFailed(tokenId)`, the LP reservation
+stays under that tokenId, and the vault records the FIRST such moment per tokenId
+(`listenerMissedAt(tokenId)`, never overwritten). The bonus vault reads it against the record's
+unlock:
+
+- `missedAt < unlockAt`: DEAD. The forfeit of an early exit was missed. The record never pays, even
+  when the same NFT is staked again by the same user; a later after-unlock unstake or re-range
+  forfeits it instead of settling it, a before-unlock re-range forfeits it instead of moving it.
+- `missedAt >= unlockAt`: MISSED-AFTER. The settlement of a legitimate exit was missed. The record
+  pays as if it were settled.
+
+The backend sends no transaction. For every `BonusListenerFailed` event it raises the alert
+`lp.vault.bonus_listener_failed` with the action "call `V3BonusVault.reconcileLp(tokenId)` from any
+wallet", and the operator (or anyone) sends that call, before or after the unlock. `reconcileLp`
+(permissionless) makes the state explicit: before the unlock it forfeits a dead record or one the
+vault no longer holds for its user (`LpBonusForfeited`); after the unlock it settles a missed-after
+record (`LpBonusSettled`) and forfeits a record that is neither settled, nor missed-after, nor held;
+a settled record is never touched. `totalLpReserved()` therefore does not stay inflated.
 
 **The exit after the end.** The pool is deployed with `rewardsWaived = true`
 (`V3_REWARDS_WAIVED`, default true): `unstake()` after the end pays the principal with a ZERO reward
@@ -853,7 +866,13 @@ still works. A pool initialized with `false` keeps v2's rule (`unstake` reverts 
 until rewards are added).
 
 The LP vault refuses to unlink or replace the listener while its `totalLpReserved()` is above zero
-(`ListenerHasReservations`); the v3-pool reservations do not hold the link. The bonus vault itself
+(`ListenerHasReservations`); the v3-pool reservations do not hold the link. It also refuses a
+listener bound to another vault (`ListenerVaultMismatch(listener, itsVault)` unless
+`listener.vault()` is the LP vault): the listener's `onRebalance` fails closed and accepts its own
+vault only, so a wrongly bound listener would revert every rebalance. Order of operations: link the
+vault to the listener first (the listener's `setVault`, or its initializer), then
+`setBonusListener(listener)`; to unlink, `setBonusListener(0)` first. The deploy below satisfies it:
+`V3BonusVault.initialize` sets the vault before the batch runs `setBonusListener(bonusVault)`. The bonus vault itself
 refuses `setVault` while `totalLpReserved()` is above zero (`LpReservationsOutstanding`), and
 `setPool` is only ever sent in the same batch as the pool's `setBonusVault`.
 
@@ -1035,12 +1054,15 @@ reservation under 234214 (235.315 tREAL) is untouched; `reconcileLp(234214)` was
 
 ### Upgrade of the stack #6 bonus vault and vault (pending)
 
-The 2026-11-10 fix (audit notes items 19 and 20: the listener's `onRebalance` fails closed; the
-bonus vault pays an LP record only while the vault holds it for its user or once settled) needs
-both implementations replaced on Sepolia stack #6. Not done yet; for the operator. Neither upgrade
-needs a reinitializer: `V3BonusVault` only APPENDS `lpSettled` (zero = not settled, the right value
-for every existing record) and the vault's layout is unchanged; its hook gas slot is already set,
-so `deploy-implementation.js` prints `data` = `0x`. Both layouts were validated against the live
+The 2026-11-10 fix and its review closure (audit notes items 19 and 20: the listener's
+`onRebalance` fails closed; the vault records `listenerMissedAt`; `setBonusListener` checks the
+listener's `vault()`; the bonus vault pays an LP record that is settled, missed-after or held, never
+a dead one) need both implementations replaced on Sepolia stack #6, in ONE batch (the new bonus
+vault reads `listenerMissedAt`, which only the new vault has). Not done yet; for the operator.
+Neither upgrade needs a reinitializer: `V3BonusVault` only APPENDS `lpSettled` (zero = not settled)
+and the vault only APPENDS `listenerMissedAt` (slot base + 9; zero = never missed), the right
+values for every existing record; the vault's hook gas slot is already set, so
+`deploy-implementation.js` prints `data` = `0x`. Both layouts were validated against the live
 proxies with `upgrades.validateUpgrade` (bonus vault `0x7203…5221`, vault `0x4B2f…2eac`).
 
 ```bash
@@ -1065,10 +1087,12 @@ Then ONE timelock batch (owner tier, `LPTimelock` `0xf2F678AC5260BB297682D54DcD9
 Then, after the execute, ONE plain transaction from any wallet (the operator), not through the
 timelock (`reconcileLp` is permissionless and `lp-timelock.js` routes owner-tier functions only):
 
-3. `V3BonusVault(0x7203…5221).reconcileLp(234214)`: forfeits B's stranded 235.315 tREAL (read on
+3. `V3BonusVault(0x7203…5221).reconcileLp(234214)`: FORFEITS B's stranded 235.315 tREAL (read on
    2026-11-10, block 12104019: user B, unlock 1794503412 = 12 Nov 19:10 Sofia, not claimed, not
-   forfeited; `stakerOf(234214)` = 0). Before the unlock the OLD implementation forfeits it as
-   well; after the unlock only the new one does, and until then the new `claim()` would not pay it.
+   forfeited; `stakerOf(234214)` = 0). Its `listenerMissedAt(234214)` is ZERO after the upgrade:
+   its failure was the listener's `onRebalance` in the OLD vault code, which wrote nothing. So the
+   new rule is neither dead nor missed-after and falls back to `stakerOf(234214) == 0 != B`:
+   forfeit, before the unlock and after it alike, and the new `claim()` never pays it.
 
    ```bash
    cast send 0x72035F4BD96AcF498030E9A39eDc3546F3815221 "reconcileLp(uint256)" 234214 --rpc-url <sepolia> --private-key <operator>

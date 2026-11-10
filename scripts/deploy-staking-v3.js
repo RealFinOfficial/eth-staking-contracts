@@ -511,8 +511,9 @@ async function main() {
       `  1. fund the bonus vault with $ASSET before the end: V3BonusVault(${addresses.bonusVault}).fund(amount)\n` +
       `  2. once the pool has the liquidity routes 1 and 2 need: StakingMigrator(${addresses.migrator}).unpauseCompound()\n` +
       "     (the LP vault's operator; route 3 is open from the batch onwards)\n" +
-      "  3. for every BonusListenerFailed(tokenId) the LP vault emits, the backend calls\n" +
-      `     V3BonusVault(${addresses.bonusVault}).reconcileLp(tokenId) (anyone may)`
+      "  3. for every BonusListenerFailed(tokenId) the LP vault emits, the backend raises the alert\n" +
+      "     lp.vault.bonus_listener_failed; the operator (or anyone) then sends, from any wallet,\n" +
+      `     V3BonusVault(${addresses.bonusVault}).reconcileLp(tokenId) (before or after the unlock)`
   );
 }
 
