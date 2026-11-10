@@ -113,6 +113,7 @@ const hre = require("hardhat");
 const C = require("../helpers/constants");
 const profiles = require("../helpers/profiles");
 const forkNode = require("../helpers/fork-node");
+const forkDiag = require("../helpers/fork-diagnostics");
 const funding = require("../helpers/funding");
 const rpc = require("../helpers/rpc");
 const chain = require("../helpers/chain");
@@ -152,6 +153,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
   let node = null;
   let provider = null;
   let rpcUsed = null;
+  /** Test accounts whose real-chain code establishFork cleared (forkNode.clearTestAccountCode). */
+  let clearedCode = [];
+  /** The relay in front of the upstream: reads "from the upstream" go through it. */
+  let upstreamReadUrl = null;
   let scratchDir = null;
   let registryFile = null;
   let fees = null;
@@ -407,6 +412,8 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     node = established.node;
     provider = established.provider;
     rpcUsed = established.url;
+    clearedCode = established.clearedCode;
+    upstreamReadUrl = established.relay.url;
     // The node's log opens with its `--fork <url>` line; mask the endpoint's key in place.
     scrubDirectory(scratchDir);
     probe = established.probe;
@@ -689,10 +696,19 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       );
     }
     if (scratchDir) console.log(`  [${P.logLabel}] node and script logs: ${scratchDir}`);
+    // Diagnostics for a run that cannot be reproduced locally (CI): the node's own log.
+    if (node && forkDiag.suiteHasFailure(this.test.parent)) {
+      forkDiag.printNodeLogTail(node.logFile, P.logLabel, 200);
+    }
     if (provider) provider.destroy();
     if (node) await node.stop();
     // Again once the node has stopped writing, whatever happened above — a failed fork included.
     if (scratchDir) scrubDirectory(scratchDir);
+  });
+
+  // A failed test whose error names a transaction gets that transaction traced on the node.
+  afterEach(async function () {
+    await forkDiag.reportFailedTest(this.currentTest, provider, P.logLabel);
   });
 
   // ── environment for the two script children ────────────────────────────
@@ -834,6 +850,53 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
       // 18 vs 6 decimals is what makes the whole sqrt-price derivation non-trivial.
       expect(P.asset.decimals - P.usdc.decimals).to.equal(12n);
+    });
+
+    it("left every test account the node unlocks without code, whatever the real chain holds", async function () {
+      // The Hardhat test keys are public, so real chains carry code on them (EIP-7702
+      // delegations); establishFork clears it with hardhat_setCode so every signer here is a
+      // plain EOA. See forkNode.clearTestAccountCode.
+      const addresses = forkNode.testAccountAddresses();
+      expect(addresses).to.have.length(forkNode.NODE_TEST_ACCOUNTS);
+      for (const address of addresses) {
+        expect(await provider.getCode(address), address).to.equal("0x");
+      }
+      for (const entry of clearedCode) {
+        expect(entry.code).to.not.equal("0x");
+        expect(addresses[entry.index]).to.equal(entry.address);
+      }
+    });
+
+    it("runs carol without the EIP-7702 delegation real Sepolia carries on her, and the sweep clears it", async function () {
+      // Read through the suite's relay, i.e. from the upstream endpoint, not from the fork.
+      const response = await fetch(upstreamReadUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "eth_getCode",
+          params: [w.carol.address, "0x" + P.pinnedBlock.toString(16)],
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const body = await response.json();
+      expect(body.error, JSON.stringify(body.error)).to.equal(undefined);
+      // 0xef0100 ‖ 20-byte delegate: the EIP-7702 delegation designator.
+      expect(body.result).to.match(/^0xef0100[0-9a-f]{40}$/i);
+      // Measured 2026-11-10 with Hardhat 2.28.6 / EDR 0.12.0-next.23 on macOS: the node
+      // already serves its own unlocked accounts without the remote code, so the sweep in
+      // establishFork usually finds nothing. It is kept so the suite does not depend on that.
+      expect(await provider.getCode(w.carol.address)).to.equal("0x");
+
+      // The sweep itself, on carol carrying the real designator: it must find and clear it.
+      await provider.send("hardhat_setCode", [w.carol.address, body.result]);
+      expect(await provider.getCode(w.carol.address)).to.equal(body.result.toLowerCase());
+      const swept = await forkNode.clearTestAccountCode(provider, P);
+      expect(swept).to.deep.equal([
+        { index: C.ROLES.carol, address: w.carol.address, code: body.result.toLowerCase() },
+      ]);
+      expect(await provider.getCode(w.carol.address)).to.equal("0x");
     });
 
     it("finds the profile's funder holding the supply it was picked for", async function () {

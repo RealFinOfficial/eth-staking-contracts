@@ -50,7 +50,7 @@ const net = require("net");
 const path = require("path");
 const ethers = require("ethers");
 
-const { POOL_ABI, ERC20_ABI } = require("./constants");
+const { POOL_ABI, ERC20_ABI, MNEMONIC, DERIVATION_PREFIX } = require("./constants");
 const profiles = require("./profiles");
 const { redactRpcText } = require("./redact");
 const { startRpcRelay } = require("./rpc-relay");
@@ -584,6 +584,51 @@ async function probeFork(provider, profile = DEFAULT_PROFILE, options = {}) {
   return { head, tokens, funders, pool, ...(pool || {}) };
 }
 
+/** How many accounts `hardhat node` unlocks from the test mnemonic (its default). */
+const NODE_TEST_ACCOUNTS = 20;
+
+/** The addresses of the node's unlocked test accounts, index 0 .. count-1. */
+function testAccountAddresses(count = NODE_TEST_ACCOUNTS) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(ethers.HDNodeWallet.fromPhrase(MNEMONIC, undefined, `${DERIVATION_PREFIX}/${i}`).address);
+  }
+  return out;
+}
+
+/**
+ * Removes whatever code the forked chain carries on the test accounts.
+ *
+ * The Hardhat test mnemonic is public, so on a real chain anyone can sign for these
+ * accounts, and someone did: on Sepolia, account #3 (carol) carries an EIP-7702
+ * delegation (`0xef0100386f…`) at the pinned block 11562000 and still today. A fork
+ * inherits that code, so every transaction carol sends would run as a delegated account,
+ * and every call made TO her would run the delegate's code. Nothing in the suites wants
+ * that: their signers are meant to be plain EOAs. `hardhat_setCode(address, "0x")` clears
+ * it on the fork only; nonces and balances are left as they are (no suite asserts a test
+ * account's nonce). Mines no block.
+ *
+ * @returns {Promise<Array<{index: number, address: string, code: string}>>} the accounts that had code.
+ */
+async function clearTestAccountCode(provider, profile = DEFAULT_PROFILE, count = NODE_TEST_ACCOUNTS) {
+  const cleared = [];
+  const addresses = testAccountAddresses(count);
+  for (let index = 0; index < addresses.length; index++) {
+    const address = addresses[index];
+    const code = await provider.getCode(address);
+    if (code === "0x") continue;
+    await provider.send("hardhat_setCode", [address, "0x"]);
+    const after = await provider.getCode(address);
+    if (after !== "0x") throw new Error(`hardhat_setCode did not clear the code of ${address}`);
+    cleared.push({ index, address, code });
+    console.log(
+      `  [${profile.logLabel}] cleared code on test account #${index} ${address}: ` +
+        `${code.length > 50 ? code.slice(0, 50) + "…" : code} (${(code.length - 2) / 2} bytes)`
+    );
+  }
+  return cleared;
+}
+
 /**
  * Tries every candidate endpoint in turn and returns the first working node.
  *
@@ -628,7 +673,8 @@ async function establishFork({
 
       try {
         const probe = await probeFork(provider, profile, { blockNumber });
-        return { node, provider, url, relay, probe, profile };
+        const clearedCode = await clearTestAccountCode(provider, profile);
+        return { node, provider, url, relay, probe, profile, clearedCode };
       } catch (error) {
         provider.destroy();
         throw error;
@@ -661,6 +707,9 @@ module.exports = {
   decideOnForkFailure,
   probeFork,
   establishFork,
+  NODE_TEST_ACCOUNTS,
+  testAccountAddresses,
+  clearTestAccountCode,
   getFreePort,
   spawnLocalNode,
   REPO_ROOT,

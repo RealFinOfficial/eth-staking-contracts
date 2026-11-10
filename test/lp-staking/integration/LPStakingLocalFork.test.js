@@ -87,6 +87,7 @@ const hre = require("hardhat");
 
 const C = require("../helpers/constants");
 const forkNode = require("../helpers/fork-node");
+const forkDiag = require("../helpers/fork-diagnostics");
 const rpc = require("../helpers/rpc");
 const chain = require("../helpers/chain");
 const uni = require("../helpers/uniswap");
@@ -111,6 +112,8 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
   let node = null;
   let provider = null;
   let rpcUsed = null;
+  /** Test accounts whose real-chain code establishFork cleared (forkNode.clearTestAccountCode). */
+  let clearedCode = [];
   let scratchDir = null;
   let registryFile = null;
   let fees = null;
@@ -306,6 +309,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     node = established.node;
     provider = established.provider;
     rpcUsed = established.url;
+    clearedCode = established.clearedCode;
     // The node's log opens with its `--fork <url>` line; mask the endpoint's key in place.
     redact.scrubDirectory(scratchDir);
 
@@ -573,10 +577,19 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       );
     }
     if (scratchDir) console.log(`  [local-fork] node and script logs: ${scratchDir}`);
+    // Diagnostics for a run that cannot be reproduced locally (CI): the node's own log.
+    if (node && forkDiag.suiteHasFailure(this.test.parent)) {
+      forkDiag.printNodeLogTail(node.logFile, "local-fork", 200);
+    }
     if (provider) provider.destroy();
     if (node) await node.stop();
     // Again once the node has stopped writing, whatever happened above — a failed fork included.
     if (scratchDir) redact.scrubDirectory(scratchDir);
+  });
+
+  // A failed test whose error names a transaction gets that transaction traced on the node.
+  afterEach(async function () {
+    await forkDiag.reportFailedTest(this.currentTest, provider, "local-fork");
   });
 
   // ── environment for the two script children ────────────────────────────
@@ -663,6 +676,21 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
 
   // ═══════════════════════════════════════════════════════════════════════
   describe("0. fork base", function () {
+
+    it("left every test account the node unlocks without code, whatever the real chain holds", async function () {
+      // The Hardhat test keys are public, so real chains carry code on them (EIP-7702
+      // delegations); establishFork clears it with hardhat_setCode so every signer here is a
+      // plain EOA. See forkNode.clearTestAccountCode.
+      const addresses = forkNode.testAccountAddresses();
+      expect(addresses).to.have.length(forkNode.NODE_TEST_ACCOUNTS);
+      for (const address of addresses) {
+        expect(await provider.getCode(address), address).to.equal("0x");
+      }
+      for (const entry of clearedCode) {
+        expect(entry.code).to.not.equal("0x");
+        expect(addresses[entry.index]).to.equal(entry.address);
+      }
+    });
     it("runs a chain-31337 node forked at the pinned block", async function () {
       expect(await provider.send("eth_chainId", [])).to.equal("0x7a69");
       expect((await provider.getNetwork()).chainId).to.equal(C.LOCAL_CHAIN_ID);
