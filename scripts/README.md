@@ -929,7 +929,8 @@ records the pool as `WeightedStakingPoolTest`.
 Deployed and rehearsed on Sepolia test stack #6 on 2026-11-09 by the deployer / operator
 `0x5576bD37419dadAab305cca998E16BcD73318A35`, owner = the live `LPTimelock`
 `0xf2F678AC5260BB297682D54DcD945BCB78901E20` (300 s). The rehearsal STOPPED at the rebalance
-(see "Open finding" below); nothing was claimed.
+(see "Open finding" below); nothing was claimed. The finding was resolved on 2026-11-10 by the vault
+upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below the finding).
 
 | What | Address | Block | Transaction |
 |---|---|---|---|
@@ -944,6 +945,12 @@ Deployed and rehearsed on Sepolia test stack #6 on 2026-11-09 by the deployer / 
 | timelock `executeBatch` | | 12098956 | `0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2` |
 | `V3BonusVault.fund(20,000 tREAL)` | | 12098960 | `0x8f2e011075fdfe89fb9610a8789c9f3c5d6f81d5b0998ed377adff7e3e995ad0` |
 | `StakingMigrator.unpauseCompound()` | | 12098961 | `0x6f270141d6b085471672fa7a31448f86bee28bc2f82e02721d4e8dfa1e3f7052` |
+| 2026-11-10: `LPStakingVault` implementation (owner-set hook gas, `setBonusHookGas`, `initializeV2()`; built from 5707a98) | `0x2eBABFe60b962D229fb7d1259984cFa6703886Ba` | 12103692 | `0x114e7b9df2b973385d4c1246cfc483e009e9a1fed3291c31384d19789dfa6955` |
+| 2026-11-10: timelock `schedule` `upgradeToAndCall(0x2eBA…86Ba, 0x5cd8a76b)` (tag `vault-hook-gas`, id `0x855baaac…1cbd`) | | 12103703 | `0xecc7351c7baf78bff19094b74af5141ba5644751c7702fc69fb3d555f054065b` |
+| 2026-11-10: timelock `execute` (emits `Upgraded`, `BonusHookGasSet(400000, 1000000)`, `Initialized(2)`) | | 12103729 | `0x52c8fb83c0a1a4fa201c1f86e8e7aca40ba6668fd95a3d869e7ccfbd2c769379` |
+| 2026-11-10: wallet D funded by A: 0.05 ETH, 20,000 tREAL, 2,000 tUSDC | `0xdbE0379cC79bBD2Fa9719274D6cB30499829E251` | 12103750-52 | `0x70152d93…4e14`, `0x3492b531…ae13`, `0xe69fb8dc…bd83` |
+| 2026-11-10: D `moveToLp(300 tUSDC, 10,000 tREAL)` -> tokenId 234225 | | 12103757 | `0x44ccb633e237b8b5e891610134ca4382063c7d59353384ed135ffb6b14910d93` |
+| 2026-11-10: D `rebalance(234225)` -> tokenId 234226, `LpBonusMoved`, no `BonusListenerFailed` | | 12103759 | `0x78650e89be486d24b86042e611f5fe6011e6781fa31166ad6d224f0e24732111` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
@@ -985,6 +992,40 @@ data at 250,000 gas (`BONUS_LISTENER_GAS`) and succeeds at 1,000,000; `eth_estim
 Sepolia's gas costs are now about ten times the earlier ones (a plain ETH transfer used 204,600
 gas), and the fork suite passed at its older pinned block. `reconcileLp(234214)` (anyone may call
 it) would forfeit B's LP reservation; it was NOT called. Stopped here: no claim, no further step.
+
+**Resolved (2026-11-10).** The vault proxy now runs `0x2eBABFe60b962D229fb7d1259984cFa6703886Ba`
+(previous `0xDa50…D09c`), activated through the timelock with `upgradeToAndCall(<impl>, 0x5cd8a76b)`:
+scheduled 11:20:12 Sofia (09:20:12 UTC, block 12103703), executed 11:25:36 Sofia (09:25:36 UTC,
+block 12103729, gas 195,050). `prepareUpgrade` validated the layout against the stack #6 proxy and
+`validate-upgrade-safety.js --network sepolia` passed. Read back after the execute: the ERC-1967
+slot = `0x2eBA…86Ba`; `bonusHookGas()` 400,000, `bonusListenerGas()` 1,000,000,
+`bonusHookGasFloor()` 411,349, `bonusListenerGasFloor()` 1,020,873; `bonusListener()` = the bonus
+vault, `bonusEscrow()` `0xcd15…CaC1`, `owner()` = the timelock, operator `0x5576…8A35` and guardian
+`0x2b98…BEA` unchanged; `isStakeOperator(migrator)` true; `stakerOf(234216)` = B.
+
+`measure-hook-gas.js`, before (block 12103676, 11:13:48 Sofia, 09:13:48 UTC) and after (block
+12103734, 11:26:36 Sofia, 09:26:36 UTC) the upgrade:
+
+| Contract | Hook | tokenId | Estimate before | Allowance before | Verdict before | Estimate after | Allowance after | Verdict after |
+|---|---|---|---|---|---|---|---|---|
+| `BonusEscrow` | `onUnstake` | 233319 | 61,186 | 100,000 (1.63x) | OK | 61,186 | 400,000 (6.54x) | OK |
+| `BonusEscrow` | `onRebalance` | 233319 | 318,754 | all gas | fail closed | 318,827 | all gas | fail closed |
+| `V3BonusVault` | `onUnstake` | 234214 | 75,901 | 250,000 (3.29x) | OK | 75,901 | 1,000,000 (13.18x) | OK |
+| `V3BonusVault` | `onRebalance` | 234214 | 339,336 | 250,000 (0.74x) | FAIL (out of gas) | 339,409 | 1,000,000 (2.95x) | OK |
+
+The proof on chain, with a fresh LP reservation (`v3-rehearsal.js` actions `fund-d`, `move-d`,
+`rebalance-d`; D never staked in sw2-test, its TransitionVoucher signed by the deployer: route 2,
+eligiblePrincipal 10,000 tREAL, eligibleReward 300 tUSDC, nonce 1, weight 1500). A's balances
+before funding D: 6.6665 ETH, 6,477,692.24 tREAL, 585,509.69 tUSDC. D's `moveToLp` (11:31:36
+Sofia, gas 3,369,925) minted tokenId 234225 on -295860 .. -281940 with 1,060.276 tREAL + 300 tUSDC,
+restaked 8,939.724 tREAL in v3 (`v3Bonus` 893.972) and reserved `lpBonus` 211.688 tREAL;
+`totalLpReserved` 447.003. D's `rebalance(234225)` to -288780 .. -285180, no swap (11:32:00 Sofia,
+09:32:00 UTC, block 12103759, gas used 1,247,912 of a 2,624,947 limit) minted 234226 and emitted
+`LpBonusMoved(234225, 234226, D, 211.688153, 106.027584)` and NO `BonusListenerFailed`:
+`lpReservation(234226)` = D, 106.028 tREAL (scaled to the tREAL-only band); `lpReservation(234225)`
+deleted; `totalLpReserved` 447.003 -> 341.342 (down by exactly 211.688 - 106.028); `stakerOf(234226)`
+= D. Afterwards `totalReserved` 3,235.423 tREAL, bonus vault balance 20,000 tREAL. B's stranded
+reservation under 234214 (235.315 tREAL) is untouched; `reconcileLp(234214)` was NOT called.
 
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 

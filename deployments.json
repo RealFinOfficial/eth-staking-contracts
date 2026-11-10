@@ -66,8 +66,8 @@
       "address": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "deployTx": "0xb03f61c5bced266621ff14325fc83cd5342aaf4fd15b197d521c6838874f8467",
       "block": 11854185,
-      "implementation": "0xDa50c33088CD9d172480d85E9946AaF6A456D09c",
-      "implementationTx": "0x44507de0d41d35b2185b00f8ab655d2839d20b74311a9a8bb05f9bda4b89b30f",
+      "implementation": "0x2eBABFe60b962D229fb7d1259984cFa6703886Ba",
+      "implementationTx": "0x114e7b9df2b973385d4c1246cfc483e009e9a1fed3291c31384d19789dfa6955",
       "pool": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
       "token0": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "token1": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
@@ -79,14 +79,16 @@
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "zapper": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",
       "bonusEscrow": "0xcd159d6A8e4acC2Fa5cBBebebE834461Cb79CaC1",
-      "previousImplementation": "0x5Ffee21075634aD6DC541EC66F8C169888602283",
-      "implementationBlock": 12098956,
-      "upgradeTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+      "previousImplementation": "0xDa50c33088CD9d172480d85E9946AaF6A456D09c",
+      "implementationBlock": 12103729,
+      "upgradeTx": "0x52c8fb83c0a1a4fa201c1f86e8e7aca40ba6668fd95a3d869e7ccfbd2c769379",
       "bonusListener": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
       "stakeOperators": [
         "0x2e72f57f494daDc9fA266a518361F103cD1fc493"
       ],
-      "bonusListenerLinkTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2"
+      "bonusListenerLinkTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+      "bonusHookGas": 400000,
+      "bonusListenerGas": 1000000
     },
     "LPZapper": {
       "address": "0x2137eAcDa0Cfb5A01253a45914c94D9795EF7a4e",

@@ -1573,3 +1573,15 @@ when already set, slot 8 packing, the configured allowance forwarded behind its 
 `test/lp-staking/LPStakingVault.test.js`, `DeployImplementation.test.js` (the default
 `initializeV2()` data for a pre-fix vault) and `StakingV3SepoliaFork.test.js` (the batch's upgrade
 carries `initializeV2()`; 400,000 / 1,000,000 stored afterwards).
+
+**Verified on stack #6 (2026-11-10).** The Sepolia vault proxy `0x4B2f…2eac` was upgraded through
+its timelock to `0x2eBABFe60b962D229fb7d1259984cFa6703886Ba` with `upgradeToAndCall(<impl>,
+0x5cd8a76b)` (executed 11:25:36 Sofia, 09:25:36 UTC, block 12103729, tx `0x52c8fb83…9379`);
+`initializeV2()` stored 400,000 / 1,000,000, floors 411,349 / 1,020,873. `measure-hook-gas.js` after
+it: escrow `onUnstake` 61,186 against 400,000 (6.54x), listener `onUnstake` 75,901 against 1,000,000
+(13.18x), listener `onRebalance` 339,409 against 1,000,000 (2.95x; it was 0.74x and FAIL at the old
+250,000), every verdict OK. A fresh LP reservation (wallet D, tokenId 234225, 211.688 tREAL) was then
+rebalanced (block 12103759, tx `0x78650e89…2111`, gas used 1,247,912): `LpBonusMoved(234225, 234226,
+D, 211.688, 106.028)`, no `BonusListenerFailed`, the new row active for D, the old row deleted,
+`totalLpReserved` down by exactly the scaled-away 105.661 tREAL. Records: scripts/README.md, "Staking
+v3 on stack #6", "Resolved (2026-11-10)".
