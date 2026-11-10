@@ -267,15 +267,15 @@ operation, then funding and `lp-epoch.js set-amount`.
 Three more UUPS proxies under `contracts/staking-v3/`, owned by the `LPTimelock` after a two-step
 handover (the deployer wires them, nominates the timelock, the timelock batch accepts):
 
-- **`WeightedStakingPoolV3.sol`** — `WeightedStakingPool` (v2) as a UUPS implementation: the same
-  lifecycle, `Stake` / `Withdraw` / `UpdateWeight` vouchers (domain `WeightedStakingPool` / `1`),
-  penalty, `unstake` / `emergencyUnstake` and events, all state in one ERC-7201 namespace. Adds
-  `stakeFor(user, amount, weight)` (only `migrator`; tokens pulled from the migrator; no pool
-  voucher, the weight is the one the `TransitionVoucher` attested), `setMigrator`, `setBonusVault`
-  (owner), and `bonusVault.onEarlyExit(user)` in `withdraw`, fail closed. Renounce disabled, so v2's
-  "renounced owner" switch is gone. The USDC reward slot is kept; the initializer flag
-  `rewardsWaived` (deploy default true) makes `addRewards` revert "Rewards waived" and `unstake`
-  after the end pay the principal with a zero reward
+- **`WeightedStakingPoolV3.sol`** — a SEPARATE MINIMAL pool (decision of 2026-11-10), not a copy
+  of v2: it holds the $ASSET principal for the window and pays it back. No weight, no USDC reward,
+  no penalty. `stake(amount, deadline, signature)` behind the backend's EIP-712
+  `StakeVoucher(address user,uint256 nonce,uint256 deadline)` (domain `WeightedStakingPool` / `1`,
+  signed by `signer`, per-user nonce), `stakeFor(user, amount)` (only `migrator`; tokens pulled from
+  the migrator), `withdraw(amount)` before the end (principal in full, `bonusVault.onEarlyExit(user)`
+  fail closed), `unstake()` / `emergencyUnstake()` after the end, `setSigner` / `setMigrator` /
+  `setBonusVault` / `recoverERC20` (owner), renounce disabled. Accounting: `stakes(user)` and
+  `totalStaked()`. The v2-shaped fields of the stack #6 layout stay as deprecated slots, never written
 - **`V3BonusVault.sol`** — the bonus book: `reserve(user, amount, unlockAt, route)` and
   `reserveLp(tokenId, user, amount, unlockAt)` (migrator only), `onEarlyExit(user)` (pool only:
   forfeits the WHOLE v3 reservation before the unlock), `onUnstake` / `onRebalance` (vault only,
@@ -292,8 +292,9 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
   USDC swapped to $ASSET under its own TwapGuard, everything staked in v3, `compoundBps` 1000),
   `moveToLp` (route 2, one position on spot ± 6,932 ticks staked in the LP vault, the rest in v3,
   `lpBps` 1000 on both parts, the USDC leg valued at the 1,800 s mean tick), `claimRestake` (route 3,
-  principal only, `restakeBps` 500). An EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`)
-  gates each call; ONE transition per wallet (`migrated(user)`, later calls `AlreadyMigrated`). The
+  principal only, `restakeBps` 500). An EIP-712 `TransitionVoucher(address user,uint8 route,uint256
+  eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain
+  `StakingMigrator` / `1`, no weight since 2026-11-10) gates each call; ONE transition per wallet (`migrated(user)`, later calls `AlreadyMigrated`). The
   compound bonus counts the bought $ASSET at most at its TWAP value, `minAssetOut` must be above zero;
   `moveToLp` asserts custody after the stake (`CustodyAssertFailed`). Routes 1 and 2:
   `pauseCompound` (vault guardian or operator) / `unpauseCompound` (vault operator), born paused;

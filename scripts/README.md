@@ -802,11 +802,11 @@ closed $ASSET staking window sw2 (`WeightedStakingPool` v2, mainnet
 | 3. claim and restake | `claimRestake(assetAmount, deadline, assetPermit, v)` | the principal only; the USDC stays in the wallet | `restakeBps` (500) of the principal |
 
 Every route needs the backend's `TransitionVoucher(address user,uint8 route,uint256
-eligiblePrincipal,uint256 eligibleReward,uint256 weight,uint256 nonce,uint256 deadline)`, EIP-712
-domain `("StakingMigrator", "1", chainId, migrator proxy)`, signed by `migrator.signer()`. The
-migrator checks the route, the deadline, `assetAmount <= eligiblePrincipal`, `usdcAmount <=
-eligibleReward`, the per-user nonce and the signature, then passes `weight` to the v3 pool as the
-user's multiplier. A permit is optional: `deadline == 0` means "already approved" (the Sepolia
+eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)`, EIP-712 domain
+`("StakingMigrator", "1", chainId, migrator proxy)`, signed by `migrator.signer()` (no `weight`
+field since 2026-11-10). The migrator checks the route, the deadline, `assetAmount <=
+eligiblePrincipal`, `usdcAmount <= eligibleReward`, the per-user nonce and the signature, then
+stakes for the user with `pool.stakeFor(user, amount)`. A permit is optional: `deadline == 0` means "already approved" (the Sepolia
 test tokens have no EIP-2612). Routes 1 and 2 are born PAUSED and are switched by the LP vault's
 tiers: `pauseCompound` (guardian or operator), `unpauseCompound` (operator only). Route 3 is never
 paused.
@@ -820,9 +820,9 @@ The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoc
 paid or checked at the transition. The company funds the vault with $ASSET any time before the
 end (`fund(amount)` or a plain transfer); `claim()` pays the caller's whole unlocked amount and
 reverts `InsufficientFunds(requested, available)` while the balance is short. A `withdraw` from v3
-before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed) and the
-weight of the withdrawn share, and returns the principal in full: v3 has no principal penalty and
-pays nothing to a penalty receiver (decision of 2026-11-10; `Withdrawn.penalty` is always 0). The LP
+before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed) and returns
+the principal in full: v3 has no principal penalty and pays nothing to a penalty receiver (decision
+of 2026-11-10). The LP
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
 unlock either one SETTLES it (`LpBonusSettled(tokenId, user)`, view `lpSettled(tokenId)`): it stays
@@ -861,11 +861,29 @@ vault no longer holds for its user (`LpBonusForfeited`); after the unlock it set
 record (`LpBonusSettled`) and forfeits a record that is neither settled, nor missed-after, nor held;
 a settled record is never touched. `totalLpReserved()` therefore does not stay inflated.
 
-**The exit after the end.** The pool is deployed with `rewardsWaived = true`
-(`V3_REWARDS_WAIVED`, default true): `unstake()` after the end pays the principal with a ZERO reward
-(`Unstaked(user, amount, 0, …)`), and `addRewards` reverts "Rewards waived". `emergencyUnstake()`
-still works. A pool initialized with `false` keeps v2's rule (`unstake` reverts "Rewards not funded"
-until rewards are added).
+**The v3 pool, a separate minimal contract (decision of 2026-11-10).** `WeightedStakingPoolV3`
+holds each wallet's $ASSET principal for the window and pays it back; it has no weight multiplier,
+no USDC reward and no penalty. Its whole surface:
+
+| Call | Who / when | What it does |
+|---|---|---|
+| `stake(amount, deadline, signature)` | anyone, before `endEpoch` | pulls `amount` from the caller; needs the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)`, domain `("WeightedStakingPool", "1", chainId, pool proxy)`, signed by `signer()`, over the caller's next `nonces(user)`; the nonce is spent (`NonceUsed`). The voucher binds no amount |
+| `stakeFor(user, amount)` | the `migrator()` only, before `endEpoch` | pulls from the migrator, credits `user` (`Staked` then `StakedFor`) |
+| `withdraw(amount)` | a staker, before `endEpoch` | the principal back in full; `bonusVault().onEarlyExit(user)` forfeits the whole v3 reservation, fail closed (also before the activation) |
+| `unstake()` / `emergencyUnstake()` | a staker, from `endEpoch` | the whole principal (`Unstaked` / `EmergencyUnstaked`); `emergencyUnstake` is kept on purpose and can be removed by a later upgrade |
+| `setSigner`, `setMigrator`, `setBonusVault`, `recoverERC20` (never the staking token), `upgradeToAndCall`, `transferOwnership` | the owner (the timelock) | `renounceOwnership` reverts |
+
+Views: `stakingToken()`, `activationEpoch()`, `endEpoch()`, `signer()`, `migrator()`, `bonusVault()`,
+`totalStaked()`, `stakes(user)` (the principal, one value), `nonces(user)`,
+`STAKE_VOUCHER_TYPEHASH()`. Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
+signer)`, `Staked(user, amount)`, `StakedFor(user, by, amount)`, `Withdrawn(user, amount)`,
+`Unstaked(user, amount)`, `EmergencyUnstaked(user, amount)`, `NonceUsed(user, nonce)`,
+`SignerChanged(oldSigner, newSigner)`, `MigratorSet(previous, new)`, `BonusVaultSet(previous, new)`.
+What each wallet brought in per route stays in the migrator's events: `Compounded(user, principal,
+usdcIn, assetBought, staked, bonus)`, `MovedToLp(user, tokenId, usdcIn, assetToLp, restaked,
+lpBonus, v3Bonus)` (+ `UsdcRefunded(user, amount)` for the USDC the position did not take),
+`ClaimRestaked(user, principal, bonus)`. The fields of the stack #6 layout the pool no longer uses
+stay in storage as deprecated slots (audit notes item 19).
 
 The LP vault refuses to unlink or replace the listener while its `totalLpReserved()` is above zero
 (`ListenerHasReservations`); the v3-pool reservations do not hold the link. It also refuses a
@@ -885,7 +903,7 @@ refuses `setVault` while `totalLpReserved()` is above zero (`LpReservationsOutst
 IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --network sepolia
 
 # 1. the three proxies, the direct wiring, the nominations and the timelock batch file
-V3_ACTIVATION_EPOCH=<unix> V3_END_EPOCH=<unix> V3_WEIGHT_SIGNER=0xBackendKey \
+V3_ACTIVATION_EPOCH=<unix> V3_END_EPOCH=<unix> V3_STAKE_SIGNER=0xBackendKey \
   V3_VAULT_IMPLEMENTATION=0xNewVaultImpl V3_MAX_TOTAL_RESERVED=100000 \
   npx hardhat run scripts/deploy-staking-v3.js --network sepolia
 
@@ -917,14 +935,13 @@ on mainnet.
 | Variable | Meaning | Default |
 |---|---|---|
 | `V3_ACTIVATION_EPOCH`, `V3_END_EPOCH` | the v3 active period; the end is the bonus unlock | required |
-| `V3_WEIGHT_SIGNER` | the v3 pool's weight-voucher signer | required |
-| `V3_MIGRATOR_SIGNER` | the `TransitionVoucher` signer | `V3_WEIGHT_SIGNER` |
+| `V3_STAKE_SIGNER` | the v3 pool's `StakeVoucher` signer (a direct `stake`) | required |
+| `V3_MIGRATOR_SIGNER` | the `TransitionVoucher` signer | `V3_STAKE_SIGNER` |
 | `V3_ASSET`, `V3_USDC` | the two tokens | the `LPZapper` entry's `asset`, `usdc` |
 | `V3_LP_VAULT`, `V3_TIMELOCK` | the vault and the owner | the registry entries |
 | `V3_TWAP_WINDOW`, `V3_TWAP_MAX_DEVIATION_TICKS` | the migrator's swap guard | 300, 953 |
 | `V3_VALUATION_WINDOW` | the mean tick valuing the LP USDC leg (and capping the compound bonus) | 1800 |
 | `V3_MAX_TOTAL_RESERVED` | the bonus vault's cap on all reservations, in whole $ASSET | required on mainnet; 100000 on test networks |
-| `V3_REWARDS_WAIVED` | `true` / `false`: the pool pays no USDC reward | `true` |
 | `V3_VAULT_IMPLEMENTATION` | the vault implementation the batch upgrades to | none |
 | `LP_BONUS_HOOK_GAS`, `LP_BONUS_LISTENER_GAS` | the vault's hook gas allowances (see "Measuring the hook gas" below) | 400000, 1000000 |
 | `V3_BATCH_FILE` | where the batch file goes | a file in the OS temp dir |
@@ -1144,6 +1161,45 @@ unchanged; `totalStaked()` 38,939.809930771574143787 tREAL and the four stakes (
 B 8,821.915741, C 9,999.000000, D 8,939.724166 tREAL) identical to the read before the upgrade;
 `totalPenalized()` stays 0.493729166666666666 tREAL (C's rehearsal penalty, never grows again);
 `PENALTY_RECEIVER()` and `getCurrentPenaltyPct()` now revert.
+
+### Upgrade pending on stack #6 (the minimal v3 pool and the voucher without weight)
+
+Not deployed yet (nothing sent on any chain). The v3 pool proxy
+`0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` (implementation `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A`)
+moves to the minimal pool of 2026-11-10, and the migrator proxy
+`0x2e72f57f494daDc9fA266a518361F103cD1fc493` (implementation `0x33c9d0298D99aa801Bfc9B0bc540F65E8e7F6E70`)
+to the `TransitionVoucher` without `weight`. The two MUST move in ONE timelock batch: the old
+migrator calls `stakeFor(address,uint256,uint256)`, which the new pool no longer has, and the new
+migrator calls `stakeFor(address,uint256)`, which the old pool does not have, so an upgrade of one
+without the other breaks routes 1, 2 and 3 until the second lands.
+
+```bash
+# 1. the two implementations (the migrator's constructor arguments are read back from the proxy)
+IMPL_TARGET=WeightedStakingPoolV3 npx hardhat run scripts/deploy-implementation.js --network sepolia
+IMPL_TARGET=StakingMigrator       npx hardhat run scripts/deploy-implementation.js --network sepolia
+
+# 2. ONE timelock batch, two calls, no reinitializer (data 0x): neither layout changes
+#    [
+#      {"target": "WeightedStakingPoolV3", "fn": "upgradeToAndCall", "args": ["<newPoolImpl>", "0x"]},
+#      {"target": "StakingMigrator",       "fn": "upgradeToAndCall", "args": ["<newMigratorImpl>", "0x"]}
+#    ]
+TIMELOCK_ACTION=schedule-batch TIMELOCK_BATCH=<file> TIMELOCK_SALT_TAG=v3-minimal-pool \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+TIMELOCK_ACTION=execute-batch  TIMELOCK_BATCH=<file> TIMELOCK_SALT_TAG=v3-minimal-pool \
+  npx hardhat run scripts/lp-timelock.js --network sepolia
+```
+
+No reinitializer on either proxy: the pool keeps every old field in place as a deprecated slot (it
+is never written again; `totalPenalized` keeps C's 0.4937 tREAL, `rewardsWaived` keeps `true`, the
+weight fields of A, B, C and D keep their values, all unread), and the migrator's storage is
+untouched (only the calldata struct `Voucher` and the typehash change). The EIP-712 domains stay
+("WeightedStakingPool" / "1" on the pool, "StakingMigrator" / "1" on the migrator), so the per-user
+nonces continue. Read back after the batch: both ERC-1967 slots, `owner()` = the timelock on both,
+`totalStaked()` and `stakes(A|B|C|D)` equal to the read before (the four principals above),
+`migrator()` / `bonusVault()` / `signer()` unchanged, `TRANSITION_VOUCHER_TYPEHASH()` = keccak256 of
+the six-field type, and the old getters (`getUserMultiplier`, `rewardsWaived`, `totalPenalized`)
+reverting. From the batch on, the backend signs the new `TransitionVoucher` (six fields) and the
+pool's `StakeVoucher`; a voucher of the old shape fails `InvalidVoucherSignature`.
 
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 
