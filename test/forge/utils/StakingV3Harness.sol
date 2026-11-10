@@ -19,13 +19,13 @@ import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol
  * @notice The staking v3 stack on top of {ApeBondHarness}'s MATH RUNG: the real `LPStakingVault`
  *         over {MockMathPositionManager} (real Uniswap V3 liquidity math) and a pool mock at $0.25
  *         per $ASSET ($ASSET = token0, tick -290188, spacing 1). The three v3 proxies are deployed
- *         and wired the way `scripts/deploy-staking-v3.js` does it: the pool with its rewards
- *         waived, the bonus vault with a budget ({DEFAULT_BUDGET}), the pool's bonus vault, then (the
- *         timelock batch) the two migrator links, the vault's bonus listener and stake operator.
+ *         and wired the way `scripts/deploy-staking-v3.js` does it: the minimal pool, the bonus
+ *         vault with a budget ({DEFAULT_BUDGET}), the pool's bonus vault, then (the timelock batch)
+ *         the two migrator links, the vault's bonus listener and stake operator.
  *
  *  The harness is the owner of every contract and the math vault's guardian and operator, so
  *  every admin call is callable without a prank; `migratorSigner` signs the transition vouchers
- *  and `voucherSigner` (the LocalHarness key) the pool's own weight vouchers.
+ *  and `voucherSigner` (the LocalHarness key) the pool's own `StakeVoucher`s.
  *
  *  The router mock swaps USDC into $ASSET at the pool's price, 4 $ASSET per USDC.
  *
@@ -34,7 +34,6 @@ import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol
  */
 abstract contract StakingV3Harness is ApeBondHarness {
     uint256 internal constant V3_DURATION = 90 days;
-    uint256 internal constant WEIGHT = 1500;
     uint32 internal constant VALUATION_WINDOW = 1800;
     uint24 internal constant SWAP_DEVIATION_TICKS = 953;
     /// @dev The harness bonus vaults' `maxTotalReserved`: far above anything a test reserves.
@@ -67,30 +66,17 @@ abstract contract StakingV3Harness is ApeBondHarness {
 
         v3Start = block.timestamp;
         v3End = block.timestamp + V3_DURATION;
-        poolV3 = _deployPoolV3(address(asset), address(usdcToken), v3Start, v3End);
+        poolV3 = _deployPoolV3(address(asset), v3Start, v3End);
         bonusVault = _deployBonusVault(address(asset), address(0), address(poolV3), address(mathVault));
         migrator = _deployMigrator(address(mathVault), address(usdcToken), address(asset), poolV3, bonusVault);
         _wireV3(mathVault, poolV3, bonusVault, migrator);
     }
 
-    /// @dev The deploy script's pool: rewards waived.
-    function _deployPoolV3(address staking, address reward, uint256 start, uint256 end)
-        internal
-        returns (WeightedStakingPoolV3)
-    {
-        return _deployPoolV3(staking, reward, start, end, true);
-    }
-
-    function _deployPoolV3(address staking, address reward, uint256 start, uint256 end, bool waived)
-        internal
-        returns (WeightedStakingPoolV3)
-    {
+    function _deployPoolV3(address staking, uint256 start, uint256 end) internal returns (WeightedStakingPoolV3) {
         WeightedStakingPoolV3 impl = new WeightedStakingPoolV3();
         LPProxy proxy = new LPProxy(
             address(impl),
-            abi.encodeCall(
-                WeightedStakingPoolV3.initialize, (address(this), staking, reward, start, end, voucherSigner, waived)
-            )
+            abi.encodeCall(WeightedStakingPoolV3.initialize, (address(this), staking, start, end, voucherSigner))
         );
         return WeightedStakingPoolV3(address(proxy));
     }
@@ -188,7 +174,7 @@ abstract contract StakingV3Harness is ApeBondHarness {
         params.fee = MATH_FEE;
         flippedVault = _deployVaultProxy(params);
 
-        flippedPoolV3 = _deployPoolV3(address(flippedAsset), address(usdcToken), v3Start, v3End);
+        flippedPoolV3 = _deployPoolV3(address(flippedAsset), v3Start, v3End);
         flippedBonusVault =
             _deployBonusVault(address(flippedAsset), address(0), address(flippedPoolV3), address(flippedVault));
         flippedMigrator = _deployMigrator(
@@ -210,7 +196,7 @@ abstract contract StakingV3Harness is ApeBondHarness {
         view
         returns (StakingMigrator.Voucher memory v)
     {
-        return _voucherSignedBy(m, migratorSignerPk, user, route, principal, reward, WEIGHT, nonce, FAR_DEADLINE);
+        return _voucherSignedBy(m, migratorSignerPk, user, route, principal, reward, nonce, FAR_DEADLINE);
     }
 
     function _voucherSignedBy(
@@ -220,17 +206,15 @@ abstract contract StakingV3Harness is ApeBondHarness {
         uint8 route,
         uint256 principal,
         uint256 reward,
-        uint256 weight,
         uint256 nonce,
         uint256 deadline
     ) internal view returns (StakingMigrator.Voucher memory v) {
-        bytes32 digest = m.voucherDigest(user, route, principal, reward, weight, nonce, deadline);
+        bytes32 digest = m.voucherDigest(user, route, principal, reward, nonce, deadline);
         (uint8 sv, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         v = StakingMigrator.Voucher({
             route: route,
             eligiblePrincipal: principal,
             eligibleReward: reward,
-            weight: weight,
             nonce: nonce,
             deadline: deadline,
             signature: abi.encodePacked(r, s, sv)
@@ -249,44 +233,33 @@ abstract contract StakingV3Harness is ApeBondHarness {
         vm.stopPrank();
     }
 
-    /// @dev A pool-signed `Stake` weight voucher for a direct `poolV3.stake`.
-    function _signStake(WeightedStakingPoolV3 p, address user, uint256 amount, uint256 weight, uint256 deadline)
+    /// @dev A pool-signed `StakeVoucher` for `user`'s next nonce, for a direct `p.stake`.
+    function _signStake(WeightedStakingPoolV3 p, address user, uint256 deadline) internal view returns (bytes memory) {
+        return _signStakeAt(p, voucherSignerPk, user, p.nonces(user), deadline);
+    }
+
+    /// @dev The same voucher with an explicit key and nonce (the replay and wrong-key cases).
+    function _signStakeAt(WeightedStakingPoolV3 p, uint256 pk, address user, uint256 nonce, uint256 deadline)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(p.STAKE_TYPEHASH(), user, amount, weight, p.nonces(user), deadline));
-        return _signPoolDigest(p, structHash);
+        bytes32 structHash = keccak256(abi.encode(p.STAKE_VOUCHER_TYPEHASH(), user, nonce, deadline));
+        return _signPoolDigest(p, pk, structHash);
     }
 
-    function _signWithdraw(WeightedStakingPoolV3 p, address user, uint256 amount, uint256 weight, uint256 deadline)
+    function _signPoolDigest(WeightedStakingPoolV3 p, uint256 pk, bytes32 structHash)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 structHash =
-            keccak256(abi.encode(p.WITHDRAW_TYPEHASH(), user, amount, weight, p.nonces(user), deadline));
-        return _signPoolDigest(p, structHash);
-    }
-
-    function _signUpdateWeight(WeightedStakingPoolV3 p, address user, uint256 amount, uint256 weight, uint256 deadline)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash =
-            keccak256(abi.encode(p.UPDATE_WEIGHT_TYPEHASH(), user, amount, weight, p.nonces(user), deadline));
-        return _signPoolDigest(p, structHash);
-    }
-
-    function _signPoolDigest(WeightedStakingPoolV3 p, bytes32 structHash) internal view returns (bytes memory) {
         bytes32 domain = keccak256(
             abi.encode(
                 EIP712_DOMAIN_TYPEHASH, keccak256("WeightedStakingPool"), keccak256("1"), block.chainid, address(p)
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domain, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(voucherSignerPk, digest);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 }

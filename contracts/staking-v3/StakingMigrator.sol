@@ -77,11 +77,11 @@ interface IMigratorPoolSpacing {
  *
  *  ELIGIBILITY. Only amounts that came out of a real sw2 claim earn a bonus. The backend attests
  *  them with an EIP-712 `TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,
- *  uint256 eligibleReward,uint256 weight,uint256 nonce,uint256 deadline)` (domain "StakingMigrator"
- *  / "1", verifying contract = this proxy) signed by {signer}. Each route checks: the voucher names
- *  this route, `assetAmount <= eligiblePrincipal`, `usdcAmount <= eligibleReward`, the nonce is
- *  unused for the caller, the deadline has not passed, the signature. `weight` is passed through to
- *  the v3 pool as the caller's multiplier. `user` is always `msg.sender`.
+ *  uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain "StakingMigrator" / "1",
+ *  verifying contract = this proxy) signed by {signer}. Each route checks: the voucher names this
+ *  route, `assetAmount <= eligiblePrincipal`, `usdcAmount <= eligibleReward`, the nonce is unused
+ *  for the caller, the deadline has not passed, the signature. `user` is always `msg.sender`. The
+ *  v3 pool has no weight (decision of 2026-11-10): `pool.stakeFor(user, amount)`.
  *
  *  ONE TRANSITION PER WALLET. A sw2 claim is converted once: the first successful route call marks
  *  the caller {migrated}, and every later route call by that wallet reverts {AlreadyMigrated},
@@ -124,7 +124,6 @@ contract StakingMigrator is
         uint8 route;
         uint256 eligiblePrincipal;
         uint256 eligibleReward;
-        uint256 weight;
         uint256 nonce;
         uint256 deadline;
         bytes signature;
@@ -143,7 +142,7 @@ contract StakingMigrator is
     int24 public constant LP_RANGE_TICKS = 6932;
 
     bytes32 public constant TRANSITION_VOUCHER_TYPEHASH = keccak256(
-        "TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 weight,uint256 nonce,uint256 deadline)"
+        "TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)"
     );
 
     // ──────────────────────── Immutables ───────────────────────
@@ -367,7 +366,7 @@ contract StakingMigrator is
         staked = assetAmount + bought;
 
         MigratorStorage storage $ = _migratorStorage();
-        uint64 unlockAt = _stakeV3(msg.sender, staked, v.weight);
+        uint64 unlockAt = _stakeV3(msg.sender, staked);
         // The bonus base values the bought part at the TWAP, never above what was actually bought.
         bonus = Math.mulDiv(assetAmount + Math.min(bought, usdcInAsset(usdcAmount)), $.compoundBps, BPS);
         _reserve(msg.sender, bonus, unlockAt, ROUTE_COMPOUND);
@@ -411,7 +410,7 @@ contract StakingMigrator is
         lpVault.stakeFor(msg.sender, tokenId);
         _assertCustody(tokenId);
 
-        _finishLp(tokenId, usdcAmount, usdcUsed, assetAmount, assetUsed, v.weight);
+        _finishLp(tokenId, usdcAmount, usdcUsed, assetAmount, assetUsed);
     }
 
     /**
@@ -431,7 +430,7 @@ contract StakingMigrator is
 
         _pull(asset, assetAmount, assetPermit);
 
-        uint64 unlockAt = _stakeV3(msg.sender, assetAmount, v.weight);
+        uint64 unlockAt = _stakeV3(msg.sender, assetAmount);
         bonus = Math.mulDiv(assetAmount, _migratorStorage().restakeBps, BPS);
         _reserve(msg.sender, bonus, unlockAt, ROUTE_RESTAKE);
 
@@ -509,15 +508,12 @@ contract StakingMigrator is
         uint8 route,
         uint256 eligiblePrincipal,
         uint256 eligibleReward,
-        uint256 weight,
         uint256 nonce,
         uint256 deadline
     ) public view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(
-                abi.encode(
-                    TRANSITION_VOUCHER_TYPEHASH, user, route, eligiblePrincipal, eligibleReward, weight, nonce, deadline
-                )
+                abi.encode(TRANSITION_VOUCHER_TYPEHASH, user, route, eligiblePrincipal, eligibleReward, nonce, deadline)
             )
         );
     }
@@ -591,8 +587,7 @@ contract StakingMigrator is
         if ($.usedNonces[msg.sender][v.nonce]) revert VoucherNonceUsed(msg.sender, v.nonce);
         if ($.migrated[msg.sender]) revert AlreadyMigrated(msg.sender);
 
-        bytes32 digest =
-            voucherDigest(msg.sender, route, v.eligiblePrincipal, v.eligibleReward, v.weight, v.nonce, v.deadline);
+        bytes32 digest = voucherDigest(msg.sender, route, v.eligiblePrincipal, v.eligibleReward, v.nonce, v.deadline);
         (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(digest, v.signature);
         if (err != ECDSA.RecoverError.NoError || recovered != $.signer) revert InvalidVoucherSignature();
 
@@ -686,8 +681,7 @@ contract StakingMigrator is
         uint256 usdcAmount,
         uint256 usdcUsed,
         uint256 assetAmount,
-        uint256 assetUsed,
-        uint256 weight
+        uint256 assetUsed
     ) private {
         MigratorStorage storage $ = _migratorStorage();
         uint64 unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration($.stakingPool).endEpoch());
@@ -698,7 +692,7 @@ contract StakingMigrator is
         uint256 remainder = assetAmount - assetUsed;
         uint256 v3Bonus;
         if (remainder > 0) {
-            _stakeV3(msg.sender, remainder, weight);
+            _stakeV3(msg.sender, remainder);
             v3Bonus = Math.mulDiv(remainder, $.lpBps, BPS);
             _reserve(msg.sender, v3Bonus, unlockAt, ROUTE_LP);
         }
@@ -713,10 +707,10 @@ contract StakingMigrator is
     }
 
     /// @dev Stakes `amount` in v3 for `user` and returns the pool's end as the bonus unlock time.
-    function _stakeV3(address user, uint256 amount, uint256 weight) private returns (uint64 unlockAt) {
+    function _stakeV3(address user, uint256 amount) private returns (uint64 unlockAt) {
         address stakingPool_ = _migratorStorage().stakingPool;
         IERC20(asset).forceApprove(stakingPool_, amount);
-        IWeightedStakingPoolV3Migration(stakingPool_).stakeFor(user, amount, weight);
+        IWeightedStakingPoolV3Migration(stakingPool_).stakeFor(user, amount);
         unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration(stakingPool_).endEpoch());
     }
 

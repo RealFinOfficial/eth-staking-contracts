@@ -31,14 +31,15 @@
  *  10. george exits early while the listener reverts (fail open, `listenerMissedAt` before the
  *      unlock) and re-stakes the same NFT: the record is DEAD and `reconcileLp` forfeits it while
  *      re-staked; henry reaches the same state (kept for step 12); ivan joins LP
- *  11. carol withdraws from v3 early: the principal back in full (no penalty in v3), her weight and
- *      her whole v3 reservation forfeited
+ *  11. a direct v3 stake with the backend's `StakeVoucher` (no weight): the replay is rejected;
+ *      carol withdraws from v3 early: the principal back in full (no penalty in v3) and her whole
+ *      v3 reservation forfeited
  *  12. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
  *      unlock (settled) and claims it; frank re-ranges after the unlock (settled under the old id)
  *      and claims it; henry's dead record is forfeited (not settled) by his after-unlock unstake;
  *      ivan's after-unlock unstake with the listener down is MISSED-AFTER: it pays and
  *      `reconcileLp` settles it; erin's stale record pays nothing and `reconcileLp` forfeits it; the v3 exit
- *      is `unstake`, the principal with a ZERO reward (the pool's rewards are waived)
+ *      is `unstake` (the principal; the minimal pool pays no reward) and `emergencyUnstake`
  *
  * Skip vs fail: the fork phase may skip ONLY when no endpoint could be reached and none was
  * configured (SEPOLIA_RPC_URL / INFURA_API_KEY). Everything after the fork fails, never skips.
@@ -70,7 +71,7 @@ const FULL_UPPER = 887220;
 const ASSET = (n) => ethers.parseUnits(String(n), 18);
 const USDC = (n) => ethers.parseUnits(String(n), 6);
 const FAR = 10n ** 12n;
-const WEIGHT = 1500n;
+const WEIGHT = 1500n; // sw2 (the v2 contract) only: the v3 pool has no weight
 const PRINCIPAL = ASSET(20_000);
 const SW2_REWARD = USDC(3_000);
 
@@ -108,7 +109,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   let forked = false;
   let fees;
 
-  let deployer, alice, bob, carol, multisig, guardian, weightSigner, dave, erin, frank, george, henry, ivan;
+  let deployer, alice, bob, carol, multisig, guardian, backendSigner, dave, erin, frank, george, henry, ivan;
   let erinStaleId, frankTokenId, henryDeadId, ivanTokenId;
   let asset, usdc, pool, npm, router, timelock, vault, sw2;
   let poolV3, bonusVault, migrator;
@@ -156,7 +157,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   /** sw2's v2 `Stake` voucher, signed by the backend key. */
   async function signSw2Stake(user, amount) {
     const chainId = (await ethers.provider.getNetwork()).chainId;
-    return weightSigner.signTypedData(
+    return backendSigner.signTypedData(
       { name: "WeightedStakingPool", version: "1", chainId, verifyingContract: await sw2.getAddress() },
       {
         Stake: [
@@ -172,9 +173,9 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   }
 
   /** The backend's `TransitionVoucher` for `user`, as the migrator's `Voucher` struct. */
-  async function voucher(user, route, principal, reward, nonce, weight = WEIGHT) {
+  async function voucher(user, route, principal, reward, nonce) {
     const chainId = (await ethers.provider.getNetwork()).chainId;
-    const signature = await weightSigner.signTypedData(
+    const signature = await backendSigner.signTypedData(
       { name: "StakingMigrator", version: "1", chainId, verifyingContract: await migrator.getAddress() },
       {
         TransitionVoucher: [
@@ -182,14 +183,29 @@ RUN("staking v3 transition on a Sepolia fork", function () {
           { name: "route", type: "uint8" },
           { name: "eligiblePrincipal", type: "uint256" },
           { name: "eligibleReward", type: "uint256" },
-          { name: "weight", type: "uint256" },
           { name: "nonce", type: "uint256" },
           { name: "deadline", type: "uint256" },
         ],
       },
-      { user: user.address, route, eligiblePrincipal: principal, eligibleReward: reward, weight, nonce, deadline: FAR }
+      { user: user.address, route, eligiblePrincipal: principal, eligibleReward: reward, nonce, deadline: FAR }
     );
-    return { route, eligiblePrincipal: principal, eligibleReward: reward, weight, nonce, deadline: FAR, signature };
+    return { route, eligiblePrincipal: principal, eligibleReward: reward, nonce, deadline: FAR, signature };
+  }
+
+  /** The backend's `StakeVoucher` for a direct v3 `stake` (no amount, no weight). */
+  async function signStakeVoucher(user, nonce, deadline = FAR) {
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    return backendSigner.signTypedData(
+      { name: "WeightedStakingPool", version: "1", chainId, verifyingContract: await poolV3.getAddress() },
+      {
+        StakeVoucher: [
+          { name: "user", type: "address" },
+          { name: "nonce", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+        ],
+      },
+      { user: user.address, nonce, deadline }
+    );
   }
 
   const NO_PERMIT = { value: 0n, deadline: 0n, v: 0, r: ethers.ZeroHash, s: ethers.ZeroHash };
@@ -224,7 +240,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const base = (await ethers.provider.getBlock("latest")).baseFeePerGas;
     const max = base * 100n > ethers.parseUnits("10", "gwei") ? base * 100n : ethers.parseUnits("10", "gwei");
     fees = { max, tip: ethers.parseUnits("1", "gwei") };
-    [deployer, alice, bob, carol, multisig, guardian, weightSigner, dave, erin, frank, george, henry, ivan] = (
+    [deployer, alice, bob, carol, multisig, guardian, backendSigner, dave, erin, frank, george, henry, ivan] = (
       await ethers.getSigners()
     ).map(pin);
 
@@ -307,7 +323,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     // The sw2 test pool: the v2 contract, a one-hour window, funded with tUSDC.
     const start = BigInt(await now());
     const Sw2 = await ethers.getContractFactory("WeightedStakingPool", deployer);
-    sw2 = await Sw2.deploy(P.asset.address, P.usdc.address, start, start + 3600n, weightSigner.address);
+    sw2 = await Sw2.deploy(P.asset.address, P.usdc.address, start, start + 3600n, backendSigner.address);
     await sw2.waitForDeployment();
     await (await usdc.approve(await sw2.getAddress(), SW2_REWARD)).wait();
     await (await sw2.addRewards(SW2_REWARD)).wait();
@@ -325,8 +341,8 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const config = {
       activationEpoch: Number(start + 3600n),
       endEpoch: Number(start + 3600n + 30n * 86400n),
-      weightSigner: weightSigner.address,
-      migratorSigner: weightSigner.address,
+      stakeSigner: backendSigner.address,
+      migratorSigner: backendSigner.address,
       asset: P.asset.address,
       usdc: P.usdc.address,
       lpVault: await vault.getAddress(),
@@ -335,7 +351,6 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       maxDeviationTicks: 953,
       valuationWindow: 1800,
       maxTotalReservedTokens: 100000n,
-      rewardsWaived: true,
       vaultImplementation: vaultImplementations.current,
     };
     const vaultAddress = await vault.getAddress();
@@ -379,7 +394,8 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(await poolV3.migrator()).to.equal(ethers.ZeroAddress);
     expect(await bonusVault.migrator()).to.equal(ethers.ZeroAddress);
     expect(await poolV3.bonusVault()).to.equal(result.addresses.bonusVault);
-    expect(await poolV3.rewardsWaived()).to.equal(true);
+    expect(await poolV3.signer()).to.equal(backendSigner.address);
+    expect(await poolV3.stakingToken()).to.equal(P.asset.address);
     expect(await bonusVault.maxTotalReserved()).to.equal(ASSET(100_000));
 
     const batch = result.batch;
@@ -462,7 +478,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const carolUsdc = await usdc.balanceOf(carol.address);
     const v3 = await voucher(carol, 3, PRINCIPAL, carolUsdc, 1n);
     await (await migrator.connect(carol).claimRestake(PRINCIPAL, FAR, NO_PERMIT, v3)).wait();
-    expect((await poolV3.stakes(carol.address)).amount).to.equal(PRINCIPAL);
+    expect((await poolV3.stakes(carol.address))).to.equal(PRINCIPAL);
     expect((await bonusVault.reservedOf(carol.address))[0]).to.equal((PRINCIPAL * 500n) / 10_000n);
     expect(await usdc.balanceOf(carol.address)).to.equal(carolUsdc, "the USDC stays in the wallet");
 
@@ -488,8 +504,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const staked = event.args.staked;
     expect(event.args.assetBought).to.be.greaterThan(minOut);
     expect(staked).to.equal(PRINCIPAL + event.args.assetBought);
-    expect((await poolV3.stakes(alice.address)).amount).to.equal(staked);
-    expect(await poolV3.getUserMultiplier(alice.address)).to.equal(WEIGHT);
+    expect(await poolV3.stakes(alice.address)).to.equal(staked);
     // The bonus base is the principal + the bought part at most at its TWAP value (L2).
     const atTwap = await migrator.usdcInAsset(aliceUsdc);
     const bought = event.args.assetBought;
@@ -535,7 +550,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const refunded = await usdc.balanceOf(bob.address);
     expect(event.args.usdcIn + refunded).to.equal(bobUsdc, "every USDC wei is in the LP or back in the wallet");
     expect(event.args.assetToLp + event.args.restaked).to.equal(PRINCIPAL, "every $ASSET wei is in the LP or in v3");
-    expect((await poolV3.stakes(bob.address)).amount).to.equal(event.args.restaked);
+    expect((await poolV3.stakes(bob.address))).to.equal(event.args.restaked);
     const lpRes = await bonusVault.lpReservation(bobTokenId);
     expect(lpRes.user).to.equal(bob.address);
     expect(lpRes.amount).to.equal(event.args.lpBonus);
@@ -720,15 +735,37 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     ivanTokenId = await joinLp(ivan);
   });
 
-  it("carol withdraws from v3 before the end: the principal in full, her weight and whole v3 reservation forfeited", async function () {
+  it("a direct v3 stake carries the backend's StakeVoucher; a replay and another wallet's voucher fail", async function () {
+    const amount = ASSET(500);
+    await (await asset.connect(deployer).approve(await poolV3.getAddress(), ethers.MaxUint256)).wait();
+    const totalBefore = await poolV3.totalStaked();
+    expect(await poolV3.nonces(deployer.address)).to.equal(0n);
+    const sig = await signStakeVoucher(deployer, 0n);
+    await expect(poolV3.connect(deployer).stake(amount, FAR, sig))
+      .to.emit(poolV3, "Staked")
+      .withArgs(deployer.address, amount)
+      .and.to.emit(poolV3, "NonceUsed")
+      .withArgs(deployer.address, 0n);
+    expect(await poolV3.stakes(deployer.address)).to.equal(amount);
+    expect(await poolV3.totalStaked()).to.equal(totalBefore + amount);
+    expect(await poolV3.nonces(deployer.address)).to.equal(1n);
+    await expect(poolV3.connect(deployer).stake(amount, FAR, sig)).to.be.revertedWith("Invalid signature");
+    const carolSig = await signStakeVoucher(carol, 0n);
+    await expect(poolV3.connect(deployer).stake(amount, FAR, carolSig)).to.be.revertedWith("Invalid signature");
+    const past = BigInt(await now()) - 1n;
+    const expired = await signStakeVoucher(deployer, 1n, past);
+    await expect(poolV3.connect(deployer).stake(amount, past, expired)).to.be.revertedWith("Signature expired");
+  });
+
+  it("carol withdraws from v3 before the end: the principal in full, her whole v3 reservation forfeited", async function () {
     // v2's penalty receiver: v3 has no principal penalty (decision of 2026-11-10) and never pays it.
     const V2_PENALTY_RECEIVER = "0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a";
     const owed = (await bonusVault.reservedOf(carol.address))[0];
     expect(owed).to.be.greaterThan(0n);
     const carolBefore = await asset.balanceOf(carol.address);
     const receiverBefore = await asset.balanceOf(V2_PENALTY_RECEIVER);
-    const forfeitedBefore = await poolV3.totalForfeitedWeight();
-    const tx = poolV3.connect(carol).withdraw(ASSET(1), 0, 0, "0x");
+    const stakedBefore = await poolV3.stakes(carol.address);
+    const tx = poolV3.connect(carol).withdraw(ASSET(1));
     await expect(tx).to.emit(bonusVault, "BonusForfeited").withArgs(carol.address, owed);
     const receipt = await (await tx).wait();
     const withdrawn = receipt.logs
@@ -736,12 +773,9 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       .find((e) => e && e.name === "Withdrawn");
     expect(withdrawn.args.user).to.equal(carol.address);
     expect(withdrawn.args.amount).to.equal(ASSET(1));
-    expect(withdrawn.args.penalty).to.equal(0n, "no penalty in v3");
-    expect(withdrawn.args.forfeitedWeight).to.be.greaterThan(0n, "the share's weight is forfeited");
     expect((await asset.balanceOf(carol.address)) - carolBefore).to.equal(ASSET(1), "the principal in full");
     expect(await asset.balanceOf(V2_PENALTY_RECEIVER)).to.equal(receiverBefore, "nothing to a penalty receiver");
-    expect(await poolV3.totalPenalized()).to.equal(0n);
-    expect((await poolV3.totalForfeitedWeight()) - forfeitedBefore).to.equal(withdrawn.args.forfeitedWeight);
+    expect(await poolV3.stakes(carol.address)).to.equal(stakedBefore - ASSET(1));
     expect((await bonusVault.reservedOf(carol.address))[0]).to.equal(0n);
   });
 
@@ -825,17 +859,27 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     );
     expect(await bonusVault.totalLpReserved()).to.equal(0n);
 
-    // v3 pays no USDC: the rewards are waived, so `unstake` pays the principal with a zero reward.
-    const staked = (await poolV3.stakes(alice.address)).amount;
+    // The minimal pool pays no reward: `unstake` pays the principal, nothing in USDC.
+    const staked = await poolV3.stakes(alice.address);
     const usdcBefore = await usdc.balanceOf(alice.address);
     const unstaked = await (await poolV3.connect(alice).unstake()).wait();
     const ev = unstaked.logs.map((l) => { try { return poolV3.interface.parseLog(l); } catch { return null; } })
       .find((e) => e && e.name === "Unstaked");
     expect(ev.args.user).to.equal(alice.address);
     expect(ev.args.amount).to.equal(staked);
-    expect(ev.args.reward).to.equal(0n);
     expect(await asset.balanceOf(alice.address)).to.equal(staked + aliceDue);
     expect(await usdc.balanceOf(alice.address)).to.equal(usdcBefore);
+    expect(await poolV3.stakes(alice.address)).to.equal(0n);
+
+    // `emergencyUnstake` after the end: the direct staker's principal, under its own event.
+    const direct = await poolV3.stakes(deployer.address);
+    expect(direct).to.equal(ASSET(500));
+    const deployerBefore = await asset.balanceOf(deployer.address);
+    await expect(poolV3.connect(deployer).emergencyUnstake())
+      .to.emit(poolV3, "EmergencyUnstaked")
+      .withArgs(deployer.address, direct);
+    expect((await asset.balanceOf(deployer.address)) - deployerBefore).to.equal(direct);
+    await expect(poolV3.connect(deployer).unstake()).to.be.revertedWith("Nothing to unstake");
   });
 
   it("never wrote the tracked deployments.json", function () {

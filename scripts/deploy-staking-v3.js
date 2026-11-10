@@ -17,10 +17,10 @@ const lpTimelock = require("./lp-timelock");
 //
 //   1. config and the on-chain checks: the LP vault's pool pair must be exactly {V3_ASSET, V3_USDC},
 //      the activation must be before the end, the end in the future
-//   2. `WeightedStakingPoolV3` + `LPProxy`, `initialize(deployer, $ASSET, USDC, activation, end,
-//      weightSigner, rewardsWaived)` — the USDC reward slot is kept and never funded (decision of
-//      2026-11-09); `rewardsWaived = true` makes `unstake` after the end pay the principal with a
-//      zero reward and refuses `addRewards`
+//   2. `WeightedStakingPoolV3` + `LPProxy`, `initialize(deployer, $ASSET, activation, end,
+//      stakeSigner)` — the minimal pool of 2026-11-10: it holds the $ASSET principal for the
+//      window and pays it back; no weight, no USDC reward. `stakeSigner` signs the backend's
+//      `StakeVoucher(address user,uint256 nonce,uint256 deadline)` for a direct `stake`
 //   3. `V3BonusVault` + `LPProxy`, `initialize(deployer, $ASSET, migrator = 0, pool, lpVault,
 //      maxTotalReserved)` — the cap on what all reservations together may owe
 //   4. `StakingMigrator(lpVault, USDC, $ASSET)` + `LPProxy`, `initialize(deployer, pool, bonusVault,
@@ -57,8 +57,8 @@ const lpTimelock = require("./lp-timelock");
 //
 //   V3_ACTIVATION_EPOCH       required, unix seconds: start of the v3 active period
 //   V3_END_EPOCH              required, unix seconds: end of the v3 period = the bonus unlock time
-//   V3_WEIGHT_SIGNER          required: the v3 pool's weight-voucher signer (a backend key)
-//   V3_MIGRATOR_SIGNER        the TransitionVoucher signer; defaults to V3_WEIGHT_SIGNER
+//   V3_STAKE_SIGNER           required: the v3 pool's StakeVoucher signer (a backend key)
+//   V3_MIGRATOR_SIGNER        the TransitionVoucher signer; defaults to V3_STAKE_SIGNER
 //   V3_ASSET / V3_USDC        default: the LPZapper entry's `asset` / `usdc` in deployments.json
 //   V3_LP_VAULT               default: the LPStakingVault entry
 //   LP_BONUS_HOOK_GAS         gas the vault forwards to the ApeBond escrow's onUnstake; default
@@ -71,13 +71,12 @@ const lpTimelock = require("./lp-timelock");
 //   V3_VALUATION_WINDOW       default 1800 (the adapter's): the mean tick valuing the LP USDC leg
 //   V3_MAX_TOTAL_RESERVED     whole $ASSET: the bonus vault's cap on all reservations together;
 //                             REQUIRED on mainnet, default 100000 on test networks
-//   V3_REWARDS_WAIVED         true | false, default true: the pool pays no USDC reward
 //   V3_VAULT_IMPLEMENTATION   the new LPStakingVault implementation (deploy-implementation.js,
 //                             IMPL_TARGET=LPStakingVault) when the live vault predates the listener
 //   V3_BATCH_FILE             where to write the timelock batch; default a file in the OS temp dir
 //   CONFIRM=yes               required on mainnet
 //
-//     V3_ACTIVATION_EPOCH=… V3_END_EPOCH=… V3_WEIGHT_SIGNER=0x… \
+//     V3_ACTIVATION_EPOCH=… V3_END_EPOCH=… V3_STAKE_SIGNER=0x… \
 //       npx hardhat run scripts/deploy-staking-v3.js --network sepolia
 
 const POOL_KIND = lpTimelock.V3_POOL_KIND;
@@ -111,14 +110,6 @@ function readAddress(name, fallback) {
   return hre.ethers.getAddress(raw);
 }
 
-function readBoolean(name, fallback) {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  if (raw === "true") return true;
-  if (raw === "false") return false;
-  throw new Error(`${name} must be true or false — got ${raw}`);
-}
-
 function readInteger(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined || raw === "") {
@@ -134,12 +125,12 @@ function readConfig(chainId) {
   const mainnet = pools.isMainnet(Number(chainId));
   const registry = pools.readRegistry()[String(chainId)] || {};
   const zapper = registry.LPZapper || {};
-  const weightSigner = readAddress("V3_WEIGHT_SIGNER");
+  const stakeSigner = readAddress("V3_STAKE_SIGNER");
   const config = {
     activationEpoch: readInteger("V3_ACTIVATION_EPOCH"),
     endEpoch: readInteger("V3_END_EPOCH"),
-    weightSigner,
-    migratorSigner: readAddress("V3_MIGRATOR_SIGNER", weightSigner),
+    stakeSigner,
+    migratorSigner: readAddress("V3_MIGRATOR_SIGNER", stakeSigner),
     asset: readAddress("V3_ASSET", zapper.asset),
     usdc: readAddress("V3_USDC", zapper.usdc),
     lpVault: readAddress("V3_LP_VAULT", registry.LPStakingVault && registry.LPStakingVault.address),
@@ -148,7 +139,6 @@ function readConfig(chainId) {
     maxDeviationTicks: readInteger("V3_TWAP_MAX_DEVIATION_TICKS", 953),
     valuationWindow: readInteger("V3_VALUATION_WINDOW", 1800),
     maxTotalReservedTokens: BigInt(readInteger("V3_MAX_TOTAL_RESERVED", mainnet ? undefined : 100000)),
-    rewardsWaived: readBoolean("V3_REWARDS_WAIVED", true),
     bonusHookGas: readInteger("LP_BONUS_HOOK_GAS", DEFAULT_BONUS_HOOK_GAS),
     bonusListenerGas: readInteger("LP_BONUS_LISTENER_GAS", DEFAULT_BONUS_LISTENER_GAS),
     vaultImplementation: process.env.V3_VAULT_IMPLEMENTATION
@@ -242,11 +232,9 @@ async function deployPool({ chainId, deployer, config }) {
     [
       deployer.address,
       config.asset,
-      config.usdc,
       config.activationEpoch,
       config.endEpoch,
-      config.weightSigner,
-      config.rewardsWaived,
+      config.stakeSigner,
     ],
     deployer
   );
@@ -256,11 +244,9 @@ async function deployPool({ chainId, deployer, config }) {
     implementation: pool.impl.address,
     implementationTx: pool.impl.tx.hash,
     stakingToken: config.asset,
-    rewardToken: config.usdc,
     activationEpoch: config.activationEpoch,
     endEpoch: config.endEpoch,
-    signer: config.weightSigner,
-    rewardsWaived: config.rewardsWaived,
+    signer: config.stakeSigner,
     owner: deployer.address,
   });
   return pool;
@@ -470,12 +456,11 @@ async function main() {
   console.log(`Timelock (owner):   ${config.timelock}`);
   console.log(`Activation:         ${config.activationEpoch} (${pools.epochToIso(config.activationEpoch)})`);
   console.log(`End (bonus unlock): ${config.endEpoch} (${pools.epochToIso(config.endEpoch)})`);
-  console.log(`Weight signer:      ${config.weightSigner}`);
+  console.log(`Stake signer:       ${config.stakeSigner}`);
   console.log(`Migrator signer:    ${config.migratorSigner}`);
   console.log(`Swap guard:         ${config.twapWindow} s / ${config.maxDeviationTicks} ticks`);
   console.log(`Valuation window:   ${config.valuationWindow} s`);
   console.log(`Bonus budget:       ${config.maxTotalReservedTokens} $ASSET (maxTotalReserved)`);
-  console.log(`Rewards waived:     ${config.rewardsWaived}`);
   console.log(`Hook gas:           escrow ${config.bonusHookGas} / listener ${config.bonusListenerGas} (LP_BONUS_HOOK_GAS / LP_BONUS_LISTENER_GAS)`);
   if (config.vaultImplementation) {
     console.log(`Vault upgrade to:   ${config.vaultImplementation} (upgradeToAndCall with initializeV2())`);

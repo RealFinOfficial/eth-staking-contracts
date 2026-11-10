@@ -282,7 +282,7 @@ const OWNER_TIER = {
     signature: "function setSigner(address signer_)",
     kinds: [V3_POOL_KIND],
     note:
-      "the v3 pool's weight-voucher signer. The StakingMigrator's voucher signer is operator-tier " +
+      "the v3 pool's StakeVoucher signer (a direct stake). The StakingMigrator's voucher signer is operator-tier " +
       "(sent directly by the vault's operator), like the RewardsDistributor's",
   },
   setPool: {

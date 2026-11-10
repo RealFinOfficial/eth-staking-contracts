@@ -11,9 +11,8 @@ pragma solidity 0.8.38;
  *  - {IV3BonusVaultEarlyExit}: what the v3 pool calls on the bonus vault when a stake leaves early.
  */
 interface IWeightedStakingPoolV3Migration {
-    /// @notice Stakes `amount`, pulled from the caller (the registered migrator), for `user` at the
-    ///         multiplier `weight`.
-    function stakeFor(address user, uint256 amount, uint256 weight) external;
+    /// @notice Stakes `amount`, pulled from the caller (the registered migrator), for `user`.
+    function stakeFor(address user, uint256 amount) external;
 
     /// @notice The end of the pool's active period; the bonus unlock time.
     function endEpoch() external view returns (uint256);

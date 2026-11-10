@@ -43,7 +43,7 @@ contract StakingMigratorTest is StakingV3Harness {
         vm.expectEmit(address(migrator));
         emit StakingMigrator.VoucherUsed(alice, 1, 1);
         vm.expectEmit(address(poolV3));
-        emit WeightedStakingPoolV3.StakedFor(alice, address(migrator), staked, WEIGHT);
+        emit WeightedStakingPoolV3.StakedFor(alice, address(migrator), staked);
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.BonusReserved(alice, bonus, uint64(v3End), 1);
         vm.expectEmit(address(migrator));
@@ -56,9 +56,8 @@ contract StakingMigratorTest is StakingV3Harness {
         assertEq(b, bonus);
         assertEq(asset.balanceOf(alice), assetBefore - PRINCIPAL, "principal pulled");
         assertEq(usdcToken.balanceOf(alice), usdcBefore - REWARD, "reward pulled");
-        (uint256 amount, uint256 weight,,) = poolV3.stakes(alice);
-        assertEq(amount, staked, "staked for alice");
-        assertEq(weight, WEIGHT, "the voucher's weight is the multiplier");
+        assertEq(poolV3.stakes(alice), staked, "staked for alice");
+        assertEq(poolV3.totalStaked(), staked);
         (uint256 reserved, uint64 unlockAt) = bonusVault.reservedOf(alice);
         assertEq(reserved, bonus);
         assertEq(unlockAt, v3End, "unlocked at the pool's end");
@@ -291,8 +290,7 @@ contract StakingMigratorTest is StakingV3Harness {
     }
 
     function test_Voucher_AStrangersSignatureIsRejected() public {
-        StakingMigrator.Voucher memory v =
-            _voucherSignedBy(migrator, alicePk, alice, 3, PRINCIPAL, 0, WEIGHT, 1, FAR_DEADLINE);
+        StakingMigrator.Voucher memory v = _voucherSignedBy(migrator, alicePk, alice, 3, PRINCIPAL, 0, 1, FAR_DEADLINE);
         vm.prank(alice);
         vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
@@ -306,9 +304,9 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
-    function test_Voucher_AnAlteredWeightFailsTheSignature() public {
+    function test_Voucher_AnAlteredEligiblePrincipalFailsTheSignature() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
-        v.weight = 2000;
+        v.eligiblePrincipal = PRINCIPAL * 2;
         vm.prank(alice);
         vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
@@ -323,7 +321,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
     function test_Voucher_ExpiredIsRejected() public {
         StakingMigrator.Voucher memory v =
-            _voucherSignedBy(migrator, migratorSignerPk, alice, 3, PRINCIPAL, 0, WEIGHT, 1, block.timestamp);
+            _voucherSignedBy(migrator, migratorSignerPk, alice, 3, PRINCIPAL, 0, 1, block.timestamp);
         vm.warp(block.timestamp + 1);
         vm.prank(alice);
         vm.expectRevert(
@@ -357,17 +355,9 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.claimRestake(PRINCIPAL, block.timestamp - 1, _noPermit(), v);
     }
 
-    function test_Voucher_TheWeightIsBoundedByThePool() public {
-        StakingMigrator.Voucher memory v =
-            _voucherSignedBy(migrator, migratorSignerPk, alice, 3, PRINCIPAL, 0, 2001, 1, FAR_DEADLINE);
-        vm.prank(alice);
-        vm.expectRevert(bytes("Invalid weight"));
-        migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
-    }
-
     function test_Voucher_TheDigestIsTheTypedTransitionVoucher() public view {
         bytes32 typehash = keccak256(
-            "TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 weight,uint256 nonce,uint256 deadline)"
+            "TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)"
         );
         assertEq(migrator.TRANSITION_VOUCHER_TYPEHASH(), typehash);
         bytes32 domain = keccak256(
@@ -375,12 +365,10 @@ contract StakingMigratorTest is StakingV3Harness {
                 EIP712_DOMAIN_TYPEHASH, keccak256("StakingMigrator"), keccak256("1"), block.chainid, address(migrator)
             )
         );
-        bytes32 structHash = keccak256(
-            abi.encode(typehash, alice, uint8(2), uint256(5), uint256(6), uint256(1200), uint256(9), uint256(10))
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(typehash, alice, uint8(2), uint256(5), uint256(6), uint256(9), uint256(10)));
         assertEq(
-            migrator.voucherDigest(alice, 2, 5, 6, 1200, 9, 10),
-            keccak256(abi.encodePacked("\x19\x01", domain, structHash))
+            migrator.voucherDigest(alice, 2, 5, 6, 9, 10), keccak256(abi.encodePacked("\x19\x01", domain, structHash))
         );
     }
 
@@ -415,7 +403,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
     function test_MoveToLp_SplitsTheBonusBetweenThePositionAndTheRemainder() public {
         (uint256 tokenId, uint256 usdcUsed) = _moveAlice();
-        (uint256 v3Amount,,,) = poolV3.stakes(alice);
+        uint256 v3Amount = poolV3.stakes(alice);
         uint256 assetUsed = PRINCIPAL - v3Amount;
         // A symmetric band is a 50/50 value split: $1,000 of USDC pairs with ~4,000 $ASSET.
         assertApproxEqRel(assetUsed, 4_000e18, 0.01e18);
@@ -446,7 +434,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
         uint256 usdcUsed = usdcBefore - usdcToken.balanceOf(alice);
         assertApproxEqRel(usdcUsed, 250e6, 0.01e18, "the matching USDC only");
-        (uint256 v3Amount,,,) = poolV3.stakes(alice);
+        uint256 v3Amount = poolV3.stakes(alice);
         assertLe(v3Amount, 1e15, "at most rounding dust is left for v3");
         (, uint256 lpAmount,,,) = bonusVault.lpReservation(tokenId);
         assertGt(lpAmount, 0);
@@ -532,7 +520,7 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 b = migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
         assertEq(b, 1_000e18);
         assertEq(usdcToken.balanceOf(alice), usdcBefore, "the USDC stays in the wallet");
-        (uint256 amount,,,) = poolV3.stakes(alice);
+        uint256 amount = poolV3.stakes(alice);
         assertEq(amount, PRINCIPAL);
         (uint256 reserved,) = bonusVault.reservedOf(alice);
         assertEq(reserved, 1_000e18);
@@ -543,7 +531,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
-        (uint256 amount,,,) = poolV3.stakes(alice);
+        uint256 amount = poolV3.stakes(alice);
         assertEq(amount, PRINCIPAL);
     }
 
@@ -710,7 +698,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
     function test_Initialize_RejectsAPoolOrBonusVaultOnAnotherToken() public {
         address impl = _deployMigratorImpl(address(mathVault), address(usdcToken), address(asset));
-        WeightedStakingPoolV3 foreignPool = _deployPoolV3(address(overture), address(usdcToken), v3Start, v3End);
+        WeightedStakingPoolV3 foreignPool = _deployPoolV3(address(overture), v3Start, v3End);
         V3BonusVault foreignBonus = _deployBonusVault(address(overture), address(0), address(poolV3), address(0));
 
         vm.expectRevert(

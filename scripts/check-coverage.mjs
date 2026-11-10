@@ -49,6 +49,14 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-10, third time (the minimal v3 pool, audit notes item 19) ──
+//    WeightedStakingPoolV3 lines 298 -> 110 (107 hit), branches 85 -> 40 (2 hit): the weight
+//    accrual, `updateWeight`, the USDC reward path and their views are gone. The three unhit lines
+//    are the usual `--ir-minimum` artefacts (the namespace accessor body, `_disableInitializers`,
+//    `__Ownable2Step_init`); the 38 unhit branch items are the `require(cond, "reason")` checks,
+//    each asserted by a passing `vm.expectRevert` in `test/forge/unit/WeightedStakingPoolV3.t.sol`.
+//    StakingMigrator lines 238 -> 237 (231 hit), branches 37 (37): the weight argument of the
+//    remainder stake in `_finishLp` is gone.
 // ── Pinned floors, re-measured 2026-11-10 (no principal penalty in v3, audit notes item 19) ──
 //    WeightedStakingPoolV3 lines 322 -> 298 (280 hit), branches 92 -> 85 (24 hit): `_calculatePenalty`,
 //    `getCurrentPenaltyPct`, `getCurrentPenalty` and the penalty transfer in `withdraw` are gone.
@@ -285,15 +293,15 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 298, minHit: 280},
-    branches: {found: 85, minHit: 24},
+    lines: {found: 110, minHit: 107},
+    branches: {found: 40, minHit: 2},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
     lines: {found: 248, minHit: 245},
     branches: {found: 44, minHit: 44},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
-    lines: {found: 238, minHit: 232},
+    lines: {found: 237, minHit: 231},
     branches: {found: 37, minHit: 37},
   },
 };

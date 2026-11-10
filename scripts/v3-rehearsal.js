@@ -5,8 +5,9 @@ const pools = require("./lib/pools");
 
 // The staking v3 rehearsal on Sepolia, step by step, for four wallets: A (the deployer), B, C and D
 // (fresh keys kept in a JSON file OUTSIDE the repo). The deployer key (PRIVATE_KEY) signs both
-// the sw2 test pool's weight vouchers and the migrator's TransitionVouchers, so it must be the
-// signer of both (`WeightedStakingPoolTest.signer()`, `StakingMigrator.signer()`).
+// the sw2 test pool's (v2) weight vouchers and the migrator's TransitionVouchers (no weight since
+// 2026-11-10), so it must be the signer of both (`WeightedStakingPoolTest.signer()`,
+// `StakingMigrator.signer()`).
 //
 //   V3R_WALLETS   path to {"B": {"address", "privateKey"}, "C": {...}, "D": {...}}; created by `fund`
 //                 when missing, D appended by `fund-d` (the file stays mode 0600)
@@ -24,7 +25,7 @@ const pools = require("./lib/pools");
 //   fund-d       generates D when missing, prints A's balances, sends D 0.05 ETH, 20,000 tREAL,
 //                2,000 tUSDC (as B and C)
 //   move-d       moveToLp(300 tUSDC, 10,000 tREAL) with a voucher of eligiblePrincipal 10,000
-//                tREAL, eligibleReward 300 tUSDC, nonce 1, weight 1500
+//                tREAL, eligibleReward 300 tUSDC, nonce 1
 //   rebalance-d  the no-swap band rebalance of D's tokenId; checks LpBonusMoved, the new row
 //                active for D, the old row gone, totalLpReserved and stakerOf(newId)
 //
@@ -33,7 +34,7 @@ const pools = require("./lib/pools");
 
 const E = hre.ethers;
 const STAKE = E.parseUnits("10000", 18);
-const WEIGHT = 1500n;
+const WEIGHT = 1500n; // the sw2 test pool's (v2) weight voucher only
 const FUND_ETH = E.parseEther("0.05");
 const FUND_ASSET = E.parseUnits("20000", 18);
 const FUND_USDC = E.parseUnits("2000", 6);
@@ -108,14 +109,13 @@ async function signVoucher(ctx, user, route, principal, reward, nonce, deadline)
       { name: "route", type: "uint8" },
       { name: "eligiblePrincipal", type: "uint256" },
       { name: "eligibleReward", type: "uint256" },
-      { name: "weight", type: "uint256" },
       { name: "nonce", type: "uint256" },
       { name: "deadline", type: "uint256" },
     ],
   };
-  const value = { user, route, eligiblePrincipal: principal, eligibleReward: reward, weight: WEIGHT, nonce, deadline };
+  const value = { user, route, eligiblePrincipal: principal, eligibleReward: reward, nonce, deadline };
   const signature = await ctx.wallets.A.signTypedData(domain, types, value);
-  return { route, eligiblePrincipal: principal, eligibleReward: reward, weight: WEIGHT, nonce, deadline, signature };
+  return { route, eligiblePrincipal: principal, eligibleReward: reward, nonce, deadline, signature };
 }
 
 const actions = {
@@ -214,8 +214,8 @@ const actions = {
 
   async withdraw(ctx) {
     const before = { reserved: (await ctx.bonus.reservedOf(ctx.wallets.C.address))[0], total: await ctx.bonus.totalReserved() };
-    const receipt = await send(ctx, "C", "poolV3.withdraw(1 tREAL, no weight voucher)", (s, o) =>
-      ctx.poolV3.connect(s).withdraw(E.parseUnits("1", 18), 0, 0, "0x", o)
+    const receipt = await send(ctx, "C", "poolV3.withdraw(1 tREAL)", (s, o) =>
+      ctx.poolV3.connect(s).withdraw(E.parseUnits("1", 18), o)
     );
     const forfeited = parse(ctx.bonus, receipt, "BonusForfeited");
     const after = { reserved: (await ctx.bonus.reservedOf(ctx.wallets.C.address))[0], total: await ctx.bonus.totalReserved() };
@@ -307,8 +307,7 @@ const actions = {
       }
       out[who] = {
         address: user,
-        v3Stake: (await ctx.poolV3.stakes(user)).amount.toString(),
-        multiplier: (await ctx.poolV3.getUserMultiplier(user)).toString(),
+        v3Stake: (await ctx.poolV3.stakes(user)).toString(),
         reservedOf: reserved.toString(),
         unlockAt: unlockAt.toString(),
         lp,
