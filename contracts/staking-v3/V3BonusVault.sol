@@ -43,8 +43,9 @@ interface IV3BonusLpVault {
  *    - the LP reservation of one position ({reserveLp}), keyed by the position's tokenId, with the
  *      exact semantics of `BonusEscrow`: the LP vault's {onRebalance} moves it to the new tokenId,
  *      scaled by min(1, valueNew / valueOld) at the vault's TWAP, so it never grows; the vault's
- *      {onUnstake} before the unlock forfeits it; after the unlock both hooks return at once and it
- *      stays claimable even if the position is unstaked later.
+ *      {onUnstake} before the unlock forfeits it; after the unlock either hook SETTLES it
+ *      ({LpBonusSettled}: the user left or re-ranged after the unlock, the bonus is theirs) and
+ *      touches nothing else, so it stays claimable under the tokenId it had.
  *
  *  RESERVE NOW, FUND LATER. No tokens move at the transition and no balance is checked there. The
  *  company funds this contract with $ASSET ({fund}, or a plain transfer) any time before the end.
@@ -60,11 +61,18 @@ interface IV3BonusLpVault {
  *  {BudgetExceeded} when a reservation would take it above the cap, so the migrator's route call
  *  reverts with them. Set by the initializer and by the owner ({setMaxTotalReserved}).
  *
- *  A MISSED NOTIFICATION. The LP vault's notifications to this contract fail open: when one reverts
- *  the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays where it was, still
- *  active. {reconcileLp} (anyone; the backend calls it for every `BonusListenerFailed`) compares
- *  the reservation with the vault: when the position is no longer staked there by the reservation's
- *  user (unstaked, or re-ranged into a new tokenId), the stale reservation is forfeited.
+ *  WHEN AN LP RESERVATION PAYS. {claim} pays an unlocked LP reservation only while the LP vault
+ *  still holds that tokenId for the reservation's user (`stakerOf(tokenId) == user`) OR the
+ *  reservation was settled by a vault notification after the unlock. Any other record is STALE —
+ *  its position left or was re-ranged without this contract being told — and pays nothing.
+ *
+ *  A MISSED NOTIFICATION. The LP vault's `onRebalance` to this contract fails CLOSED (since
+ *  2026-11-10; a revert reverts the rebalance), its `onUnstake` fails OPEN: when that one reverts
+ *  the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays where it was.
+ *  {reconcileLp} (anyone; the backend calls it for every `BonusListenerFailed`) compares the
+ *  reservation with the vault: when the position is no longer staked there by the reservation's
+ *  user and the reservation is not settled, it is forfeited (before or after the unlock), so
+ *  `totalLpReserved` never stays inflated by a stale record.
  *
  *  ADMIN: owner (the timelock) only — upgrades, `setMigrator`, `setPool`, `setVault`,
  *  `setMaxTotalReserved`, `recoverSurplus`. No pause and no function that raises a reservation.
@@ -91,7 +99,7 @@ contract V3BonusVault is
         bool claimed;
         bool forfeited;
         /// Position of this tokenId in `lpTokens[user]`; the slot a rebalance rewrites in place.
-        /// uint16 keeps the five fields in ONE slot (a cheaper fail-open rebalance hook).
+        /// uint16 keeps the five fields in ONE slot (a cheaper rebalance hook).
         uint16 index;
         uint256 amount;
     }
@@ -111,6 +119,10 @@ contract V3BonusVault is
         uint256 maxTotalReserved;
         /// The LP part of `totalReserved`: every LP reservation neither claimed nor forfeited.
         uint256 totalLpReserved;
+        /// tokenId => the LP reservation was settled by a vault notification after its unlock
+        /// (the user unstaked or re-ranged then): it pays even though the vault no longer holds
+        /// the tokenId. APPENDED (stale-record fix, 2026-11-10); every field above stays put.
+        mapping(uint256 => bool) lpSettled;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.V3BonusVault")) - 1)) & ~0xff
@@ -132,6 +144,9 @@ contract V3BonusVault is
     );
     event BonusForfeited(address indexed user, uint256 amount);
     event LpBonusForfeited(uint256 indexed tokenId, address indexed user, uint256 amount);
+    /// @notice The LP reservation of `tokenId` was settled: the vault reported its unstake or
+    ///         re-range after the unlock. It stays claimable under `tokenId`.
+    event LpBonusSettled(uint256 indexed tokenId, address indexed user);
     event BonusClaimed(address indexed user, uint256 amount);
     event Funded(address indexed from, uint256 amount, uint256 balance);
     event SurplusRecovered(address indexed to, uint256 amount);
@@ -257,19 +272,26 @@ contract V3BonusVault is
         return (r.user, r.amount, r.unlockAt, r.claimed, r.forfeited);
     }
 
+    /// @notice True when the LP reservation of `tokenId` was settled after its unlock (see
+    ///         {LpBonusSettled}): it pays although the vault no longer holds the position.
+    function lpSettled(uint256 tokenId) external view returns (bool) {
+        return _bonusStorage().lpSettled[tokenId];
+    }
+
     /// @notice The tokenIds whose LP reservations belong to `user` (a rebalance rewrites its entry).
     function lpTokensOf(address user) external view returns (uint256[] memory) {
         return _bonusStorage().lpTokens[user];
     }
 
-    /// @notice What {claim} would pay `user` now, before the funding check.
+    /// @notice What {claim} would pay `user` now, before the funding check. A stale LP record
+    ///         (position not held for `user` and not settled) counts zero.
     function claimable(address user) external view returns (uint256 amount) {
         V3BonusVaultStorage storage $ = _bonusStorage();
         UserReservation storage r = $.reservations[user];
         if (block.timestamp >= r.unlockAt) amount = r.amount;
         uint256[] storage ids = $.lpTokens[user];
         for (uint256 i = 0; i < ids.length; ++i) {
-            amount += _lpClaimable($.lpReservations[ids[i]]);
+            amount += _lpClaimable($, ids[i]);
         }
     }
 
@@ -333,11 +355,12 @@ contract V3BonusVault is
     // ──────────────────────── Vault notifications ──────────────
 
     /// @inheritdoc IBonusEscrowHooks
+    /// @dev Before the unlock: forfeits. After it: settles (the bonus is the user's).
     function onUnstake(uint256 tokenId) external onlyVault {
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[tokenId];
-        if (!_isActive(r)) return;
-        _forfeitLp($, r, tokenId);
+        if (_isActive(r)) _forfeitLp($, r, tokenId);
+        else _settleLp($, r, tokenId);
     }
 
     /// @inheritdoc IBonusEscrowHooks
@@ -347,7 +370,11 @@ contract V3BonusVault is
     {
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[oldTokenId];
-        if (!_isActive(r)) return;
+        if (!_isActive(r)) {
+            // After the unlock the record stays under the old id, settled (pays without the vault).
+            _settleLp($, r, oldTokenId);
+            return;
+        }
 
         LpReservation storage moved = $.lpReservations[newTokenId];
         if (moved.user != address(0)) revert DuplicateReservation(newTokenId);
@@ -375,19 +402,22 @@ contract V3BonusVault is
 
     /**
      * @notice Forfeits the LP reservation of `tokenId` when the LP vault no longer holds the
-     *         position for the reservation's user — the state a failed (fail-open) `onUnstake` or
-     *         `onRebalance` notification leaves behind. Anyone may call; the backend calls it for
-     *         every `BonusListenerFailed(tokenId)` the vault emits.
-     * @dev A no-op unless the reservation is active (recorded, not claimed, not forfeited, before
-     *      its unlock) AND `vault.stakerOf(tokenId) != user`. After the unlock nothing is touched,
-     *      exactly like {onUnstake}. No-op while no vault is linked.
+     *         position for the reservation's user — the state a failed (fail-open) `onUnstake`
+     *         notification leaves behind, or a failed `onRebalance` of the vault before
+     *         2026-11-10. Anyone may call; the backend calls it for every
+     *         `BonusListenerFailed(tokenId)` the vault emits. The tokens stay as surplus.
+     * @dev A no-op unless the reservation is open (recorded, not claimed, not forfeited), NOT
+     *      settled, AND `vault.stakerOf(tokenId) != user`. Before the unlock that is the early
+     *      exit {onUnstake} would have forfeited; after it, a stale record {claim} would never
+     *      pay, cleaned so `totalLpReserved` does not stay inflated. A settled record is never
+     *      touched. No-op while no vault is linked.
      * @return forfeited True when the reservation was forfeited by this call.
      */
     function reconcileLp(uint256 tokenId) external nonReentrant returns (bool forfeited) {
         V3BonusVaultStorage storage $ = _bonusStorage();
         LpReservation storage r = $.lpReservations[tokenId];
         address vault_ = $.vault;
-        if (vault_ == address(0) || !_isActive(r)) return false;
+        if (vault_ == address(0) || !_isOpen(r) || $.lpSettled[tokenId]) return false;
         if (IV3BonusLpVault(vault_).stakerOf(tokenId) == r.user) return false;
         _forfeitLp($, r, tokenId);
         return true;
@@ -405,8 +435,10 @@ contract V3BonusVault is
 
     /**
      * @notice Pays the caller everything of theirs that is unlocked: the v3 reservation once its
-     *         unlock time has passed, plus every LP reservation that is unlocked, not claimed and not
-     *         forfeited. All or nothing: reverts {InsufficientFunds} while the balance is short.
+     *         unlock time has passed, plus every LP reservation that is unlocked, not claimed, not
+     *         forfeited AND either still held by the vault for the caller or settled. A stale LP
+     *         record is skipped (left for {reconcileLp}). All or nothing: reverts
+     *         {InsufficientFunds} while the balance is short.
      */
     function claim() external nonReentrant returns (uint256 amount) {
         V3BonusVaultStorage storage $ = _bonusStorage();
@@ -420,11 +452,10 @@ contract V3BonusVault is
         uint256 lpTotal;
         uint256[] storage ids = $.lpTokens[msg.sender];
         for (uint256 i = 0; i < ids.length; ++i) {
-            LpReservation storage lp = $.lpReservations[ids[i]];
-            uint256 lpAmount = _lpClaimable(lp);
+            uint256 lpAmount = _lpClaimable($, ids[i]);
             if (lpAmount > 0) {
                 lpTotal += lpAmount;
-                lp.claimed = true;
+                $.lpReservations[ids[i]].claimed = true;
             }
         }
         amount += lpTotal;
@@ -543,13 +574,34 @@ contract V3BonusVault is
         $.vault = vault_;
     }
 
-    /// @dev Recorded, not claimed, not forfeited, before its unlock.
-    function _isActive(LpReservation storage r) private view returns (bool) {
-        return r.user != address(0) && !r.claimed && !r.forfeited && block.timestamp < r.unlockAt;
+    /// @dev Settles an open reservation after its unlock (once): the vault reported an unstake or
+    ///      a re-range then, so the bonus pays without the vault holding the tokenId. No-op for a
+    ///      missing, claimed, forfeited or already settled record.
+    function _settleLp(V3BonusVaultStorage storage $, LpReservation storage r, uint256 tokenId) private {
+        if (!_isOpen(r) || $.lpSettled[tokenId]) return;
+        $.lpSettled[tokenId] = true;
+        emit LpBonusSettled(tokenId, r.user);
     }
 
-    function _lpClaimable(LpReservation storage r) private view returns (uint256) {
+    /// @dev Recorded, not claimed, not forfeited.
+    function _isOpen(LpReservation storage r) private view returns (bool) {
+        return r.user != address(0) && !r.claimed && !r.forfeited;
+    }
+
+    /// @dev Recorded, not claimed, not forfeited, before its unlock.
+    function _isActive(LpReservation storage r) private view returns (bool) {
+        return _isOpen(r) && block.timestamp < r.unlockAt;
+    }
+
+    /// @dev What the LP reservation of `tokenId` pays now: its amount when it is open, unlocked
+    ///      and either settled or still held by the vault for its user; zero otherwise (a stale
+    ///      record pays nothing). The vault read comes last, after every storage check.
+    function _lpClaimable(V3BonusVaultStorage storage $, uint256 tokenId) private view returns (uint256) {
+        LpReservation storage r = $.lpReservations[tokenId];
         if (r.claimed || r.forfeited || block.timestamp < r.unlockAt) return 0;
+        if ($.lpSettled[tokenId]) return r.amount;
+        address vault_ = $.vault;
+        if (vault_ == address(0) || IV3BonusLpVault(vault_).stakerOf(tokenId) != r.user) return 0;
         return r.amount;
     }
 

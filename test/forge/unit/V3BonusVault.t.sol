@@ -50,6 +50,12 @@ contract V3BonusVaultTest is StakingV3Harness {
         book.reserveLp(id, user, amount, UNLOCK);
     }
 
+    /// @dev The math vault reports `user` as the staker of `id` (the book's LP records pay only
+    ///      while the vault holds the position for their user, or once settled).
+    function _holdFor(uint256 id, address user) internal {
+        vm.mockCall(address(mathVault), abi.encodeCall(mathVault.stakerOf, (id)), abi.encode(user));
+    }
+
     function _reserve(address user, uint256 amount) internal {
         vm.prank(carol);
         book.reserve(user, amount, UNLOCK, 3);
@@ -284,14 +290,47 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(book.totalReserved(), 0);
     }
 
-    function test_OnUnstake_UnknownOrMaturedIsANoOp() public {
+    function test_OnUnstake_UnknownIsANoOpMaturedSettles() public {
+        vm.recordLogs();
         vm.prank(address(mathVault));
         book.onUnstake(ID3);
+        assertEq(vm.getRecordedLogs().length, 0, "unknown: nothing");
+        assertFalse(book.lpSettled(ID3));
         _reserveLp(ID1, alice, BONUS);
         vm.warp(UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusSettled(ID1, alice);
         vm.prank(address(mathVault));
         book.onUnstake(ID1);
-        assertEq(book.claimable(alice), BONUS, "after the unlock an unstake keeps it claimable");
+        assertTrue(book.lpSettled(ID1));
+        assertEq(book.totalLpReserved(), BONUS, "a settlement moves no total");
+        assertEq(book.claimable(alice), BONUS, "after the unlock an unstake settles it: claimable");
+        // A second report does not settle twice.
+        vm.recordLogs();
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        assertEq(vm.getRecordedLogs().length, 0, "settled once");
+    }
+
+    function test_OnUnstake_AClaimedOrForfeitedRecordIsNeverSettled() public {
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, BONUS);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID2); // forfeited before the unlock
+        _holdFor(ID1, alice);
+        book.fund(BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(alice);
+        book.claim();
+        vm.recordLogs();
+        vm.startPrank(address(mathVault));
+        book.onUnstake(ID1);
+        book.onUnstake(ID2);
+        book.onRebalance(ID1, ID3, _snap(L), _snap(L));
+        vm.stopPrank();
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertFalse(book.lpSettled(ID1));
+        assertFalse(book.lpSettled(ID2));
     }
 
     // ──────────────────────── onRebalance ──────────────────────
@@ -349,15 +388,22 @@ contract V3BonusVaultTest is StakingV3Harness {
         book.onRebalance(ID1, ID2, _snap(L), _snap(L));
     }
 
-    function test_OnRebalance_InactiveIsANoOp() public {
+    function test_OnRebalance_UnknownIsANoOpMaturedSettlesUnderTheOldId() public {
         vm.prank(address(mathVault));
         book.onRebalance(ID3, ID2, _snap(L), _snap(L));
+        assertFalse(book.lpSettled(ID3));
         _reserveLp(ID1, alice, BONUS);
         vm.warp(UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusSettled(ID1, alice);
         vm.prank(address(mathVault));
         book.onRebalance(ID1, ID2, _snap(L), _snap(1));
         (, uint256 amount,,,) = book.lpReservation(ID1);
-        assertEq(amount, BONUS, "a post-unlock rebalance leaves it under the old id");
+        assertEq(amount, BONUS, "a post-unlock rebalance leaves it under the old id, unscaled");
+        (address moved,,,,) = book.lpReservation(ID2);
+        assertEq(moved, address(0));
+        assertTrue(book.lpSettled(ID1));
+        assertEq(book.claimable(alice), BONUS, "settled: pays without the vault");
     }
 
     function test_OnRebalance_KeepsTheOtherEntriesOfTheList() public {
@@ -388,6 +434,7 @@ contract V3BonusVaultTest is StakingV3Harness {
         _reserveLp(ID2, alice, 3 * BONUS);
         vm.prank(address(mathVault));
         book.onUnstake(ID2); // forfeited before the unlock
+        _holdFor(ID1, alice);
         book.fund(10 * BONUS);
 
         vm.prank(alice);
@@ -416,6 +463,7 @@ contract V3BonusVaultTest is StakingV3Harness {
     function test_Claim_RevertsAllOrNothingWhenShort() public {
         _reserve(alice, BONUS);
         _reserveLp(ID1, alice, BONUS);
+        _holdFor(ID1, alice);
         book.fund(BONUS);
         vm.warp(UNLOCK);
         vm.prank(alice);
@@ -426,6 +474,35 @@ contract V3BonusVaultTest is StakingV3Harness {
         book.fund(BONUS);
         vm.prank(alice);
         book.claim();
+    }
+
+    function test_Claim_AStaleLpRecordPaysNothing() public {
+        // ID1 is not staked in the math vault (stakerOf == 0) and was never settled: stale.
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        _reserveLp(ID2, alice, 3 * BONUS);
+        _holdFor(ID2, bob); // held, but for someone else: stale too
+        book.fund(10 * BONUS);
+        vm.warp(UNLOCK);
+        assertEq(book.claimable(alice), BONUS, "only the v3 part");
+        vm.prank(alice);
+        assertEq(book.claim(), BONUS);
+        (,,, bool claimed1,) = book.lpReservation(ID1);
+        (,,, bool claimed2,) = book.lpReservation(ID2);
+        assertFalse(claimed1);
+        assertFalse(claimed2);
+        assertEq(book.totalLpReserved(), 5 * BONUS, "left for reconcileLp");
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claim();
+    }
+
+    function test_Claim_AnUnlinkedBookPaysOnlySettledRecords() public {
+        V3BonusVault unlinked = _deployBonusVault(address(asset), carol, poolStub, address(0));
+        vm.prank(carol);
+        unlinked.reserveLp(ID1, alice, BONUS, UNLOCK);
+        vm.warp(UNLOCK);
+        assertEq(unlinked.claimable(alice), 0, "no vault to say who holds it");
     }
 
     function test_Claim_OnlyTheCallersReservations() public {
@@ -540,6 +617,7 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.prank(address(mathVault));
         book.onRebalance(ID1, ID3, _snap(L), _snap(L / 2));
         assertEq(book.totalLpReserved(), BONUS + scaled, "a down-scaling lowers it");
+        _holdFor(ID3, alice);
 
         vm.prank(address(mathVault));
         book.onUnstake(ID2);
@@ -591,18 +669,41 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertFalse(book.reconcileLp(ID1), "a second call is a no-op");
     }
 
-    function test_ReconcileLp_NoOpForUnknownMaturedOrUnlinked() public {
+    function test_ReconcileLp_NoOpForUnknownHeldSettledOrUnlinked() public {
         assertFalse(book.reconcileLp(ID3), "no reservation");
         _reserveLp(ID1, alice, BONUS);
+        _holdFor(ID1, alice);
+        assertFalse(book.reconcileLp(ID1), "held before the unlock");
         vm.warp(UNLOCK);
-        assertFalse(book.reconcileLp(ID1), "after the unlock nothing is touched");
+        assertFalse(book.reconcileLp(ID1), "held after the unlock");
         assertEq(book.totalLpReserved(), BONUS);
+
+        _reserveLp(ID2, alice, BONUS);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID2); // after the unlock: settled
+        assertFalse(book.reconcileLp(ID2), "a settled record is never touched");
+        assertEq(book.totalLpReserved(), 2 * BONUS);
 
         V3BonusVault unlinked = _deployBonusVault(address(asset), carol, poolStub, address(0));
         vm.prank(carol);
         unlinked.reserveLp(ID2, alice, BONUS, UNLOCK + 1);
         assertFalse(unlinked.reconcileLp(ID2), "no vault to ask");
         assertEq(unlinked.totalLpReserved(), BONUS);
+    }
+
+    function test_ReconcileLp_AfterTheUnlockForfeitsAStaleRecord() public {
+        _reserveLp(ID1, alice, BONUS);
+        book.fund(BONUS);
+        vm.warp(UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        vm.prank(stranger);
+        assertTrue(book.reconcileLp(ID1));
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        assertEq(asset.balanceOf(address(book)), BONUS, "the tokens stay, as surplus");
+        assertFalse(book.reconcileLp(ID1));
+        assertFalse(book.lpSettled(ID1));
     }
 
     // ──────────────────────── Storage ──────────────────────────
@@ -612,5 +713,20 @@ contract V3BonusVaultTest is StakingV3Harness {
             & ~bytes32(uint256(0xff));
         assertEq(slot, 0x7ee3db96cd3f5364376de98c276fd460a05b617c20412712666abb0adcc73b00);
         assertEq(address(uint160(uint256(vm.load(address(book), slot)))), address(asset), "field 0 is the token");
+    }
+
+    /// @dev `lpSettled` is APPENDED in slot 10 of the namespace, after `totalLpReserved` in slot 9
+    ///      (`vault` and `bonusIsToken0` share slot 3): the mapping's entry for `tokenId` lives at
+    ///      keccak256(tokenId . (base + 10)).
+    function test_Storage_LpSettledIsAppendedLast() public {
+        bytes32 base = 0x7ee3db96cd3f5364376de98c276fd460a05b617c20412712666abb0adcc73b00;
+        _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, 2 * BONUS);
+        assertEq(uint256(vm.load(address(book), bytes32(uint256(base) + 9))), 3 * BONUS, "slot 9 = totalLpReserved");
+        vm.warp(UNLOCK);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        bytes32 entry = keccak256(abi.encode(ID1, uint256(base) + 10));
+        assertEq(uint256(vm.load(address(book), entry)), 1, "slot 10 = lpSettled");
     }
 }
