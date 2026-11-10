@@ -32,12 +32,25 @@ contract RevertingListener {
     }
 }
 
+/// @dev A listener that accepts every notification and does nothing: the state it leaves is the
+///      state the PRE-FIX vault (listener `onRebalance` fail open, before 2026-11-10) left when the
+///      call ran out of gas inside its `try` — Sepolia stack #6, position 234214 on 2026-11-09.
+contract SilentListener {
+    uint256 public totalLpReserved;
+
+    function onUnstake(uint256) external {}
+
+    function onRebalance(uint256, uint256, IBonusEscrowHooks.Snapshot calldata, IBonusEscrowHooks.Snapshot calldata)
+        external {}
+}
+
 /**
  * @notice The vault's staking v3 bonus listener ({LPStakingVault-setBonusListener}): the owner-tier
- *         link with its code and reservation rules, the two FAIL-OPEN notifications with their gas
- *         floor, and the real flows on the math rung — a position joined through the migrator,
- *         re-ranged (the LP reservation moves and scales down) and unstaked (forfeited before the
- *         unlock, kept after it).
+ *         link with its code and reservation rules, the FAIL-OPEN `onUnstake` with its gas floor,
+ *         the FAIL-CLOSED `onRebalance` (since 2026-11-10), and the real flows on the math rung — a
+ *         position joined through the migrator, re-ranged (the LP reservation moves and scales
+ *         down, or is settled after the unlock) and unstaked (forfeited before the unlock, settled
+ *         after it), plus the stale record a missed notification leaves (never paid, reconciled).
  */
 contract VaultBonusListenerTest is StakingV3Harness {
     uint256 internal constant PRINCIPAL = 20_000e18;
@@ -105,33 +118,93 @@ contract VaultBonusListenerTest is StakingV3Harness {
         vm.etch(address(bonusVault), address(new RevertingListener()).code);
     }
 
-    function test_ReconcileLp_AFailedRebalanceLeavesAStaleReservationReconcileForfeitsIt() public {
+    /// @dev Swaps a {SilentListener} under the listener's address (storage untouched), runs the
+    ///      rebalance, restores the real code: the pre-fix stranded reservation, reproduced.
+    function _strandedRebalance(uint256 tokenId) internal returns (uint256 newId) {
+        bytes memory saved = address(bonusVault).code;
+        vm.etch(address(bonusVault), address(new SilentListener()).code);
+        vm.prank(alice);
+        newId = mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        vm.etch(address(bonusVault), saved);
+    }
+
+    /// @dev The Sepolia stack #6 bug end to end (wallet B, 234214 -> 234216, 2026-11-09): the
+    ///      reservation stays under the burned id, active. After the fix it never pays — not
+    ///      even after the unlock — and `reconcileLp` forfeits it.
+    function test_StaleRecord_APreFixStrandedReservationNeverPaysAndIsReconciled() public {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
         uint256 totalBefore = bonusVault.totalReserved();
 
-        bytes memory saved = _withListenerDown();
-        vm.expectEmit(address(mathVault));
-        emit LPStakingVault.BonusListenerFailed(tokenId);
-        vm.prank(alice);
-        uint256 newId =
-            mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
-        vm.etch(address(bonusVault), saved);
+        uint256 newId = _strandedRebalance(tokenId);
 
-        // The reservation is still under the burned tokenId, active.
         (address user, uint256 stale,,, bool forfeited) = bonusVault.lpReservation(tokenId);
-        assertEq(user, alice);
+        assertEq(user, alice, "the record stayed under the burned id");
         assertEq(stale, owedLp);
         assertFalse(forfeited);
         assertEq(mathVault.stakerOf(tokenId), address(0));
+        assertEq(mathVault.stakerOf(newId), alice);
+        (address newUser,,,,) = bonusVault.lpReservation(newId);
+        assertEq(newUser, address(0), "the new position has no record");
 
+        // After the unlock, with alice still staked on the NEW id: the stale record pays nothing.
+        vm.warp(v3End);
+        assertEq(bonusVault.claimable(alice), owedV3, "only the v3 part");
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedV3, "the stale LP record is skipped");
+        (,,, bool claimed,) = bonusVault.lpReservation(tokenId);
+        assertFalse(claimed);
+        assertFalse(bonusVault.lpSettled(tokenId));
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        bonusVault.claim();
+
+        // Anyone cleans it after the unlock too; the tokens stay as surplus.
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
         vm.prank(stranger);
         assertTrue(bonusVault.reconcileLp(tokenId));
-        assertEq(bonusVault.totalReserved(), totalBefore - owedLp);
+        assertEq(bonusVault.totalReserved(), totalBefore - owedLp - owedV3);
         assertEq(bonusVault.totalLpReserved(), 0);
+        assertEq(asset.balanceOf(address(bonusVault)), owedLp, "the LP part stays here");
         assertFalse(bonusVault.reconcileLp(newId), "the new tokenId carries no reservation");
+    }
+
+    function test_StaleRecord_ReconciledBeforeTheUnlockToo() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        _strandedRebalance(tokenId);
+        vm.prank(stranger);
+        assertTrue(bonusVault.reconcileLp(tokenId));
+        (, uint256 amount,,, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertEq(amount, 0);
+        assertTrue(forfeited);
+        assertEq(bonusVault.totalLpReserved(), 0);
+        assertGt(owedLp, 0);
+    }
+
+    /// @dev A missed `onUnstake` after the unlock (fail open) leaves an unsettled record for a
+    ///      position the user took out: not payable, and reconciled.
+    function test_StaleRecord_AFailedUnstakeAfterTheUnlockIsNotPaid() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        vm.warp(v3End);
+        bytes memory saved = _withListenerDown();
+        vm.expectEmit(address(mathVault));
+        emit LPStakingVault.BonusListenerFailed(tokenId);
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        vm.etch(address(bonusVault), saved);
+
+        assertFalse(bonusVault.lpSettled(tokenId));
+        assertEq(bonusVault.claimable(alice), owedV3);
+        assertTrue(bonusVault.reconcileLp(tokenId));
+        assertEq(bonusVault.totalLpReserved(), 0);
+        assertGt(owedLp, 0);
     }
 
     function test_ReconcileLp_AFailedUnstakeIsForfeitedByReconcile() public {
@@ -189,6 +262,7 @@ contract VaultBonusListenerTest is StakingV3Harness {
     function test_Unstake_BeforeTheUnlockForfeitsTheLpReservation() public {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
         uint256 totalBefore = bonusVault.totalReserved();
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
@@ -196,22 +270,75 @@ contract VaultBonusListenerTest is StakingV3Harness {
         mathVault.unstake(tokenId);
         assertEq(bonusVault.totalReserved(), totalBefore - owedLp);
         assertEq(mathNpm.ownerOf(tokenId), alice);
+        assertFalse(bonusVault.lpSettled(tokenId), "an early exit is forfeited, never settled");
+        vm.warp(v3End);
+        assertEq(bonusVault.claimable(alice), owedV3, "the LP part is gone for good");
     }
 
-    function test_Unstake_AfterTheUnlockKeepsItClaimable() public {
+    function test_Unstake_AfterTheUnlockSettlesAndPays() public {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
         (uint256 owedV3,) = bonusVault.reservedOf(alice);
         vm.warp(v3End);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusSettled(tokenId, alice);
         vm.prank(alice);
         mathVault.unstake(tokenId);
+        assertTrue(bonusVault.lpSettled(tokenId));
+        assertEq(mathVault.stakerOf(tokenId), address(0));
+        assertFalse(bonusVault.reconcileLp(tokenId), "a settled record is never reconciled");
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedLp + owedV3);
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    function test_Rebalance_AfterTheUnlockSettlesUnderTheOldIdAndPays() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        vm.warp(v3End);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusSettled(tokenId, alice);
+        vm.prank(alice);
+        uint256 newId = mathVault.rebalance(tokenId, PRICE_TICK + 10, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+
+        (address user, uint256 amount,,,) = bonusVault.lpReservation(tokenId);
+        assertEq(user, alice, "the record stays under the old id");
+        assertEq(amount, owedLp, "not scaled after the unlock");
+        assertTrue(bonusVault.lpSettled(tokenId));
+        (address newUser,,,,) = bonusVault.lpReservation(newId);
+        assertEq(newUser, address(0));
+
+        // Leaving the new position afterwards changes nothing: the settled record pays.
+        vm.prank(alice);
+        mathVault.unstake(newId);
         asset.approve(address(bonusVault), type(uint256).max);
         bonusVault.fund(owedLp + owedV3);
         vm.prank(alice);
         assertEq(bonusVault.claim(), owedLp + owedV3);
     }
 
-    // ──────────────────────── Fail open ────────────────────────
+    function test_Claim_AStillStakedPositionPaysAfterTheUnlock() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        vm.warp(v3End);
+        asset.approve(address(bonusVault), type(uint256).max);
+        bonusVault.fund(owedLp + owedV3);
+        vm.prank(alice);
+        assertEq(bonusVault.claim(), owedLp + owedV3);
+        // A later unstake of a claimed record neither settles nor forfeits it.
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        assertFalse(bonusVault.lpSettled(tokenId));
+        (,,, bool claimed, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertTrue(claimed);
+        assertFalse(forfeited);
+    }
+
+    // ──────────────────────── Fail open (unstake) / fail closed (rebalance) ─
 
     function test_FailOpen_AnUnstakeCompletesWhenTheListenerReverts() public {
         uint256 tokenId = _join();
@@ -225,16 +352,26 @@ contract VaultBonusListenerTest is StakingV3Harness {
         assertEq(mathNpm.ownerOf(tokenId), alice, "the exit completed");
     }
 
-    function test_FailOpen_ARebalanceCompletesWhenTheListenerReverts() public {
+    function test_FailClosed_ARebalanceRevertsWhenTheListenerReverts() public {
         uint256 tokenId = _join();
-        RevertingListener bad = new RevertingListener();
-        vm.etch(address(bonusVault), address(bad).code);
-        vm.expectEmit(address(mathVault));
-        emit LPStakingVault.BonusListenerFailed(tokenId);
+        (address user, uint256 owedLp, uint64 unlockAt,,) = bonusVault.lpReservation(tokenId);
+        uint256 totalBefore = bonusVault.totalReserved();
+        bytes memory saved = _withListenerDown();
         vm.prank(alice);
-        uint256 newId =
-            mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
-        assertEq(mathVault.stakerOf(newId), alice, "the rebalance completed");
+        vm.expectRevert(bytes("listener down"));
+        mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        vm.etch(address(bonusVault), saved);
+
+        // Vault and reservation untouched.
+        assertEq(mathVault.stakerOf(tokenId), alice);
+        assertEq(mathNpm.ownerOf(tokenId), address(mathVault));
+        (address u, uint256 a, uint64 t, bool claimed, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertEq(u, user);
+        assertEq(a, owedLp);
+        assertEq(t, unlockAt);
+        assertFalse(claimed);
+        assertFalse(forfeited);
+        assertEq(bonusVault.totalReserved(), totalBefore);
     }
 
     function test_FailOpen_TheGasFloorRefusesAStarvedUnstake() public {
@@ -245,20 +382,26 @@ contract VaultBonusListenerTest is StakingV3Harness {
         mathVault.unstake{gas: 108_000}(tokenId);
     }
 
-    function test_FailOpen_TheGasFloorRefusesAStarvedRebalance() public {
+    /// @dev A starved listener `onRebalance` (the Sepolia out-of-gas) now reverts the whole
+    ///      rebalance instead of completing it with the reservation stranded.
+    function test_FailClosed_AStarvedRebalanceReverts() public {
         uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
         mathVault.setBonusEscrow(address(0));
-        // Enough for the whole rebalance up to the listener, not for the listener's floor.
+        // Enough for the whole rebalance without the listener, not for the listener's work.
         uint256 gasForAll = _rebalanceGasUpToListener(tokenId);
         vm.prank(alice);
-        vm.expectRevert(LPStakingVault.InsufficientGasForBonusHook.selector);
+        vm.expectRevert();
         mathVault.rebalance{gas: gasForAll}(
             tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE
         );
+        assertEq(mathVault.stakerOf(tokenId), alice);
+        (address user, uint256 amount,,,) = bonusVault.lpReservation(tokenId);
+        assertEq(user, alice);
+        assertEq(amount, owedLp);
     }
 
-    /// @dev The gas a whole rebalance needs with the listener off. Given exactly that, the call
-    ///      reaches the listener with only what the steps after it need, far below the floor.
+    /// @dev The gas a whole rebalance needs with the listener off.
     function _rebalanceGasUpToListener(uint256 tokenId) internal returns (uint256) {
         uint256 snap = vm.snapshotState();
         // The real listener still owes and cannot be unlinked: put an idle one under its address.
@@ -288,8 +431,10 @@ contract VaultBonusListenerTest is StakingV3Harness {
 
     // ──────────────────────── Gas measurement ──────────────────
 
-    /// @dev The listener's two hooks, measured from the caller, against the allowance the vault
-    ///      forwards. The rebalance one reads the vault's TWAP and values two positions.
+    /// @dev The listener's two hooks, measured from the caller. `onUnstake` runs inside the
+    ///      allowance the vault forwards; `onRebalance` (fail closed since 2026-11-10, all the
+    ///      remaining gas) is still held to the old figure as a cost regression guard. The
+    ///      rebalance one reads the vault's TWAP and values two positions.
     function test_HookGas_TheListenerFitsTheAllowance() public {
         uint256 tokenId = _join();
         (,,,,, int24 lower, int24 upper, uint128 liq,,,,) = mathNpm.positions(tokenId);

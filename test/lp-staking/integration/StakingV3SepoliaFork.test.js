@@ -21,13 +21,18 @@
  *   5. route 2 (join LP) mints on the real band, stakes the NFT in the vault for bob, refunds the
  *      USDC dust and stakes the remainder in v3
  *   6. bob re-ranges his position: the LP reservation moves to the new tokenId, scaled down, and
- *      the fail-open listener did NOT fail on the real pool's `observe`; its gas is recorded
- *   7. dave joins LP and unstakes before the unlock: his LP reservation is forfeited on the real
+ *      the listener ran on the real pool's `observe`; its gas is recorded
+ *   7. a reverting listener reverts bob's next re-range (fail closed since 2026-11-10): the vault
+ *      and the reservation are untouched
+ *   8. erin's re-range under a silent listener reproduces the pre-fix stranded record (Sepolia
+ *      stack #6, 234214): the reservation stays under the burned id; frank joins LP too
+ *   9. dave joins LP and unstakes before the unlock: his LP reservation is forfeited on the real
  *      pool; the listener's unstake gas is recorded
- *   8. carol withdraws from v3 early: her whole v3 reservation is forfeited
- *   9. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
- *      unlock and still claims it; the v3 exit is `unstake`, the principal with a ZERO reward
- *      (the pool's rewards are waived)
+ *  10. carol withdraws from v3 early: her whole v3 reservation is forfeited
+ *  11. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
+ *      unlock (settled) and claims it; frank re-ranges after the unlock (settled under the old id)
+ *      and claims it; erin's stale record pays nothing and `reconcileLp` forfeits it; the v3 exit
+ *      is `unstake`, the principal with a ZERO reward (the pool's rewards are waived)
  *
  * Skip vs fail: the fork phase may skip ONLY when no endpoint could be reached and none was
  * configured (SEPOLIA_RPC_URL / INFURA_API_KEY). Everything after the fork fails, never skips.
@@ -97,7 +102,8 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   let forked = false;
   let fees;
 
-  let deployer, alice, bob, carol, multisig, guardian, weightSigner, dave;
+  let deployer, alice, bob, carol, multisig, guardian, weightSigner, dave, erin, frank;
+  let erinStaleId, frankTokenId;
   let asset, usdc, pool, npm, router, timelock, vault, sw2;
   let poolV3, bonusVault, migrator;
   let assetIsToken0;
@@ -212,7 +218,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const base = (await ethers.provider.getBlock("latest")).baseFeePerGas;
     const max = base * 100n > ethers.parseUnits("10", "gwei") ? base * 100n : ethers.parseUnits("10", "gwei");
     fees = { max, tip: ethers.parseUnits("1", "gwei") };
-    [deployer, alice, bob, carol, multisig, guardian, weightSigner, dave] = (await ethers.getSigners()).map(pin);
+    [deployer, alice, bob, carol, multisig, guardian, weightSigner, dave, erin, frank] = (await ethers.getSigners()).map(pin);
 
     asset = new ethers.Contract(P.asset.address, C.ERC20_ABI, deployer);
     usdc = new ethers.Contract(P.usdc.address, C.ERC20_ABI, deployer);
@@ -226,7 +232,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const funder = await impersonate(FUNDER);
     await (await asset.connect(funder).transfer(deployer.address, ASSET(3_000_000))).wait();
     await (await usdc.connect(funder).transfer(deployer.address, USDC(1_000_000))).wait();
-    for (const user of [alice, bob, carol, dave]) {
+    for (const user of [alice, bob, carol, dave, erin, frank]) {
       await (await asset.connect(funder).transfer(user.address, PRINCIPAL)).wait();
     }
     for (const user of [deployer, alice, bob, carol]) {
@@ -513,6 +519,32 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     notes.push(`route 2: LP ${ethers.formatUnits(event.args.assetToLp, 18)} tREAL + ${ethers.formatUnits(event.args.usdcIn, 6)} tUSDC, v3 ${ethers.formatUnits(event.args.restaked, 18)} tREAL, refund ${ethers.formatUnits(refunded, 6)} tUSDC`);
   });
 
+  /** Runs `fn` with `code` under the bonus vault's address (its storage untouched), then restores it. */
+  async function withListenerCode(code, fn) {
+    const address = await bonusVault.getAddress();
+    const saved = await ethers.provider.getCode(address);
+    await rpc("hardhat_setCode", [address, code]);
+    try {
+      return await fn();
+    } finally {
+      await rpc("hardhat_setCode", [address, saved]);
+    }
+  }
+  const REVERT_ALL = "0x60006000fd"; // PUSH1 0 PUSH1 0 REVERT: every call reverts, empty data
+  const ACCEPT_ALL = "0x00"; // STOP: every call succeeds and does nothing (the pre-fix swallowed failure)
+  const NO_SWAP = { zeroForOne: true, amountIn: 0n, amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n };
+
+  /** Route 2 for a fresh wallet with 1,000 tUSDC; returns the staked tokenId. */
+  async function joinLp(user) {
+    await (await usdc.transfer(user.address, USDC(1_000))).wait();
+    await (await asset.connect(user).approve(await migrator.getAddress(), ethers.MaxUint256)).wait();
+    await (await usdc.connect(user).approve(await migrator.getAddress(), ethers.MaxUint256)).wait();
+    const v2 = await voucher(user, 2, PRINCIPAL, USDC(1_000), 1n);
+    const joined = await (await migrator.connect(user).moveToLp(USDC(1_000), PRINCIPAL, 0, 0, FAR, NO_PERMIT, NO_PERMIT, v2)).wait();
+    return joined.logs.map((l) => { try { return migrator.interface.parseLog(l); } catch { return null; } })
+      .find((e) => e && e.name === "MovedToLp").args.tokenId;
+  }
+
   it("bob re-ranges: the LP reservation moves to the new tokenId, scaled down, and the listener did not fail", async function () {
     const before = (await bonusVault.lpReservation(bobTokenId)).amount;
     const tick = Number((await pool.slot0()).tick);
@@ -528,6 +560,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const hookGas = await listenerGas((b) =>
       b.onRebalance.estimateGas(bobTokenId, 2n ** 64n, snap(live.liquidity), snap(live.liquidity / 2n))
     );
+    // Fail closed since 2026-11-10 (all remaining gas): the 1,000,000 figure is a cost guard only.
     expect(hookGas).to.be.lessThan(await vault.bonusListenerGas());
 
     const tx = await vault.connect(bob).rebalance(bobTokenId, newLower, newUpper, noSwap, FAR);
@@ -542,12 +575,52 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(moved.amount).to.be.lessThan(before);
     expect(moved.amount).to.be.greaterThan(0n);
     expect((await bonusVault.lpTokensOf(bob.address))[0]).to.equal(newId);
+    expect(await bonusVault.lpSettled(newId)).to.equal(false);
     bobTokenId = newId;
     notes.push(
       `rebalance: LP bonus ${ethers.formatUnits(before, 18)} -> ${ethers.formatUnits(moved.amount, 18)} tREAL, ` +
         `tx gas ${receipt.gasUsed}, listener onRebalance ${hookGas} gas (eth_estimateGas from the vault, incl. ` +
-        `the 21,000 intrinsic; allowance ${await vault.bonusListenerGas()})`
+        `the 21,000 intrinsic; fail closed, no allowance)`
     );
+  });
+
+  it("a reverting listener reverts bob's next re-range (fail closed): vault and reservation untouched", async function () {
+    const before = await bonusVault.lpReservation(bobTokenId);
+    const totalBefore = await bonusVault.totalReserved();
+    const live = await npm.positions(bobTokenId);
+    await withListenerCode(REVERT_ALL, async () => {
+      await expect(
+        vault.connect(bob).rebalance(bobTokenId, live.tickLower - 60n, live.tickUpper + 60n, NO_SWAP, FAR)
+      ).to.be.reverted;
+    });
+    expect(await vault.stakerOf(bobTokenId)).to.equal(bob.address);
+    expect(await npm.ownerOf(bobTokenId)).to.equal(await vault.getAddress());
+    const after = await bonusVault.lpReservation(bobTokenId);
+    expect(after.user).to.equal(before.user);
+    expect(after.amount).to.equal(before.amount);
+    expect(after.forfeited).to.equal(false);
+    expect(await bonusVault.totalReserved()).to.equal(totalBefore);
+  });
+
+  it("erin's re-range under a silent listener strands her record under the burned id (the pre-fix state)", async function () {
+    erinStaleId = await joinLp(erin);
+    frankTokenId = await joinLp(frank);
+    const owed = (await bonusVault.lpReservation(erinStaleId)).amount;
+    expect(owed).to.be.greaterThan(0n);
+    const live = await npm.positions(erinStaleId);
+    const newId = await withListenerCode(ACCEPT_ALL, async () => {
+      const receipt = await (await vault.connect(erin).rebalance(
+        erinStaleId, live.tickLower + 60n, live.tickUpper - 60n, NO_SWAP, FAR
+      )).wait();
+      return receipt.logs.map((l) => { try { return vault.interface.parseLog(l); } catch { return null; } })
+        .find((e) => e && e.name === "Rebalanced").args.newTokenId;
+    });
+    const stale = await bonusVault.lpReservation(erinStaleId);
+    expect(stale.user).to.equal(erin.address, "the record stayed under the burned id");
+    expect(stale.amount).to.equal(owed);
+    expect(await vault.stakerOf(erinStaleId)).to.equal(ethers.ZeroAddress);
+    expect(await vault.stakerOf(newId)).to.equal(erin.address);
+    expect((await bonusVault.lpReservation(newId)).user).to.equal(ethers.ZeroAddress);
   });
 
   it("dave joins LP and unstakes before the unlock: the LP reservation is forfeited on the real pool", async function () {
@@ -594,7 +667,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect((await bonusVault.reservedOf(carol.address))[0]).to.equal(0n);
   });
 
-  it("after the end: unfunded claims revert, funded ones pay; an LP unstaked after the unlock still pays", async function () {
+  it("after the end: unfunded claims revert, funded ones pay; settled LP records pay, a stale one does not", async function () {
     await expect(bonusVault.connect(alice).claim()).to.be.revertedWithCustomError(bonusVault, "NothingToClaim");
     await advance(3600 + 30 * 86400 + 10);
 
@@ -603,15 +676,45 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       .to.be.revertedWithCustomError(bonusVault, "InsufficientFunds")
       .withArgs(aliceDue, 0n);
 
-    await (await vault.connect(bob).unstake(bobTokenId)).wait();
+    // bob unstakes after the unlock: settled, it pays without the vault.
+    await expect(vault.connect(bob).unstake(bobTokenId))
+      .to.emit(bonusVault, "LpBonusSettled")
+      .withArgs(bobTokenId, bob.address);
+    expect(await bonusVault.lpSettled(bobTokenId)).to.equal(true);
     const bobDue = await bonusVault.claimable(bob.address);
     const lpPart = (await bonusVault.lpReservation(bobTokenId)).amount;
     expect(bobDue).to.equal((await bonusVault.reservedOf(bob.address))[0] + lpPart);
 
-    await (await asset.approve(await bonusVault.getAddress(), aliceDue + bobDue)).wait();
-    await (await bonusVault.fund(aliceDue + bobDue)).wait();
+    // frank re-ranges after the unlock: settled under the OLD id, unscaled.
+    const frankLp = (await bonusVault.lpReservation(frankTokenId)).amount;
+    const fl = await npm.positions(frankTokenId);
+    await expect(vault.connect(frank).rebalance(frankTokenId, fl.tickLower + 60n, fl.tickUpper - 60n, NO_SWAP, FAR))
+      .to.emit(bonusVault, "LpBonusSettled")
+      .withArgs(frankTokenId, frank.address);
+    const frankRes = await bonusVault.lpReservation(frankTokenId);
+    expect(frankRes.user).to.equal(frank.address);
+    expect(frankRes.amount).to.equal(frankLp);
+    const frankDue = await bonusVault.claimable(frank.address);
+    expect(frankDue).to.equal((await bonusVault.reservedOf(frank.address))[0] + frankLp);
+
+    // erin's stale record (pre-fix strand): only her v3 part is claimable.
+    const erinLp = (await bonusVault.lpReservation(erinStaleId)).amount;
+    const erinDue = await bonusVault.claimable(erin.address);
+    expect(erinDue).to.equal((await bonusVault.reservedOf(erin.address))[0]);
+
+    const due = aliceDue + bobDue + frankDue + erinDue;
+    await (await asset.approve(await bonusVault.getAddress(), due)).wait();
+    await (await bonusVault.fund(due)).wait();
     await expect(bonusVault.connect(alice).claim()).to.emit(bonusVault, "BonusClaimed").withArgs(alice.address, aliceDue);
     await expect(bonusVault.connect(bob).claim()).to.emit(bonusVault, "BonusClaimed").withArgs(bob.address, bobDue);
+    await expect(bonusVault.connect(frank).claim()).to.emit(bonusVault, "BonusClaimed").withArgs(frank.address, frankDue);
+    await expect(bonusVault.connect(erin).claim()).to.emit(bonusVault, "BonusClaimed").withArgs(erin.address, erinDue);
+    expect((await bonusVault.lpReservation(erinStaleId)).claimed).to.equal(false);
+    expect(await bonusVault.totalLpReserved()).to.equal(erinLp, "only the stale record is still counted");
+    // Anyone cleans it after the unlock; the tokens stay as surplus.
+    await expect(bonusVault.connect(carol).reconcileLp(erinStaleId))
+      .to.emit(bonusVault, "LpBonusForfeited")
+      .withArgs(erinStaleId, erin.address, erinLp);
     // What is left owed is dave's v3 remainder reservation alone (his LP one was forfeited).
     expect(await bonusVault.totalReserved()).to.equal((await bonusVault.reservedOf(dave.address))[0]);
     expect(await bonusVault.totalLpReserved()).to.equal(0n);

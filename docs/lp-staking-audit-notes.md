@@ -57,6 +57,12 @@ constants. `setBonusHookGas(escrowGas, listenerGas)` (owner, 100,000..3,000,000 
 `initializeV2()` inside the upgrade. New item 20; items 15 and 19 and the I-01 operator note point
 to it.
 
+Revision 2026-11-10 (stale LP record): the vault's notification of the listener's `onRebalance` is
+FAIL CLOSED like the escrow's (no `try`, no allowance); `onUnstake` stays fail open. `V3BonusVault`
+pays an LP record only while the vault holds the position for its user or once settled by a
+notification after the unlock (`lpSettled`, appended; `LpBonusSettled`), and `reconcileLp` cleans a
+stale record after the unlock too. Items 19 ("Change of 2026-11-10") and 20 ("Follow-up").
+
 Nothing here is an open bug. Items that need a decision before deployment say so.
 
 ---
@@ -1436,21 +1442,27 @@ document is unchanged; the rebalance logic and every valuation of the vault are 
 
 **In scope, changed:** `LPStakingVault.setBonusListener(address)` (owner), `bonusListener` appended
 after `stakeOperators` in the vault namespace (layout validated against the live Sepolia stack #6
-proxy), and two notifications to it in `unstake` and `rebalance`, right after the escrow's. BOTH are
-FAIL OPEN, unlike the escrow's `onRebalance`: inside `try`, `bonusListenerGas()` each (250,000 fixed
-at first, owner-set with default 1,000,000 since item 20), behind `bonusListenerGasFloor()` (`InsufficientGasForBonusHook` below it), `BonusListenerFailed(tokenId)`
-on a revert. `setBonusListener` refuses a code-less address (`NotAContract`) and, by the C-13 rule,
+proxy), and two notifications to it in `unstake` and `rebalance`, right after the escrow's. They
+follow the escrow's split since 2026-11-10 (see "Change of 2026-11-10" below): `onUnstake` FAILS
+OPEN inside `try` with `bonusListenerGas()` (250,000 fixed at first, owner-set with default 1,000,000
+since item 20), behind `bonusListenerGasFloor()` (`InsufficientGasForBonusHook` below it),
+`BonusListenerFailed(tokenId)` on a revert; `onRebalance` FAILS CLOSED like the escrow's: no `try`,
+all the remaining gas, a revert reverts the rebalance. (From 2026-11-09 to 2026-11-10 both failed
+open.) `setBonusListener` refuses a code-less address (`NotAContract`) and, by the C-13 rule,
 refuses to unlink or replace a listener whose `totalReserved()` is above zero
 (`ListenerHasReservations`).
 
 **Deliberate properties a reviewer is expected to flag:**
 
-- **The listener's notifications fail open.** A listener that reverts or runs out of its 250,000
-  gas leaves the LP reservation active under the old (burned or unstaked) tokenId. It is NOT paid
-  at the unlock any more: `V3BonusVault.reconcileLp(tokenId)` (permissionless) forfeits an active
-  reservation whose position the vault no longer holds for its user, and the backend calls it for
-  every `BonusListenerFailed` event. A re-range whose notification failed therefore loses the LP
-  bonus. Measured cost of the rebalance notification: 80,759 gas on the mock pool (optimized),
+- **The listener's `onUnstake` fails open; its `onRebalance` fails closed (since 2026-11-10).** An
+  `onUnstake` that reverts or runs out of its allowance leaves the LP reservation under the
+  unstaked tokenId, unsettled. `claim()` never pays such a STALE record (it pays an LP record only
+  while `vault.stakerOf(tokenId) == user` or after a settlement), and
+  `V3BonusVault.reconcileLp(tokenId)` (permissionless) forfeits it, before or after the unlock; the
+  backend calls it for every `BonusListenerFailed` event. An exit whose notification failed after
+  the unlock therefore loses the LP bonus (accepted: the alternative is a stale record that pays).
+  A rebalance cannot leave a stale record any more: its notification reverts the whole rebalance.
+  Measured cost of the rebalance notification: 80,759 gas on the mock pool (optimized),
   180,550 in the coverage build, and 182,405 on the real Sepolia pool (`eth_estimateGas` of
   `onRebalance` sent from the vault's address, including the 21,000 intrinsic gas;
   `StakingV3SepoliaFork.test.js`); `onUnstake` 52,158 on the same basis. The margin on the real pool
@@ -1488,6 +1500,39 @@ refuses to unlink or replace a listener whose `totalReserved()` is above zero
 | L5 — the migrator accepted a pool or vault on another token | `initialize` requires `stakingPool.stakingToken() == asset` and `bonusVault.bonusToken() == asset` (`TokenPairMismatch`) |
 | L6 — the fork suite did not exercise the live upgrade | the suite starts from a proxy on the 746b22c vault (`LPStakingVaultPreListenerMock`) and executes `upgradeToAndCall` inside the batch; an LP unstake before the unlock forfeits on the real pool; both listener gas figures are printed |
 | L7 — the deploy script claimed to resume but redeployed | recorded kinds are reused ("recorded at …, reused") |
+
+**Change of 2026-11-10: a failed hook can no longer leave a record that pays.** Found on Sepolia
+stack #6 on 2026-11-09 (item 20): wallet B's position 234214 carried an LP reservation of 235.315
+tREAL; B rebalanced into 234216; the listener's fail-open `onRebalance` ran out of its 250,000 gas;
+the vault emitted `BonusListenerFailed(234214)` and completed the rebalance. The reservation stayed
+under the burned id 234214 (user B, active, unlock = the v3 end), 234216 got none, and `claim()` —
+which then paid every record in `lpTokens[user]` that was unlocked, not claimed and not forfeited —
+would have paid B the 235.315 tREAL after the unlock even if B had left the LP pool. Raising the
+allowance (item 20) removed that one failure, not the design that let a failed hook leave a payable
+record. Two changes:
+
+1. `LPStakingVault`: the listener's `onRebalance` is FAIL CLOSED, exactly like the escrow's (item
+   15): no `try`, no allowance, all the remaining gas, a revert reverts the rebalance. A re-range
+   whose bonus re-scaling cannot run does not happen; `unstake` stays open whatever the listener
+   does. `onUnstake` stays fail open with `bonusListenerGas` and its floor (an exit is never blocked
+   by a bonus contract), so `BonusListenerFailed` is now emitted by `unstake` only. The allowance's
+   storage field, bounds and floor are unchanged; the vault's storage layout is unchanged.
+2. `V3BonusVault`: `claim()` pays an LP record only when the vault still holds the position for the
+   record's user (`vault.stakerOf(tokenId) == r.user`) OR the record is SETTLED. A vault
+   notification for a record whose unlock has passed (`onUnstake(tokenId)`, or
+   `onRebalance(oldTokenId, …)`, which until now returned without touching anything) settles it:
+   `lpSettled[tokenId] = true`, event `LpBonusSettled(tokenId, user)`; the record stays under its
+   tokenId, unscaled, and pays. A record whose position the vault no longer holds for its user and
+   that is not settled is stale and pays nothing; `reconcileLp(tokenId)` now forfeits it after the
+   unlock too (before the unlock: unchanged), so `totalLpReserved` cannot stay inflated; a settled
+   record is never touched. Storage: `mapping(uint256 => bool) lpSettled` APPENDED at the end of the
+   ERC-7201 struct (slot base + 10); no existing field of `LpReservation` or of the struct moved
+   (validated against the stack #6 proxy `0x7203…5221`). New view `lpSettled(tokenId)`; the
+   `lpReservation(tokenId)` tuple is unchanged because the indexer vendors that ABI.
+
+`claim()` and `claimable()` now make one `stakerOf` view call per unsettled unlocked LP record of
+the caller (a user has one or two). With no vault linked an unsettled record is not payable; that
+state is reachable only on a bonus vault that was never linked.
 
 Tests: `test/forge/unit/{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`,
 `test/forge/fuzz/StakingV3Fuzz.t.sol`, `test/forge/invariant/V3BonusVaultInvariants.t.sol` (I1
@@ -1585,3 +1630,16 @@ rebalanced (block 12103759, tx `0x78650e89…2111`, gas used 1,247,912): `LpBonu
 D, 211.688, 106.028)`, no `BonusListenerFailed`, the new row active for D, the old row deleted,
 `totalLpReserved` down by exactly the scaled-away 105.661 tREAL. Records: scripts/README.md, "Staking
 v3 on stack #6", "Resolved (2026-11-10)".
+
+**Follow-up of 2026-11-10: the listener's `onRebalance` fails closed.** The larger allowance fixed
+the measured failure, but a fail-open `onRebalance` still let any future failure (another repricing,
+a listener upgrade that costs more) complete a rebalance and leave the LP reservation under the
+burned id, where `claim()` would have paid it. The vault now calls the listener's `onRebalance`
+without `try` and without an allowance, like the escrow's (item 19, "Change of 2026-11-10"), and the
+bonus vault pays an LP record only while the vault holds the position for its user or after a
+settlement. `bonusListenerGas` / `bonusListenerGasFloor` now govern the listener's `onUnstake` only;
+`setBonusHookGas` keeps both parameters. In `scripts/measure-hook-gas.js` the listener's
+`onRebalance` row reads "fail closed (no stipend)" like the escrow's, still measured and printed.
+The cost of that hook now raises the gas a rebalance uses (about 340,000 on Sepolia for an active
+record), it can no longer fail silently. Sizes after it (`forge build --sizes`): `LPStakingVault`
+19,717 B runtime (4,859 B under EIP-170), `V3BonusVault` 12,988 B, `StakingMigrator` 21,487 B.

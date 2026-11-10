@@ -49,6 +49,13 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-10 (stale LP record fix, audit notes items 19 and 20) ──
+//    LPStakingVault lines 262 -> 255 (251 hit), branches 49 -> 45 (45): the listener's fail-open
+//    `onRebalance` wrapper (its `try`, floor check and `catch`) is gone, the call is fail closed.
+//    V3BonusVault lines 216 -> 229 (226 hit), branches 35 -> 39 (39): settlement (`_settleLp`,
+//    `lpSettled`), the held-or-settled rule in `_lpClaimable`, `reconcileLp` after the unlock.
+//    Every new branch is hit; the uncovered lines are the same `--ir-minimum` artefacts as below
+//    (accessor body, `_disableInitializers`, `__Ownable2Step_init`, `_checkTwapDeviation`).
 // ── Pinned floors, re-measured 2026-11-09, second time (the security-review fix round) ── only
 //    the three staking v3 denominators moved, every new branch is hit and the uncovered lines are
 //    the SAME artefacts as below: WeightedStakingPoolV3 lines 317 -> 322 (303 hit), branches 90 -> 92
@@ -223,8 +230,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 26, minHit: 26},
   },
   "contracts/lp-staking/LPStakingVault.sol": {
-    lines: {found: 262, minHit: 258},
-    branches: {found: 49, minHit: 49},
+    lines: {found: 255, minHit: 251},
+    branches: {found: 45, minHit: 45},
   },
   "contracts/lp-staking/LPZapper.sol": {
     lines: {found: 102, minHit: 98},
@@ -271,8 +278,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 92, minHit: 30},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 216, minHit: 213},
-    branches: {found: 35, minHit: 35},
+    lines: {found: 229, minHit: 226},
+    branches: {found: 39, minHit: 39},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
     lines: {found: 238, minHit: 232},

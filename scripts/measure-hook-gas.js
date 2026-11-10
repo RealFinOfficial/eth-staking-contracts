@@ -3,8 +3,8 @@ const hre = require("hardhat");
 const pools = require("./lib/pools");
 const { scanLogs } = require("./lib/logs");
 
-// Measures, READ-ONLY, what the vault's two fail-open bonus notifications really cost on the live
-// chain, and compares it with the gas the vault forwards (audit notes item 20, "Glamsterdam: fixed
+// Measures, READ-ONLY, what the vault's bonus notifications really cost on the live chain, and
+// compares the two fail-open ones with the gas the vault forwards (audit notes item 20, "Glamsterdam: fixed
 // hook stipends"). Run it before every mainnet operation that links, upgrades or re-sizes a hook,
 // and after every network fork.
 //
@@ -12,9 +12,11 @@ const { scanLogs } = require("./lib/logs");
 //     npx hardhat run scripts/measure-hook-gas.js --network mainnet
 //
 // Why it exists. The vault calls the ApeBond `BonusEscrow.onUnstake` and the staking v3
-// `V3BonusVault.onUnstake` / `onRebalance` inside `try` with a fixed gas allowance, and a hook that
-// runs out of it fails OPEN: the exit or the rebalance completes, the bonus is not forfeited or not
-// moved, and only a `BonusHookFailed` / `BonusListenerFailed` event says so. Glamsterdam (EIP-8037,
+// `V3BonusVault.onUnstake` inside `try` with an owner-set gas allowance, and a hook that runs out of
+// it fails OPEN: the exit completes, the bonus is not forfeited, and only a `BonusHookFailed` /
+// `BonusListenerFailed` event says so. Both `onRebalance` calls (escrow and listener; the listener's
+// since 2026-11-10) fail CLOSED with all the remaining gas: their rows are measured and printed as
+// "fail closed (no stipend)", because their cost is gas the rebalance itself must carry. Glamsterdam (EIP-8037,
 // live on Sepolia since 2026-10-06) made a new storage slot about ten times dearer, which Foundry and
 // the Hardhat network do not reproduce. Only the live chain gives the real figure.
 //
@@ -262,7 +264,9 @@ async function main() {
       label: "V3BonusVault",
       address: listenerAddress,
       allowance: allowances.listener,
-      rebalanceAllowance: allowances.listener,
+      // The listener's onRebalance is FAIL CLOSED since 2026-11-10 (no try, all remaining gas),
+      // like the escrow's: measured for the record, not held to an allowance.
+      rebalanceAllowance: null,
       ids:
         idList("MEASURE_LISTENER_TOKEN_IDS") ||
         (await activeIds({

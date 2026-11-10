@@ -255,7 +255,7 @@ const OWNER_TIER = {
     signature: "function setBonusListener(address newListener)",
     kinds: ["LPStakingVault"],
     note:
-      "links the staking v3 V3BonusVault notified (fail open) on unstake and rebalance, or " +
+      "links the staking v3 V3BonusVault notified on unstake (fail open) and rebalance (fail closed), or " +
       "address(0) to unlink it; refused while the linked listener still owes totalReserved()",
   },
   setBonusHookGas: {

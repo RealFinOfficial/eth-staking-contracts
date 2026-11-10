@@ -823,7 +823,10 @@ reverts `InsufficientFunds(requested, available)` while the balance is short. A 
 before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed). The LP
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
-unlock both are no-ops and it stays claimable. Forfeited amounts stay in the vault as surplus
+unlock either one SETTLES it (`LpBonusSettled(tokenId, user)`, view `lpSettled(tokenId)`): it stays
+under the tokenId it had, unscaled, and pays. `claim()` pays an unlocked LP reservation only while
+the vault still holds that tokenId for the reservation's user (`stakerOf(tokenId) == user`) or once
+it is settled; any other record is stale and pays nothing (2026-11-10, see below). Forfeited amounts stay in the vault as surplus
 (`recoverSurplus(to, amount)`, owner). `totalLpReserved()` is the LP part of `totalReserved()`.
 
 **The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve` and `reserveLp` revert
@@ -831,14 +834,17 @@ unlock both are no-ops and it stays claimable. Forfeited amounts stay in the vau
 deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner (`setMaxTotalReserved`, event
 `MaxTotalReservedSet(previousMax, newMax)`, a timelock operation).
 
-**A failed listener notification (`BonusListenerFailed`).** The LP vault's two notifications fail
-open: when one reverts, the vault emits `BonusListenerFailed(tokenId)` and the LP reservation stays
-active under that tokenId. The backend MUST call `V3BonusVault.reconcileLp(tokenId)` (permissionless)
-for every `BonusListenerFailed` event: when the vault no longer holds the position for the
-reservation's user (`vault.stakerOf(tokenId) != user`: unstaked, or re-ranged into a new tokenId)
-and the reservation is still before its unlock, it is forfeited (`LpBonusForfeited`); otherwise the
-call changes nothing. A re-range whose notification failed therefore loses the LP bonus instead of
-carrying it to the new tokenId.
+**A failed listener notification (`BonusListenerFailed`).** Since 2026-11-10 the LP vault's
+`onRebalance` notification to the listener FAILS CLOSED like the escrow's (no `try`, all the
+remaining gas): a rebalance whose bonus re-scaling cannot run reverts, and the reservation never
+stays behind under the burned tokenId. The `onUnstake` notification still fails OPEN (an exit is
+never blocked): when it reverts, the vault emits `BonusListenerFailed(tokenId)` and the LP
+reservation stays under that tokenId, unsettled. Such a stale record is never paid by `claim()`.
+The backend MUST call `V3BonusVault.reconcileLp(tokenId)` (permissionless) for every
+`BonusListenerFailed` event: when the vault no longer holds the position for the reservation's
+user (`vault.stakerOf(tokenId) != user`) and the reservation is not settled, it is forfeited
+(`LpBonusForfeited`), before or after the unlock, so `totalLpReserved()` does not stay inflated;
+otherwise the call changes nothing. An exit whose notification failed therefore loses the LP bonus.
 
 **The exit after the end.** The pool is deployed with `rewardsWaived = true`
 (`V3_REWARDS_WAIVED`, default true): `unstake()` after the end pays the principal with a ZERO reward
@@ -1027,12 +1033,65 @@ deleted; `totalLpReserved` 447.003 -> 341.342 (down by exactly 211.688 - 106.028
 = D. Afterwards `totalReserved` 3,235.423 tREAL, bonus vault balance 20,000 tREAL. B's stranded
 reservation under 234214 (235.315 tREAL) is untouched; `reconcileLp(234214)` was NOT called.
 
+### Upgrade of the stack #6 bonus vault and vault (pending)
+
+The 2026-11-10 fix (audit notes items 19 and 20: the listener's `onRebalance` fails closed; the
+bonus vault pays an LP record only while the vault holds it for its user or once settled) needs
+both implementations replaced on Sepolia stack #6. Not done yet; for the operator. Neither upgrade
+needs a reinitializer: `V3BonusVault` only APPENDS `lpSettled` (zero = not settled, the right value
+for every existing record) and the vault's layout is unchanged; its hook gas slot is already set,
+so `deploy-implementation.js` prints `data` = `0x`. Both layouts were validated against the live
+proxies with `upgrades.validateUpgrade` (bonus vault `0x7203…5221`, vault `0x4B2f…2eac`).
+
+```bash
+IMPL_TARGET=V3BonusVault  npx hardhat run scripts/deploy-implementation.js --network sepolia
+IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --network sepolia
+```
+
+Then ONE timelock batch (owner tier, `LPTimelock` `0xf2F678AC5260BB297682D54DcD945BCB78901E20`,
+300 s), the two upgrades in this order, as a `TIMELOCK_BATCH` file for `lp-timelock.js`
+(`schedule-batch`, wait 300 s, `execute-batch` with the same file):
+
+```json
+[
+  { "target": "V3BonusVault",   "fn": "upgradeToAndCall", "args": ["<new V3BonusVault impl>", "0x"] },
+  { "target": "LPStakingVault", "fn": "upgradeToAndCall", "args": ["<new LPStakingVault impl>", "0x"] }
+]
+```
+
+1. `V3BonusVault(0x72035F4BD96AcF498030E9A39eDc3546F3815221).upgradeToAndCall(<new bonus vault impl>, 0x)`
+2. `LPStakingVault(0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac).upgradeToAndCall(<new vault impl>, 0x)`
+
+Then, after the execute, ONE plain transaction from any wallet (the operator), not through the
+timelock (`reconcileLp` is permissionless and `lp-timelock.js` routes owner-tier functions only):
+
+3. `V3BonusVault(0x7203…5221).reconcileLp(234214)`: forfeits B's stranded 235.315 tREAL (read on
+   2026-11-10, block 12104019: user B, unlock 1794503412 = 12 Nov 19:10 Sofia, not claimed, not
+   forfeited; `stakerOf(234214)` = 0). Before the unlock the OLD implementation forfeits it as
+   well; after the unlock only the new one does, and until then the new `claim()` would not pay it.
+
+   ```bash
+   cast send 0x72035F4BD96AcF498030E9A39eDc3546F3815221 "reconcileLp(uint256)" 234214 --rpc-url <sepolia> --private-key <operator>
+   ```
+
+Timing: execute the batch BEFORE the unlock (12 Nov 19:10 Sofia, 17:10 UTC). An LP record whose
+position is unstaked or re-ranged after the unlock while the OLD bonus vault still runs is not
+settled (the old hooks return without writing), so after the upgrade it would count as stale and
+pay nothing.
+
+Read back after it: both ERC-1967 slots; `lpReservation(234214)` forfeited with amount 0;
+`totalLpReserved()` down by 235.315 tREAL (341.342 -> 106.028 on the 2026-11-10 state);
+`lpSettled(234226)` false and `stakerOf(234226)` = D (D's record pays at the unlock while D stays).
+
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 
-The vault calls the ApeBond `BonusEscrow.onUnstake` and the staking v3 listener's `onUnstake` /
-`onRebalance` inside `try` with a gas allowance, and a hook that runs out of it fails OPEN: the
-exit or the rebalance completes and the bonus is silently not forfeited or not moved (only
-`BonusHookFailed` / `BonusListenerFailed` says so). Glamsterdam (EIP-8037, on Sepolia since
+The vault calls the ApeBond `BonusEscrow.onUnstake` and the staking v3 listener's `onUnstake`
+inside `try` with a gas allowance, and a hook that runs out of it fails OPEN: the exit completes and
+the bonus is silently not forfeited (only `BonusHookFailed` / `BonusListenerFailed` says so). Both
+`onRebalance` calls fail CLOSED with all the remaining gas (the listener's since 2026-11-10; it
+failed open with the allowance before, which is how 234214 was stranded): they cannot fail
+silently, their cost is gas the rebalance carries, and the script prints them as "fail closed (no
+stipend)". Glamsterdam (EIP-8037, on Sepolia since
 2026-10-06, on mainnet at a date not yet set) makes a new storage slot about ten times dearer, so
 the allowances are owner-set since this fix: `setBonusHookGas(escrowGas, listenerGas)`, each
 100,000..3,000,000, defaults 400,000 / 1,000,000 (`initialize` on a new vault, `initializeV2()` in
@@ -1054,8 +1113,8 @@ staked (from the position manager, or from the vault's `Staked` / `Rebalanced` e
 is burned) and a tokenId nobody uses as the new id, so it writes a NEW reservation row. The
 estimate includes the 21,000 intrinsic gas and the calldata, so it overstates the hook's need.
 Verdict per row: OK at 1.5x or more, LOW from 1x, FAIL below; a LOW or FAIL row means
-`setBonusHookGas` through `lp-timelock.js` BEFORE the operation. The escrow's `onRebalance` is fail
-closed (all remaining gas, no allowance) and is printed for the record.
+`setBonusHookGas` through `lp-timelock.js` BEFORE the operation. The escrow's and the listener's
+`onRebalance` are fail closed (all remaining gas, no allowance) and are printed for the record.
 
 Run it: before every mainnet operation that links, upgrades or re-sizes a hook, after every network
 fork, and before every escrow or listener upgrade. The upgrade of a live vault is printed by
