@@ -53,6 +53,7 @@ const ethers = require("ethers");
 const { POOL_ABI, ERC20_ABI } = require("./constants");
 const profiles = require("./profiles");
 const { redactRpcText } = require("./redact");
+const { startRpcRelay } = require("./rpc-relay");
 
 /**
  * Every function below takes the profile as its LAST parameter and defaults it to the
@@ -603,25 +604,41 @@ async function establishFork({
 
   for (const url of candidates) {
     let node = null;
+    let relay = null;
     try {
+      // The node forks THROUGH a local relay (helpers/rpc-relay.js) that retries throttled or
+      // failed upstream reads and caps how many are in flight. `url` stays the upstream: it is
+      // what the suites log and what their "serves block N as the upstream does" checks read.
+      relay = await startRpcRelay({ upstream: url, label: profile.logLabel });
       const port = await getFreePort();
       const logFile = path.join(logDir, `hardhat-node-${port}.log`);
-      node = await spawnForkNode({ url, port, logFile, profile, blockNumber });
+      const spawned = await spawnForkNode({ url: relay.url, port, logFile, profile, blockNumber });
+      const relayRef = relay;
+      node = {
+        ...spawned,
+        relay: relayRef,
+        stop: async () => {
+          await spawned.stop();
+          await relayRef.stop();
+        },
+      };
 
       const provider = new ethers.JsonRpcProvider(node.rpcUrl, undefined, PROVIDER_OPTIONS);
       provider.pollingInterval = 100;
 
       try {
         const probe = await probeFork(provider, profile, { blockNumber });
-        return { node, provider, url, probe, profile };
+        return { node, provider, url, relay, probe, profile };
       } catch (error) {
         provider.destroy();
         throw error;
       }
     } catch (error) {
       if (node) await node.stop();
+      else if (relay) await relay.stop();
+      const relayDetail = relay && relay.stats.lastError ? ` [relay: ${relay.stats.lastError}]` : "";
       // Printed or thrown by decideOnForkFailure: the endpoint's key must not go with it.
-      failures.push(redactRpcText(`${url}: ${error.shortMessage || error.message}`));
+      failures.push(redactRpcText(`${url}: ${error.shortMessage || error.message}${relayDetail}`));
     }
   }
 
