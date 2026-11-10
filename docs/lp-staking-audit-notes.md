@@ -1698,7 +1698,7 @@ and the new pool has only `stakeFor(address,uint256)`, the two proxies are upgra
 batch on stack #6: `WeightedStakingPoolV3.upgradeToAndCall(newImpl, 0x)` and
 `StakingMigrator.upgradeToAndCall(newImpl, 0x)`, no reinitializer (scripts/README.md, "Upgrade
 of the stack #6 v3 pool and migrator").
-Live on stack #6 since block 12105028 (2026-11-10 15:48 Sofia, 13:48 UTC), built from bd31c48: the two Low fixes above (ed33613) are not on stack #6 yet.
+Live on stack #6 since block 12105028 (2026-11-10 15:48 Sofia, 13:48 UTC), built from bd31c48. The two Low fixes live on stack #6 since block 12105079 (2026-11-10 15:58 Sofia, 13:58 UTC), implementation `0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72`.
 
 ## 20. Glamsterdam: fixed hook stipends (found and fixed 2026-11-09)
 

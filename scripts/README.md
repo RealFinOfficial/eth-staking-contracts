@@ -1009,6 +1009,9 @@ upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below
 | 2026-11-10: `StakingMigrator` implementation (`TransitionVoucher` without `weight`; built from bd31c48) | `0x0c1522dE805cE814F776086Fa4B6dBfcEadFeB77` | 12104972 | `0x7d8d584ed4ae058ee2ee850379ef1758c2ca2a435f35d359b57000d34e42f17b` |
 | 2026-11-10: timelock `scheduleBatch` (2 calls: pool then migrator `upgradeToAndCall(<impl>, 0x)`, tag `v3-minimal-pool`, id `0x0677e6ea…9fb9`) | | 12105001 | `0x526320429a8ebbb5e841ab84c1208e4bdb7ef09f22b36677b5e060df565dbd1a` |
 | 2026-11-10: timelock `executeBatch` (two `Upgraded` events) | | 12105028 | `0x31c60f220690c43623a3b93522a5352a7947acea86450d946b6408b79d127076` |
+| 2026-11-10: `WeightedStakingPoolV3` implementation (the two Low fixes: `BonusVaultLocked`, surplus-only `recoverERC20`; built from 8554d43 = ed33613 code; 9,840 B) | `0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72` | 12105041 | `0x670be719c6d7428b65e1b49718cab97b540a5d67fc50901bfe0d375a37996f93` |
+| 2026-11-10: timelock `schedule` pool `upgradeToAndCall(0x6180…1A72, 0x)` (tag `v3-pool-low-closure`, id `0x94888a62…979a`) | | 12105052 | `0x0a9ab2329237592d2fb46840d88b923dd12e6dbad492cdb37f08223f3bc31da5` |
+| 2026-11-10: timelock `execute` (pool `Upgraded`; read back: links, window, `totalStaked` and the four stakes unchanged; `setBonusVault(0)` from the timelock reverts `BonusVaultLocked(0x7203…5221, 1794503412)`; `recoverERC20($ASSET, 1)` reverts `SurplusExceeded(1, 0)`, pool balance = `totalStaked`) | | 12105079 | `0x22f4794e642ecffbb8c49234961eded81bcfdd409a70a6946f32cf9ff14f7d65` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
@@ -1171,7 +1174,8 @@ B 8,821.915741, C 9,999.000000, D 8,939.724166 tREAL) identical to the read befo
 ### Upgrade of the stack #6 v3 pool and migrator (the minimal v3 pool and the voucher without weight): done 2026-11-10
 
 Done 2026-11-10 by the deployer `0x5576…8A35` from bd31c48 (the review fixes of ed33613, the
-bonus vault lock and the surplus `recoverERC20`, are NOT in these implementations), all
+bonus vault lock and the surplus `recoverERC20`, are NOT in these implementations; they went live
+in a second pool upgrade at block 12105079, 15:58 Sofia, 13:58 UTC, tag `v3-pool-low-closure`), all
 transactions in the stack #6 table above. Implementations deployed with `deploy-implementation.js`:
 pool `0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316` (15:36:48 Sofia, 13:36:48 UTC, block 12104969;
 9,609 B runtime) and migrator `0x0c1522dE805cE814F776086Fa4B6dBfcEadFeB77` (15:37:24 Sofia, 13:37:24

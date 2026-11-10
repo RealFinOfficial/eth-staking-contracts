@@ -256,11 +256,36 @@
       "address": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
       "deployTx": "0x8134104f25c7c40a387ba7180ae03ecf4257a49005dc6151afb5066545b5b5ba",
       "block": 12098916,
-      "implementation": "0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316",
-      "implementationTx": "0xd8aaf8053588e3b8bb5ebefca6681a52569c316eddf89ad2c0106be0bc18883f",
-      "previousImplementation": "0x2E7b8ACaE6e746371F2822A83A052e3eA579860A",
-      "implementationBlock": 12105028,
-      "upgradeTx": "0x31c60f220690c43623a3b93522a5352a7947acea86450d946b6408b79d127076",
+      "implementation": "0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72",
+      "implementationTx": "0x670be719c6d7428b65e1b49718cab97b540a5d67fc50901bfe0d375a37996f93",
+      "previousImplementation": "0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316",
+      "implementationBlock": 12105079,
+      "upgradeTx": "0x22f4794e642ecffbb8c49234961eded81bcfdd409a70a6946f32cf9ff14f7d65",
+      "implementationHistory": [
+        {
+          "implementation": "0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06",
+          "activeFromBlock": 12098916,
+          "note": "first v3 pool, v2 penalty"
+        },
+        {
+          "implementation": "0x2E7b8ACaE6e746371F2822A83A052e3eA579860A",
+          "activeFromBlock": 12104575,
+          "upgradeTx": "0x0d8374fe444ae33f3a10c976b3186e7449d1a0d8c82d7e7896331e55df421e4d",
+          "note": "no principal penalty, 62f6165"
+        },
+        {
+          "implementation": "0x2a486D9d9652f1436f1FaFf03b00FE93a4F60316",
+          "activeFromBlock": 12105028,
+          "upgradeTx": "0x31c60f220690c43623a3b93522a5352a7947acea86450d946b6408b79d127076",
+          "note": "minimal pool, bd31c48, batch v3-minimal-pool with the migrator"
+        },
+        {
+          "implementation": "0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72",
+          "activeFromBlock": 12105079,
+          "upgradeTx": "0x22f4794e642ecffbb8c49234961eded81bcfdd409a70a6946f32cf9ff14f7d65",
+          "note": "bonus vault lock + surplus recoverERC20, ed33613"
+        }
+      ],
       "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "rewardToken": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "activationEpoch": 1794244212,
