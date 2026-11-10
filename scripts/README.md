@@ -983,6 +983,9 @@ upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below
 | 2026-11-10: timelock `scheduleBatch` (2 calls: bonus vault then vault `upgradeToAndCall(<impl>, 0x)`, tag `v3-review-closure`, id `0x29ebca62…efb8`) | | 12104236 | `0x0a5a5ddd4c993f3b9f8a662ada94f4a55f9c9ab26a6eaa152ebf89eb46623aec` |
 | 2026-11-10: timelock `executeBatch` (two `Upgraded` events) | | 12104265 | `0x513c575e69b674188f2973f74ef6312c1af371109ab104f2368ebc7c0868df6e` |
 | 2026-11-10: `V3BonusVault.reconcileLp(234214)` from the deployer -> `LpBonusForfeited(234214, B, 235.314762005877517222)` | | 12104270 | `0x0862b0256b4148576fdb58a0061d247fe32aad93c51b0e244ac0bfb33ee76730` |
+| 2026-11-10: `WeightedStakingPoolV3` implementation (no principal penalty; built from 62f6165) | `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A` | 12104529 | `0x8dc4e15b7cba9cca5b29089efedee6621e170646de4ef979d1cc9aeebd2f12b2` |
+| 2026-11-10: timelock `schedule` pool `upgradeToAndCall(0x2E7b…860A, 0x)` (tag `v3-pool-no-penalty`, id `0x509e4c2b…df07`) | | 12104548 | `0xf1a62d8af73045335ae238fd7638972d68186d4a765cc66de0c01736e61d0745` |
+| 2026-11-10: timelock `execute` (pool `Upgraded`) | | 12104575 | `0x0d8374fe444ae33f3a10c976b3186e7449d1a0d8c82d7e7896331e55df421e4d` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
@@ -1015,7 +1018,7 @@ rewards 335.672514 / 333.333333 / 330.994152 tUSDC), then ran one route with a T
 C's early `withdraw(1 tREAL)` (block 12099212, `0x4187b9e844267502a4ef218d0b757d592efa923c3d1ba4519179634d0348234a`):
 `BonusForfeited(C, 500)`, `reservedOf(C)` = 0, `totalReserved` 2,235.423; penalty 0.4937 tREAL
 (the v2 penalty the first v3 implementation still carried; removed by the decision of 2026-11-10,
-see "Pool upgrade pending" below).
+see "Pool upgrade on stack #6" below).
 
 **Open finding: the listener runs out of gas on Sepolia.** B's `rebalance(234214)` to
 -288780 .. -285180, no swap (block 12099214, `0xf8406bc0c085fffb6da13e08b37074766c063a9abfb105b36c37aa33a4031f6a`)
@@ -1124,16 +1127,23 @@ active, `stakerOf(234226)` = D); `totalReserved()` 3,000.108576690943245770 tREA
 D's record under 234226 (106.028 tREAL) is untouched and pays at the unlock (12 Nov 19:10 Sofia,
 17:10 UTC) while D stays staked.
 
-### Pool upgrade pending on stack #6 (no principal penalty, 2026-11-10)
+### Pool upgrade on stack #6 (no principal penalty): done 2026-11-10
 
-The live v3 pool `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` (implementation
-`0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06`) still runs v2's early-withdrawal penalty. The new
-implementation removes it (audit notes item 19, "Decision of 2026-11-10"). PENDING: deploy the
-implementation with `deploy-implementation.js`, then ONE timelock operation
-`WeightedStakingPoolV3(0xB8F5…fcb9).upgradeToAndCall(<new WeightedStakingPoolV3 impl>, 0x)`. No
-reinitializer: the layout is unchanged (`totalPenalized` keeps its slot and stays at the
-0.493729166666666666 tREAL the C rehearsal recorded; it never grows again).
-`upgrades.validateUpgrade` against the live proxy passed on 2026-11-10.
+The live v3 pool `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` ran v2's early-withdrawal penalty
+under its first implementation `0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06`. The new implementation
+`0x2E7b8ACaE6e746371F2822A83A052e3eA579860A` (built from 62f6165) removes it (audit notes item 19,
+"Decision of 2026-11-10"). Deployed with `deploy-implementation.js` (block 12104529, 14:07 Sofia,
+12:07 UTC); `prepareUpgrade` validated it against the deployed layout and
+`validate-upgrade-safety.js` printed "storage layout is a legal successor" for the pool. ONE timelock
+operation `upgradeToAndCall(0x2E7b…860A, 0x)`, tag `v3-pool-no-penalty`, id
+`0x509e4c2b6eb372a7ac2dc71d16329402d85a5c450684764c3668fcd1f746df07`: scheduled in block 12104548
+(14:11 Sofia, 12:11 UTC), executed in block 12104575 (14:17 Sofia, 12:17 UTC). No reinitializer: the
+layout is unchanged. Read back after it: the ERC-1967 slot = `0x2E7b…860A`; `owner()` = the
+timelock; `migrator()`, `bonusVault()`, `signer()` (the deployer) and `rewardsWaived()` (true)
+unchanged; `totalStaked()` 38,939.809930771574143787 tREAL and the four stakes (A 11,179.170023,
+B 8,821.915741, C 9,999.000000, D 8,939.724166 tREAL) identical to the read before the upgrade;
+`totalPenalized()` stays 0.493729166666666666 tREAL (C's rehearsal penalty, never grows again);
+`PENALTY_RECEIVER()` and `getCurrentPenaltyPct()` now revert.
 
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 

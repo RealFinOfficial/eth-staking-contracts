@@ -1621,6 +1621,7 @@ its view `totalPenalized()` (zero on a fresh deploy; stack #6 keeps the 0.493729
 of the 2026-11-09 rehearsal), and, always zero, `Withdrawn.penalty`, `GlobalUpdated.totalPenalized`, and
 `PoolInitialized.maxPenaltyBps` / `minPenaltyBps` (emitted as 0, 0). The stack #6 pool upgrade is
 one timelock operation, `WeightedStakingPoolV3.upgradeToAndCall(newImpl, 0x)`, no reinitializer.
+Live on stack #6 since block 12104575 (2026-11-10 14:17 Sofia, 12:17 UTC), implementation `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A`.
 
 ## 20. Glamsterdam: fixed hook stipends (found and fixed 2026-11-09)
 

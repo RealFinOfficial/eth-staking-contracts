@@ -8125,6 +8125,515 @@
           ]
         }
       }
+    },
+    "07eb92f98b210dd18a55f159feb99144bfac4e52f224350ae50dffd184086a5b": {
+      "address": "0x2E7b8ACaE6e746371F2822A83A052e3eA579860A",
+      "layout": {
+        "solcVersion": "0.8.38",
+        "storage": [],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_bytes32": {
+            "label": "bytes32",
+            "numberOfBytes": "32"
+          },
+          "t_contract(IERC20)748": {
+            "label": "contract IERC20",
+            "numberOfBytes": "20"
+          },
+          "t_mapping(t_address,t_struct(StakeInfo)3601_storage)": {
+            "label": "mapping(address => struct WeightedStakingPoolV3.StakeInfo)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_uint256)": {
+            "label": "mapping(address => uint256)",
+            "numberOfBytes": "32"
+          },
+          "t_string_storage": {
+            "label": "string",
+            "numberOfBytes": "32"
+          },
+          "t_struct(EIP712Storage)200_storage": {
+            "label": "struct EIP712Upgradeable.EIP712Storage",
+            "members": [
+              {
+                "label": "_hashedName",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_hashedVersion",
+                "type": "t_bytes32",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "_name",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "_version",
+                "type": "t_string_storage",
+                "offset": 0,
+                "slot": "3"
+              }
+            ],
+            "numberOfBytes": "128"
+          },
+          "t_struct(InitializableStorage)558_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(Ownable2StepStorage)14_storage": {
+            "label": "struct Ownable2StepUpgradeable.Ownable2StepStorage",
+            "members": [
+              {
+                "label": "_pendingOwner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)74_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(PoolStorage)3680_storage": {
+            "label": "struct WeightedStakingPoolV3.PoolStorage",
+            "members": [
+              {
+                "label": "stakingToken",
+                "type": "t_contract(IERC20)748",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "rewardToken",
+                "type": "t_contract(IERC20)748",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "activationEpoch",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "endEpoch",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "poolDuration",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "signer",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "totalStaked",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "6"
+              },
+              {
+                "label": "totalWeightedStaked",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "7"
+              },
+              {
+                "label": "totalAccumulatedWeight",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "8"
+              },
+              {
+                "label": "totalForfeitedWeight",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "9"
+              },
+              {
+                "label": "globalLastUpdateTime",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "10"
+              },
+              {
+                "label": "totalRewards",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "11"
+              },
+              {
+                "label": "totalRewardsClaimed",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "12"
+              },
+              {
+                "label": "totalPenalized",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "13"
+              },
+              {
+                "label": "stakes",
+                "type": "t_mapping(t_address,t_struct(StakeInfo)3601_storage)",
+                "offset": 0,
+                "slot": "14"
+              },
+              {
+                "label": "claimedRewards",
+                "type": "t_mapping(t_address,t_uint256)",
+                "offset": 0,
+                "slot": "15"
+              },
+              {
+                "label": "nonces",
+                "type": "t_mapping(t_address,t_uint256)",
+                "offset": 0,
+                "slot": "16"
+              },
+              {
+                "label": "migrator",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "17"
+              },
+              {
+                "label": "bonusVault",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "18"
+              },
+              {
+                "label": "rewardsWaived",
+                "type": "t_bool",
+                "offset": 20,
+                "slot": "18"
+              }
+            ],
+            "numberOfBytes": "608"
+          },
+          "t_struct(StakeInfo)3601_storage": {
+            "label": "struct WeightedStakingPoolV3.StakeInfo",
+            "members": [
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "weight",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "accumulatedWeight",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "lastUpdateTime",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "3"
+              }
+            ],
+            "numberOfBytes": "128"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          }
+        },
+        "namespaces": {
+          "erc7201:real.staking.storage.WeightedStakingPoolV3": [
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "stakingToken",
+              "type": "t_contract(IERC20)748",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:106",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "rewardToken",
+              "type": "t_contract(IERC20)748",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:107",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "activationEpoch",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:108",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "endEpoch",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:109",
+              "offset": 0,
+              "slot": "3"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "poolDuration",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:109",
+              "offset": 0,
+              "slot": "4"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "signer",
+              "type": "t_address",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:110",
+              "offset": 0,
+              "slot": "5"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalStaked",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:110",
+              "offset": 0,
+              "slot": "6"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalWeightedStaked",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:110",
+              "offset": 0,
+              "slot": "7"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalAccumulatedWeight",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:111",
+              "offset": 0,
+              "slot": "8"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalForfeitedWeight",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:111",
+              "offset": 0,
+              "slot": "9"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "globalLastUpdateTime",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:111",
+              "offset": 0,
+              "slot": "10"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalRewards",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:112",
+              "offset": 0,
+              "slot": "11"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalRewardsClaimed",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:112",
+              "offset": 0,
+              "slot": "12"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "totalPenalized",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:120",
+              "offset": 0,
+              "slot": "13"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "stakes",
+              "type": "t_mapping(t_address,t_struct(StakeInfo)3601_storage)",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:120",
+              "offset": 0,
+              "slot": "14"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "claimedRewards",
+              "type": "t_mapping(t_address,t_uint256)",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:121",
+              "offset": 0,
+              "slot": "15"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "nonces",
+              "type": "t_mapping(t_address,t_uint256)",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:122",
+              "offset": 0,
+              "slot": "16"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "migrator",
+              "type": "t_address",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:123",
+              "offset": 0,
+              "slot": "17"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "bonusVault",
+              "type": "t_address",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:127",
+              "offset": 0,
+              "slot": "18"
+            },
+            {
+              "contract": "WeightedStakingPoolV3",
+              "label": "rewardsWaived",
+              "type": "t_bool",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:130",
+              "offset": 20,
+              "slot": "18"
+            }
+          ],
+          "erc7201:openzeppelin.storage.EIP712": [
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_hashedName",
+              "type": "t_bytes32",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:37",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_hashedVersion",
+              "type": "t_bytes32",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:38",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_name",
+              "type": "t_string_storage",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:40",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "EIP712Upgradeable",
+              "label": "_version",
+              "type": "t_string_storage",
+              "src": "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol:41",
+              "offset": 0,
+              "slot": "3"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable2Step": [
+            {
+              "contract": "Ownable2StepUpgradeable",
+              "label": "_pendingOwner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol:29",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
     }
   }
 }
