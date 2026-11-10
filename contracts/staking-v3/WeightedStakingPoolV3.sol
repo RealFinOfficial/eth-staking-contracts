@@ -20,10 +20,19 @@ import "./interfaces/IStakingV3.sol";
  *
  *  WHAT IS KEPT FROM V2, unchanged in meaning: the lifecycle (stake before `endEpoch`, weight
  *  accrues from `activationEpoch` to `endEpoch`, `withdraw` before the end forfeits the weight of the
- *  withdrawn share and pays the linear penalty to {PENALTY_RECEIVER}, `unstake` after the end pays
- *  the stake and the pro-rata reward, `emergencyUnstake` after the end pays the stake alone), the
- *  EIP-712 weight vouchers (`Stake`, `Withdraw`, `UpdateWeight`, domain "WeightedStakingPool" / "1",
- *  verifying contract = this proxy), the per-user nonces, and every event with its arguments.
+ *  withdrawn share, `unstake` after the end pays the stake and the pro-rata reward,
+ *  `emergencyUnstake` after the end pays the stake alone), the EIP-712 weight vouchers (`Stake`,
+ *  `Withdraw`, `UpdateWeight`, domain "WeightedStakingPool" / "1", verifying contract = this proxy),
+ *  the per-user nonces, and every event with its arguments.
+ *
+ *  THE V3 EXIT RULE (decision of 2026-11-10): v3 has NO principal penalty. A `withdraw` before
+ *  `endEpoch` returns the withdrawn principal IN FULL to the user. Its only consequences are that the
+ *  accumulated weight of the withdrawn share is forfeited, and that the bonus vault forfeits the
+ *  user's whole v3 bonus reservation (through the `bonusVault.onEarlyExit` notification below).
+ *  Nothing is ever sent to a penalty receiver. The penalty fields that remain in storage and in the
+ *  events (`totalPenalized`, `Withdrawn.penalty`, `GlobalUpdated.totalPenalized`,
+ *  `PoolInitialized.maxPenaltyBps` / `minPenaltyBps`) are kept only so the storage layout and the
+ *  ABI that indexers decode stay the same; nothing adds to them (zero on a fresh deploy).
  *
  *  WHAT IS DIFFERENT, and why:
  *    - Every value lives in ONE ERC-7201 namespaced struct; the implementation has no state and its
@@ -72,8 +81,6 @@ contract WeightedStakingPoolV3 is
     uint256 public constant BASE_WEIGHT = 1000; // x1.0
     uint256 public constant MAX_WEIGHT = 2000; // x2.0
 
-    uint256 public constant MAX_PENALTY_BPS = 5000; // 50%
-    uint256 public constant MIN_PENALTY_BPS = 500; // 5%
     uint256 public constant BPS_DENOMINATOR = 10000;
 
     bytes32 public constant STAKE_TYPEHASH =
@@ -82,8 +89,6 @@ contract WeightedStakingPoolV3 is
         keccak256("Withdraw(address user,uint256 amount,uint256 weight,uint256 nonce,uint256 deadline)");
     bytes32 public constant UPDATE_WEIGHT_TYPEHASH =
         keccak256("UpdateWeight(address user,uint256 amount,uint256 weight,uint256 nonce,uint256 deadline)");
-
-    address public constant PENALTY_RECEIVER = 0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a;
 
     // ──────────────────────── Storage ──────────────────────────
 
@@ -102,6 +107,10 @@ contract WeightedStakingPoolV3 is
         uint256 globalLastUpdateTime;
         uint256 totalRewards;
         uint256 totalRewardsClaimed;
+        /// DEPRECATED (2026-11-10, v3 has no principal penalty): never written any more; zero on a
+        /// fresh deploy (Sepolia stack #6 keeps the figure its first implementation recorded). The
+        /// field keeps its name and place so the layout of the deployed proxies does not shift (the
+        /// upgrades validator refuses a renamed struct member, even with `oz-renamed-from`).
         uint256 totalPenalized;
         mapping(address => StakeInfo) stakes;
         mapping(address => uint256) claimedRewards;
@@ -127,6 +136,7 @@ contract WeightedStakingPoolV3 is
     // ──────────────────────── Events ───────────────────────────
 
     event Staked(address indexed user, uint256 amount, uint256 weight, uint256 totalStaked);
+    /// @notice `penalty` is always 0: v3 returns the principal in full (kept for ABI compatibility).
     event Withdrawn(address indexed user, uint256 amount, uint256 forfeitedWeight, uint256 penalty);
     event Unstaked(
         address indexed user,
@@ -153,6 +163,8 @@ contract WeightedStakingPoolV3 is
         uint256 totalRewardsClaimed,
         uint256 timestamp
     );
+    /// @notice `maxPenaltyBps` and `minPenaltyBps` are always 0: v3 has no principal penalty; the
+    ///         fields stay so the v2-shaped event decodes unchanged. `bpsDenominator` is 10000.
     event PoolInitialized(
         address indexed stakingToken,
         address indexed rewardToken,
@@ -227,9 +239,7 @@ contract WeightedStakingPoolV3 is
         $.signer = signer_;
         $.rewardsWaived = rewardsWaived_;
 
-        emit PoolInitialized(
-            stakingToken_, rewardToken_, activationEpoch_, endEpoch_, MAX_PENALTY_BPS, MIN_PENALTY_BPS, BPS_DENOMINATOR
-        );
+        emit PoolInitialized(stakingToken_, rewardToken_, activationEpoch_, endEpoch_, 0, 0, BPS_DENOMINATOR);
         emit SignerChanged(address(0), signer_);
         emit MigratorSet(address(0), address(0));
         emit BonusVaultSet(address(0), address(0));
@@ -271,15 +281,6 @@ contract WeightedStakingPoolV3 is
             total += $.totalWeightedStaked * (t - $.globalLastUpdateTime);
         }
         return total - $.totalForfeitedWeight;
-    }
-
-    function _calculatePenalty(uint256 amount) internal view returns (uint256) {
-        PoolStorage storage $ = _poolStorage();
-        if (block.timestamp < $.activationEpoch) return 0;
-        if (block.timestamp >= $.endEpoch) return 0;
-        uint256 remaining = $.endEpoch - block.timestamp;
-        uint256 spread = MAX_PENALTY_BPS - MIN_PENALTY_BPS;
-        return (amount * (spread * remaining + MIN_PENALTY_BPS * $.poolDuration)) / ($.poolDuration * BPS_DENOMINATOR);
     }
 
     function _verifyWeightSignature(
@@ -392,8 +393,9 @@ contract WeightedStakingPoolV3 is
         _emitGlobal();
     }
 
-    /// @notice Withdraw before endEpoch. Before activation: free. During active: forfeit weight +
-    ///         penalty. Either way the user's whole v3 bonus reservation is forfeited.
+    /// @notice Withdraw before endEpoch. The principal is returned IN FULL (v3 has no penalty).
+    ///         During the active period the weight of the withdrawn share is forfeited. Either way
+    ///         the bonus vault forfeits the user's whole v3 bonus reservation.
     function withdraw(uint256 amount, uint256 weight, uint256 deadline, bytes calldata signature)
         external
         nonReentrant
@@ -419,7 +421,6 @@ contract WeightedStakingPoolV3 is
         _applyWeight(msg.sender, newWeight);
 
         uint256 forfeitedWeight = 0;
-        uint256 penalty = 0;
 
         if (block.timestamp >= $.activationEpoch) {
             uint256 proportionalWeight = (info.accumulatedWeight * amount + info.amount - 1) / info.amount;
@@ -427,8 +428,6 @@ contract WeightedStakingPoolV3 is
             $.totalForfeitedWeight += proportionalWeight;
             info.accumulatedWeight -= proportionalWeight;
             forfeitedWeight = proportionalWeight;
-
-            penalty = _calculatePenalty(amount);
         }
 
         info.amount -= amount;
@@ -438,23 +437,15 @@ contract WeightedStakingPoolV3 is
             _applyWeight(msg.sender, 0);
         }
 
-        uint256 userReceives = amount - penalty;
-        if (penalty > 0) {
-            $.totalPenalized += penalty;
-        }
-
         // After every state change, before any token leaves: the bonus is forfeited (fail closed).
         address bonusVault_ = $.bonusVault;
         if (bonusVault_ != address(0)) {
             IV3BonusVaultEarlyExit(bonusVault_).onEarlyExit(msg.sender);
         }
 
-        if (penalty > 0) {
-            $.stakingToken.safeTransfer(PENALTY_RECEIVER, penalty);
-        }
-        $.stakingToken.safeTransfer(msg.sender, userReceives);
+        $.stakingToken.safeTransfer(msg.sender, amount);
 
-        emit Withdrawn(msg.sender, amount, forfeitedWeight, penalty);
+        emit Withdrawn(msg.sender, amount, forfeitedWeight, 0);
         _emitStakeUpdated(msg.sender);
         _emitGlobal();
     }
@@ -674,6 +665,8 @@ contract WeightedStakingPoolV3 is
         return _poolStorage().totalRewardsClaimed;
     }
 
+    /// @notice Deprecated: v3 has no principal penalty and never adds to this counter. Zero on a fresh
+    ///         deploy; on Sepolia stack #6 it keeps what the first implementation recorded.
     function totalPenalized() external view returns (uint256) {
         return _poolStorage().totalPenalized;
     }
@@ -725,19 +718,5 @@ contract WeightedStakingPoolV3 is
         uint256 totalEffective = _totalEffectiveWeight();
         if (totalEffective == 0 || $.totalRewards == 0) return 0;
         return ($.totalRewards * w) / totalEffective;
-    }
-
-    function getCurrentPenaltyPct() external view returns (uint256) {
-        PoolStorage storage $ = _poolStorage();
-        if (block.timestamp < $.activationEpoch) return 0;
-        if (block.timestamp >= $.endEpoch) return 0;
-        uint256 remaining = $.endEpoch - block.timestamp;
-        return MIN_PENALTY_BPS + ((MAX_PENALTY_BPS - MIN_PENALTY_BPS) * remaining) / $.poolDuration;
-    }
-
-    function getCurrentPenalty(address user) external view returns (uint256) {
-        uint256 amount = _poolStorage().stakes[user].amount;
-        if (amount == 0) return 0;
-        return _calculatePenalty(amount);
     }
 }

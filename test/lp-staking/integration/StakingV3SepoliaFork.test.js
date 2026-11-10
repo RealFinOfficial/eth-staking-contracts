@@ -31,7 +31,8 @@
  *  10. george exits early while the listener reverts (fail open, `listenerMissedAt` before the
  *      unlock) and re-stakes the same NFT: the record is DEAD and `reconcileLp` forfeits it while
  *      re-staked; henry reaches the same state (kept for step 12); ivan joins LP
- *  11. carol withdraws from v3 early: her whole v3 reservation is forfeited
+ *  11. carol withdraws from v3 early: the principal back in full (no penalty in v3), her weight and
+ *      her whole v3 reservation forfeited
  *  12. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
  *      unlock (settled) and claims it; frank re-ranges after the unlock (settled under the old id)
  *      and claims it; henry's dead record is forfeited (not settled) by his after-unlock unstake;
@@ -719,12 +720,28 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     ivanTokenId = await joinLp(ivan);
   });
 
-  it("carol withdraws from v3 before the end: her whole v3 reservation is forfeited", async function () {
+  it("carol withdraws from v3 before the end: the principal in full, her weight and whole v3 reservation forfeited", async function () {
+    // v2's penalty receiver: v3 has no principal penalty (decision of 2026-11-10) and never pays it.
+    const V2_PENALTY_RECEIVER = "0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a";
     const owed = (await bonusVault.reservedOf(carol.address))[0];
     expect(owed).to.be.greaterThan(0n);
-    await expect(poolV3.connect(carol).withdraw(ASSET(1), 0, 0, "0x"))
-      .to.emit(bonusVault, "BonusForfeited")
-      .withArgs(carol.address, owed);
+    const carolBefore = await asset.balanceOf(carol.address);
+    const receiverBefore = await asset.balanceOf(V2_PENALTY_RECEIVER);
+    const forfeitedBefore = await poolV3.totalForfeitedWeight();
+    const tx = poolV3.connect(carol).withdraw(ASSET(1), 0, 0, "0x");
+    await expect(tx).to.emit(bonusVault, "BonusForfeited").withArgs(carol.address, owed);
+    const receipt = await (await tx).wait();
+    const withdrawn = receipt.logs
+      .map((l) => { try { return poolV3.interface.parseLog(l); } catch { return null; } })
+      .find((e) => e && e.name === "Withdrawn");
+    expect(withdrawn.args.user).to.equal(carol.address);
+    expect(withdrawn.args.amount).to.equal(ASSET(1));
+    expect(withdrawn.args.penalty).to.equal(0n, "no penalty in v3");
+    expect(withdrawn.args.forfeitedWeight).to.be.greaterThan(0n, "the share's weight is forfeited");
+    expect((await asset.balanceOf(carol.address)) - carolBefore).to.equal(ASSET(1), "the principal in full");
+    expect(await asset.balanceOf(V2_PENALTY_RECEIVER)).to.equal(receiverBefore, "nothing to a penalty receiver");
+    expect(await poolV3.totalPenalized()).to.equal(0n);
+    expect((await poolV3.totalForfeitedWeight()) - forfeitedBefore).to.equal(withdrawn.args.forfeitedWeight);
     expect((await bonusVault.reservedOf(carol.address))[0]).to.equal(0n);
   });
 

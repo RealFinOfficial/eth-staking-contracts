@@ -1435,7 +1435,7 @@ document is unchanged; the rebalance logic and every valuation of the vault are 
 
 | File | What it is |
 |---|---|
-| `contracts/staking-v3/WeightedStakingPoolV3.sol` | `WeightedStakingPool` (v2) as a UUPS implementation in one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): the same lifecycle, vouchers (domain `WeightedStakingPool` / `1`), penalty, exits and events; plus `stakeFor(user, amount, weight)` callable only by `migrator`, and a FAIL-CLOSED `bonusVault.onEarlyExit(user)` in `withdraw` (after the state changes, before the transfers). Ownership two-step, `renounceOwnership` reverts, so v2's "owner renounced" switch and its branches are gone |
+| `contracts/staking-v3/WeightedStakingPoolV3.sol` | `WeightedStakingPool` (v2) as a UUPS implementation in one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): the same lifecycle, vouchers (domain `WeightedStakingPool` / `1`), exits and events, WITHOUT v2's principal penalty (decision of 2026-11-10, below); plus `stakeFor(user, amount, weight)` callable only by `migrator`, and a FAIL-CLOSED `bonusVault.onEarlyExit(user)` in `withdraw` (after the state changes, before the transfers). Ownership two-step, `renounceOwnership` reverts, so v2's "owner renounced" switch and its branches are gone |
 | `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user (forfeited whole by `onEarlyExit` before the unlock) and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). Reserve now, fund later; `claim()` all or nothing, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
 | `contracts/staking-v3/StakingMigrator.sol` | The one-call transition after the staker's own sw2 `unstake()`: `compound` (USDC swapped through SwapRouter02 under its own `TwapGuard`, 300 s / 953 ticks), `moveToLp` (one position on spot ± 6,932 ticks rounded outward, the adapter's `_campaignRange` math, staked through `vault.stakeFor`; the USDC leg valued at the 1,800 s mean tick, `OracleHistory`), `claimRestake`. Each checks an EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`) and spends its per-user nonce before any token moves. Routes 1 and 2 behind `pauseCompound` (vault guardian or operator) / `unpauseCompound` (operator), born paused; route 3 never paused. Namespace `real.staking.storage.StakingMigrator` |
 | `contracts/staking-v3/interfaces/IStakingV3.sol` | The three cross-contract interfaces |
@@ -1606,6 +1606,21 @@ I4 a claim pays exactly or the vault is short, I5 `totalLpReserved` equals the s
 reservations), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
 (the three routes end to end on the real Sepolia Uniswap deployment, the timelock batch, the
 rebalance scaling, early-exit forfeiture, claims before and after funding).
+
+**Decision of 2026-11-10: no principal penalty in v3.** `WeightedStakingPoolV3` is a separate
+contract from v2 and does not carry v2's early-withdrawal penalty (5 % to 50 % of the withdrawn
+amount, sent to `0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a`). A `withdraw` before `endEpoch` now
+returns the withdrawn principal in full to the user. It has exactly two consequences: the
+accumulated weight of the withdrawn share is forfeited (as before), and the bonus vault forfeits the
+user's whole v3 bonus reservation through `onEarlyExit` (as before, fail closed). Nothing is ever
+sent to a penalty receiver. Removed: `MAX_PENALTY_BPS`, `MIN_PENALTY_BPS`, `PENALTY_RECEIVER`,
+`_calculatePenalty`, `getCurrentPenaltyPct()`, `getCurrentPenalty(address)`. Kept for compatibility,
+never added to again: the storage field `totalPenalized` (same name and slot, so the live stack #6
+proxy `0xB8F5…fcb9` accepts the upgrade; the upgrades validator refuses a renamed struct member) and
+its view `totalPenalized()` (zero on a fresh deploy; stack #6 keeps the 0.493729166666666666 tREAL
+of the 2026-11-09 rehearsal), and, always zero, `Withdrawn.penalty`, `GlobalUpdated.totalPenalized`, and
+`PoolInitialized.maxPenaltyBps` / `minPenaltyBps` (emitted as 0, 0). The stack #6 pool upgrade is
+one timelock operation, `WeightedStakingPoolV3.upgradeToAndCall(newImpl, 0x)`, no reinitializer.
 
 ## 20. Glamsterdam: fixed hook stipends (found and fixed 2026-11-09)
 

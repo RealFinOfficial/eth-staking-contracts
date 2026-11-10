@@ -10,11 +10,12 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
 /**
- * @notice {WeightedStakingPoolV3}: v2's lifecycle, vouchers, penalty and exits behind a UUPS proxy,
- *         plus the migrator's `stakeFor` and the fail-closed early-exit notification.
+ * @notice {WeightedStakingPoolV3}: v2's lifecycle, vouchers and exits behind a UUPS proxy, WITHOUT
+ *         v2's principal penalty (decision of 2026-11-10), plus the migrator's `stakeFor` and the
+ *         fail-closed early-exit notification.
  *
- *  `p` is a fresh pool whose activation is one day ahead (so both the free and the penalised
- *  withdrawal are reachable), deployed WITHOUT the rewards waiver (v2's reward rules), with
+ *  `p` is a fresh pool whose activation is one day ahead (so a withdrawal both before and during
+ *  the active period is reachable), deployed WITHOUT the rewards waiver (v2's reward rules), with
  *  `carol` as its migrator and the harness bonus vault rebuilt
  *  around it (`book`, migrator `carol`), so a forfeiture is visible end to end.
  */
@@ -25,7 +26,8 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
     uint256 internal end;
 
     uint256 internal constant AMOUNT = 1_000e18;
-    address internal constant PENALTY_RECEIVER = 0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a;
+    /// v2's penalty receiver: v3 must never send it anything.
+    address internal constant V2_PENALTY_RECEIVER = 0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a;
 
     function setUp() public {
         _deployStakingV3();
@@ -70,7 +72,21 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertFalse(p.rewardsWaived());
         assertEq(p.BASE_WEIGHT(), 1000);
         assertEq(p.MAX_WEIGHT(), 2000);
-        assertEq(p.PENALTY_RECEIVER(), PENALTY_RECEIVER);
+    }
+
+    function test_Abi_ThePenaltyGettersAreGone() public view {
+        string[5] memory gone = [
+            "MAX_PENALTY_BPS()",
+            "MIN_PENALTY_BPS()",
+            "PENALTY_RECEIVER()",
+            "getCurrentPenaltyPct()",
+            "getCurrentPenalty(address)"
+        ];
+        for (uint256 i = 0; i < gone.length; i++) {
+            (bool ok,) = address(p).staticcall(abi.encodeWithSignature(gone[i], alice));
+            assertFalse(ok, gone[i]);
+        }
+        assertEq(p.totalPenalized(), 0, "the deprecated counter reads zero");
     }
 
     function test_Initialize_ValidatesEveryArgument() public {
@@ -199,26 +215,51 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         emit V3BonusVault.BonusForfeited(alice, 50e18);
         vm.prank(alice);
         p.withdraw(AMOUNT / 2, 0, 0, "");
-        assertEq(asset.balanceOf(alice) - before, AMOUNT / 2, "no penalty before activation");
+        assertEq(asset.balanceOf(alice) - before, AMOUNT / 2, "the principal in full");
         (uint256 reserved,) = book.reservedOf(alice);
         assertEq(reserved, 0, "the whole reservation is gone");
         assertEq(p.getUserMultiplier(alice), 1000, "an unsigned withdraw resets the boost");
     }
 
-    function test_Withdraw_DuringTheActivePeriodPaysThePenalty() public {
-        _stake(alice, AMOUNT, 1000);
+    function test_Withdraw_EarlyWithdrawReturnsThePrincipalInFull() public {
+        _stakeFor(alice, AMOUNT, 1000);
+        vm.prank(carol);
+        book.reserve(alice, 50e18, uint64(end), 3);
         vm.warp(start + 15 days);
-        uint256 expectedPenalty = p.getCurrentPenalty(alice);
-        assertEq(p.getCurrentPenaltyPct(), 500 + (4500 * 15 days) / 30 days);
+        uint256 accrued = p.getUserWeight(alice);
+        assertGt(accrued, 0);
+
         uint256 before = asset.balanceOf(alice);
+        uint256 receiverBefore = asset.balanceOf(V2_PENALTY_RECEIVER);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusForfeited(alice, 50e18);
+        vm.expectEmit(address(p));
+        emit WeightedStakingPoolV3.Withdrawn(alice, AMOUNT, accrued, 0);
         vm.prank(alice);
         p.withdraw(AMOUNT, 0, 0, "");
-        assertEq(asset.balanceOf(PENALTY_RECEIVER), expectedPenalty);
-        assertEq(asset.balanceOf(alice) - before, AMOUNT - expectedPenalty);
-        assertEq(p.totalPenalized(), expectedPenalty);
-        assertGt(p.totalForfeitedWeight(), 0);
+
+        assertEq(asset.balanceOf(alice) - before, AMOUNT, "the principal in full");
+        assertEq(asset.balanceOf(V2_PENALTY_RECEIVER), receiverBefore, "nothing to a penalty receiver");
+        assertEq(asset.balanceOf(address(p)), 0, "nothing kept by the pool");
+        assertEq(p.totalPenalized(), 0);
+        (uint256 reserved,) = book.reservedOf(alice);
+        assertEq(reserved, 0, "the whole reservation is forfeited");
+        assertEq(p.totalForfeitedWeight(), accrued, "the accrued weight is forfeited");
+        assertEq(p.getUserWeight(alice), 0);
         assertEq(p.getUserMultiplier(alice), 0, "a full exit clears the multiplier");
-        assertEq(p.getCurrentPenalty(alice), 0);
+    }
+
+    function test_Withdraw_PartialDuringTheActivePeriodForfeitsTheShareOnly() public {
+        _stake(alice, AMOUNT, 1000);
+        vm.warp(start + 10 days);
+        uint256 before = asset.balanceOf(alice);
+        vm.prank(alice);
+        p.withdraw(AMOUNT / 4, 0, 0, "");
+        assertEq(asset.balanceOf(alice) - before, AMOUNT / 4, "the withdrawn share in full");
+        assertEq(asset.balanceOf(V2_PENALTY_RECEIVER), 0);
+        assertEq(p.totalStaked(), AMOUNT - AMOUNT / 4);
+        assertGt(p.totalForfeitedWeight(), 0);
+        assertGt(p.getUserWeight(alice), 0, "the kept share keeps its weight");
     }
 
     function test_Withdraw_ASignedWithdrawKeepsTheAttestedWeight() public {
@@ -389,15 +430,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
     function test_Views_BeforeAnythingIsStaked() public view {
         assertEq(p.getPendingReward(alice), 0);
         assertEq(p.getUserWeight(alice), 0);
-        assertEq(p.getCurrentPenaltyPct(), 0, "zero before activation");
         assertEq(p.totalAccumulatedWeight(), 0);
-    }
-
-    function test_Views_PenaltyIsZeroAfterTheEnd() public {
-        _stake(alice, AMOUNT, 1000);
-        vm.warp(end);
-        assertEq(p.getCurrentPenaltyPct(), 0);
-        assertEq(p.getCurrentPenalty(alice), 0);
     }
 
     // ──────────────────────── Owner functions ──────────────────

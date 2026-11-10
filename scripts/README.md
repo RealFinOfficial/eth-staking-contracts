@@ -820,7 +820,9 @@ The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoc
 paid or checked at the transition. The company funds the vault with $ASSET any time before the
 end (`fund(amount)` or a plain transfer); `claim()` pays the caller's whole unlocked amount and
 reverts `InsufficientFunds(requested, available)` while the balance is short. A `withdraw` from v3
-before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed). The LP
+before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed) and the
+weight of the withdrawn share, and returns the principal in full: v3 has no principal penalty and
+pays nothing to a penalty receiver (decision of 2026-11-10; `Withdrawn.penalty` is always 0). The LP
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
 unlock either one SETTLES it (`LpBonusSettled(tokenId, user)`, view `lpSettled(tokenId)`): it stays
@@ -1011,7 +1013,9 @@ rewards 335.672514 / 333.333333 / 330.994152 tUSDC), then ran one route with a T
 
 `migrated()` true for all three, `totalReserved()` 2,735.423 tREAL (`totalLpReserved` 235.315).
 C's early `withdraw(1 tREAL)` (block 12099212, `0x4187b9e844267502a4ef218d0b757d592efa923c3d1ba4519179634d0348234a`):
-`BonusForfeited(C, 500)`, `reservedOf(C)` = 0, `totalReserved` 2,235.423; penalty 0.4937 tREAL.
+`BonusForfeited(C, 500)`, `reservedOf(C)` = 0, `totalReserved` 2,235.423; penalty 0.4937 tREAL
+(the v2 penalty the first v3 implementation still carried; removed by the decision of 2026-11-10,
+see "Pool upgrade pending" below).
 
 **Open finding: the listener runs out of gas on Sepolia.** B's `rebalance(234214)` to
 -288780 .. -285180, no swap (block 12099214, `0xf8406bc0c085fffb6da13e08b37074766c063a9abfb105b36c37aa33a4031f6a`)
@@ -1119,6 +1123,17 @@ active, `stakerOf(234226)` = D); `totalReserved()` 3,000.108576690943245770 tREA
 
 D's record under 234226 (106.028 tREAL) is untouched and pays at the unlock (12 Nov 19:10 Sofia,
 17:10 UTC) while D stays staked.
+
+### Pool upgrade pending on stack #6 (no principal penalty, 2026-11-10)
+
+The live v3 pool `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` (implementation
+`0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06`) still runs v2's early-withdrawal penalty. The new
+implementation removes it (audit notes item 19, "Decision of 2026-11-10"). PENDING: deploy the
+implementation with `deploy-implementation.js`, then ONE timelock operation
+`WeightedStakingPoolV3(0xB8F5…fcb9).upgradeToAndCall(<new WeightedStakingPoolV3 impl>, 0x)`. No
+reinitializer: the layout is unchanged (`totalPenalized` keeps its slot and stays at the
+0.493729166666666666 tREAL the C rehearsal recorded; it never grows again).
+`upgrades.validateUpgrade` against the live proxy passed on 2026-11-10.
 
 ### Measuring the hook gas (`scripts/measure-hook-gas.js`, Glamsterdam fix, audit notes item 20)
 

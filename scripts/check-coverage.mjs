@@ -49,6 +49,10 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-10 (no principal penalty in v3, audit notes item 19) ──
+//    WeightedStakingPoolV3 lines 322 -> 298 (280 hit), branches 92 -> 85 (24 hit): `_calculatePenalty`,
+//    `getCurrentPenaltyPct`, `getCurrentPenalty` and the penalty transfer in `withdraw` are gone.
+//    No line or branch was added; the uncovered ones are the same `--ir-minimum` artefacts as below.
 // ── Pinned floors, re-measured 2026-11-10, second time (review closure, audit notes item 19) ──
 //    LPStakingVault lines 255 -> 262 (258 hit), branches 45 -> 48 (48): `listenerMissedAt` (the
 //    write-once branch in the listener's `catch`, the view) and the `ListenerVaultMismatch` guard
@@ -281,8 +285,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 322, minHit: 303},
-    branches: {found: 92, minHit: 30},
+    lines: {found: 298, minHit: 280},
+    branches: {found: 85, minHit: 24},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
     lines: {found: 248, minHit: 245},
