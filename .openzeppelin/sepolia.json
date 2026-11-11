@@ -10063,6 +10063,377 @@
         "0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72",
         "0xE6077b572f218194333051F12D24eF6f63f3cC2c"
       ]
+    },
+    "d738baee1b63eb30fe1f30418d33746f8a418acefa17bd2a18ab1d815aef4439": {
+      "address": "0x37a6ed1343Ec965e401801bD91678f494874d03a",
+      "layout": {
+        "solcVersion": "0.8.38",
+        "storage": [],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_array(t_uint256)dyn_storage": {
+            "label": "uint256[]",
+            "numberOfBytes": "32"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_contract(IERC20)514": {
+            "label": "contract IERC20",
+            "numberOfBytes": "20"
+          },
+          "t_mapping(t_address,t_array(t_uint256)dyn_storage)": {
+            "label": "mapping(address => uint256[])",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_struct(UserReservation)916_storage)": {
+            "label": "mapping(address => struct V3BonusVaultRetired.UserReservation)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_bool)": {
+            "label": "mapping(uint256 => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_struct(LpReservation)929_storage)": {
+            "label": "mapping(uint256 => struct V3BonusVaultRetired.LpReservation)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(InitializableStorage)324_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(LpReservation)929_storage": {
+            "label": "struct V3BonusVaultRetired.LpReservation",
+            "members": [
+              {
+                "label": "user",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "unlockAt",
+                "type": "t_uint64",
+                "offset": 20,
+                "slot": "0"
+              },
+              {
+                "label": "claimed",
+                "type": "t_bool",
+                "offset": 28,
+                "slot": "0"
+              },
+              {
+                "label": "forfeited",
+                "type": "t_bool",
+                "offset": 29,
+                "slot": "0"
+              },
+              {
+                "label": "index",
+                "type": "t_uint16",
+                "offset": 30,
+                "slot": "0"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(Ownable2StepStorage)14_storage": {
+            "label": "struct Ownable2StepUpgradeable.Ownable2StepStorage",
+            "members": [
+              {
+                "label": "_pendingOwner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)74_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(UserReservation)916_storage": {
+            "label": "struct V3BonusVaultRetired.UserReservation",
+            "members": [
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "unlockAt",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(V3BonusVaultStorage)967_storage": {
+            "label": "struct V3BonusVaultRetired.V3BonusVaultStorage",
+            "members": [
+              {
+                "label": "bonusToken",
+                "type": "t_contract(IERC20)514",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "migrator",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "pool",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "vault",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "bonusIsToken0",
+                "type": "t_bool",
+                "offset": 20,
+                "slot": "3"
+              },
+              {
+                "label": "totalReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "reservations",
+                "type": "t_mapping(t_address,t_struct(UserReservation)916_storage)",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "lpReservations",
+                "type": "t_mapping(t_uint256,t_struct(LpReservation)929_storage)",
+                "offset": 0,
+                "slot": "6"
+              },
+              {
+                "label": "lpTokens",
+                "type": "t_mapping(t_address,t_array(t_uint256)dyn_storage)",
+                "offset": 0,
+                "slot": "7"
+              },
+              {
+                "label": "maxTotalReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "8"
+              },
+              {
+                "label": "totalLpReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "9"
+              },
+              {
+                "label": "lpSettled",
+                "type": "t_mapping(t_uint256,t_bool)",
+                "offset": 0,
+                "slot": "10"
+              }
+            ],
+            "numberOfBytes": "352"
+          },
+          "t_uint16": {
+            "label": "uint16",
+            "numberOfBytes": "2"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          }
+        },
+        "namespaces": {
+          "erc7201:real.staking.storage.V3BonusVault": [
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "bonusToken",
+              "type": "t_contract(IERC20)514",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "migrator",
+              "type": "t_address",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:70",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "pool",
+              "type": "t_address",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:71",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "vault",
+              "type": "t_address",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:72",
+              "offset": 0,
+              "slot": "3"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "bonusIsToken0",
+              "type": "t_bool",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:73",
+              "offset": 20,
+              "slot": "3"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "totalReserved",
+              "type": "t_uint256",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:74",
+              "offset": 0,
+              "slot": "4"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "reservations",
+              "type": "t_mapping(t_address,t_struct(UserReservation)916_storage)",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:74",
+              "offset": 0,
+              "slot": "5"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "lpReservations",
+              "type": "t_mapping(t_uint256,t_struct(LpReservation)929_storage)",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:75",
+              "offset": 0,
+              "slot": "6"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "lpTokens",
+              "type": "t_mapping(t_address,t_array(t_uint256)dyn_storage)",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:76",
+              "offset": 0,
+              "slot": "7"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "maxTotalReserved",
+              "type": "t_uint256",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:78",
+              "offset": 0,
+              "slot": "8"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "totalLpReserved",
+              "type": "t_uint256",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:79",
+              "offset": 0,
+              "slot": "9"
+            },
+            {
+              "contract": "V3BonusVaultRetired",
+              "label": "lpSettled",
+              "type": "t_mapping(t_uint256,t_bool)",
+              "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:79",
+              "offset": 0,
+              "slot": "10"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable2Step": [
+            {
+              "contract": "Ownable2StepUpgradeable",
+              "label": "_pendingOwner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol:29",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
     }
   }
 }

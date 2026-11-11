@@ -312,11 +312,11 @@
       "address": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
       "deployTx": "0x43cf25b7cba5e850fc0055f4b1a19929635c020f5de59fdbb2108808f0865c25",
       "block": 12098918,
-      "implementation": "0xFC95A85622E68EDd006E380dB8dE458F0BB7f9C2",
-      "implementationTx": "0x0e6c6e4d63ea317a41578c831d31c644c4c14365cccbbdcd935bc021df79634a",
-      "previousImplementation": "0xB395ed72D08c072df4ED4900b80A0a78a30c1478",
-      "implementationBlock": 12104265,
-      "upgradeTx": "0x513c575e69b674188f2973f74ef6312c1af371109ab104f2368ebc7c0868df6e",
+      "implementation": "0x37a6ed1343Ec965e401801bD91678f494874d03a",
+      "implementationTx": "0x930c03a330bb8591fea85e0fab02c8c6064dc2f27bf760a48fb523aa8ec2efab",
+      "previousImplementation": "0xFC95A85622E68EDd006E380dB8dE458F0BB7f9C2",
+      "implementationBlock": 12112252,
+      "upgradeTx": "0x9e47c57cb648ba1ba98320c3a7b0790700fb372537a3bfa726f165c2769c2980",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "pool": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
@@ -336,7 +336,15 @@
       "fundBlock": 12098960,
       "retiredOn": "2026-11-11",
       "retiredReason": "first stack #6 staking v3 set: window ended 2026-11-12T17:10:12Z, and the pool ran the weighted build before its upgrade to the minimal build; replaced by a fresh set with a 90-day window",
-      "retiredInFavourOf": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1"
+      "retiredInFavourOf": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
+      "implementationHistory": [
+        {
+          "implementation": "0xFC95A85622E68EDd006E380dB8dE458F0BB7f9C2",
+          "activeUntilBlock": 12112252,
+          "note": "V3BonusVault at b414e7f, the last working build of the first set"
+        }
+      ],
+      "retirementImplementation": "V3BonusVaultRetired (test stack only): totalLpReserved() = 0, hooks are no-ops, every reservation unreachable"
     },
     "StakingMigratorRetired": {
       "address": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",

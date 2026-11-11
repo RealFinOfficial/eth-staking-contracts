@@ -1007,12 +1007,15 @@ zero and no route works on this set.
 Order rule: the batch waits on purpose for the deploy-day order of the indexer. First the test
 server's indexer registers the three new proxies and refreshes the vault ABI, then the batch runs.
 
-Blocker: `LPStakingVault.setBonusListener` reverts with `ListenerHasReservations` while the current
-listener, the first set's bonus vault `0x72035F4BD96AcF498030E9A39eDc3546F3815221`, still reports
-`totalLpReserved() != 0`. On 2026-11-11 it reports 106.027583613785831393 $ASSET (D's record under
-tokenId 234226). It reaches zero when that LP bonus is claimed after the first set's end (2026-11-12
-19:10:12 Sofia, 17:10:12 UTC) or is forfeited by unstaking the LP position. After the batch, the
-operator steps the script prints: fund the new bonus vault (`V3BonusVault.fund`), then
+Blocker, cleared on 2026-11-11: `LPStakingVault.setBonusListener` reverts with
+`ListenerHasReservations` while the current listener, the first set's bonus vault
+`0x72035F4BD96AcF498030E9A39eDc3546F3815221`, reports `totalLpReserved() != 0`, and it reported
+106.027583613785831393 $ASSET (D's record under tokenId 234226). The retirement upgrade of that bonus
+vault to `V3BonusVaultRetired` (timelock id
+`0xf600788869b6879672584275945b86770fb189679c7ac4634c87ef8d2ad0cfd8`, executed in block 12112252, tx
+`0x9e47c57cb648ba1ba98320c3a7b0790700fb372537a3bfa726f165c2769c2980`, see the first set's section
+below) made it report 0. The batch now waits only for the indexer order rule above. After the batch,
+the operator steps the script prints: fund the new bonus vault (`V3BonusVault.fund`), then
 `StakingMigrator.unpauseCompound()`.
 
 ### Staking v3 on stack #6, first set (2026-11-09, retired 2026-11-11)
@@ -1032,6 +1035,37 @@ proxy from its deployment block with the minimal ABI cannot decode. The three co
 chain and keep their state. In deployments.json their entries are now the kinds
 `WeightedStakingPoolV3Retired`, `V3BonusVaultRetired` and `StakingMigratorRetired` (each with
 `retiredOn`, `retiredReason` and `retiredInFavourOf`, as `TimelockControllerRetired`).
+
+The first bonus vault was retired by an upgrade on 2026-11-11, all transactions in the table below.
+Its LP reservation of 106.027583613785831393 $ASSET (D's record under tokenId 234226) blocked the
+vault's `setBonusListener` switch to the second set (`ListenerHasReservations`), and no one can clear
+it, because the keys of the rehearsal wallets B, C and D are lost. The replacement implementation is
+`V3BonusVaultRetired` (`contracts/lp-staking/mocks/V3BonusVaultRetired.sol`, 5 tests in
+`test/forge/unit/V3BonusVaultRetired.t.sol`, in the repo since commit 31c0939). It is for a test
+stack ONLY and must never be deployed on mainnet. It reports `totalLpReserved() == 0`, its
+`onUnstake` and `onRebalance` do nothing, and it has no claim, no funding and no recovery. The
+implementation `0x37a6ed1343Ec965e401801bD91678f494874d03a` (block 12112222) was deployed with
+`IMPL_CONTRACT`, which picks the artifact while `IMPL_TARGET` stays the kind:
+
+```bash
+IMPL_TARGET=V3BonusVault IMPL_PROXY_ADDRESS=0x72035F4BD96AcF498030E9A39eDc3546F3815221 \
+  IMPL_CONTRACT=V3BonusVaultRetired IMPL_UNSAFE_ALLOW_EXTRA=missing-initializer \
+  npx hardhat run scripts/deploy-implementation.js --network sepolia
+```
+
+The timelock operation `upgradeToAndCall(0x37a6…d03a, 0x)` on the proxy
+`0x72035F4BD96AcF498030E9A39eDc3546F3815221`, id
+`0xf600788869b6879672584275945b86770fb189679c7ac4634c87ef8d2ad0cfd8`, was scheduled in block 12112225
+(2026-11-11 16:09:36 Sofia, 14:09:36 UTC) and executed in block 12112252 (16:15:36 Sofia, 14:15:36
+UTC). It was sent with `TIMELOCK_TARGET_ADDRESS=0x72035F4BD96AcF498030E9A39eDc3546F3815221` and no
+`TIMELOCK_TARGET`, because the registry kind `V3BonusVault` now names the second set's bonus vault.
+Read back after it: the proxy's implementation slot holds `0x37a6…d03a`, `totalLpReserved()` returns
+0, `owner()` is still the timelock `0xf2F678AC5260BB297682D54DcD945BCB78901E20`, and a simulation of
+`LPStakingVault.setBonusListener(0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1)` from the timelock
+passes. The LP vault's `bonusListener()` stays the first bonus vault until the second set's batch
+runs. Consequences, on test tokens only: every reservation of the first bonus vault (v3 and LP) is
+unreachable, and its 20,000 tREAL stay in the proxy. The first pool still holds 38,939.81 test $ASSET
+of four wallets, and the three wallets B, C and D cannot take theirs back.
 
 | What | Address | Block | Transaction |
 |---|---|---|---|
@@ -1067,6 +1101,9 @@ chain and keep their state. In deployments.json their entries are now the kinds
 | 2026-11-10: `WeightedStakingPoolV3` implementation (the two Low fixes: `BonusVaultLocked`, surplus-only `recoverERC20`; built from 8554d43 = ed33613 code; 9,840 B) | `0x6180487Bb4C0F7fCD63Fca79A45BBa27C0301A72` | 12105041 | `0x670be719c6d7428b65e1b49718cab97b540a5d67fc50901bfe0d375a37996f93` |
 | 2026-11-10: timelock `schedule` pool `upgradeToAndCall(0x6180…1A72, 0x)` (tag `v3-pool-low-closure`, id `0x94888a62…979a`) | | 12105052 | `0x0a9ab2329237592d2fb46840d88b923dd12e6dbad492cdb37f08223f3bc31da5` |
 | 2026-11-10: timelock `execute` (pool `Upgraded`; read back: links, window, `totalStaked` and the four stakes unchanged; `setBonusVault(0)` from the timelock reverts `BonusVaultLocked(0x7203…5221, 1794503412)`; `recoverERC20($ASSET, 1)` reverts `SurplusExceeded(1, 0)`, pool balance = `totalStaked`) | | 12105079 | `0x22f4794e642ecffbb8c49234961eded81bcfdd409a70a6946f32cf9ff14f7d65` |
+| 2026-11-11: `V3BonusVaultRetired` implementation for the first bonus vault (test stack only) | `0x37a6ed1343Ec965e401801bD91678f494874d03a` | 12112222 | `0x930c03a330bb8591fea85e0fab02c8c6064dc2f27bf760a48fb523aa8ec2efab` |
+| 2026-11-11: timelock `schedule` `V3BonusVault(0x7203…5221).upgradeToAndCall(0x37a6…d03a, 0x)` (id `0xf6007888…cfd8`) | | 12112225 | `0xcf6f65ff22d20de6eeac37aa7038f06938be67115ec463b0da322acb8e61670e` |
+| 2026-11-11: timelock `execute` (the first bonus vault now reports `totalLpReserved()` 0) | | 12112252 | `0x9e47c57cb648ba1ba98320c3a7b0790700fb372537a3bfa726f165c2769c2980` |
 
 Parameters: v3 activation 1794244212 (2026-11-09 17:10:12 UTC), end = bonus unlock 1794503412
 (2026-11-12 17:10:12 UTC); `rewardsWaived = true`; `maxTotalReserved` 100,000 tREAL; weight and
