@@ -221,13 +221,13 @@ calldata, and `upgrades.forceImport`, which records the storage layout in
 `.openzeppelin/<network>.json` (committed on named networks; OS temp dir on dev chains).
 
 After the deploy the operator multisig, with no delay, funds the distributor and schedules epoch 1.
-Funding uses `scripts/lp-fund-rewards.js` (`$OVTR` through `mintRewardToken`). Both funding amounts are
-decided (2026-10-13): `LP_FUND_OVTR_AMOUNT=7500` and `LP_FUND_ASSET_AMOUNT=3000`, so at launch exactly
-7,500 `$OVTR` are minted and exactly 3,000 `$ASSET` are moved into the distributor, all of it epoch 1.
-Nothing more is minted until a later epoch is decided. Epoch 1 is scheduled at least 30 minutes ahead
-(`scripts/lp-epoch.js`). The epoch-1 amounts are decided: 3,000 `$ASSET` and 7,500 `$OVTR`
-(`LP_EPOCH1_ASSET_AMOUNT` / `LP_EPOCH1_OVTR_AMOUNT`, whole tokens). The only open launch item is the
-start time of epoch 1.
+Funding uses `scripts/lp-fund-rewards.js` (`$OVTR` through `mintRewardToken`). Epoch 1 is a test
+epoch of 50 `$OVTR` and 30 `$ASSET` over 3 days (decided 2026-11-11), funded with exactly those
+amounts: `LP_FUND_OVTR_AMOUNT=50`, `LP_FUND_ASSET_AMOUNT=30`, `LP_EPOCH1_OVTR_AMOUNT=50` and
+`LP_EPOCH1_ASSET_AMOUNT=30` (whole tokens). Epoch 1 is scheduled at least 30 minutes ahead
+(`scripts/lp-epoch.js`). The production figures, 7,500 `$OVTR` and 3,000 `$ASSET` over 7 days, belong
+to the first production epoch, probably epoch 2 or 3, which is scheduled with `EPOCH_AMOUNTS`. The
+start time of each epoch is given at scheduling time.
 A new reward token later: `scripts/add-reward-token.js` + the `addRewardToken` timelock
 operation, then funding and `lp-epoch.js set-amount`.
 

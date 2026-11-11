@@ -34,8 +34,10 @@ const pools = require("./lib/pools");
 //                     resolves to the registry's $ASSET (LPZapper.asset) whatever its symbol.
 //                     For `schedule` of epoch 1 without EPOCH_AMOUNTS the fallbacks
 //                     LP_EPOCH1_OVTR_AMOUNT and LP_EPOCH1_ASSET_AMOUNT are used. They carry the
-//                     decided first-mainnet-epoch figures, 7,500 $OVTR and 3,000 $ASSET, in
-//                     whole tokens; the script converts them with each token's decimals.
+//                     figures of mainnet epoch 1, the test epoch (50 $OVTR and 30 $ASSET), in
+//                     whole tokens; the script converts them with each token's decimals. Every
+//                     later epoch, including the first production epoch (7,500 $OVTR and
+//                     3,000 $ASSET), passes EPOCH_AMOUNTS.
 //   EPOCH_TOKEN       set-amount: the token (symbol or address)
 //   EPOCH_AMOUNT      set-amount: the quantity in whole tokens (0 allowed)
 //   LP_REGISTRY_ADDRESS overrides the deployments.json lookup
