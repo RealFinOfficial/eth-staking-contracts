@@ -252,7 +252,7 @@
       "rewardsAdded": "1000000000",
       "addRewardsTx": "0x4f6e90eb241a2abcc47605379e8f99676ccec561cb4bb493fb9b26bb4a1807a0"
     },
-    "WeightedStakingPoolV3": {
+    "WeightedStakingPoolV3Retired": {
       "address": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
       "deployTx": "0x8134104f25c7c40a387ba7180ae03ecf4257a49005dc6151afb5066545b5b5ba",
       "block": 12098916,
@@ -303,9 +303,12 @@
       },
       "bonusVault": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
       "setBonusVaultTx": "0x2c8dd859f31349b681e3bef5c1162a02bfc77016372771c1c3b7c284b7345108",
-      "migrator": "0x2e72f57f494daDc9fA266a518361F103cD1fc493"
+      "migrator": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
+      "retiredOn": "2026-11-11",
+      "retiredReason": "first stack #6 staking v3 set: window ended 2026-11-12T17:10:12Z, and the pool ran the weighted build before its upgrade to the minimal build; replaced by a fresh set with a 90-day window",
+      "retiredInFavourOf": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6"
     },
-    "V3BonusVault": {
+    "V3BonusVaultRetired": {
       "address": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
       "deployTx": "0x43cf25b7cba5e850fc0055f4b1a19929635c020f5de59fdbb2108808f0865c25",
       "block": 12098918,
@@ -330,9 +333,12 @@
       "migrator": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
       "funded": "20000000000000000000000",
       "fundTx": "0x8f2e011075fdfe89fb9610a8789c9f3c5d6f81d5b0998ed377adff7e3e995ad0",
-      "fundBlock": 12098960
+      "fundBlock": 12098960,
+      "retiredOn": "2026-11-11",
+      "retiredReason": "first stack #6 staking v3 set: window ended 2026-11-12T17:10:12Z, and the pool ran the weighted build before its upgrade to the minimal build; replaced by a fresh set with a 90-day window",
+      "retiredInFavourOf": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1"
     },
-    "StakingMigrator": {
+    "StakingMigratorRetired": {
       "address": "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
       "deployTx": "0xee704ffbacb4c6de41ca4f8281f178295f3c32bd10bf0abf42abb41ae435561c",
       "block": 12098920,
@@ -361,7 +367,51 @@
       },
       "compoundPaused": false,
       "unpauseCompoundTx": "0x6f270141d6b085471672fa7a31448f86bee28bc2f82e02721d4e8dfa1e3f7052",
-      "unpauseCompoundBlock": 12098961
+      "unpauseCompoundBlock": 12098961,
+      "retiredOn": "2026-11-11",
+      "retiredReason": "first stack #6 staking v3 set: window ended 2026-11-12T17:10:12Z, and the pool ran the weighted build before its upgrade to the minimal build; replaced by a fresh set with a 90-day window",
+      "retiredInFavourOf": "0x58a0464284020bF3368d3B629c5F693e94F8D893"
+    },
+    "WeightedStakingPoolV3": {
+      "address": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
+      "deployTx": "0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623",
+      "block": 12112123,
+      "implementation": "0xE6077b572f218194333051F12D24eF6f63f3cC2c",
+      "implementationTx": "0x8d3de87028cb975d7913d00c7536ebe9e1c78a5c1230c2043c557753df1a3150",
+      "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "activationEpoch": 1794404858,
+      "endEpoch": 1802180858,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "V3BonusVault": {
+      "address": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
+      "deployTx": "0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d",
+      "block": 12112125,
+      "implementation": "0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da",
+      "implementationTx": "0x22aca0ff16f5f33b506e6a5bbd8a53d5557476bc1f0b6ede97c9cb44bc1090df",
+      "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "pool": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
+      "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "maxTotalReserved": "100000000000000000000000",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "StakingMigrator": {
+      "address": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
+      "deployTx": "0x96d588dbd3181c55ea813491aef280166fd3747a18b43beb4ae7a1a1e9fe25af",
+      "block": 12112127,
+      "implementation": "0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A",
+      "implementationTx": "0xea65e7233d1180126d6776cce348bb6d2fd93b496639bfcea1e095d973fecf41",
+      "lpVault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
+      "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
+      "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
+      "stakingPool": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
+      "bonusVault": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "valuationWindow": 1800,
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     }
   }
 }

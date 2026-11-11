@@ -972,13 +972,66 @@ SW2_TEST_REWARD=1000 WEIGHT_SIGNER=0xBackendKey \
 `STAKING_TOKEN` / `REWARD_TOKEN` default to the `LPZapper` entry's tokens. It refuses mainnet and
 records the pool as `WeightedStakingPoolTest`.
 
-### Staking v3 on stack #6 (2026-11-09)
+### Staking v3 on stack #6, second set (2026-11-11)
+
+A second staking v3 set was deployed on Sepolia test stack #6 on 2026-11-11 with
+`scripts/deploy-staking-v3.js`, from commit 7c6a764, by the deployer
+`0x5576bD37419dadAab305cca998E16BcD73318A35`. It replaces the first set of 2026-11-09 (the next
+section), which cannot serve the test site. The registry kinds `WeightedStakingPoolV3`,
+`V3BonusVault` and `StakingMigrator` in deployments.json (chain 11155111) now hold this set.
+
+| What | Address | Block | Transaction |
+|---|---|---|---|
+| `WeightedStakingPoolV3` proxy (impl `0xE6077b572f218194333051F12D24eF6f63f3cC2c`) | `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6` | 12112123 | `0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623` |
+| `V3BonusVault` proxy (impl `0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da`) | `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` | 12112125 | `0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d` |
+| `StakingMigrator` proxy (impl `0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A`) | `0x58a0464284020bF3368d3B629c5F693e94F8D893` | 12112127 | `0x96d588dbd3181c55ea813491aef280166fd3747a18b43beb4ae7a1a1e9fe25af` |
+| `pool.setBonusVault(0x2Daa…1fa1)`, then the three `transferOwnership(0xf2F6…1E20)` nominations | | | `0x79b38f447f9b57c925a2122bed87768bce190f7fee55ad590eafb4241a3aa741` (the `setBonusVault`) |
+
+Parameters: activation 1794404858 (2026-11-11 15:47:38 Sofia, 13:47:38 UTC), end = bonus unlock
+1802180858 (2027-02-09 15:47:38 Sofia, 13:47:38 UTC), a window of 90 days (decided by Vladimir on
+2026-11-11). Stake signer and migrator signer = the deployer `0x5576…8A35`. Swap guard 300 s and
+953 ticks, valuation window 1,800 s, `maxTotalReserved` 100,000 $ASSET, vault hook gas 400,000 /
+1,000,000 (all script defaults).
+
+State: deployed and nominated, the timelock batch NOT executed yet. The batch (`LPTimelock`
+`0xf2F678AC5260BB297682D54DcD945BCB78901E20`, tag `staking-v3`, id
+`0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360`) holds 7 calls:
+`acceptOwnership()` on the three proxies, `setMigrator(0x58a0…D893)` on the pool and on the bonus
+vault, then on the LP vault `0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac`
+`setBonusListener(0x2Daa…1fa1)` and `setStakeOperator(0x58a0…D893, true)`. It has no vault upgrade
+and no `setBonusHookGas`, because the live vault already has both. A re-run of
+`deploy-staking-v3.js` with the same `V3_*` values resumes (the three kinds are recorded) and writes
+the same batch file again. Until the batch runs, the pool's and the bonus vault's `migrator()` are
+zero and no route works on this set.
+
+Order rule: the batch waits on purpose for the deploy-day order of the indexer. First the test
+server's indexer registers the three new proxies and refreshes the vault ABI, then the batch runs.
+
+Blocker: `LPStakingVault.setBonusListener` reverts with `ListenerHasReservations` while the current
+listener, the first set's bonus vault `0x72035F4BD96AcF498030E9A39eDc3546F3815221`, still reports
+`totalLpReserved() != 0`. On 2026-11-11 it reports 106.027583613785831393 $ASSET (D's record under
+tokenId 234226). It reaches zero when that LP bonus is claimed after the first set's end (2026-11-12
+19:10:12 Sofia, 17:10:12 UTC) or is forfeited by unstaking the LP position. After the batch, the
+operator steps the script prints: fund the new bonus vault (`V3BonusVault.fund`), then
+`StakingMigrator.unpauseCompound()`.
+
+### Staking v3 on stack #6, first set (2026-11-09, retired 2026-11-11)
 
 Deployed and rehearsed on Sepolia test stack #6 on 2026-11-09 by the deployer / operator
 `0x5576bD37419dadAab305cca998E16BcD73318A35`, owner = the live `LPTimelock`
 `0xf2F678AC5260BB297682D54DcD945BCB78901E20` (300 s). The rehearsal STOPPED at the rebalance
 (see "Open finding" below); nothing was claimed. The finding was resolved on 2026-11-10 by the vault
 upgrade to the owner-set hook gas and proven with wallet D (see "Resolved" below the finding).
+
+This first set was retired on 2026-11-11 in favour of the second set (the section above). Its window
+ends on 2026-11-12 17:10:12 UTC, and the pool has no function to move its end. Its pool proxy also
+ran the weighted build from its deployment block 12098916 until the upgrade to the minimal build at
+block 12105079, and emitted 25 logs in the old shape (among them the event that seeds the pool's
+window and every stake, 38,939.81 test $ASSET in four wallets), which an indexer that registers the
+proxy from its deployment block with the minimal ABI cannot decode. The three contracts stay on
+chain and keep their state. In deployments.json their entries are now the kinds
+`WeightedStakingPoolV3Retired`, `V3BonusVaultRetired` and `StakingMigratorRetired` (each with
+`retiredOn`, `retiredReason` and `retiredInFavourOf`, as `TimelockControllerRetired`).
 
 | What | Address | Block | Transaction |
 |---|---|---|---|
@@ -1157,7 +1210,9 @@ D's record under 234226 (106.028 tREAL) is untouched and pays at the unlock (12 
 
 ### Pool upgrade on stack #6 (no principal penalty): done 2026-11-10
 
-The live v3 pool `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` ran v2's early-withdrawal penalty
+This section and the next describe the first v3 set, retired on 2026-11-11 (the current set is in
+"Staking v3 on stack #6, second set" above). The first set's v3 pool
+`0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9`, then the live one, ran v2's early-withdrawal penalty
 under its first implementation `0x19499B535E6F8A2200fA466Ef9BEFd04D5027E06`. The new implementation
 `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A` (built from 62f6165) removes it (audit notes item 19,
 "Decision of 2026-11-10"). Deployed with `deploy-implementation.js` (block 12104529, 14:07 Sofia,
@@ -1200,9 +1255,9 @@ identical to the read before; pool `nonces(A..D)` 0; migrator `isNonceUsed(A..D,
 
 The record of the plan as it was written before the upgrade:
 
-The v3 pool proxy
+The first set's v3 pool proxy
 `0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9` (implementation `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A`)
-moves to the minimal pool of 2026-11-10, and the migrator proxy
+moves to the minimal pool of 2026-11-10, and the first set's migrator proxy
 `0x2e72f57f494daDc9fA266a518361F103cD1fc493` (implementation `0x33c9d0298D99aa801Bfc9B0bc540F65E8e7F6E70`)
 to the `TransitionVoucher` without `weight`. The two MUST move in ONE timelock batch: the old
 migrator calls `stakeFor(address,uint256,uint256)`, which the new pool no longer has, and the new
