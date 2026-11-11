@@ -230,6 +230,36 @@ async function checkBounds(registry, startsAt, endsAt, prevLiveId, now) {
   return warnings;
 }
 
+/**
+ * The `schedule` action up to the call: reads EPOCH_ID, EPOCH_STARTS_AT, EPOCH_ENDS_AT or
+ * EPOCH_DURATION, EPOCH_AMOUNTS (or the LP_EPOCH1_* fallbacks for epoch 1) from the environment,
+ * refuses everything the contract would revert on, and returns the `scheduleEpoch` call, the
+ * printed summary and the GAP warnings. Also used by `scripts/lib/lp-epoch-batch.js`.
+ */
+async function prepareSchedule({ registry, distributor, tokens, count, lastLiveId, now }) {
+  const id = process.env.EPOCH_ID ? BigInt(process.env.EPOCH_ID) : count + 1n;
+  if (id !== count + 1n) throw new Error(`EPOCH_ID must be epochCount + 1 = ${count + 1n} — got ${id}`);
+  const startsAt = parseTime("EPOCH_STARTS_AT", process.env.EPOCH_STARTS_AT);
+  const endsAt = process.env.EPOCH_ENDS_AT
+    ? parseTime("EPOCH_ENDS_AT", process.env.EPOCH_ENDS_AT)
+    : startsAt + BigInt(process.env.EPOCH_DURATION || 0);
+  let raw = process.env.EPOCH_AMOUNTS;
+  if (!raw && id === 1n && (process.env.LP_EPOCH1_OVTR_AMOUNT || process.env.LP_EPOCH1_ASSET_AMOUNT)) {
+    raw = [
+      process.env.LP_EPOCH1_OVTR_AMOUNT && `OVTR=${process.env.LP_EPOCH1_OVTR_AMOUNT}`,
+      process.env.LP_EPOCH1_ASSET_AMOUNT && `ASSET=${process.env.LP_EPOCH1_ASSET_AMOUNT}`,
+    ]
+      .filter(Boolean)
+      .join(",");
+  }
+  const parsed = parseAmounts(raw || "", tokens);
+  await requireEnabledRewardTokens(distributor, parsed.entries);
+  const warnings = await checkBounds(registry, startsAt, endsAt, lastLiveId, now);
+  const call = ["scheduleEpoch", [id, startsAt, endsAt, parsed.tokens, parsed.amounts]];
+  const summary = `schedule epoch ${id}: ${iso(startsAt)} -> ${iso(endsAt)}\n  ${parsed.rows.join("\n  ") || "(no token amounts yet)"}`;
+  return { id, startsAt, endsAt, parsed, call, summary, warnings };
+}
+
 async function show(registry, tokens, now) {
   const count = await registry.epochCount();
   console.log(`epochCount ${count}, lastLiveId ${await registry.lastLiveId()}, currentEpoch ${await registry.currentEpoch()}`);
@@ -267,26 +297,7 @@ async function main() {
   let warnings = [];
 
   if (action === "schedule") {
-    const id = process.env.EPOCH_ID ? BigInt(process.env.EPOCH_ID) : count + 1n;
-    if (id !== count + 1n) throw new Error(`EPOCH_ID must be epochCount + 1 = ${count + 1n} — got ${id}`);
-    const startsAt = parseTime("EPOCH_STARTS_AT", process.env.EPOCH_STARTS_AT);
-    const endsAt = process.env.EPOCH_ENDS_AT
-      ? parseTime("EPOCH_ENDS_AT", process.env.EPOCH_ENDS_AT)
-      : startsAt + BigInt(process.env.EPOCH_DURATION || 0);
-    let raw = process.env.EPOCH_AMOUNTS;
-    if (!raw && id === 1n && (process.env.LP_EPOCH1_OVTR_AMOUNT || process.env.LP_EPOCH1_ASSET_AMOUNT)) {
-      raw = [
-        process.env.LP_EPOCH1_OVTR_AMOUNT && `OVTR=${process.env.LP_EPOCH1_OVTR_AMOUNT}`,
-        process.env.LP_EPOCH1_ASSET_AMOUNT && `ASSET=${process.env.LP_EPOCH1_ASSET_AMOUNT}`,
-      ]
-        .filter(Boolean)
-        .join(",");
-    }
-    const parsed = parseAmounts(raw || "", tokens);
-    await requireEnabledRewardTokens(distributor, parsed.entries);
-    warnings = await checkBounds(registry, startsAt, endsAt, lastLiveId, now);
-    call = ["scheduleEpoch", [id, startsAt, endsAt, parsed.tokens, parsed.amounts]];
-    summary = `schedule epoch ${id}: ${iso(startsAt)} -> ${iso(endsAt)}\n  ${parsed.rows.join("\n  ") || "(no token amounts yet)"}`;
+    ({ call, summary, warnings } = await prepareSchedule({ registry, distributor, tokens, count, lastLiveId, now }));
   } else if (action === "set-amount") {
     const id = BigInt(process.env.EPOCH_ID || 0);
     const e = await registry.epoch(id);
@@ -334,7 +345,18 @@ async function main() {
   await pools.send(summary.split("\n")[0], signer, (o) => signer.sendTransaction({ to: registryAddress, data, ...o }));
 }
 
-module.exports = { checkEpochBounds, formatDuration, earliestStart, parseAmounts, requireEnabledRewardTokens };
+module.exports = {
+  checkEpochBounds,
+  formatDuration,
+  earliestStart,
+  parseAmounts,
+  requireEnabledRewardTokens,
+  prepareSchedule,
+  tokenBook,
+  iso,
+  REGISTRY_ABI,
+  DISTRIBUTOR_ABI,
+};
 
 // `hardhat run` executes this file as the entry point; a `require` from the unit test must only
 // pick up the pure check above.

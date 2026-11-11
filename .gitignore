@@ -20,6 +20,11 @@ lcov.info
 # artifact, not a record: the addresses it names are already in deployments.json.
 apebond-*-batch.json
 
+# `scripts/lp-epoch-batch.js` and `scripts/lp-epoch-batch-with-asset.js` write the Safe batch
+# they built beside deployments.json, for the operator to import into the Safe. It is a build
+# artifact, not a record.
+lp-epoch-*-batch*.json
+
 # `scripts/apebond-rehearsal.js` writes the purchase it made beside deployments.json, so the
 # claim phase can run in another shell on another day. Same reason as the batch file above:
 # it is a run artifact of a TEST-STACK rehearsal, not a record of the deployment.
