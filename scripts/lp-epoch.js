@@ -17,7 +17,10 @@ const pools = require("./lib/pools");
 // is never proposed that would revert: every bound on the 900-second grid; `endsAt > startsAt`;
 // `startsAt >= now + 30 minutes` (a Safe transaction can sit for hours — check the time you
 // expect it to EXECUTE, and leave margin); no overlap with the last live epoch; bounds and
-// cancel only on the last live epoch.
+// cancel only on the last live epoch. Every refusal names the contract error the transaction
+// would revert with (NotOnGrid, InvalidBounds, StartTooSoon, OverlapsPreviousEpoch). A start
+// LATER than the previous live epoch's end is accepted, but prints a GAP warning: no rewards
+// accrue to users in a gap, and that time can never be paid later.
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -116,20 +119,88 @@ function parseAmounts(raw, tokens) {
   return out;
 }
 
-/** The registry's own rules, against chain time, before anything is proposed. */
-async function checkBounds(registry, startsAt, endsAt, prevLiveId, now) {
+/** Seconds as `1 day 3 hours 15 minutes`; zero parts are omitted. */
+function formatDuration(seconds) {
+  const units = [
+    ["day", 86400n],
+    ["hour", 3600n],
+    ["minute", 60n],
+    ["second", 1n],
+  ];
+  const parts = [];
+  let rest = seconds;
+  for (const [name, size] of units) {
+    const n = rest / size;
+    rest %= size;
+    if (n > 0n) parts.push(`${n} ${name}${n === 1n ? "" : "s"}`);
+  }
+  return parts.length > 0 ? parts.join(" ") : "0 seconds";
+}
+
+/** The first grid point the contract accepts as a start at chain time `now`. */
+function earliestStart(now) {
+  const min = now + SCHEDULE_MARGIN;
+  return ((min + INTERVAL - 1n) / INTERVAL) * INTERVAL;
+}
+
+/**
+ * The registry's bounds rules (`LPEpochRegistry._checkBounds`), PURE: no chain call, no env.
+ * All times are BigInt unix seconds; `now` is the chain time; `prev` is `null` or the previous
+ * live epoch `{ id, endsAt }`. Every problem names the custom error the contract would revert
+ * with. A start later than `prev.endsAt` is accepted by the contract and returned as a GAP
+ * warning: no rewards accrue to users in a gap and it can never be paid later.
+ */
+function checkEpochBounds({ startsAt, endsAt, now, prev }) {
   const problems = [];
-  if (startsAt % INTERVAL !== 0n) problems.push(`startsAt ${startsAt} is not on the 900-s grid`);
-  if (endsAt % INTERVAL !== 0n) problems.push(`endsAt ${endsAt} is not on the 900-s grid`);
-  if (endsAt <= startsAt) problems.push("endsAt must be after startsAt");
+  const warnings = [];
+  const earliest = earliestStart(now);
+  if (startsAt % INTERVAL !== 0n) {
+    problems.push(`the start ${iso(startsAt)} is not on the 15-minute grid (900 s). The contract would revert with NotOnGrid.`);
+  }
+  if (endsAt % INTERVAL !== 0n) {
+    problems.push(`the end ${iso(endsAt)} is not on the 15-minute grid (900 s). The contract would revert with NotOnGrid.`);
+  }
+  if (endsAt <= startsAt) {
+    problems.push(`the end ${iso(endsAt)} is not after the start ${iso(startsAt)}. The contract would revert with InvalidBounds.`);
+  }
   if (startsAt < now + SCHEDULE_MARGIN) {
-    problems.push(`startsAt ${iso(startsAt)} is less than 30 minutes after chain time ${iso(now)}`);
+    problems.push(
+      `the start ${iso(startsAt)} is less than 30 minutes after chain time ${iso(now)}. ` +
+        `The earliest start the contract accepts now is ${iso(earliest)}. The contract would revert with StartTooSoon.`,
+    );
   }
-  if (prevLiveId !== 0n) {
-    const prev = await registry.epoch(prevLiveId);
-    if (startsAt < prev.endsAt) problems.push(`starts before epoch ${prevLiveId} ends (${iso(prev.endsAt)})`);
+  if (prev) {
+    if (startsAt < prev.endsAt) {
+      problems.push(
+        `the start ${iso(startsAt)} is earlier than the end of epoch ${prev.id} (${iso(prev.endsAt)}). ` +
+          "The contract would revert with OverlapsPreviousEpoch.",
+      );
+    } else if (startsAt > prev.endsAt) {
+      const gap = startsAt - prev.endsAt;
+      const intervals = (gap + INTERVAL - 1n) / INTERVAL;
+      const advice =
+        prev.endsAt >= now + SCHEDULE_MARGIN
+          ? `  To schedule with no gap, set EPOCH_STARTS_AT=${iso(prev.endsAt)}.`
+          : `  The end of epoch ${prev.id} is less than 30 minutes ahead or already past, so a gap can no longer be avoided. ` +
+            `The earliest start the contract accepts now is ${iso(earliest)}.`;
+      warnings.push(
+        `WARNING: GAP of ${formatDuration(gap)} (${intervals} interval${intervals === 1n ? "" : "s"} of 15 minutes) ` +
+          `between the end of epoch ${prev.id} (${iso(prev.endsAt)}) and this start (${iso(startsAt)}).\n` +
+          "  No rewards accrue to users in the gap, and they can never be paid later.\n" +
+          advice,
+      );
+    }
   }
+  return { problems, warnings };
+}
+
+/** The registry's own rules, against chain time, before anything is proposed. Returns the warnings. */
+async function checkBounds(registry, startsAt, endsAt, prevLiveId, now) {
+  let prev = null;
+  if (prevLiveId !== 0n) prev = { id: prevLiveId, endsAt: (await registry.epoch(prevLiveId)).endsAt };
+  const { problems, warnings } = checkEpochBounds({ startsAt, endsAt, now, prev });
   if (problems.length > 0) throw new Error(`Refused before sending:\n  - ${problems.join("\n  - ")}`);
+  return warnings;
 }
 
 async function show(registry, tokens, now) {
@@ -166,6 +237,7 @@ async function main() {
   const lastLiveId = await registry.lastLiveId();
   let call;
   let summary;
+  let warnings = [];
 
   if (action === "schedule") {
     const id = process.env.EPOCH_ID ? BigInt(process.env.EPOCH_ID) : count + 1n;
@@ -184,7 +256,7 @@ async function main() {
         .join(",");
     }
     const parsed = parseAmounts(raw || "", tokens);
-    await checkBounds(registry, startsAt, endsAt, lastLiveId, now);
+    warnings = await checkBounds(registry, startsAt, endsAt, lastLiveId, now);
     call = ["scheduleEpoch", [id, startsAt, endsAt, parsed.tokens, parsed.amounts]];
     summary = `schedule epoch ${id}: ${iso(startsAt)} -> ${iso(endsAt)}\n  ${parsed.rows.join("\n  ") || "(no token amounts yet)"}`;
   } else if (action === "set-amount") {
@@ -212,7 +284,7 @@ async function main() {
       const endsAt = process.env.EPOCH_ENDS_AT
         ? parseTime("EPOCH_ENDS_AT", process.env.EPOCH_ENDS_AT)
         : startsAt + BigInt(process.env.EPOCH_DURATION || 0);
-      await checkBounds(registry, startsAt, endsAt, e.prevLiveId, now);
+      warnings = await checkBounds(registry, startsAt, endsAt, e.prevLiveId, now);
       call = ["updateEpochBounds", [id, startsAt, endsAt]];
       summary = `move epoch ${id} to ${iso(startsAt)} -> ${iso(endsAt)}`;
     }
@@ -220,6 +292,7 @@ async function main() {
 
   const data = registry.interface.encodeFunctionData(call[0], call[1]);
   console.log(`\n${summary}\n  to:   ${registryAddress}\n  data: ${data}`);
+  for (const warning of warnings) console.log(`\n${warning}`);
 
   const signer = await pools.getSigner();
   const operator = await registry.operator();
@@ -232,7 +305,13 @@ async function main() {
   await pools.send(summary.split("\n")[0], signer, (o) => signer.sendTransaction({ to: registryAddress, data, ...o }));
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+module.exports = { checkEpochBounds, formatDuration, earliestStart };
+
+// `hardhat run` executes this file as the entry point; a `require` from the unit test must only
+// pick up the pure check above.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
