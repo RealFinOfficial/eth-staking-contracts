@@ -18,7 +18,8 @@ const pools = require("./lib/pools");
 // `startsAt >= now + 30 minutes` (a Safe transaction can sit for hours — check the time you
 // expect it to EXECUTE, and leave margin); no overlap with the last live epoch; bounds and
 // cancel only on the last live epoch. Every refusal names the contract error the transaction
-// would revert with (NotOnGrid, InvalidBounds, StartTooSoon, OverlapsPreviousEpoch). A start
+// would revert with (NotOnGrid, InvalidBounds, StartTooSoon, OverlapsPreviousEpoch, and
+// DuplicateToken / UnknownRewardToken for a token listed twice or registered but not enabled). A start
 // LATER than the previous live epoch's end is accepted, but prints a GAP warning: no rewards
 // accrue to users in a gap, and that time can never be paid later.
 //
@@ -104,19 +105,43 @@ function findToken({ book, assetAddress }, key) {
   return entry;
 }
 
-/** `SYMBOL=amount,...` -> parallel token / amount arrays in smallest units. */
+/**
+ * `SYMBOL=amount,...` -> parallel token / amount arrays in smallest units, plus the resolved
+ * token-book `entries`. A token named twice (by symbol, address or the ASSET alias) is refused.
+ */
 function parseAmounts(raw, tokens) {
-  const out = { tokens: [], amounts: [], rows: [] };
+  const out = { tokens: [], amounts: [], rows: [], entries: [] };
   for (const part of raw.split(",").map((p) => p.trim()).filter(Boolean)) {
     const [key, value] = part.split("=");
     if (value === undefined) throw new Error(`EPOCH_AMOUNTS entry "${part}" is not SYMBOL=amount`);
     const token = findToken(tokens, key);
+    if (out.tokens.some((a) => a.toLowerCase() === token.address.toLowerCase())) {
+      throw new Error(`EPOCH_AMOUNTS names ${token.symbol} (${token.address}) more than once. The contract would revert with DuplicateToken.`);
+    }
     const amount = hre.ethers.parseUnits(value.trim(), token.decimals);
     out.tokens.push(token.address);
     out.amounts.push(amount);
     out.rows.push(`${token.symbol} ${value.trim()} (${amount} in smallest units, ${token.address})`);
+    out.entries.push(token);
   }
   return out;
+}
+
+/**
+ * The registry accepts only tokens the distributor's `isRewardToken` approves (registered AND
+ * enabled); the token book lists every registered one. Refuses all disabled entries in one error.
+ */
+async function requireEnabledRewardTokens(distributor, entries) {
+  const problems = [];
+  for (const entry of entries) {
+    if (!(await distributor.isRewardToken(entry.address))) {
+      problems.push(
+        `${entry.symbol} (${entry.address}) is registered on the distributor but not enabled as a reward token. ` +
+          "The contract would revert with UnknownRewardToken.",
+      );
+    }
+  }
+  if (problems.length > 0) throw new Error(`Refused before sending:\n  - ${problems.join("\n  - ")}`);
 }
 
 /** Seconds as `1 day 3 hours 15 minutes`; zero parts are omitted. */
@@ -256,6 +281,7 @@ async function main() {
         .join(",");
     }
     const parsed = parseAmounts(raw || "", tokens);
+    await requireEnabledRewardTokens(distributor, parsed.entries);
     warnings = await checkBounds(registry, startsAt, endsAt, lastLiveId, now);
     call = ["scheduleEpoch", [id, startsAt, endsAt, parsed.tokens, parsed.amounts]];
     summary = `schedule epoch ${id}: ${iso(startsAt)} -> ${iso(endsAt)}\n  ${parsed.rows.join("\n  ") || "(no token amounts yet)"}`;
@@ -266,6 +292,7 @@ async function main() {
     if (e.cancelled) throw new Error(`epoch ${id} is cancelled`);
     if (e.startsAt < now + SCHEDULE_MARGIN) throw new Error(`epoch ${id} is frozen: it starts ${iso(e.startsAt)}`);
     const token = findToken(tokens, process.env.EPOCH_TOKEN || "");
+    await requireEnabledRewardTokens(distributor, [token]);
     const rawAmount = (process.env.EPOCH_AMOUNT || "").trim();
     if (rawAmount === "") throw new Error("Set EPOCH_AMOUNT (whole tokens; 0 allowed)");
     const amount = hre.ethers.parseUnits(rawAmount, token.decimals);
@@ -305,7 +332,7 @@ async function main() {
   await pools.send(summary.split("\n")[0], signer, (o) => signer.sendTransaction({ to: registryAddress, data, ...o }));
 }
 
-module.exports = { checkEpochBounds, formatDuration, earliestStart };
+module.exports = { checkEpochBounds, formatDuration, earliestStart, parseAmounts, requireEnabledRewardTokens };
 
 // `hardhat run` executes this file as the entry point; a `require` from the unit test must only
 // pick up the pure check above.

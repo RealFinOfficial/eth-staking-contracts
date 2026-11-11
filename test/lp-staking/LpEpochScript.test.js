@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 
-const { checkEpochBounds } = require("../../scripts/lp-epoch");
+const { checkEpochBounds, parseAmounts, requireEnabledRewardTokens } = require("../../scripts/lp-epoch");
 
 /**
  * The pure bounds check of `scripts/lp-epoch.js`, with fixed timestamps and no network.
@@ -133,5 +133,92 @@ describe("lp-epoch.js checkEpochBounds", function () {
         `The earliest start the contract accepts now is ${iso(NOW + 2700n)}.`,
     );
     expect(r.warnings[0]).to.not.include("EPOCH_STARTS_AT");
+  });
+});
+
+/**
+ * The token checks of `scripts/lp-epoch.js`, with a fake token book and a stub distributor.
+ *
+ * `scheduleEpoch` reverts with `DuplicateToken` when a token is listed twice, and both
+ * `scheduleEpoch` and `setEpochAmount` revert with `UnknownRewardToken` when the distributor's
+ * `isRewardToken` answers false (registered but not enabled). The script refuses both first.
+ */
+describe("lp-epoch.js token checks", function () {
+  const OVTR = { address: "0x1111111111111111111111111111111111111111", symbol: "OVTR", decimals: 18 };
+  const TREAL = { address: "0x2222222222222222222222222222222222222222", symbol: "tREAL", decimals: 6 };
+  const BOOK = { book: [OVTR, TREAL], assetAddress: TREAL.address };
+  const dup = (t) => `EPOCH_AMOUNTS names ${t.symbol} (${t.address}) more than once. The contract would revert with DuplicateToken.`;
+  const disabled = (t) =>
+    `  - ${t.symbol} (${t.address}) is registered on the distributor but not enabled as a reward token. ` +
+    "The contract would revert with UnknownRewardToken.";
+
+  describe("parseAmounts", function () {
+    it("two different tokens parse as today", function () {
+      const r = parseAmounts("OVTR=1000,tREAL=3000", BOOK);
+      expect(r.tokens).to.deep.equal([OVTR.address, TREAL.address]);
+      expect(r.amounts).to.deep.equal([1000n * 10n ** 18n, 3000n * 10n ** 6n]);
+      expect(r.rows).to.have.length(2);
+      expect(r.entries).to.deep.equal([OVTR, TREAL]);
+    });
+
+    it("the same symbol twice is a duplicate", function () {
+      expect(() => parseAmounts("OVTR=1,OVTR=2", BOOK)).to.throw(dup(OVTR));
+    });
+
+    it("the same symbol in another case is a duplicate", function () {
+      expect(() => parseAmounts("OVTR=1,ovtr=2", BOOK)).to.throw(dup(OVTR));
+    });
+
+    it("a symbol plus its address is a duplicate", function () {
+      expect(() => parseAmounts(`OVTR=1,${OVTR.address.toUpperCase().replace("0X", "0x")}=2`, BOOK)).to.throw(dup(OVTR));
+    });
+
+    it("the ASSET alias plus the aliased token's symbol is a duplicate", function () {
+      expect(() => parseAmounts("ASSET=1,tREAL=2", BOOK)).to.throw(dup(TREAL));
+    });
+  });
+
+  describe("requireEnabledRewardTokens", function () {
+    const stub = (disabledAddresses) => {
+      const calls = [];
+      return {
+        calls,
+        isRewardToken: async (address) => {
+          calls.push(address);
+          return !disabledAddresses.includes(address);
+        },
+      };
+    };
+
+    async function rejection(promise) {
+      try {
+        await promise;
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected a rejection");
+    }
+
+    it("all enabled: resolves", async function () {
+      const d = stub([]);
+      await requireEnabledRewardTokens(d, [OVTR, TREAL]);
+      expect(d.calls).to.deep.equal([OVTR.address, TREAL.address]);
+    });
+
+    it("one disabled: throws with the exact line", async function () {
+      const error = await rejection(requireEnabledRewardTokens(stub([TREAL.address]), [OVTR, TREAL]));
+      expect(error.message).to.equal(`Refused before sending:\n${disabled(TREAL)}`);
+    });
+
+    it("two disabled: both lines in one error", async function () {
+      const error = await rejection(requireEnabledRewardTokens(stub([OVTR.address, TREAL.address]), [OVTR, TREAL]));
+      expect(error.message).to.equal(`Refused before sending:\n${disabled(OVTR)}\n${disabled(TREAL)}`);
+    });
+
+    it("an empty list: resolves and makes no call", async function () {
+      const d = stub([OVTR.address]);
+      await requireEnabledRewardTokens(d, []);
+      expect(d.calls).to.deep.equal([]);
+    });
   });
 });
