@@ -82,11 +82,12 @@
       "previousImplementation": "0x2eBABFe60b962D229fb7d1259984cFa6703886Ba",
       "implementationBlock": 12104265,
       "upgradeTx": "0x513c575e69b674188f2973f74ef6312c1af371109ab104f2368ebc7c0868df6e",
-      "bonusListener": "0x72035F4BD96AcF498030E9A39eDc3546F3815221",
+      "bonusListener": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
       "stakeOperators": [
-        "0x2e72f57f494daDc9fA266a518361F103cD1fc493"
+        "0x2e72f57f494daDc9fA266a518361F103cD1fc493",
+        "0x58a0464284020bF3368d3B629c5F693e94F8D893"
       ],
-      "bonusListenerLinkTx": "0xb0060a7c96d7881decf3fcd7c273bbeae231b826520dea89a759e4e020831af2",
+      "bonusListenerLinkTx": "0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93",
       "bonusHookGas": 400000,
       "bonusListenerGas": 1000000
     },
@@ -390,7 +391,16 @@
       "activationEpoch": 1794404858,
       "endEpoch": 1802180858,
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x250bb168837e6a5ea3a2ec9117c9154dd9bd3e9615ba1210c75e4491ef07739f",
+        "scheduleBlock": 12117876,
+        "executeTx": "0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93",
+        "executeBlock": 12117902
+      },
+      "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893"
     },
     "V3BonusVault": {
       "address": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
@@ -402,7 +412,19 @@
       "pool": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "maxTotalReserved": "100000000000000000000000",
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x250bb168837e6a5ea3a2ec9117c9154dd9bd3e9615ba1210c75e4491ef07739f",
+        "scheduleBlock": 12117876,
+        "executeTx": "0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93",
+        "executeBlock": 12117902
+      },
+      "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
+      "funded": "20000000000000000000000",
+      "fundTx": "0xd3def6cbff5652d9f2d640fbb9ae1b55d36c10e4b070469aad0ab4c84bd37f4d",
+      "fundBlock": 12117920
     },
     "StakingMigrator": {
       "address": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
@@ -419,7 +441,18 @@
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
       "valuationWindow": 1800,
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
+      "ownerAccepted": {
+        "timelockBatchId": "0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360",
+        "timelockSaltTag": "staking-v3",
+        "scheduleTx": "0x250bb168837e6a5ea3a2ec9117c9154dd9bd3e9615ba1210c75e4491ef07739f",
+        "scheduleBlock": 12117876,
+        "executeTx": "0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93",
+        "executeBlock": 12117902
+      },
+      "compoundPaused": false,
+      "unpauseCompoundTx": "0x79da457340b722518e2390a72f19f1c2dfa71070a5aceee96cb15af04b103194",
+      "unpauseCompoundBlock": 12117908
     }
   }
 }

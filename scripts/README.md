@@ -993,7 +993,7 @@ Parameters: activation 1794404858 (2026-11-11 15:47:38 Sofia, 13:47:38 UTC), end
 953 ticks, valuation window 1,800 s, `maxTotalReserved` 100,000 $ASSET, vault hook gas 400,000 /
 1,000,000 (all script defaults).
 
-State: deployed and nominated, the timelock batch NOT executed yet. The batch (`LPTimelock`
+State: linked and funded on 2026-11-12. The timelock batch (`LPTimelock`
 `0xf2F678AC5260BB297682D54DcD945BCB78901E20`, tag `staking-v3`, id
 `0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360`) holds 7 calls:
 `acceptOwnership()` on the three proxies, `setMigrator(0x58a0…D893)` on the pool and on the bonus
@@ -1001,11 +1001,11 @@ vault, then on the LP vault `0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac`
 `setBonusListener(0x2Daa…1fa1)` and `setStakeOperator(0x58a0…D893, true)`. It has no vault upgrade
 and no `setBonusHookGas`, because the live vault already has both. A re-run of
 `deploy-staking-v3.js` with the same `V3_*` values resumes (the three kinds are recorded) and writes
-the same batch file again. Until the batch runs, the pool's and the bonus vault's `migrator()` are
-zero and no route works on this set.
+the same batch file again.
 
-Order rule: the batch waits on purpose for the deploy-day order of the indexer. First the test
-server's indexer registers the three new proxies and refreshes the vault ABI, then the batch runs.
+Order rule, satisfied first: the batch waited on purpose for the deploy-day order of the indexer.
+The test server's indexer registered the three new proxies and refreshed the vault ABI on 2026-11-11
+at 18:28 Sofia (16:28 UTC), and only then did the batch run.
 
 Blocker, cleared on 2026-11-11: `LPStakingVault.setBonusListener` reverts with
 `ListenerHasReservations` while the current listener, the first set's bonus vault
@@ -1014,9 +1014,35 @@ Blocker, cleared on 2026-11-11: `LPStakingVault.setBonusListener` reverts with
 vault to `V3BonusVaultRetired` (timelock id
 `0xf600788869b6879672584275945b86770fb189679c7ac4634c87ef8d2ad0cfd8`, executed in block 12112252, tx
 `0x9e47c57cb648ba1ba98320c3a7b0790700fb372537a3bfa726f165c2769c2980`, see the first set's section
-below) made it report 0. The batch now waits only for the indexer order rule above. After the batch,
-the operator steps the script prints: fund the new bonus vault (`V3BonusVault.fund`), then
-`StakingMigrator.unpauseCompound()`.
+below) made it report 0.
+
+The batch was scheduled in block 12117876 (2026-11-12 11:12:00 Sofia, 09:12:00 UTC), tx
+`0x250bb168837e6a5ea3a2ec9117c9154dd9bd3e9615ba1210c75e4491ef07739f`, and executed in block
+12117902 (11:17:12 Sofia, 09:17:12 UTC), tx
+`0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93`. Read back after it: `owner()`
+of the three proxies is the timelock `0xf2F6…1E20` and `pendingOwner()` is the zero address. The
+pool's and the bonus vault's `migrator()` are `0x58a0464284020bF3368d3B629c5F693e94F8D893`. The LP
+vault's `bonusListener()` is `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` and
+`isStakeOperator(0x58a0…D893)` is true. The retired first-set migrator
+`0x2e72f57f494daDc9fA266a518361F103cD1fc493` is still an allowed stake operator on the LP vault
+(`isStakeOperator` true), because the batch added the new migrator and did not remove the old one.
+
+The operator `0x5576bD37419dadAab305cca998E16BcD73318A35` then ran the two steps the script prints.
+`StakingMigrator.unpauseCompound()` landed in block 12117908 (11:18:24 Sofia, 09:18:24 UTC), tx
+`0x79da457340b722518e2390a72f19f1c2dfa71070a5aceee96cb15af04b103194`, and `compoundPaused()` is now
+false. The tREAL `approve(0x2Daa…1fa1, 20,000)` landed in block 12117914, tx
+`0xcdc4c576a783007e50a4ad28bb78b420370d99c94452be4457591dedbec0f48f` (gas used 128,310), and
+`V3BonusVault.fund(20,000 test $ASSET)` (20000000000000000000000 wei) landed in block 12117920
+(11:20:48 Sofia, 09:20:48 UTC), tx `0xd3def6cbff5652d9f2d640fbb9ae1b55d36c10e4b070469aad0ab4c84bd37f4d`
+(gas used 155,992). The bonus vault's tREAL balance is now 20,000.
+
+Two earlier attempts reverted and changed nothing: an `approve` sent with a fixed gas limit of
+120,000 ran out of gas (block 12117906, tx
+`0xab33c23502749ea76b4351557c571ff10e4fb11bc286cbc384c4b9adb3660db5`), and the `fund` right after it
+reverted for lack of allowance (block 12117907, tx
+`0xb73b5ba6da44bde277ac9727d3853f6c951fb62533959099421508f4780e00b4`). On Sepolia today an `approve`
+that writes a new allowance used 128,310 gas, so writes should take the node's estimate instead of a
+hand-picked limit.
 
 ### Staking v3 on stack #6, first set (2026-11-09, retired 2026-11-11)
 
