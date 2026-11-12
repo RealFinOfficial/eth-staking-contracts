@@ -11,10 +11,14 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
 /**
  * @notice Bounded actor on a bare {V3BonusVault}: the migrator's two reserves, the pool's early
  *         exit (v3 part and active LP parts), the vault's unstake and rebalance (with random value
- *         ratios), the permissionless `reconcileLp` (no handler tokenId is staked in the vault, so
- *         an active one is forfeited), clock warps, funding, the three claims (`claim`, `claimV3`,
- *         `claimLp`) and surplus recoveries. Per-step properties are checked around the step and
- *         kept as violation counters; state properties are checked by the invariant functions.
+ *         ratios), a `hold` step and a directed `claimHeld` step (the vault holds an id for its
+ *         user from then on, a mocked `stakerOf`, so the held pay path of `_lpClaimable` is
+ *         fuzzed), the permissionless
+ *         `reconcileLp` (it forfeits an active id the vault does not hold), clock warps, funding,
+ *         the three claims (`claim`, `claimV3`, `claimLp`), `claimLp` on another wallet's id and on
+ *         an old id a rebalance deleted, and surplus recoveries. Per-step properties are checked
+ *         around the step and kept as violation counters; state properties are checked by the
+ *         invariant functions.
  */
 contract V3BonusVaultHandler is Test {
     V3BonusVault internal immutable book;
@@ -39,6 +43,19 @@ contract V3BonusVaultHandler is Test {
     uint256 public overpayViolations;
     /// @dev An early exit left an active LP record of the user, or forfeited a non-active one.
     uint256 public earlyExitViolations;
+    /// @dev A `claimLp` on another wallet's id or on a deleted old id that did not revert with its
+    ///      expected error, or that changed state.
+    uint256 public wrongClaimViolations;
+    /// @dev Expected reverts, counted apart so they hide no real one: `NotLpReservationUser` on
+    ///      another wallet's id, `NothingToClaim` on an old id a rebalance deleted.
+    uint256 public expectedOwnerReverts;
+    uint256 public expectedEmptyReverts;
+    /// @dev LP records paid while neither settled nor missed-after: the HELD path of
+    ///      `_lpClaimable` (the handler never mocks `listenerMissedAt`, so it is zero).
+    uint256 public heldPaid;
+    uint256 public holds;
+    /// @dev The old ids of rebalances that moved the record (deleted under the old id).
+    uint256[] internal oldIds;
 
     constructor(
         V3BonusVault book_,
@@ -123,7 +140,20 @@ contract V3BonusVaultHandler is Test {
         if (movedUser != address(0)) {
             if (moved > before || moved > ceiling[oldId]) scalingViolations++;
             ceiling[newId] = before;
+            oldIds.push(oldId);
         }
+    }
+
+    /// @dev The vault HOLDS `id` for the record's user from now on (a mocked `stakerOf`), so an
+    ///      unlocked open record pays through the held path of `_lpClaimable`. Without this step no
+    ///      handler id is staked in the vault and only settled records pay.
+    function hold(uint256 idSeed) external {
+        if (nextId == 1) return;
+        uint256 id = 1 + idSeed % (nextId - 1);
+        (address user,,,,) = book.lpReservation(id);
+        if (user == address(0)) return;
+        vm.mockCall(vault, abi.encodeWithSignature("stakerOf(uint256)", id), abi.encode(user));
+        holds++;
     }
 
     function reconcile(uint256 idSeed) external {
@@ -149,11 +179,20 @@ contract V3BonusVaultHandler is Test {
         uint256 due = book.claimable(user);
         uint256 balance = asset.balanceOf(address(book));
         uint256 before = asset.balanceOf(user);
+        uint256[] memory ids = book.lpTokensOf(user);
+        bool[] memory wasClaimed = new bool[](ids.length);
+        for (uint256 j = 0; j < ids.length; ++j) {
+            (,,, wasClaimed[j],) = book.lpReservation(ids[j]);
+        }
         vm.prank(user);
         try book.claim() returns (uint256 amount) {
             if (amount != due) overpayViolations++;
             if (asset.balanceOf(user) - before != amount) overpayViolations++;
             paid += amount;
+            for (uint256 j = 0; j < ids.length; ++j) {
+                (,,, bool claimed,) = book.lpReservation(ids[j]);
+                if (claimed && !wasClaimed[j] && !book.lpSettled(ids[j])) heldPaid++;
+            }
         } catch {
             if (due > 0 && balance >= due) shortClaimViolations++;
         }
@@ -192,8 +231,93 @@ contract V3BonusVaultHandler is Test {
             if (claimableBefore - book.claimable(user) != amount) overpayViolations++;
             (,,, bool claimed,) = book.lpReservation(id);
             if (!claimed) overpayViolations++;
+            if (!book.lpSettled(id)) heldPaid++;
             paid += amount;
         } catch {}
+    }
+
+    /// @dev The held path, directed: an open record is held for its user, the clock moves to its
+    ///      unlock if needed, and its user's `claimLp` must pay exactly its amount (or revert
+    ///      `InsufficientFunds` while the balance is short).
+    function claimHeld(uint256 idSeed) external {
+        if (nextId == 1) return;
+        uint256 id = 1 + idSeed % (nextId - 1);
+        (address user, uint256 lp, uint64 unlockAt, bool claimed, bool forfeited) = book.lpReservation(id);
+        if (user == address(0) || claimed || forfeited) return;
+        vm.mockCall(vault, abi.encodeWithSignature("stakerOf(uint256)", id), abi.encode(user));
+        holds++;
+        if (block.timestamp < unlockAt) vm.warp(unlockAt);
+        uint256 balance = asset.balanceOf(address(book));
+        uint256 before = asset.balanceOf(user);
+        vm.prank(user);
+        try book.claimLp(id) returns (uint256 amount) {
+            if (amount != lp || asset.balanceOf(user) - before != amount) overpayViolations++;
+            if (!book.lpSettled(id)) heldPaid++;
+            paid += amount;
+        } catch (bytes memory err) {
+            bytes memory short = abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, lp, balance);
+            if (balance >= lp || keccak256(err) != keccak256(short)) shortClaimViolations++;
+        }
+    }
+
+    /// @dev State a wrong `claimLp` must leave unchanged.
+    function _snapshot(uint256 id) internal view returns (bytes32) {
+        (address u, uint256 lp, uint64 unlockAt, bool claimed, bool forfeited) = book.lpReservation(id);
+        return keccak256(
+            abi.encode(
+                book.totalReserved(),
+                book.totalLpReserved(),
+                asset.balanceOf(address(book)),
+                u,
+                lp,
+                unlockAt,
+                claimed,
+                forfeited
+            )
+        );
+    }
+
+    /// @dev `claimLp` on an id from ANOTHER wallet's list: `NotLpReservationUser(id, caller,
+    ///      owner)`, nothing changes.
+    function claimLpOther(uint256 seed, uint256 otherSeed, uint256 idSeed) external {
+        address caller = _user(seed);
+        address other = users[(seed % 3 + 1 + otherSeed % 2) % 3];
+        uint256[] memory ids = book.lpTokensOf(other);
+        if (ids.length == 0) return;
+        uint256 id = ids[idSeed % ids.length];
+        bytes32 before = _snapshot(id);
+        vm.prank(caller);
+        try book.claimLp(id) {
+            wrongClaimViolations++;
+        } catch (bytes memory err) {
+            if (
+                keccak256(err)
+                    == keccak256(abi.encodeWithSelector(V3BonusVault.NotLpReservationUser.selector, id, caller, other))
+            ) {
+                expectedOwnerReverts++;
+            } else {
+                wrongClaimViolations++;
+            }
+        }
+        if (_snapshot(id) != before) wrongClaimViolations++;
+    }
+
+    /// @dev `claimLp` on an OLD id a rebalance deleted: `NothingToClaim`, nothing changes.
+    function claimLpOld(uint256 seed, uint256 idx) external {
+        if (oldIds.length == 0) return;
+        uint256 id = oldIds[idx % oldIds.length];
+        bytes32 before = _snapshot(id);
+        vm.prank(_user(seed));
+        try book.claimLp(id) {
+            wrongClaimViolations++;
+        } catch (bytes memory err) {
+            if (keccak256(err) == keccak256(abi.encodeWithSelector(V3BonusVault.NothingToClaim.selector))) {
+                expectedEmptyReverts++;
+            } else {
+                wrongClaimViolations++;
+            }
+        }
+        if (_snapshot(id) != before) wrongClaimViolations++;
     }
 
     function recover(uint256 amount) external {
@@ -276,6 +400,12 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
     function invariant_ClaimPaysExactlyOrIsShort() public view {
         assertEq(handler.overpayViolations(), 0);
         assertEq(handler.shortClaimViolations(), 0);
+    }
+
+    /// @dev I7: `claimLp` on another wallet's id reverts `NotLpReservationUser`, on an old id a
+    ///      rebalance deleted reverts `NothingToClaim`, and neither changes any state.
+    function invariant_WrongClaimLpRevertsAndChangesNothing() public view {
+        assertEq(handler.wrongClaimViolations(), 0);
     }
 
     /// @dev I6: an early exit forfeits every active LP record of the user and touches no other.

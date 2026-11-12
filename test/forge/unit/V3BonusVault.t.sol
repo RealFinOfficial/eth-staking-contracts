@@ -3,6 +3,7 @@ pragma solidity 0.8.38;
 
 import {StakingV3Harness} from "../utils/StakingV3Harness.sol";
 import {V3BonusVault} from "../../../contracts/staking-v3/V3BonusVault.sol";
+import {V3BonusVaultParent} from "../utils/V3BonusVaultParent.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonusEscrowHooks.sol";
 import {PositionValue} from "../../../contracts/lp-staking/libraries/PositionValue.sol";
@@ -905,6 +906,144 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.prank(alice);
         assertEq(book.claimLp(ID1), BONUS);
         assertEq(book.totalLpReserved(), 0);
+    }
+
+    // ──────────────────────── claimLp on a tokenId with no record ─
+
+    /// @dev The OLD tokenId of a rebalance before the unlock: its record was moved to the new id
+    ///      and deleted. `claimLp(oldId)` pays nothing and moves no total; the new id pays once.
+    function test_ClaimLp_TheOldIdOfARebalanceHasNoRecord() public {
+        _reserveLp(ID1, alice, BONUS);
+        uint256 moved = Math.mulDiv(BONUS, _value(L / 2), _value(L));
+        vm.prank(address(mathVault));
+        book.onRebalance(ID1, ID2, _snap(L), _snap(L / 2));
+        _holdFor(ID2, alice);
+        book.fund(10 * BONUS);
+        vm.warp(UNLOCK);
+        (address oldUser,,,,) = book.lpReservation(ID1);
+        assertEq(oldUser, address(0), "deleted under the old id");
+
+        uint256 before = asset.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID1);
+        vm.prank(bob);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID1);
+        assertEq(asset.balanceOf(alice), before);
+        assertEq(book.totalReserved(), moved);
+        assertEq(book.totalLpReserved(), moved);
+
+        vm.prank(alice);
+        assertEq(book.claimLp(ID2), moved);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID2);
+        assertEq(asset.balanceOf(alice) - before, moved, "paid once");
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+    }
+
+    /// @dev A tokenId that never had a record while the vault reports a missed notification for
+    ///      it: `_lpClaimable` takes the MISSED-AFTER branch (`missedAt >= unlockAt == 0`) and
+    ///      returns the empty record's amount, zero. Only `claimLp` reaches it: a user's list holds
+    ///      only recorded ids (`reserveLp` appends, a rebalance rewrites to the moved id), so the
+    ///      `claimable(user)` path cannot carry such an id.
+    function test_ClaimLp_ANeverRecordedIdWithAMissedNotificationPaysNothing() public {
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        _holdFor(ID1, alice);
+        _missedAt(ID3, 1);
+        _holdFor(ID3, alice);
+        book.fund(10 * BONUS);
+        vm.warp(UNLOCK);
+        uint256 before = asset.balanceOf(alice);
+        uint256 claimableBefore = book.claimable(alice);
+        for (uint256 i = 0; i < 2; ++i) {
+            address caller = i == 0 ? alice : bob;
+            vm.prank(caller);
+            vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+            book.claimLp(ID3);
+        }
+        assertEq(asset.balanceOf(alice), before);
+        assertEq(book.totalReserved(), 3 * BONUS);
+        assertEq(book.totalLpReserved(), 2 * BONUS);
+        assertEq(book.claimable(alice), claimableBefore, "the list path is unchanged");
+        assertEq(claimableBefore, 3 * BONUS);
+        uint256[] memory ids = book.lpTokensOf(alice);
+        assertEq(ids.length, 1);
+        assertEq(ids[0], ID1, "the empty id is in no user's list");
+    }
+
+    // ──────────────────────── Upgrade from the parent implementation ─
+
+    /// @dev State written on a proxy running the PARENT implementation (42c7ccf, a verbatim copy in
+    ///      `test/forge/utils/V3BonusVaultParent.sol`) reads the same after the upgrade; the new
+    ///      early-exit rule and the part claims then work on it.
+    function test_Upgrade_FromTheParentImplementationKeepsTheReservations() public {
+        V3BonusVaultParent parentImpl = new V3BonusVaultParent();
+        V3BonusVault b = V3BonusVault(
+            address(
+                new LPProxy(
+                    address(parentImpl),
+                    abi.encodeCall(
+                        V3BonusVaultParent.initialize,
+                        (address(this), address(asset), carol, poolStub, address(mathVault), DEFAULT_BUDGET)
+                    )
+                )
+            )
+        );
+        vm.startPrank(carol);
+        b.reserve(alice, BONUS, UNLOCK, 2);
+        b.reserveLp(ID1, alice, 2 * BONUS, UNLOCK);
+        b.reserve(bob, 3 * BONUS, UNLOCK, 2);
+        b.reserveLp(ID2, bob, 4 * BONUS, UNLOCK);
+        vm.stopPrank();
+        (bool hadClaimV3,) = address(b).call(abi.encodeCall(V3BonusVault.claimV3, ()));
+        assertFalse(hadClaimV3, "the parent has no claimV3");
+
+        b.upgradeToAndCall(address(new V3BonusVault()), "");
+
+        (uint256 v3a, uint64 ua) = b.reservedOf(alice);
+        assertEq(v3a, BONUS);
+        assertEq(ua, UNLOCK);
+        (address u1, uint256 lp1, uint64 un1, bool c1, bool f1) = b.lpReservation(ID1);
+        assertEq(u1, alice);
+        assertEq(lp1, 2 * BONUS);
+        assertEq(un1, UNLOCK);
+        assertFalse(c1);
+        assertFalse(f1);
+        assertEq(b.totalReserved(), 10 * BONUS);
+        assertEq(b.totalLpReserved(), 6 * BONUS);
+        assertEq(b.maxTotalReserved(), DEFAULT_BUDGET);
+        uint256[] memory ids = b.lpTokensOf(bob);
+        assertEq(ids.length, 1);
+        assertEq(ids[0], ID2);
+
+        // The new rule on old state: alice's early exit forfeits both parts.
+        vm.expectEmit(address(b));
+        emit V3BonusVault.BonusForfeited(alice, BONUS);
+        vm.expectEmit(address(b));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, 2 * BONUS);
+        vm.prank(poolStub);
+        b.onEarlyExit(alice);
+        assertEq(b.totalReserved(), 7 * BONUS);
+        assertEq(b.totalLpReserved(), 4 * BONUS);
+
+        // The part claims on old state: bob's two parts pay after the unlock.
+        _holdFor(ID2, bob);
+        asset.approve(address(b), type(uint256).max);
+        b.fund(7 * BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(bob);
+        assertEq(b.claimV3(), 3 * BONUS);
+        vm.prank(bob);
+        assertEq(b.claimLp(ID2), 4 * BONUS);
+        assertEq(b.totalReserved(), 0);
+        assertEq(b.totalLpReserved(), 0);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        b.claim();
     }
 
     // ──────────────────────── recoverSurplus ───────────────────
