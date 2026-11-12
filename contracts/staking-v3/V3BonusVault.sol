@@ -41,8 +41,7 @@ interface IV3BonusLpVault {
  *
  *  TWO KINDS OF RESERVATION, both written only by the migrator:
  *    - the v3 reservation of a user ({reserve}): one running amount per user and the latest unlock
- *      time. A `withdraw` from the v3 pool before its end calls {onEarlyExit} and forfeits the WHOLE
- *      amount; a stake that stays to the end keeps it.
+ *      time. A stake that stays to the end keeps it.
  *    - the LP reservation of one position ({reserveLp}), keyed by the position's tokenId, with the
  *      exact semantics of `BonusEscrow`: the LP vault's {onRebalance} moves it to the new tokenId,
  *      scaled by min(1, valueNew / valueOld) at the vault's TWAP, so it never grows; the vault's
@@ -53,10 +52,23 @@ interface IV3BonusLpVault {
  *      vault for its user, and never when it is DEAD (a failed `onUnstake` before the unlock);
  *      see "A MISSED NOTIFICATION" below.
  *
+ *  LEAVING EARLY (rule of 2026-11-12). A `withdraw` from the v3 pool before its end, of any amount,
+ *  calls {onEarlyExit}, which forfeits BOTH parts of that user: the WHOLE v3 reservation (while it
+ *  is still locked) AND every LP reservation of the user that is still ACTIVE (recorded, not
+ *  claimed, not forfeited, before its unlock). A forfeited LP record stays forfeited: the vault's
+ *  later {onUnstake} / {onRebalance} for it and {reconcileLp} are no-ops, and it never pays. The
+ *  reverse does not hold: an LP unstake before the unlock forfeits only that LP reservation, and the
+ *  v3 reservation is kept.
+ *
  *  RESERVE NOW, FUND LATER. No tokens move at the transition and no balance is checked there. The
  *  company funds this contract with $ASSET ({fund}, or a plain transfer) any time before the end.
- *  {claim} pays everything of the caller's that is unlocked, from the balance, and reverts
- *  {InsufficientFunds} — all or nothing — while the balance is short.
+ *
+ *  THREE CLAIMS, one rule set. {claim} pays everything of the caller's that is unlocked; {claimV3}
+ *  pays only the caller's v3 reservation; {claimLp} pays only the LP reservation of one tokenId of
+ *  the caller's ({NotLpReservationUser} for another wallet's record). Each pays from the balance and
+ *  reverts {InsufficientFunds} — all or nothing for that call — while the balance is short, and
+ *  {NothingToClaim} when it would pay zero. Each emits {V3BonusClaimed} for the v3 part it pays,
+ *  {LpBonusClaimed} for each LP record it pays, then {BonusClaimed} once with the call's total.
  *
  *  ACCOUNTING. `totalReserved` is the sum of every reservation that is neither claimed nor
  *  forfeited; `totalLpReserved` is the LP part of it (the amount the LP vault's listener link
@@ -77,11 +89,12 @@ interface IV3BonusLpVault {
  *    - MISSED-AFTER: `missedAt != 0 && missedAt >= unlockAt`. The settle was missed: the user left
  *      after the unlock, legitimately. The record pays as if it had been settled.
  *
- *  WHEN AN LP RESERVATION PAYS. {claim} pays an unlocked, unclaimed, unforfeited LP reservation
- *  that is not dead and is either SETTLED (a vault notification after the unlock), MISSED-AFTER, or
- *  still HELD by the LP vault for its user (`stakerOf(tokenId) == user`). Any other record is
- *  STALE and pays nothing. An after-unlock notification never settles a dead record: it forfeits
- *  it; a before-unlock re-range never moves a dead record: it forfeits it.
+ *  WHEN AN LP RESERVATION PAYS. {claim} (and {claimLp} for one tokenId) pays an unlocked,
+ *  unclaimed, unforfeited LP reservation that is not dead and is either SETTLED (a vault
+ *  notification after the unlock), MISSED-AFTER, or still HELD by the LP vault for its user
+ *  (`stakerOf(tokenId) == user`). Any other record is STALE and pays nothing. An after-unlock
+ *  notification never settles a dead record: it forfeits it; a before-unlock re-range never moves
+ *  a dead record: it forfeits it.
  *
  *  {reconcileLp} (permissionless) makes the state explicit. The backend sends no transaction: for
  *  every `BonusListenerFailed` it raises the alert `lp.vault.bonus_listener_failed` with the action
@@ -164,7 +177,14 @@ contract V3BonusVault is
     /// @notice The LP reservation of `tokenId` was settled: the vault reported its unstake or
     ///         re-range after the unlock. It stays claimable under `tokenId`.
     event LpBonusSettled(uint256 indexed tokenId, address indexed user);
+    /// @notice The total one claim call ({claim}, {claimV3} or {claimLp}) paid `user`; emitted once
+    ///         per call, after the part events below.
     event BonusClaimed(address indexed user, uint256 amount);
+    /// @notice A claim call paid `user`'s v3 reservation, `amount` (added 2026-11-12).
+    event V3BonusClaimed(address indexed user, uint256 amount);
+    /// @notice A claim call paid the LP reservation of `tokenId` to `user`, `amount` (added
+    ///         2026-11-12).
+    event LpBonusClaimed(uint256 indexed tokenId, address indexed user, uint256 amount);
     event Funded(address indexed from, uint256 amount, uint256 balance);
     event SurplusRecovered(address indexed to, uint256 amount);
     event MigratorSet(address previousMigrator, address newMigrator);
@@ -188,6 +208,8 @@ contract V3BonusVault is
     error RenounceDisabled();
     error BudgetExceeded(uint256 requested, uint256 remaining);
     error LpReservationsOutstanding(uint256 totalLpReserved);
+    /// @dev {claimLp} of a `tokenId` whose LP reservation belongs to `user`, not to `caller`.
+    error NotLpReservationUser(uint256 tokenId, address caller, address user);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -353,8 +375,23 @@ contract V3BonusVault is
 
     // ──────────────────────── Pool notification ────────────────
 
-    /// @notice `user` withdrew from the v3 pool before its end: the whole v3 reservation is
-    ///         forfeited while it is still locked. LP reservations are not touched.
+    /**
+     * @notice `user` withdrew from the v3 pool before its end (any amount, partial or full). Rule of
+     *         2026-11-12: leaving v3 early forfeits BOTH parts — the whole v3 reservation while it
+     *         is still locked ({BonusForfeited}), AND every LP reservation of `user` that is still
+     *         ACTIVE (recorded, not claimed, not forfeited, before its own unlock), each with
+     *         {LpBonusForfeited}. A claimed, forfeited or unlocked LP record is left as it is. The
+     *         reverse does not hold: an LP unstake before the end forfeits only that LP reservation.
+     * @dev The pool calls this fail closed, before the principal leaves, so it must never revert
+     *      for a reason of its own: storage reads and writes only, no external call. The loop is
+     *      bounded by `lpTokens[user].length`. Only {reserveLp} appends to that list (a rebalance
+     *      rewrites its entry in place), only the migrator calls {reserveLp}, and the migrator
+     *      reserves at most ONE LP position per wallet: {moveToLp} mints one position, and its
+     *      one-transition rule (`migrated[user]`, {AlreadyMigrated}) refuses every later route
+     *      call of the same wallet. So under one migrator the list holds at most one entry per
+     *      user (a migrator the owner links later, with its own `migrated` map, could add one
+     *      more each); the `uint16` index of {reserveLp} caps it at 65,536 in any case.
+     */
     function onEarlyExit(address user) external {
         V3BonusVaultStorage storage $ = _bonusStorage();
         address pool_ = $.pool;
@@ -362,11 +399,17 @@ contract V3BonusVault is
 
         UserReservation storage r = $.reservations[user];
         uint256 amount = r.amount;
-        if (amount == 0 || block.timestamp >= r.unlockAt) return;
+        if (amount != 0 && block.timestamp < r.unlockAt) {
+            r.amount = 0;
+            $.totalReserved -= amount;
+            emit BonusForfeited(user, amount);
+        }
 
-        r.amount = 0;
-        $.totalReserved -= amount;
-        emit BonusForfeited(user, amount);
+        uint256[] storage ids = $.lpTokens[user];
+        for (uint256 i = 0; i < ids.length; ++i) {
+            LpReservation storage lp = $.lpReservations[ids[i]];
+            if (_isActive(lp)) _forfeitLp($, lp, ids[i]);
+        }
     }
 
     // ──────────────────────── Vault notifications ──────────────
@@ -474,36 +517,49 @@ contract V3BonusVault is
      *         forfeited, not DEAD, AND settled, missed-after or still held by the vault for the
      *         caller (see the header). A stale LP record is skipped (left for {reconcileLp}). All
      *         or nothing: reverts {InsufficientFunds} while the balance is short.
+     * @dev Emits {V3BonusClaimed} when it pays the v3 part, {LpBonusClaimed} for each LP record it
+     *      pays, then {BonusClaimed} once with the total of the call.
      */
     function claim() external nonReentrant returns (uint256 amount) {
         V3BonusVaultStorage storage $ = _bonusStorage();
-
-        UserReservation storage r = $.reservations[msg.sender];
-        if (r.amount > 0 && block.timestamp >= r.unlockAt) {
-            amount = r.amount;
-            r.amount = 0;
-        }
+        amount = _takeV3($);
 
         uint256 lpTotal;
         uint256[] storage ids = $.lpTokens[msg.sender];
         for (uint256 i = 0; i < ids.length; ++i) {
-            uint256 lpAmount = _lpClaimable($, ids[i]);
-            if (lpAmount > 0) {
-                lpTotal += lpAmount;
-                $.lpReservations[ids[i]].claimed = true;
-            }
+            lpTotal += _takeLp($, ids[i]);
         }
         amount += lpTotal;
 
-        if (amount == 0) revert NothingToClaim();
-        uint256 balance = $.bonusToken.balanceOf(address(this));
-        if (balance < amount) revert InsufficientFunds(amount, balance);
+        _pay($, amount, lpTotal);
+    }
 
-        $.totalReserved -= amount;
-        $.totalLpReserved -= lpTotal;
-        $.bonusToken.safeTransfer(msg.sender, amount);
+    /**
+     * @notice Pays the caller's v3 reservation only, once its unlock time has passed. The LP
+     *         reservations stay where they are. Reverts {NothingToClaim} when nothing of the v3
+     *         part is due and {InsufficientFunds} while the balance is short.
+     * @dev Emits {V3BonusClaimed}, then {BonusClaimed} with the same amount.
+     */
+    function claimV3() external nonReentrant returns (uint256 amount) {
+        V3BonusVaultStorage storage $ = _bonusStorage();
+        amount = _takeV3($);
+        _pay($, amount, 0);
+    }
 
-        emit BonusClaimed(msg.sender, amount);
+    /**
+     * @notice Pays the caller the LP reservation of `tokenId` only, under the same rule as
+     *         {claim} (unlocked, not claimed, not forfeited, not DEAD, and settled, missed-after or
+     *         still held by the vault for the caller). Reverts {NotLpReservationUser} when the
+     *         record belongs to another wallet, {NothingToClaim} when it pays nothing now (an
+     *         unknown tokenId included) and {InsufficientFunds} while the balance is short.
+     * @dev Emits {LpBonusClaimed}, then {BonusClaimed} with the same amount.
+     */
+    function claimLp(uint256 tokenId) external nonReentrant returns (uint256 amount) {
+        V3BonusVaultStorage storage $ = _bonusStorage();
+        address user = $.lpReservations[tokenId].user;
+        if (user != address(0) && user != msg.sender) revert NotLpReservationUser(tokenId, msg.sender, user);
+        amount = _takeLp($, tokenId);
+        _pay($, amount, amount);
     }
 
     // ──────────────────────── Owner functions ──────────────────
@@ -576,6 +632,41 @@ contract V3BonusVault is
         uint256 reserved = $.totalReserved;
         uint256 cap = $.maxTotalReserved;
         if (reserved + amount > cap) revert BudgetExceeded(amount, cap > reserved ? cap - reserved : 0);
+    }
+
+    /// @dev The v3 part of a claim: when the caller's v3 reservation is unlocked and non-zero,
+    ///      zeroes it (so it can never pay twice), emits {V3BonusClaimed} and returns it.
+    function _takeV3(V3BonusVaultStorage storage $) private returns (uint256 amount) {
+        UserReservation storage r = $.reservations[msg.sender];
+        amount = r.amount;
+        if (amount == 0 || block.timestamp < r.unlockAt) return 0;
+        r.amount = 0;
+        emit V3BonusClaimed(msg.sender, amount);
+    }
+
+    /// @dev One LP part of a claim: when {_lpClaimable} pays the record of `tokenId` (the caller's:
+    ///      checked by the callers), marks it claimed (so it can never pay twice), emits
+    ///      {LpBonusClaimed} and returns its amount.
+    function _takeLp(V3BonusVaultStorage storage $, uint256 tokenId) private returns (uint256 amount) {
+        amount = _lpClaimable($, tokenId);
+        if (amount == 0) return 0;
+        $.lpReservations[tokenId].claimed = true;
+        emit LpBonusClaimed(tokenId, msg.sender, amount);
+    }
+
+    /// @dev The shared tail of the three claims, after every record is marked: {NothingToClaim}
+    ///      for zero, {InsufficientFunds} while the balance is short, then both totals drop by
+    ///      exactly what is paid (`lpAmount` of it is LP), the transfer, and {BonusClaimed}.
+    function _pay(V3BonusVaultStorage storage $, uint256 amount, uint256 lpAmount) private {
+        if (amount == 0) revert NothingToClaim();
+        uint256 balance = $.bonusToken.balanceOf(address(this));
+        if (balance < amount) revert InsufficientFunds(amount, balance);
+
+        $.totalReserved -= amount;
+        $.totalLpReserved -= lpAmount;
+        $.bonusToken.safeTransfer(msg.sender, amount);
+
+        emit BonusClaimed(msg.sender, amount);
     }
 
     /// @dev Forfeits an active LP reservation: both totals drop, the tokens stay as surplus.

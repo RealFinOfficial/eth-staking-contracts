@@ -820,15 +820,38 @@ issues one voucher per sw2 claim and should read `migrated(user)` before it sign
 
 The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoch`. Nothing is
 paid or checked at the transition. The company funds the vault with $ASSET any time before the
-end (`fund(amount)` or a plain transfer); `claim()` pays the caller's whole unlocked amount and
-reverts `InsufficientFunds(requested, available)` while the balance is short. A `withdraw` from v3
-before the end forfeits the caller's WHOLE v3 reservation (`onEarlyExit`, fail closed) and returns
-the principal in full: v3 has no principal penalty and pays nothing to a penalty receiver (decision
-of 2026-11-10). The LP
+end (`fund(amount)` or a plain transfer).
+
+**Three claim functions (2026-11-12).** Each pays the caller only, from the vault's balance, under
+the same rules: `NothingToClaim()` when it would pay zero, `InsufficientFunds(requested, available)`
+while the balance is short (nothing changes then), `totalReserved()` lowered by exactly what is paid
+and `totalLpReserved()` by exactly its LP part, and every paid record marked so it never pays twice.
+
+| Call | What it pays |
+|---|---|
+| `claim()` | everything of the caller's that is unlocked: the v3 reservation plus every payable LP reservation (unchanged behaviour) |
+| `claimV3()` | the caller's v3 reservation only, once unlocked |
+| `claimLp(tokenId)` | the LP reservation of `tokenId` only, when it is the caller's and payable (the rule below); another wallet's record reverts `NotLpReservationUser(tokenId, caller, user)`, an unknown tokenId reverts `NothingToClaim()` |
+
+Events, so an indexer can date each part: `V3BonusClaimed(user, amount)` for the v3 part a call pays,
+`LpBonusClaimed(tokenId, user, amount)` for each LP record it pays, then `BonusClaimed(user, total)`
+ONCE per call with the call's total (as before). A `claim()` that pays the v3 part and one LP record
+therefore emits three events, in that order.
+
+**Leaving v3 early (rule of 2026-11-12).** A `withdraw` from v3 before the end, of any amount
+(partial or full), calls `onEarlyExit(user)` (fail closed) and forfeits BOTH parts of the caller:
+the WHOLE v3 reservation (`BonusForfeited(user, amount)`) AND every LP reservation of the caller that
+is still active, i.e. recorded, not claimed, not forfeited and before its unlock
+(`LpBonusForfeited(tokenId, user, amount)` each). The LP position itself stays staked in the LP
+vault; its record stays forfeited: a later `unstake` or `rebalance` of it, and `reconcileLp`, change
+nothing, and it never pays. The reverse does not hold: an LP `unstake` before the unlock forfeits
+only that LP reservation, and the v3 reservation still pays at the end. The `withdraw` returns the
+principal in full: v3 has no principal penalty and pays nothing to a penalty receiver (decision of
+2026-11-10). The LP
 reservation follows the position: the vault's `rebalance` moves it to the new tokenId scaled by
 min(1, valueNew / valueOld) (never up); an `unstake` before the unlock forfeits it; after the
 unlock either one SETTLES it (`LpBonusSettled(tokenId, user)`, view `lpSettled(tokenId)`): it stays
-under the tokenId it had, unscaled, and pays. After the unlock `claim()` pays an LP reservation that
+under the tokenId it had, unscaled, and pays. After the unlock `claim()` (and `claimLp(tokenId)`) pays an LP reservation that
 is SETTLED, MISSED-AFTER (the vault's `onUnstake` to the listener failed at or after the unlock) or
 still HELD by the vault for its user (`stakerOf(tokenId) == user`), and never one that is DEAD (that
 notification failed before the unlock); any other record is stale and pays nothing (2026-11-10, see
@@ -871,7 +894,7 @@ no USDC reward and no penalty. Its whole surface:
 |---|---|---|
 | `stake(amount, deadline, signature)` | anyone, before `endEpoch` | pulls `amount` from the caller; needs the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)`, domain `("WeightedStakingPool", "1", chainId, pool proxy)`, signed by `signer()`, over the caller's next `nonces(user)`; the nonce is spent (`NonceUsed`). The voucher binds no amount |
 | `stakeFor(user, amount)` | the `migrator()` only, before `endEpoch` | pulls from the migrator, credits `user` (`Staked` then `StakedFor`) |
-| `withdraw(amount)` | a staker, before `endEpoch` | the principal back in full; `bonusVault().onEarlyExit(user)` forfeits the whole v3 reservation, fail closed (also before the activation) |
+| `withdraw(amount)` | a staker, before `endEpoch` | the principal back in full; `bonusVault().onEarlyExit(user)` forfeits the whole v3 reservation AND every active LP reservation of the user, for any amount withdrawn, fail closed (also before the activation) |
 | `unstake()` / `emergencyUnstake()` | a staker, from `endEpoch` | the whole principal (`Unstaked` / `EmergencyUnstaked`); `emergencyUnstake` is kept on purpose and can be removed by a later upgrade |
 | `setSigner`, `setMigrator`, `setBonusVault`, `recoverERC20`, `upgradeToAndCall`, `transferOwnership` | the owner (the timelock) | `renounceOwnership` reverts. `setBonusVault`: before `endEpoch` a linked vault can be neither unlinked nor replaced (`BonusVaultLocked(current, endEpoch)`); linking from zero is always allowed. If the bonus vault reverts, upgrade it, never unlink it. `recoverERC20`: any token in full; of $ASSET only `balanceOf(pool) - totalStaked` (`SurplusExceeded(requested, available)` above it) |
 

@@ -10,10 +10,11 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
 
 /**
  * @notice Bounded actor on a bare {V3BonusVault}: the migrator's two reserves, the pool's early
- *         exit, the vault's unstake and rebalance (with random value ratios), the permissionless
- *         `reconcileLp` (no handler tokenId is staked in the vault, so an active one is forfeited),
- *         clock warps, funding, claims and surplus recoveries. Per-step properties are checked around the step and kept
- *         as violation counters; state properties are checked by the invariant functions.
+ *         exit (v3 part and active LP parts), the vault's unstake and rebalance (with random value
+ *         ratios), the permissionless `reconcileLp` (no handler tokenId is staked in the vault, so
+ *         an active one is forfeited), clock warps, funding, the three claims (`claim`, `claimV3`,
+ *         `claimLp`) and surplus recoveries. Per-step properties are checked around the step and
+ *         kept as violation counters; state properties are checked by the invariant functions.
  */
 contract V3BonusVaultHandler is Test {
     V3BonusVault internal immutable book;
@@ -36,6 +37,8 @@ contract V3BonusVaultHandler is Test {
     uint256 public scalingViolations;
     uint256 public shortClaimViolations;
     uint256 public overpayViolations;
+    /// @dev An early exit left an active LP record of the user, or forfeited a non-active one.
+    uint256 public earlyExitViolations;
 
     constructor(
         V3BonusVault book_,
@@ -78,9 +81,25 @@ contract V3BonusVaultHandler is Test {
         ceiling[id] = amount;
     }
 
+    /// @dev Rule of 2026-11-12: the exit forfeits the v3 part (while locked) and every ACTIVE LP
+    ///      record of the user (open, before its unlock); every other record is left as it was.
     function earlyExit(uint256 seed) external {
+        address user = _user(seed);
+        uint256[] memory ids = book.lpTokensOf(user);
+        bool[] memory wasActive = new bool[](ids.length);
+        uint256[] memory amountBefore = new uint256[](ids.length);
+        for (uint256 j = 0; j < ids.length; ++j) {
+            (, uint256 lp, uint64 unlockAt, bool claimed, bool forfeited) = book.lpReservation(ids[j]);
+            wasActive[j] = !claimed && !forfeited && block.timestamp < unlockAt;
+            amountBefore[j] = lp;
+        }
         vm.prank(pool);
-        book.onEarlyExit(_user(seed));
+        book.onEarlyExit(user);
+        for (uint256 j = 0; j < ids.length; ++j) {
+            (, uint256 lp,,, bool forfeited) = book.lpReservation(ids[j]);
+            if (wasActive[j] && (!forfeited || lp != 0)) earlyExitViolations++;
+            if (!wasActive[j] && lp != amountBefore[j]) earlyExitViolations++;
+        }
     }
 
     function unstake(uint256 idSeed) external {
@@ -138,6 +157,43 @@ contract V3BonusVaultHandler is Test {
         } catch {
             if (due > 0 && balance >= due) shortClaimViolations++;
         }
+    }
+
+    /// @dev `claimV3` pays exactly the unlocked v3 part, and `claimable` drops by exactly that.
+    function claimV3(uint256 seed) external {
+        address user = _user(seed);
+        (uint256 v3, uint64 unlockAt) = book.reservedOf(user);
+        uint256 due = block.timestamp >= unlockAt ? v3 : 0;
+        uint256 claimableBefore = book.claimable(user);
+        uint256 balance = asset.balanceOf(address(book));
+        uint256 before = asset.balanceOf(user);
+        vm.prank(user);
+        try book.claimV3() returns (uint256 amount) {
+            if (amount != due) overpayViolations++;
+            if (asset.balanceOf(user) - before != amount) overpayViolations++;
+            if (claimableBefore - book.claimable(user) != amount) overpayViolations++;
+            paid += amount;
+        } catch {
+            if (due > 0 && balance >= due) shortClaimViolations++;
+        }
+    }
+
+    /// @dev `claimLp` pays one record of the user: `claimable` drops by exactly what it paid.
+    function claimLp(uint256 seed, uint256 idSeed) external {
+        address user = _user(seed);
+        uint256[] memory ids = book.lpTokensOf(user);
+        if (ids.length == 0) return;
+        uint256 id = ids[idSeed % ids.length];
+        uint256 claimableBefore = book.claimable(user);
+        uint256 before = asset.balanceOf(user);
+        vm.prank(user);
+        try book.claimLp(id) returns (uint256 amount) {
+            if (asset.balanceOf(user) - before != amount) overpayViolations++;
+            if (claimableBefore - book.claimable(user) != amount) overpayViolations++;
+            (,,, bool claimed,) = book.lpReservation(id);
+            if (!claimed) overpayViolations++;
+            paid += amount;
+        } catch {}
     }
 
     function recover(uint256 amount) external {
@@ -215,9 +271,15 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
         assertEq(handler.scalingViolations(), 0);
     }
 
-    /// @dev I4: a claim pays exactly `claimable`, and reverts only when the balance is short.
+    /// @dev I4: a claim pays exactly `claimable`, and reverts only when the balance is short;
+    ///      `claimV3` and `claimLp` pay exactly their part (2026-11-12).
     function invariant_ClaimPaysExactlyOrIsShort() public view {
         assertEq(handler.overpayViolations(), 0);
         assertEq(handler.shortClaimViolations(), 0);
+    }
+
+    /// @dev I6: an early exit forfeits every active LP record of the user and touches no other.
+    function invariant_EarlyExitForfeitsExactlyTheActiveLpRecords() public view {
+        assertEq(handler.earlyExitViolations(), 0);
     }
 }

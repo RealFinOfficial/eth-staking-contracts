@@ -1436,7 +1436,7 @@ document is unchanged; the rebalance logic and every valuation of the vault are 
 | File | What it is |
 |---|---|
 | `contracts/staking-v3/WeightedStakingPoolV3.sol` | The v3 pool, a SEPARATE MINIMAL contract (decision of 2026-11-10, below), UUPS, one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): it holds each wallet's $ASSET principal for the window and pays it back. A direct `stake(amount, deadline, signature)` behind the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)` (domain `WeightedStakingPool` / `1`), `stakeFor(user, amount)` callable only by `migrator`, `withdraw(amount)` before the end (principal in full, FAIL-CLOSED `bonusVault.onEarlyExit(user)` after the state changes, before the transfer), `unstake()` / `emergencyUnstake()` after the end. No weight, no USDC reward, no penalty. Ownership two-step, `renounceOwnership` reverts |
-| `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user (forfeited whole by `onEarlyExit` before the unlock) and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). Reserve now, fund later; `claim()` all or nothing, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
+| `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). `onEarlyExit` (a v3 `withdraw` before the end) forfeits the whole v3 reservation AND, since 2026-11-12, every active LP reservation of the same user; an LP `onUnstake` before the unlock forfeits only that LP reservation. Reserve now, fund later; three claims (`claim()` everything unlocked, `claimV3()` the v3 part, `claimLp(tokenId)` one LP part, 2026-11-12), each all or nothing for its call, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
 | `contracts/staking-v3/StakingMigrator.sol` | The one-call transition after the staker's own sw2 `unstake()`: `compound` (USDC swapped through SwapRouter02 under its own `TwapGuard`, 300 s / 953 ticks), `moveToLp` (one position on spot ± 6,932 ticks rounded outward, the adapter's `_campaignRange` math, staked through `vault.stakeFor`; the USDC leg valued at the 1,800 s mean tick, `OracleHistory`), `claimRestake`. Each checks an EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`) and spends its per-user nonce before any token moves. Routes 1 and 2 behind `pauseCompound` (vault guardian or operator) / `unpauseCompound` (operator), born paused; route 3 never paused. Namespace `real.staking.storage.StakingMigrator` |
 | `contracts/staking-v3/interfaces/IStakingV3.sol` | The three cross-contract interfaces |
 
@@ -1606,15 +1606,40 @@ forfeited B's 235.314762005877517222 tREAL (block 12104270). Records: scripts/RE
 Tests: `test/forge/unit/{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`,
 `test/forge/fuzz/StakingV3Fuzz.t.sol`, `test/forge/invariant/V3BonusVaultInvariants.t.sol` (I1
 `totalReserved` equals the sum of open reservations, I2 balance conservation, I3 scaling never raises,
-I4 a claim pays exactly or the vault is short, I5 `totalLpReserved` equals the sum of open LP
+I4 a claim (`claim`, `claimV3`, `claimLp`) pays exactly or the vault is short, I5 `totalLpReserved`
+equals the sum of open LP reservations, I6 an early exit forfeits exactly the user's active LP
 reservations), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
 (the three routes end to end on the real Sepolia Uniswap deployment, the timelock batch, the
 rebalance scaling, early-exit forfeiture, claims before and after funding).
 
+**Leaving v3 early forfeits both parts; one claim per part (business decision of the owner,
+2026-11-12).** `V3BonusVault.onEarlyExit(user)`, which the pool calls fail closed inside every
+`withdraw` before `endEpoch` (partial or full), forfeits the user's whole v3 reservation as before
+AND every LP reservation of the user that is still ACTIVE (recorded, not claimed, not forfeited,
+before its unlock), each through the existing `_forfeitLp` (`LpBonusForfeited`, both totals
+lowered once). The hook still makes no external call (storage only), so it cannot revert for a
+reason of its own. Its loop runs over `lpTokens[user]`, which only `reserveLp` appends to (a
+rebalance rewrites the entry in place); only the migrator calls `reserveLp`, once per wallet
+(`moveToLp` mints one position and the one-transition rule refuses every later route call), so
+the list holds at most one entry per user under one migrator. A record forfeited this way stays
+forfeited: the vault's later `onUnstake` / `onRebalance` reach `_settleLp`, a no-op for a
+forfeited record; `reconcileLp` returns early; it never pays. The reverse is unchanged: an LP
+`unstake` before the unlock forfeits only that LP reservation. The pool's interface did not change.
+Two claim functions were added beside the unchanged `claim()`: `claimV3()` (the v3 part only) and
+`claimLp(tokenId)` (one LP record of the caller; another wallet's record reverts
+`NotLpReservationUser(tokenId, caller, user)`), with the same rules (`NothingToClaim`,
+`InsufficientFunds`, totals lowered by exactly what is paid, the record marked before the
+transfer, `nonReentrant`). Every claim emits `V3BonusClaimed(user, amount)` and
+`LpBonusClaimed(tokenId, user, amount)` for the parts it pays, then `BonusClaimed(user, total)`
+once. No storage was added. Tests: `test_EarlyExit_*`, `test_ClaimV3_*`, `test_ClaimLp_*` in
+`test/forge/unit/V3BonusVault.t.sol`, `test_Withdraw_*ForfeitsTheV3AndTheLpPart` in
+`WeightedStakingPoolV3.t.sol`, `test_V3EarlyExit_*` in `VaultBonusListener.t.sol`, invariant I6.
+
 **The v3 pool, a separate minimal contract (decision 2026-11-10).** `WeightedStakingPoolV3` is not
 a copy of v2. It holds each wallet's $ASSET principal for the window and pays it back; the bonus
 logic is unchanged and lives in the migrator and the bonus vault (10 % / 10 % / 5 % reserved at the
-transition, paid in $ASSET after the end, the v3 part forfeited on an early exit). The decision was
+transition, paid in $ASSET after the end, the v3 part forfeited on an early exit; since 2026-11-12
+the user's active LP part too, see below). The decision was
 taken in two steps on the same day: first the principal penalty was removed (5 % to 50 % of the
 withdrawn amount, sent to `0xD6719Ce10F1b499Bd8FE022AB045b991b996dA6a`; live on stack #6 since block
 12104575, 2026-11-10 14:17 Sofia, 12:17 UTC, implementation `0x2E7b8ACaE6e746371F2822A83A052e3eA579860A`),

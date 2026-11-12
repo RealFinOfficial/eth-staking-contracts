@@ -31,8 +31,10 @@ import "./interfaces/IStakingV3.sol";
  *      tokens are pulled from the migrator and credited to `user`. No pool voucher is checked: the
  *      migrator has already verified the backend's `TransitionVoucher`.
  *    - `withdraw(amount)` before `endEpoch`: the principal back IN FULL (no penalty). The bonus
- *      vault is told through `onEarlyExit(user)` and forfeits the user's whole v3 reservation (fail
- *      closed: no `try`). The notification is sent before and after the activation alike.
+ *      vault is told through `onEarlyExit(user)` (fail closed: no `try`) and forfeits, for any
+ *      amount withdrawn, the user's whole v3 reservation AND every LP reservation of the user that
+ *      is still active (rule of 2026-11-12). The notification is sent before and after the
+ *      activation alike.
  *    - `unstake()` after `endEpoch`: the whole principal. `emergencyUnstake()` after `endEpoch`:
  *      the same payout under its own event (kept on purpose; the contract is upgradeable, so it can
  *      be removed later).
@@ -139,7 +141,8 @@ contract WeightedStakingPoolV3 is
     event Staked(address indexed user, uint256 amount);
     /// @notice The migrator staked `amount` for `user` (emitted after {Staked}).
     event StakedFor(address indexed user, address indexed by, uint256 amount);
-    /// @notice `user` took `amount` back before `endEpoch`, in full; the v3 bonus is forfeited.
+    /// @notice `user` took `amount` back before `endEpoch`, in full; the bonus vault forfeits the
+    ///         user's v3 bonus and every active LP bonus of the user.
     event Withdrawn(address indexed user, uint256 amount);
     /// @notice `user` took the whole principal back after `endEpoch`.
     event Unstaked(address indexed user, uint256 amount);
@@ -248,8 +251,9 @@ contract WeightedStakingPoolV3 is
         emit StakedFor(user, msg.sender, amount);
     }
 
-    /// @notice Withdraw before `endEpoch`. The principal is returned IN FULL; the bonus vault
-    ///         forfeits the user's whole v3 bonus reservation.
+    /// @notice Withdraw before `endEpoch`, any amount. The principal is returned IN FULL; the
+    ///         bonus vault forfeits the user's whole v3 bonus reservation AND every LP bonus
+    ///         reservation of the user that is still active (rule of 2026-11-12).
     function withdraw(uint256 amount) external nonReentrant {
         PoolStorage storage $ = _poolStorage();
         require(block.timestamp < $.endEpoch, "Use unstake after pool ends");

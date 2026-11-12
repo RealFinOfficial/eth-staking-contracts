@@ -466,6 +466,66 @@ contract VaultBonusListenerTest is StakingV3Harness {
         assertEq(bonusVault.claimable(alice), owedV3, "the LP part is gone for good");
     }
 
+    /// @dev Rule of 2026-11-12, end to end: alice joins LP through the migrator (an LP part and a v3
+    ///      remainder part), then withdraws the remainder from the v3 pool before its end. Both
+    ///      parts are forfeited in the withdrawal; her later LP unstake neither reverts nor moves
+    ///      a total, and nothing pays at the end.
+    function test_V3EarlyExit_ForfeitsTheJoinedLpPartToo() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 owedV3,) = bonusVault.reservedOf(alice);
+        uint256 staked = poolV3.stakes(alice);
+        assertGt(owedV3, 0);
+        assertGt(staked, 0);
+        uint256 totalBefore = bonusVault.totalReserved();
+
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.BonusForfeited(alice, owedV3);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(alice);
+        poolV3.withdraw(staked / 2);
+        assertEq(bonusVault.totalReserved(), totalBefore - owedLp - owedV3);
+        assertEq(bonusVault.totalLpReserved(), 0);
+        assertEq(mathVault.stakerOf(tokenId), alice, "the position itself stays staked");
+
+        vm.recordLogs();
+        vm.prank(alice);
+        mathVault.unstake(tokenId);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].emitter != address(bonusVault), "the forfeited record is not touched again");
+            assertTrue(logs[i].topics[0] != LPStakingVault.BonusListenerFailed.selector, "the hook did not revert");
+        }
+        assertEq(mathVault.listenerMissedAt(tokenId), 0);
+        assertFalse(bonusVault.reconcileLp(tokenId));
+        vm.warp(v3End);
+        assertEq(bonusVault.claimable(alice), 0);
+        assertFalse(bonusVault.lpSettled(tokenId));
+        assertEq(bonusVault.totalLpReserved(), 0, "dropped exactly once");
+    }
+
+    /// @dev The same exit, then a re-range of the still-staked position (fail closed in the vault):
+    ///      it must not revert, and the forfeited record is neither moved nor revived.
+    function test_V3EarlyExit_ThenARebalanceNeitherRevertsNorRevives() public {
+        uint256 tokenId = _join();
+        uint256 staked = poolV3.stakes(alice);
+        vm.prank(alice);
+        poolV3.withdraw(staked);
+        vm.prank(alice);
+        uint256 newId = mathVault.rebalance(tokenId, PRICE_TICK + 10, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        (address moved,,,,) = bonusVault.lpReservation(newId);
+        assertEq(moved, address(0), "nothing moved to the new id");
+        (,,,, bool forfeited) = bonusVault.lpReservation(tokenId);
+        assertTrue(forfeited);
+        assertEq(bonusVault.totalLpReserved(), 0);
+        assertEq(bonusVault.totalReserved(), 0);
+        vm.warp(v3End);
+        vm.prank(alice);
+        mathVault.unstake(newId);
+        assertEq(bonusVault.claimable(alice), 0);
+    }
+
     function test_Unstake_AfterTheUnlockSettlesAndPays() public {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);

@@ -53,6 +53,12 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //    WeightedStakingPoolV3 lines 110 -> 117 (114 hit), branches 40 -> 41 (5 hit): the
 //    `BonusVaultLocked` guard in `setBonusVault` and the staking-token surplus check in
 //    `recoverERC20`, both hit; the three unhit lines are the same `--ir-minimum` artefacts.
+// ── Pinned floors, re-measured 2026-11-12 (early exit forfeits both parts; claimV3 / claimLp) ──
+//    V3BonusVault lines 248 -> 269 (266 hit), branches 44 -> 46 (46): the LP loop in `onEarlyExit`,
+//    `claimV3`, `claimLp` with its `NotLpReservationUser` check, and the shared `_takeV3` /
+//    `_takeLp` / `_pay` helpers. Every new line and branch is hit; the three unhit lines are the
+//    same `--ir-minimum` artefacts (the namespace accessor body, `_disableInitializers`,
+//    `__Ownable2Step_init`).
 // ── Pinned floors, re-measured 2026-11-10, third time (the minimal v3 pool, audit notes item 19) ──
 //    WeightedStakingPoolV3 lines 298 -> 110 (107 hit), branches 85 -> 40 (2 hit): the weight
 //    accrual, `updateWeight`, the USDC reward path and their views are gone. The three unhit lines
@@ -301,8 +307,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 41, minHit: 5},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 248, minHit: 245},
-    branches: {found: 44, minHit: 44},
+    lines: {found: 269, minHit: 266},
+    branches: {found: 46, minHit: 46},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
     lines: {found: 237, minHit: 231},

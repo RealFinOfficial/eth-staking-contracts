@@ -12,6 +12,7 @@ import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Perm
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {VmSafe} from "forge-std/Vm.sol";
 
 /**
  * @notice {WeightedStakingPoolV3}: the minimal v3 pool of 2026-11-10. A direct `stake` behind the
@@ -357,6 +358,65 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         p.withdraw(AMOUNT / 4);
         assertEq(p.stakes(alice), AMOUNT - AMOUNT / 4);
         assertEq(p.totalStaked(), AMOUNT - AMOUNT / 4);
+    }
+
+    /// @dev Rule of 2026-11-12: a withdrawal before the end, partial or full, forfeits the v3 part
+    ///      AND every active LP part of the user.
+    function _withdrawForfeitsBoth(uint256 amount) internal {
+        _stakeFor(alice, AMOUNT);
+        vm.startPrank(carol);
+        book.reserve(alice, 50e18, uint64(end), 2);
+        book.reserveLp(7, alice, 80e18, uint64(end));
+        book.reserveLp(8, bob, 30e18, uint64(end));
+        vm.stopPrank();
+        vm.warp(start + 10 days);
+
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusForfeited(alice, 50e18);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(7, alice, 80e18);
+        vm.expectEmit(address(p));
+        emit WeightedStakingPoolV3.Withdrawn(alice, amount);
+        vm.prank(alice);
+        p.withdraw(amount);
+
+        (uint256 reserved,) = book.reservedOf(alice);
+        assertEq(reserved, 0);
+        (, uint256 lp,,, bool forfeited) = book.lpReservation(7);
+        assertEq(lp, 0);
+        assertTrue(forfeited);
+        assertEq(book.totalReserved(), 30e18, "only bob's LP part is left");
+        assertEq(book.totalLpReserved(), 30e18);
+    }
+
+    function test_Withdraw_PartialForfeitsTheV3AndTheLpPart() public {
+        _withdrawForfeitsBoth(AMOUNT / 4);
+        assertEq(p.stakes(alice), AMOUNT - AMOUNT / 4);
+    }
+
+    function test_Withdraw_FullForfeitsTheV3AndTheLpPart() public {
+        _withdrawForfeitsBoth(AMOUNT);
+        assertEq(p.stakes(alice), 0);
+    }
+
+    /// @dev After the end the pool takes the principal back through `unstake`, which never calls
+    ///      the hook: both parts stay owed.
+    function test_Unstake_AfterTheEndKeepsTheV3AndTheLpPart() public {
+        _stakeFor(alice, AMOUNT);
+        vm.startPrank(carol);
+        book.reserve(alice, 50e18, uint64(end), 2);
+        book.reserveLp(7, alice, 80e18, uint64(end));
+        vm.stopPrank();
+        vm.warp(end);
+        vm.recordLogs();
+        vm.prank(alice);
+        p.unstake();
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].emitter != address(book), "the bonus vault is not called");
+        }
+        assertEq(book.totalReserved(), 130e18);
+        assertEq(book.totalLpReserved(), 80e18);
     }
 
     /// @dev A pool like `p` that was never linked to a bonus vault.

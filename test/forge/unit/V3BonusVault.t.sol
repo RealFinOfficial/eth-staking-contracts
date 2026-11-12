@@ -9,6 +9,7 @@ import {PositionValue} from "../../../contracts/lp-staking/libraries/PositionVal
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {VmSafe} from "forge-std/Vm.sol";
 
 /**
  * @notice {V3BonusVault} as a book: every gate (who may reserve, report, fund, recover), every
@@ -244,31 +245,201 @@ contract V3BonusVaultTest is StakingV3Harness {
         book.onEarlyExit(alice);
     }
 
-    function test_EarlyExit_ForfeitsTheWholeV3ReservationButNoLpOne() public {
+    /// @dev Rule of 2026-11-12: leaving v3 early forfeits the v3 part AND every active LP part of
+    ///      the user (changed from "the LP reservation is untouched"). Another user's record stays.
+    function test_EarlyExit_ForfeitsTheWholeV3ReservationAndEveryActiveLpOne() public {
         _reserve(alice, BONUS);
         _reserve(alice, BONUS);
         _reserveLp(ID1, alice, BONUS);
+        _reserveLp(ID2, alice, 3 * BONUS);
+        _reserveLp(ID3, bob, 5 * BONUS);
         vm.expectEmit(address(book));
         emit V3BonusVault.BonusForfeited(alice, 2 * BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID2, alice, 3 * BONUS);
         vm.prank(poolStub);
         book.onEarlyExit(alice);
         (uint256 amount,) = book.reservedOf(alice);
         assertEq(amount, 0);
-        assertEq(book.totalReserved(), BONUS, "the LP reservation is untouched");
-        (, uint256 lpAmount,,, bool forfeited) = book.lpReservation(ID1);
-        assertEq(lpAmount, BONUS);
-        assertFalse(forfeited);
+        (, uint256 lp1,,, bool forfeited1) = book.lpReservation(ID1);
+        (, uint256 lp2,,, bool forfeited2) = book.lpReservation(ID2);
+        assertEq(lp1, 0);
+        assertEq(lp2, 0);
+        assertTrue(forfeited1);
+        assertTrue(forfeited2);
+        assertEq(book.totalReserved(), 5 * BONUS, "only bob's LP reservation is left");
+        assertEq(book.totalLpReserved(), 5 * BONUS);
+        (, uint256 lp3,,, bool forfeited3) = book.lpReservation(ID3);
+        assertEq(lp3, 5 * BONUS, "another user's record is untouched");
+        assertFalse(forfeited3);
+    }
+
+    function test_EarlyExit_OnlyAV3PartIsForfeitedAsBefore() public {
+        _reserve(alice, BONUS);
+        vm.recordLogs();
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "one event");
+        assertEq(logs[0].topics[0], V3BonusVault.BonusForfeited.selector);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+    }
+
+    function test_EarlyExit_ForfeitsTheLpPartWithoutAV3Part() public {
+        _reserveLp(ID1, alice, BONUS);
+        vm.recordLogs();
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "no BonusForfeited for a zero v3 part");
+        assertEq(logs[0].topics[0], V3BonusVault.LpBonusForfeited.selector);
+        (,,,, bool forfeited) = book.lpReservation(ID1);
+        assertTrue(forfeited);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+    }
+
+    function test_EarlyExit_ForfeitsTheLpPartWhenTheV3PartWasAlreadyZeroed() public {
+        _reserve(alice, BONUS);
+        vm.prank(poolStub);
+        book.onEarlyExit(alice); // the v3 part is zeroed by a first exit
+        _reserveLp(ID1, alice, 2 * BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusForfeited(ID1, alice, 2 * BONUS);
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+    }
+
+    /// @dev Only ACTIVE LP records are forfeited: a claimed, an already forfeited and an unlocked
+    ///      record are left as they are, so no total drops twice.
+    function test_EarlyExit_SkipsLpRecordsThatAreNotActive() public {
+        uint256 id4 = 104;
+        vm.startPrank(carol);
+        book.reserveLp(ID1, alice, BONUS, UNLOCK / 2); // unlocks earlier, then claimed
+        book.reserveLp(id4, alice, 8 * BONUS, UNLOCK / 2); // unlocks earlier, not claimed
+        vm.stopPrank();
+        _reserveLp(ID2, alice, 2 * BONUS);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID2); // forfeited by the LP vault before the unlock
+        _reserveLp(ID3, alice, 4 * BONUS);
+        vm.warp(UNLOCK / 2);
+        _holdFor(ID1, alice);
+        book.fund(BONUS);
+        vm.prank(alice);
+        book.claimLp(ID1);
+        assertEq(book.totalLpReserved(), 12 * BONUS);
+
+        vm.recordLogs();
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "only ID3 is active");
+        assertEq(logs[0].topics[0], V3BonusVault.LpBonusForfeited.selector);
+        assertEq(uint256(logs[0].topics[1]), ID3);
+        (, uint256 lp4,,, bool forfeited4) = book.lpReservation(id4);
+        assertEq(lp4, 8 * BONUS, "an unlocked record is no longer forfeitable");
+        assertFalse(forfeited4);
+        (,,, bool claimed1, bool forfeited1) = book.lpReservation(ID1);
+        assertTrue(claimed1);
+        assertFalse(forfeited1, "a claimed record is never forfeited");
+        assertEq(book.totalLpReserved(), 8 * BONUS);
+        assertEq(book.totalReserved(), 8 * BONUS);
     }
 
     function test_EarlyExit_IsANoOpWithoutReservationOrAfterTheUnlock() public {
         vm.prank(poolStub);
         book.onEarlyExit(alice);
         _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
         vm.warp(UNLOCK);
+        vm.recordLogs();
         vm.prank(poolStub);
         book.onEarlyExit(alice);
+        assertEq(vm.getRecordedLogs().length, 0, "nothing forfeited at the unlock");
         (uint256 amount,) = book.reservedOf(alice);
         assertEq(amount, BONUS, "at the unlock it is no longer forfeitable");
+        (, uint256 lp,,, bool forfeited) = book.lpReservation(ID1);
+        assertEq(lp, 2 * BONUS, "nor is the LP part");
+        assertFalse(forfeited);
+        assertEq(book.totalReserved(), 3 * BONUS);
+        assertEq(book.totalLpReserved(), 2 * BONUS);
+    }
+
+    /// @dev A record forfeited by the early exit stays forfeited and harmless: the LP vault's later
+    ///      notifications neither revert nor revive, settle or move it, `reconcileLp` is a no-op,
+    ///      `claim` pays nothing for it, and `totalLpReserved` dropped exactly once.
+    function test_EarlyExit_AForfeitedLpRecordStaysForfeited() public {
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        _reserveLp(ID2, bob, 3 * BONUS);
+        _holdFor(ID1, alice); // still staked in the LP vault by alice
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        assertEq(book.totalLpReserved(), 3 * BONUS);
+        assertEq(book.totalReserved(), 3 * BONUS);
+
+        vm.recordLogs();
+        // Before the unlock: a re-range and an unstake from the LP vault.
+        vm.startPrank(address(mathVault));
+        book.onRebalance(ID1, ID3, _snap(L), _snap(L));
+        book.onUnstake(ID1);
+        vm.stopPrank();
+        assertFalse(book.reconcileLp(ID1));
+        // After the unlock: the same again.
+        vm.warp(UNLOCK);
+        vm.startPrank(address(mathVault));
+        book.onRebalance(ID1, ID3, _snap(L), _snap(L));
+        book.onUnstake(ID1);
+        vm.stopPrank();
+        assertFalse(book.reconcileLp(ID1));
+        assertEq(vm.getRecordedLogs().length, 0, "no event: nothing moved, settled or forfeited again");
+
+        (address user, uint256 lp,, bool claimed, bool forfeited) = book.lpReservation(ID1);
+        assertEq(user, alice);
+        assertEq(lp, 0);
+        assertFalse(claimed);
+        assertTrue(forfeited);
+        assertFalse(book.lpSettled(ID1));
+        (address moved,,,,) = book.lpReservation(ID3);
+        assertEq(moved, address(0), "nothing moved to the new id");
+        uint256[] memory ids = book.lpTokensOf(alice);
+        assertEq(ids[0], ID1, "the list entry is not rewritten");
+        assertEq(book.totalLpReserved(), 3 * BONUS, "dropped exactly once");
+        assertEq(book.totalReserved(), 3 * BONUS);
+
+        book.fund(10 * BONUS);
+        assertEq(book.claimable(alice), 0);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claim();
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID1);
+    }
+
+    /// @dev The reverse stays as it was: an LP unstake before the end forfeits only that LP part,
+    ///      and the v3 part still pays at the end.
+    function test_LpUnstakeBeforeTheEndForfeitsOnlyTheLpPart() public {
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        vm.recordLogs();
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics[0], V3BonusVault.LpBonusForfeited.selector);
+        (uint256 amount,) = book.reservedOf(alice);
+        assertEq(amount, BONUS, "the v3 part is kept");
+        book.fund(BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(alice);
+        assertEq(book.claim(), BONUS);
+        assertEq(book.totalReserved(), 0);
     }
 
     // ──────────────────────── onUnstake ────────────────────────
@@ -518,6 +689,222 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.prank(bob);
         vm.expectRevert(V3BonusVault.NothingToClaim.selector);
         book.claim();
+    }
+
+    // ──────────────────────── claimV3 / claimLp / claim, part by part ─
+
+    /// @dev alice: a v3 part of BONUS, an LP part of 2 BONUS under ID1 and 4 BONUS under ID2, both
+    ///      held by the vault for her; the vault is funded with `funding`; the clock at the unlock.
+    function _twoPartsUnlocked(uint256 funding) internal {
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        _reserveLp(ID2, alice, 4 * BONUS);
+        _holdFor(ID1, alice);
+        _holdFor(ID2, alice);
+        if (funding > 0) book.fund(funding);
+        vm.warp(UNLOCK);
+    }
+
+    function test_ClaimV3_ThenClaimLp_ThenClaimHasNothingLeft() public {
+        _twoPartsUnlocked(10 * BONUS);
+        uint256 before = asset.balanceOf(alice);
+
+        vm.expectEmit(address(book));
+        emit V3BonusVault.V3BonusClaimed(alice, BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusClaimed(alice, BONUS);
+        vm.prank(alice);
+        assertEq(book.claimV3(), BONUS);
+        assertEq(asset.balanceOf(alice) - before, BONUS);
+        assertEq(book.totalReserved(), 6 * BONUS);
+        assertEq(book.totalLpReserved(), 6 * BONUS, "a v3 claim moves no LP total");
+        (uint256 v3Left,) = book.reservedOf(alice);
+        assertEq(v3Left, 0);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimV3();
+
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusClaimed(ID1, alice, 2 * BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusClaimed(alice, 2 * BONUS);
+        vm.prank(alice);
+        assertEq(book.claimLp(ID1), 2 * BONUS);
+        assertEq(book.totalReserved(), 4 * BONUS);
+        assertEq(book.totalLpReserved(), 4 * BONUS);
+        (,,, bool claimed1,) = book.lpReservation(ID1);
+        assertTrue(claimed1);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID1);
+
+        vm.prank(alice);
+        assertEq(book.claimLp(ID2), 4 * BONUS);
+        assertEq(asset.balanceOf(alice) - before, 7 * BONUS);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claim();
+        assertEq(book.claimable(alice), 0);
+    }
+
+    function test_ClaimLp_ThenClaimPaysOnlyTheRest() public {
+        _twoPartsUnlocked(10 * BONUS);
+        vm.prank(alice);
+        book.claimLp(ID2);
+        assertEq(book.claimable(alice), 3 * BONUS);
+
+        vm.recordLogs();
+        vm.prank(alice);
+        assertEq(book.claim(), 3 * BONUS);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        // Transfer, then the three claim events: the v3 part, the LP part, the total.
+        bytes32[] memory sigs = new bytes32[](3);
+        uint256 n;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].emitter != address(book)) continue;
+            sigs[n++] = logs[i].topics[0];
+        }
+        assertEq(n, 3, "three events from the book");
+        assertEq(sigs[0], V3BonusVault.V3BonusClaimed.selector);
+        assertEq(sigs[1], V3BonusVault.LpBonusClaimed.selector);
+        assertEq(sigs[2], V3BonusVault.BonusClaimed.selector);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        (,,, bool claimed2,) = book.lpReservation(ID2);
+        assertTrue(claimed2);
+    }
+
+    function test_Claim_EmitsEachPartAndTheTotal() public {
+        _reserve(alice, BONUS);
+        _reserveLp(ID1, alice, 2 * BONUS);
+        _holdFor(ID1, alice);
+        book.fund(3 * BONUS);
+        vm.warp(UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.V3BonusClaimed(alice, BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusClaimed(ID1, alice, 2 * BONUS);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusClaimed(alice, 3 * BONUS);
+        vm.prank(alice);
+        assertEq(book.claim(), 3 * BONUS);
+    }
+
+    function test_Claim_AfterBothPartsWereClaimedSinglyHasNothing() public {
+        _twoPartsUnlocked(10 * BONUS);
+        vm.startPrank(alice);
+        book.claimLp(ID1);
+        book.claimV3();
+        book.claimLp(ID2);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claim();
+        vm.stopPrank();
+        assertEq(asset.balanceOf(address(book)), 3 * BONUS, "paid exactly 7 BONUS");
+    }
+
+    function test_ClaimLp_AnotherWalletsTokenIdReverts() public {
+        _twoPartsUnlocked(10 * BONUS);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.NotLpReservationUser.selector, ID1, bob, alice));
+        book.claimLp(ID1);
+        // An unknown tokenId has no user: nothing to claim.
+        vm.prank(bob);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimLp(ID3);
+    }
+
+    function test_ClaimLp_NothingForAForfeitedLockedDeadOrStaleRecord() public {
+        uint256 id4 = 104;
+        uint256 id5 = 105;
+        _reserveLp(ID1, alice, BONUS); // forfeited
+        _reserveLp(ID2, alice, BONUS); // dead
+        _reserveLp(ID3, alice, BONUS); // stale: the vault holds it for nobody
+        _reserveLp(id4, alice, BONUS); // stale: held for bob
+        vm.prank(carol);
+        book.reserveLp(id5, alice, BONUS, UNLOCK + 100); // not yet unlocked
+        _holdFor(id5, alice);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1);
+        _holdFor(ID2, alice);
+        _missedAt(ID2, UNLOCK - 1);
+        _holdFor(id4, bob);
+        book.fund(10 * BONUS);
+        vm.warp(UNLOCK);
+
+        uint256[5] memory ids = [ID1, ID2, ID3, id4, id5];
+        for (uint256 i = 0; i < ids.length; ++i) {
+            vm.prank(alice);
+            vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+            book.claimLp(ids[i]);
+        }
+        assertEq(book.totalLpReserved(), 4 * BONUS, "nothing moved");
+        vm.warp(UNLOCK + 100);
+        vm.prank(alice);
+        assertEq(book.claimLp(id5), BONUS, "pays once unlocked");
+    }
+
+    function test_ClaimV3_NothingBeforeTheUnlockOrWithoutAReservation() public {
+        _reserve(alice, BONUS);
+        book.fund(BONUS);
+        vm.prank(alice);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimV3();
+        vm.warp(UNLOCK);
+        vm.prank(bob);
+        vm.expectRevert(V3BonusVault.NothingToClaim.selector);
+        book.claimV3();
+    }
+
+    function test_InsufficientFunds_OnEachClaimThenASuccessAfterFund() public {
+        _twoPartsUnlocked(BONUS / 2);
+        vm.startPrank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, BONUS, BONUS / 2));
+        book.claimV3();
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, 2 * BONUS, BONUS / 2));
+        book.claimLp(ID1);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, 7 * BONUS, BONUS / 2));
+        book.claim();
+        vm.stopPrank();
+        assertEq(book.totalReserved(), 7 * BONUS, "nothing changed");
+        assertEq(book.totalLpReserved(), 6 * BONUS);
+        (uint256 v3,) = book.reservedOf(alice);
+        assertEq(v3, BONUS);
+        (,,, bool claimed1,) = book.lpReservation(ID1);
+        assertFalse(claimed1);
+
+        book.fund(BONUS / 2);
+        vm.prank(alice);
+        assertEq(book.claimV3(), BONUS);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, 2 * BONUS, 0));
+        book.claimLp(ID1);
+        book.fund(2 * BONUS);
+        vm.prank(alice);
+        assertEq(book.claimLp(ID1), 2 * BONUS);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.InsufficientFunds.selector, 4 * BONUS, 0));
+        book.claim();
+        book.fund(4 * BONUS);
+        vm.prank(alice);
+        assertEq(book.claim(), 4 * BONUS);
+        assertEq(book.totalReserved(), 0);
+        assertEq(book.totalLpReserved(), 0);
+        assertEq(asset.balanceOf(address(book)), 0);
+    }
+
+    function test_ClaimLp_PaysASettledRecordTheVaultNoLongerHolds() public {
+        _reserveLp(ID1, alice, BONUS);
+        book.fund(BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(address(mathVault));
+        book.onUnstake(ID1); // settled after the unlock
+        vm.expectEmit(address(book));
+        emit V3BonusVault.LpBonusClaimed(ID1, alice, BONUS);
+        vm.prank(alice);
+        assertEq(book.claimLp(ID1), BONUS);
+        assertEq(book.totalLpReserved(), 0);
     }
 
     // ──────────────────────── recoverSurplus ───────────────────
