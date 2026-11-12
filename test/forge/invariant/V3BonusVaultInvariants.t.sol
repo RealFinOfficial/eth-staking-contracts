@@ -64,6 +64,19 @@ contract V3BonusVaultHandler is Test {
     /// @dev A direct stake whose v3 reservation did not grow by exactly `previewStakeBonus`.
     uint256 public stakeBonusViolations;
     uint256 public directStakes;
+    /// @dev Direct stakes attempted while the window was open, and those that reverted (none may:
+    ///      the budget is unbounded here). Counted outside the reverting call, so a stake step
+    ///      that always failed could not pass the I8 invariant vacuously.
+    uint256 public stakeAttempts;
+    uint256 public stakeFailures;
+    /// @dev The REAL pool `withdraw` step (2026-11-12): calls, partial and full ones, re-stakes
+    ///      after a withdraw, and a withdraw that reverted or did not forfeit exactly the rule.
+    uint256 public poolWithdraws;
+    uint256 public partialWithdraws;
+    uint256 public fullWithdraws;
+    uint256 public restakesAfterWithdraw;
+    uint256 public poolWithdrawViolations;
+    mapping(address => bool) internal hasWithdrawn;
 
     constructor(
         V3BonusVault book_,
@@ -137,11 +150,57 @@ contract V3BonusVaultHandler is Test {
             keccak256(abi.encode(stakePool.STAKE_VOUCHER_TYPEHASH(), user, stakePool.nonces(user), block.timestamp));
         (uint8 v, bytes32 r, bytes32 sg) =
             vm.sign(signerPk, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
+        stakeAttempts++;
         vm.prank(user);
-        stakePool.stake(amount, block.timestamp, abi.encodePacked(r, sg, v));
-        (uint256 afterAmount,) = book.reservedOf(user);
-        if (afterAmount - before != preview) stakeBonusViolations++;
-        directStakes++;
+        try stakePool.stake(amount, block.timestamp, abi.encodePacked(r, sg, v)) {
+            (uint256 afterAmount,) = book.reservedOf(user);
+            if (afterAmount - before != preview) stakeBonusViolations++;
+            directStakes++;
+            if (hasWithdrawn[user]) restakesAfterWithdraw++;
+        } catch {
+            stakeFailures++;
+        }
+    }
+
+    /// @dev A `withdraw` through the REAL pool before its end, partial or full: the principal back
+    ///      in full, and the bonus vault forfeits (through the pool's `onEarlyExit`) the user's
+    ///      still-locked v3 part and every active LP record, nothing else. "Stake, withdraw part,
+    ///      stake again" is fuzzed through the pool with the `stake` step.
+    function poolWithdraw(uint256 seed, uint256 amountSeed, bool full) external {
+        if (block.timestamp >= stakePool.endEpoch()) return;
+        address user = _user(seed);
+        uint256 staked = stakePool.stakes(user);
+        if (staked == 0) return;
+        uint256 amount = full ? staked : bound(amountSeed, 1, staked);
+        (uint256 v3Before, uint64 v3Unlock) = book.reservedOf(user);
+        uint256[] memory ids = book.lpTokensOf(user);
+        bool[] memory wasActive = new bool[](ids.length);
+        uint256[] memory lpBefore = new uint256[](ids.length);
+        for (uint256 j = 0; j < ids.length; ++j) {
+            (, uint256 lp, uint64 unlockAt, bool claimed, bool forfeited) = book.lpReservation(ids[j]);
+            wasActive[j] = !claimed && !forfeited && block.timestamp < unlockAt;
+            lpBefore[j] = lp;
+        }
+        uint256 balanceBefore = asset.balanceOf(user);
+        vm.prank(user);
+        try stakePool.withdraw(amount) {
+            poolWithdraws++;
+            if (amount == staked) fullWithdraws++;
+            else partialWithdraws++;
+            hasWithdrawn[user] = true;
+            if (asset.balanceOf(user) - balanceBefore != amount) poolWithdrawViolations++;
+            if (stakePool.stakes(user) != staked - amount) poolWithdrawViolations++;
+            (uint256 v3After,) = book.reservedOf(user);
+            bool locked = v3Before != 0 && block.timestamp < v3Unlock;
+            if (v3After != (locked ? 0 : v3Before)) poolWithdrawViolations++;
+            for (uint256 j = 0; j < ids.length; ++j) {
+                (, uint256 lp,,, bool forfeited) = book.lpReservation(ids[j]);
+                if (wasActive[j] && (!forfeited || lp != 0)) poolWithdrawViolations++;
+                if (!wasActive[j] && lp != lpBefore[j]) poolWithdrawViolations++;
+            }
+        } catch {
+            poolWithdrawViolations++;
+        }
     }
 
     function earlyExit(uint256 seed) external {
@@ -458,9 +517,27 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
         assertEq(handler.shortClaimViolations(), 0);
     }
 
-    /// @dev I8: a direct stake reserves exactly `previewStakeBonus` (the new-stake bonus).
+    /// @dev I8: a direct stake reserves exactly `previewStakeBonus` (the new-stake bonus), and no
+    ///      direct stake attempted in the window reverted.
     function invariant_ADirectStakeReservesExactlyThePreview() public view {
         assertEq(handler.stakeBonusViolations(), 0);
+        assertEq(handler.stakeFailures(), 0, "a direct stake in the window reverted");
+    }
+
+    /// @dev I9: a withdraw through the real pool returns the principal in full and forfeits
+    ///      exactly the user's locked v3 part and active LP records.
+    function invariant_APoolWithdrawForfeitsExactlyTheRule() public view {
+        assertEq(handler.poolWithdrawViolations(), 0);
+    }
+
+    /// @dev Anti-vacuity per run, the suite's pattern (BonusEscrowInvariants, VaultCustody): a run
+    ///      that attempted a direct stake while the window was open must have executed one, so I8
+    ///      cannot pass on a stake step that never completes. A run whose warps close the 90-day
+    ///      window before any stake attempt is legitimately empty and is not counted.
+    function afterInvariant() public view {
+        if (handler.stakeAttempts() > 0) {
+            assertGt(handler.directStakes(), 0, "direct stakes were attempted but none executed: I8 is vacuous");
+        }
     }
 
     /// @dev I7: `claimLp` on another wallet's id reverts `NotLpReservationUser`, on an old id a

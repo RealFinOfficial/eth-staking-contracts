@@ -45,6 +45,7 @@ const { ethers, network } = require("hardhat");
 const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 const { takeSnapshot } = require("@nomicfoundation/hardhat-network-helpers");
 const redact = require("../helpers/redact");
+const { GAS_LIMIT_MARGIN_PCT } = require("../helpers/chain");
 
 // ─────────────────────────── Mainnet constants ───────────────────────────
 
@@ -264,17 +265,26 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
    * which is what makes "no transaction here depends on fee estimation" true rather than
    * aspirational. Hardhat's signer funnels everything through `sendTransaction`, so this
    * one seam covers plain calls, `.connect(...)` calls and contract deployments alike.
+   * A transaction without a `gasLimit` gets its estimate times `GAS_LIMIT_MARGIN_PCT`
+   * (120 %, test/lp-staking/helpers/chain.js, where the reason is written down): the node
+   * estimates against a pending block whose timestamp can differ from the one the
+   * transaction is mined in, and a swap's gas depends on that timestamp.
    */
   function pinFees(signer) {
     if (signer.__feesPinned) return signer;
     const send = signer.sendTransaction.bind(signer);
-    signer.sendTransaction = (tx) => {
+    signer.sendTransaction = async (tx) => {
       if (!pinnedFees) throw new Error("pinFees used before the fork's fees were derived");
-      return send({
+      const full = {
         maxFeePerGas: pinnedFees.maxFeePerGas,
         maxPriorityFeePerGas: pinnedFees.maxPriorityFeePerGas,
         ...tx,
-      });
+      };
+      if (full.gasLimit === undefined || full.gasLimit === null) {
+        const estimate = await signer.estimateGas(full);
+        full.gasLimit = (estimate * GAS_LIMIT_MARGIN_PCT) / 100n;
+      }
+      return send(full);
     };
     signer.__feesPinned = true;
     return signer;

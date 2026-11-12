@@ -16,6 +16,7 @@ import {VmSafe} from "forge-std/Vm.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {WeightedStakingPoolV3At5b1174c} from "../utils/WeightedStakingPoolV3At5b1174c.sol";
 import {V3BonusVaultAt5b1174c} from "../utils/V3BonusVaultAt5b1174c.sol";
+import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol";
 
 /**
  * @notice {WeightedStakingPoolV3}: the minimal v3 pool of 2026-11-10. A direct `stake` behind the
@@ -863,6 +864,124 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         _stakeOn(q, bob, AMOUNT);
         assertEq(_v3Of(b, bob), AT_47_OF_90, "the upgraded pair reserves the stake bonus");
         assertEq(b.totalReserved(), 180e18 + AT_47_OF_90);
+    }
+
+    // ──────────────────────── The shared budget, both directions ─
+
+    /// @dev The harness stack (real pool `poolV3`, bonus vault, migrator; 90 days from now) with
+    ///      the budget set to exactly one bonus of 50 $ASSET (5 % of 1,000).
+    function _budgetOfOneBonus() internal {
+        bonusVault.setMaxTotalReserved(FULL);
+        _approveMigrator(alice);
+        vm.prank(bob);
+        asset.approve(address(poolV3), type(uint256).max);
+    }
+
+    /// @dev alice's route 3 (`claimRestake` of 1,000 $ASSET, 5 %: 50 $ASSET).
+    function _restakeAlice(uint256 nonce) internal returns (uint256) {
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, AMOUNT, 0, nonce);
+        vm.prank(alice);
+        return migrator.claimRestake(AMOUNT, FAR_DEADLINE, _noPermit(), v);
+    }
+
+    /// @dev A direct stake that takes the last room makes another wallet's route call revert
+    ///      `BudgetExceeded`; the staker's early withdraw frees the room and the route goes through.
+    function test_SharedBudget_ADirectStakeTakesTheLastRoomFromTheRoutes() public {
+        _budgetOfOneBonus();
+        _stakeOn(poolV3, bob, AMOUNT);
+        assertEq(bonusVault.totalReserved(), FULL, "the budget is full");
+
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, AMOUNT, 0, 1);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 0));
+        migrator.claimRestake(AMOUNT, FAR_DEADLINE, _noPermit(), v);
+        assertFalse(migrator.migrated(alice), "the route call left nothing behind");
+        assertEq(poolV3.stakes(alice), 0);
+
+        vm.prank(bob);
+        poolV3.withdraw(1); // early: forfeits bob's whole v3 part
+        assertEq(bonusVault.totalReserved(), 0, "the room is free again");
+        assertEq(_restakeAlice(1), FULL);
+        assertEq(_v3Of(bonusVault, alice), FULL);
+    }
+
+    /// @dev The reverse: a route bonus that takes the last room makes a direct stake revert.
+    function test_SharedBudget_ARouteBonusTakesTheLastRoomFromADirectStake() public {
+        _budgetOfOneBonus();
+        assertEq(_restakeAlice(1), FULL);
+        bytes memory sig = _signStake(poolV3, bob, FAR_DEADLINE);
+        uint256 before = asset.balanceOf(bob);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 0));
+        poolV3.stake(AMOUNT, FAR_DEADLINE, sig);
+        assertEq(poolV3.stakes(bob), 0);
+        assertEq(asset.balanceOf(bob), before, "no token moved");
+
+        vm.prank(alice);
+        poolV3.withdraw(1); // alice leaves early: her route bonus is forfeited
+        _stakeOn(poolV3, bob, AMOUNT);
+        assertEq(_v3Of(bonusVault, bob), FULL);
+    }
+
+    // ──────────────────────── The upgrade order guard ──────────
+
+    /// @dev A pool on the NEW code linked to a bonus vault still on the PREVIOUS code (5b1174c):
+    ///      a direct stake that earns a bonus reverts, with EMPTY revert data (the old vault has
+    ///      no `reserveStake` and no fallback, so the call fails at its selector dispatch), while
+    ///      `stakeFor`, `withdraw`, `unstake` and a direct stake whose bonus rounds to zero keep
+    ///      working. Why the pool and the bonus vault are upgraded in one timelock batch.
+    function test_UpgradeOrder_ANewPoolOnAnOldVaultRevertsOnlyTheBonusStake() public {
+        uint256 s = block.timestamp + 1 days;
+        uint256 e = s + 90 days;
+        WeightedStakingPoolV3 q = _deployPoolV3(address(asset), s, e);
+        V3BonusVault old = V3BonusVault(
+            address(
+                new LPProxy(
+                    address(new V3BonusVaultAt5b1174c()),
+                    abi.encodeCall(
+                        V3BonusVaultAt5b1174c.initialize,
+                        (address(this), address(asset), carol, address(q), address(0), DEFAULT_BUDGET)
+                    )
+                )
+            )
+        );
+        q.setMigrator(carol);
+        q.setBonusVault(address(old));
+        vm.prank(alice);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(bob);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(carol);
+        asset.approve(address(q), type(uint256).max);
+        vm.warp(s);
+
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
+        vm.prank(alice);
+        vm.expectRevert(bytes(""));
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
+        assertEq(q.stakes(alice), 0, "the bonus stake reverted whole");
+
+        // A direct stake whose bonus rounds to zero makes no vault call and goes through.
+        assertEq(q.previewStakeBonus(1), 0);
+        _stakeOn(q, bob, 1);
+        assertEq(q.stakes(bob), 1);
+
+        // The migrator's path, the early exit and the exit after the end are unaffected.
+        vm.startPrank(carol);
+        q.stakeFor(alice, AMOUNT);
+        old.reserve(alice, 100e18, uint64(e), 2);
+        q.stakeFor(bob, AMOUNT);
+        vm.stopPrank();
+        vm.prank(alice);
+        q.withdraw(AMOUNT / 2);
+        (uint256 v3,) = old.reservedOf(alice);
+        assertEq(v3, 0, "the old vault still forfeits on an early exit");
+        assertEq(q.stakes(alice), AMOUNT / 2);
+        vm.warp(e);
+        uint256 before = asset.balanceOf(bob);
+        vm.prank(bob);
+        q.unstake();
+        assertEq(asset.balanceOf(bob) - before, AMOUNT + 1);
     }
 
     // ──────────────────────── Owner functions ──────────────────
