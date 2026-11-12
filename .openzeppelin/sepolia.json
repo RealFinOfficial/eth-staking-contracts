@@ -9573,7 +9573,7 @@
             "label": "contract IERC20",
             "numberOfBytes": "20"
           },
-          "t_mapping(t_address,t_struct(StakeInfo)3605_storage)": {
+          "t_mapping(t_address,t_struct(StakeInfo)4363_storage)": {
             "label": "mapping(address => struct WeightedStakingPoolV3.StakeInfo)",
             "numberOfBytes": "32"
           },
@@ -9657,7 +9657,7 @@
             ],
             "numberOfBytes": "32"
           },
-          "t_struct(PoolStorage)3675_storage": {
+          "t_struct(PoolStorage)4433_storage": {
             "label": "struct WeightedStakingPoolV3.PoolStorage",
             "members": [
               {
@@ -9746,7 +9746,7 @@
               },
               {
                 "label": "stakes",
-                "type": "t_mapping(t_address,t_struct(StakeInfo)3605_storage)",
+                "type": "t_mapping(t_address,t_struct(StakeInfo)4363_storage)",
                 "offset": 0,
                 "slot": "14"
               },
@@ -9783,7 +9783,7 @@
             ],
             "numberOfBytes": "608"
           },
-          "t_struct(StakeInfo)3605_storage": {
+          "t_struct(StakeInfo)4363_storage": {
             "label": "struct WeightedStakingPoolV3.StakeInfo",
             "members": [
               {
@@ -9828,7 +9828,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "stakingToken",
               "type": "t_contract(IERC20)748",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:96",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:98",
               "offset": 0,
               "slot": "0"
             },
@@ -9836,7 +9836,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "rewardToken",
               "type": "t_contract(IERC20)748",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:98",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:100",
               "offset": 0,
               "slot": "1"
             },
@@ -9844,7 +9844,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "activationEpoch",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:99",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:101",
               "offset": 0,
               "slot": "2"
             },
@@ -9852,7 +9852,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "endEpoch",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:100",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:102",
               "offset": 0,
               "slot": "3"
             },
@@ -9860,7 +9860,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "poolDuration",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:102",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:104",
               "offset": 0,
               "slot": "4"
             },
@@ -9868,7 +9868,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "signer",
               "type": "t_address",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:102",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:104",
               "offset": 0,
               "slot": "5"
             },
@@ -9876,7 +9876,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalStaked",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:102",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:104",
               "offset": 0,
               "slot": "6"
             },
@@ -9884,7 +9884,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalWeightedStaked",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:104",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:106",
               "offset": 0,
               "slot": "7"
             },
@@ -9892,7 +9892,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalAccumulatedWeight",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:106",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:108",
               "offset": 0,
               "slot": "8"
             },
@@ -9900,7 +9900,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalForfeitedWeight",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:108",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:110",
               "offset": 0,
               "slot": "9"
             },
@@ -9908,7 +9908,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "globalLastUpdateTime",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:110",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:112",
               "offset": 0,
               "slot": "10"
             },
@@ -9916,7 +9916,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalRewards",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:113",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:115",
               "offset": 0,
               "slot": "11"
             },
@@ -9924,7 +9924,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalRewardsClaimed",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:115",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:117",
               "offset": 0,
               "slot": "12"
             },
@@ -9932,15 +9932,15 @@
               "contract": "WeightedStakingPoolV3",
               "label": "totalPenalized",
               "type": "t_uint256",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:116",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:118",
               "offset": 0,
               "slot": "13"
             },
             {
               "contract": "WeightedStakingPoolV3",
               "label": "stakes",
-              "type": "t_mapping(t_address,t_struct(StakeInfo)3605_storage)",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:117",
+              "type": "t_mapping(t_address,t_struct(StakeInfo)4363_storage)",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:119",
               "offset": 0,
               "slot": "14"
             },
@@ -9948,7 +9948,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "claimedRewards",
               "type": "t_mapping(t_address,t_uint256)",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:119",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:121",
               "offset": 0,
               "slot": "15"
             },
@@ -9956,7 +9956,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "nonces",
               "type": "t_mapping(t_address,t_uint256)",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:121",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:123",
               "offset": 0,
               "slot": "16"
             },
@@ -9964,7 +9964,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "migrator",
               "type": "t_address",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:125",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:127",
               "offset": 0,
               "slot": "17"
             },
@@ -9972,7 +9972,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "bonusVault",
               "type": "t_address",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:126",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:128",
               "offset": 0,
               "slot": "18"
             },
@@ -9980,7 +9980,7 @@
               "contract": "WeightedStakingPoolV3",
               "label": "rewardsWaived",
               "type": "t_bool",
-              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:128",
+              "src": "contracts/staking-v3/WeightedStakingPoolV3.sol:130",
               "offset": 20,
               "slot": "18"
             }
@@ -10390,6 +10390,377 @@
               "label": "lpSettled",
               "type": "t_mapping(t_uint256,t_bool)",
               "src": "contracts/lp-staking/mocks/V3BonusVaultRetired.sol:79",
+              "offset": 0,
+              "slot": "10"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable2Step": [
+            {
+              "contract": "Ownable2StepUpgradeable",
+              "label": "_pendingOwner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol:29",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Ownable": [
+            {
+              "contract": "OwnableUpgradeable",
+              "label": "_owner",
+              "type": "t_address",
+              "src": "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol:24",
+              "offset": 0,
+              "slot": "0"
+            }
+          ],
+          "erc7201:openzeppelin.storage.Initializable": [
+            {
+              "contract": "Initializable",
+              "label": "_initialized",
+              "type": "t_uint64",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:69",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "Initializable",
+              "label": "_initializing",
+              "type": "t_bool",
+              "src": "@openzeppelin/contracts/proxy/utils/Initializable.sol:73",
+              "offset": 8,
+              "slot": "0"
+            }
+          ]
+        }
+      }
+    },
+    "2cc5dc411922dfecc9ce84d222b5c734b54d4eaacba324ee853cde8d4f8aa9bf": {
+      "address": "0x986a26368226c4d439660791a7a5fe177571755E",
+      "layout": {
+        "solcVersion": "0.8.38",
+        "storage": [],
+        "types": {
+          "t_address": {
+            "label": "address",
+            "numberOfBytes": "20"
+          },
+          "t_array(t_uint256)dyn_storage": {
+            "label": "uint256[]",
+            "numberOfBytes": "32"
+          },
+          "t_bool": {
+            "label": "bool",
+            "numberOfBytes": "1"
+          },
+          "t_contract(IERC20)748": {
+            "label": "contract IERC20",
+            "numberOfBytes": "20"
+          },
+          "t_mapping(t_address,t_array(t_uint256)dyn_storage)": {
+            "label": "mapping(address => uint256[])",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_address,t_struct(UserReservation)3777_storage)": {
+            "label": "mapping(address => struct V3BonusVault.UserReservation)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_bool)": {
+            "label": "mapping(uint256 => bool)",
+            "numberOfBytes": "32"
+          },
+          "t_mapping(t_uint256,t_struct(LpReservation)3791_storage)": {
+            "label": "mapping(uint256 => struct V3BonusVault.LpReservation)",
+            "numberOfBytes": "32"
+          },
+          "t_struct(InitializableStorage)558_storage": {
+            "label": "struct Initializable.InitializableStorage",
+            "members": [
+              {
+                "label": "_initialized",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "_initializing",
+                "type": "t_bool",
+                "offset": 8,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(LpReservation)3791_storage": {
+            "label": "struct V3BonusVault.LpReservation",
+            "members": [
+              {
+                "label": "user",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "unlockAt",
+                "type": "t_uint64",
+                "offset": 20,
+                "slot": "0"
+              },
+              {
+                "label": "claimed",
+                "type": "t_bool",
+                "offset": 28,
+                "slot": "0"
+              },
+              {
+                "label": "forfeited",
+                "type": "t_bool",
+                "offset": 29,
+                "slot": "0"
+              },
+              {
+                "label": "index",
+                "type": "t_uint16",
+                "offset": 30,
+                "slot": "0"
+              },
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(Ownable2StepStorage)14_storage": {
+            "label": "struct Ownable2StepUpgradeable.Ownable2StepStorage",
+            "members": [
+              {
+                "label": "_pendingOwner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(OwnableStorage)74_storage": {
+            "label": "struct OwnableUpgradeable.OwnableStorage",
+            "members": [
+              {
+                "label": "_owner",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "0"
+              }
+            ],
+            "numberOfBytes": "32"
+          },
+          "t_struct(UserReservation)3777_storage": {
+            "label": "struct V3BonusVault.UserReservation",
+            "members": [
+              {
+                "label": "amount",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "unlockAt",
+                "type": "t_uint64",
+                "offset": 0,
+                "slot": "1"
+              }
+            ],
+            "numberOfBytes": "64"
+          },
+          "t_struct(V3BonusVaultStorage)3832_storage": {
+            "label": "struct V3BonusVault.V3BonusVaultStorage",
+            "members": [
+              {
+                "label": "bonusToken",
+                "type": "t_contract(IERC20)748",
+                "offset": 0,
+                "slot": "0"
+              },
+              {
+                "label": "migrator",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "1"
+              },
+              {
+                "label": "pool",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "2"
+              },
+              {
+                "label": "vault",
+                "type": "t_address",
+                "offset": 0,
+                "slot": "3"
+              },
+              {
+                "label": "bonusIsToken0",
+                "type": "t_bool",
+                "offset": 20,
+                "slot": "3"
+              },
+              {
+                "label": "totalReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "4"
+              },
+              {
+                "label": "reservations",
+                "type": "t_mapping(t_address,t_struct(UserReservation)3777_storage)",
+                "offset": 0,
+                "slot": "5"
+              },
+              {
+                "label": "lpReservations",
+                "type": "t_mapping(t_uint256,t_struct(LpReservation)3791_storage)",
+                "offset": 0,
+                "slot": "6"
+              },
+              {
+                "label": "lpTokens",
+                "type": "t_mapping(t_address,t_array(t_uint256)dyn_storage)",
+                "offset": 0,
+                "slot": "7"
+              },
+              {
+                "label": "maxTotalReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "8"
+              },
+              {
+                "label": "totalLpReserved",
+                "type": "t_uint256",
+                "offset": 0,
+                "slot": "9"
+              },
+              {
+                "label": "lpSettled",
+                "type": "t_mapping(t_uint256,t_bool)",
+                "offset": 0,
+                "slot": "10"
+              }
+            ],
+            "numberOfBytes": "352"
+          },
+          "t_uint16": {
+            "label": "uint16",
+            "numberOfBytes": "2"
+          },
+          "t_uint256": {
+            "label": "uint256",
+            "numberOfBytes": "32"
+          },
+          "t_uint64": {
+            "label": "uint64",
+            "numberOfBytes": "8"
+          }
+        },
+        "namespaces": {
+          "erc7201:real.staking.storage.V3BonusVault": [
+            {
+              "contract": "V3BonusVault",
+              "label": "bonusToken",
+              "type": "t_contract(IERC20)748",
+              "src": "contracts/staking-v3/V3BonusVault.sol:143",
+              "offset": 0,
+              "slot": "0"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "migrator",
+              "type": "t_address",
+              "src": "contracts/staking-v3/V3BonusVault.sol:144",
+              "offset": 0,
+              "slot": "1"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "pool",
+              "type": "t_address",
+              "src": "contracts/staking-v3/V3BonusVault.sol:145",
+              "offset": 0,
+              "slot": "2"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "vault",
+              "type": "t_address",
+              "src": "contracts/staking-v3/V3BonusVault.sol:145",
+              "offset": 0,
+              "slot": "3"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "bonusIsToken0",
+              "type": "t_bool",
+              "src": "contracts/staking-v3/V3BonusVault.sol:145",
+              "offset": 20,
+              "slot": "3"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "totalReserved",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/V3BonusVault.sol:146",
+              "offset": 0,
+              "slot": "4"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "reservations",
+              "type": "t_mapping(t_address,t_struct(UserReservation)3777_storage)",
+              "src": "contracts/staking-v3/V3BonusVault.sol:146",
+              "offset": 0,
+              "slot": "5"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "lpReservations",
+              "type": "t_mapping(t_uint256,t_struct(LpReservation)3791_storage)",
+              "src": "contracts/staking-v3/V3BonusVault.sol:148",
+              "offset": 0,
+              "slot": "6"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "lpTokens",
+              "type": "t_mapping(t_address,t_array(t_uint256)dyn_storage)",
+              "src": "contracts/staking-v3/V3BonusVault.sol:148",
+              "offset": 0,
+              "slot": "7"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "maxTotalReserved",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/V3BonusVault.sol:150",
+              "offset": 0,
+              "slot": "8"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "totalLpReserved",
+              "type": "t_uint256",
+              "src": "contracts/staking-v3/V3BonusVault.sol:152",
+              "offset": 0,
+              "slot": "9"
+            },
+            {
+              "contract": "V3BonusVault",
+              "label": "lpSettled",
+              "type": "t_mapping(t_uint256,t_bool)",
+              "src": "contracts/staking-v3/V3BonusVault.sol:158",
               "offset": 0,
               "slot": "10"
             }

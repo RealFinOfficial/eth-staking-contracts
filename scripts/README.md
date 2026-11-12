@@ -1006,7 +1006,7 @@ section), which cannot serve the test site. The registry kinds `WeightedStakingP
 | What | Address | Block | Transaction |
 |---|---|---|---|
 | `WeightedStakingPoolV3` proxy (impl `0xE6077b572f218194333051F12D24eF6f63f3cC2c`) | `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6` | 12112123 | `0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623` |
-| `V3BonusVault` proxy (impl `0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da`) | `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` | 12112125 | `0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d` |
+| `V3BonusVault` proxy (impl `0x986a26368226c4d439660791a7a5fe177571755E` since 2026-11-12, previous `0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da`) | `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` | 12112125 | `0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d` |
 | `StakingMigrator` proxy (impl `0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A`) | `0x58a0464284020bF3368d3B629c5F693e94F8D893` | 12112127 | `0x96d588dbd3181c55ea813491aef280166fd3747a18b43beb4ae7a1a1e9fe25af` |
 | `pool.setBonusVault(0x2Daa…1fa1)`, then the three `transferOwnership(0xf2F6…1E20)` nominations | | | `0x79b38f447f9b57c925a2122bed87768bce190f7fee55ad590eafb4241a3aa741` (the `setBonusVault`) |
 
@@ -1058,6 +1058,36 @@ false. The tREAL `approve(0x2Daa…1fa1, 20,000)` landed in block 12117914, tx
 `V3BonusVault.fund(20,000 test $ASSET)` (20000000000000000000000 wei) landed in block 12117920
 (11:20:48 Sofia, 09:20:48 UTC), tx `0xd3def6cbff5652d9f2d640fbb9ae1b55d36c10e4b070469aad0ab4c84bd37f4d`
 (gas used 155,992). The bonus vault's tREAL balance is now 20,000.
+
+Upgrade of the bonus vault on 2026-11-12. The `V3BonusVault` proxy
+`0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` was upgraded from the implementation
+`0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da` to the implementation
+`0x986a26368226c4d439660791a7a5fe177571755E`, built from commits d922e70 and 224d228. The new
+implementation was deployed with `IMPL_TARGET=V3BonusVault npx hardhat run
+scripts/deploy-implementation.js --network sepolia` from commit 224d228 in block 12119277
+(15:55:00 Sofia, 13:55:00 UTC), tx `0xe33343416d26634f3f2484d932ab7313525f30772dd0678f61d52ff455e79850`,
+and its runtime code is 14,236 bytes. `prepareUpgrade` validated it against the deployed storage
+layout, and `scripts/validate-upgrade-safety.js --network sepolia` passed ("All upgrade-safety
+checks passed."). The `LPTimelock` `0xf2F678AC5260BB297682D54DcD945BCB78901E20` operation
+`upgradeToAndCall(0x986a26368226c4d439660791a7a5fe177571755E, 0x)` on the proxy (id
+`0xed2995d64867edbd81a0189a7de99b339689e181c206e6bd8bb2ab22be92af7a`, no salt tag) was scheduled in
+block 12119287 (15:57:00 Sofia, 13:57:00 UTC), tx
+`0x7c1e9024f29892ce7786e17053dffa636ba87290e8d0ecb49b2242703610645f`, and executed in block 12119313
+(16:02:24 Sofia, 14:02:24 UTC), tx `0x8aed8274c8a3db01d88b56f041702caa9cf745a98077e9a8552bb0d5d08ea0f3`.
+The new implementation changes two things. An early exit from the pool now forfeits both bonus
+parts of the user: the whole v3 reservation and every LP reservation of the user that is still
+active. Next to `claim()`, a user can now claim each part on its own with `claimV3()` and
+`claimLp(tokenId)`. Read back after the upgrade: the ERC-1967 implementation of the proxy is
+`0x986a26368226c4d439660791a7a5fe177571755E`. `owner()` is the timelock, `migrator()` is
+`0x58a0464284020bF3368d3B629c5F693e94F8D893`, `pool()` is `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6`
+and `vault()` is `0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac`. `maxTotalReserved()` is 100,000
+$ASSET, `totalReserved()` and `totalLpReserved()` are 0, and the proxy's tREAL balance is 20,000. A
+simulated `claimV3()` from a wallet without a reservation reverts with `NothingToClaim()` (selector
+`0x969bf728`), which shows that the new function is live. No reservation existed at the time of the
+upgrade, and no claim can be logged before the pool's end (2027-02-09 15:47:38 Sofia, 13:47:38 UTC).
+The test server's indexer still runs the module version from before this change (evm-indexer
+`staking-v3-campaign` 1cbbb4a). The matching module version is a7068b2. It needs the stored ABI
+`LpStaking.V3BonusVault` refreshed and the engine restarted, at any time before the pool's end.
 
 Two earlier attempts reverted and changed nothing: an `approve` sent with a fixed gas limit of
 120,000 ran out of gas (block 12117906, tx

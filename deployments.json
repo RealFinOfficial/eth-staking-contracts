@@ -406,8 +406,8 @@
       "address": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
       "deployTx": "0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d",
       "block": 12112125,
-      "implementation": "0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da",
-      "implementationTx": "0x22aca0ff16f5f33b506e6a5bbd8a53d5557476bc1f0b6ede97c9cb44bc1090df",
+      "implementation": "0x986a26368226c4d439660791a7a5fe177571755E",
+      "implementationTx": "0xe33343416d26634f3f2484d932ab7313525f30772dd0678f61d52ff455e79850",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "pool": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
@@ -424,7 +424,10 @@
       "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
       "funded": "20000000000000000000000",
       "fundTx": "0xd3def6cbff5652d9f2d640fbb9ae1b55d36c10e4b070469aad0ab4c84bd37f4d",
-      "fundBlock": 12117920
+      "fundBlock": 12117920,
+      "previousImplementation": "0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da",
+      "implementationBlock": 12119313,
+      "upgradeTx": "0x8aed8274c8a3db01d88b56f041702caa9cf745a98077e9a8552bb0d5d08ea0f3"
     },
     "StakingMigrator": {
       "address": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
