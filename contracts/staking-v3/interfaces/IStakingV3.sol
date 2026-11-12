@@ -9,6 +9,8 @@ pragma solidity 0.8.38;
  *  - {IWeightedStakingPoolV3Migration}: what the migrator calls on the v3 pool.
  *  - {IV3BonusVaultReservations}: what the migrator calls on the bonus vault.
  *  - {IV3BonusVaultEarlyExit}: what the v3 pool calls on the bonus vault when a stake leaves early.
+ *  - {IV3BonusVaultStakeBonus}: what the v3 pool calls on the bonus vault for a direct stake's
+ *    new-stake bonus (2026-11-12).
  */
 interface IWeightedStakingPoolV3Migration {
     /// @notice Stakes `amount`, pulled from the caller (the registered migrator), for `user`.
@@ -35,4 +37,10 @@ interface IV3BonusVaultReservations {
 interface IV3BonusVaultEarlyExit {
     /// @notice `user` withdrew from the v3 pool before its end.
     function onEarlyExit(address user) external;
+}
+
+interface IV3BonusVaultStakeBonus {
+    /// @notice Adds `amount` to `user`'s v3 bonus reservation for a direct stake, unlocked at
+    ///         `unlockAt` (route 4). Only the registered pool may call.
+    function reserveStake(address user, uint256 amount, uint64 unlockAt) external;
 }

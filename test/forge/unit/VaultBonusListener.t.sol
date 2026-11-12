@@ -526,6 +526,37 @@ contract VaultBonusListenerTest is StakingV3Harness {
         assertEq(bonusVault.claimable(alice), 0);
     }
 
+    /// @dev The new-stake bonus (2026-11-12) on the real flow: alice joins LP through the
+    ///      migrator, then stakes more directly in the v3 pool with the backend's voucher. The
+    ///      direct stake reserves `previewStakeBonus` (route 4) on top of the route bonus, and an
+    ///      early withdraw forfeits the whole v3 part with the LP part.
+    function test_DirectStake_ReservesItsBonusAndAnEarlyExitForfeitsItWithTheRest() public {
+        uint256 tokenId = _join();
+        (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
+        (uint256 routeV3,) = bonusVault.reservedOf(alice);
+        vm.warp(v3Start + 43 days); // 47 of 90 days left
+        uint256 amount = 1_000e18;
+        uint256 preview = poolV3.previewStakeBonus(amount);
+        assertEq(preview, 26_111_111_111_111_111_111, "1,000 x 5 % x 47 / 90");
+        vm.prank(alice);
+        asset.approve(address(poolV3), amount);
+        bytes memory sig = _signStake(poolV3, alice, FAR_DEADLINE);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.BonusReserved(alice, preview, uint64(v3End), 4);
+        vm.prank(alice);
+        poolV3.stake(amount, FAR_DEADLINE, sig);
+        (uint256 v3,) = bonusVault.reservedOf(alice);
+        assertEq(v3, routeV3 + preview);
+
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.BonusForfeited(alice, routeV3 + preview);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
+        vm.prank(alice);
+        poolV3.withdraw(amount);
+        assertEq(bonusVault.totalReserved(), 0);
+    }
+
     function test_Unstake_AfterTheUnlockSettlesAndPays() public {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);

@@ -1435,8 +1435,8 @@ document is unchanged; the rebalance logic and every valuation of the vault are 
 
 | File | What it is |
 |---|---|
-| `contracts/staking-v3/WeightedStakingPoolV3.sol` | The v3 pool, a SEPARATE MINIMAL contract (decision of 2026-11-10, below), UUPS, one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): it holds each wallet's $ASSET principal for the window and pays it back. A direct `stake(amount, deadline, signature)` behind the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)` (domain `WeightedStakingPool` / `1`), `stakeFor(user, amount)` callable only by `migrator`, `withdraw(amount)` before the end (principal in full, FAIL-CLOSED `bonusVault.onEarlyExit(user)` after the state changes, before the transfer), `unstake()` / `emergencyUnstake()` after the end. No weight, no USDC reward, no penalty. Ownership two-step, `renounceOwnership` reverts |
-| `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). `onEarlyExit` (a v3 `withdraw` before the end) forfeits the whole v3 reservation AND, since 2026-11-12, every active LP reservation of the same user; an LP `onUnstake` before the unlock forfeits only that LP reservation. Reserve now, fund later; three claims (`claim()` everything unlocked, `claimV3()` the v3 part, `claimLp(tokenId)` one LP part, 2026-11-12), each all or nothing for its call, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
+| `contracts/staking-v3/WeightedStakingPoolV3.sol` | The v3 pool, a SEPARATE MINIMAL contract (decision of 2026-11-10, below), UUPS, one ERC-7201 namespace (`real.staking.storage.WeightedStakingPoolV3`): it holds each wallet's $ASSET principal for the window and pays it back. A direct `stake(amount, deadline, signature)` behind the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)` (domain `WeightedStakingPool` / `1`), `stakeFor(user, amount)` callable only by `migrator`, `withdraw(amount)` before the end (principal in full, FAIL-CLOSED `bonusVault.onEarlyExit(user)` after the state changes, before the transfer), `unstake()` / `emergencyUnstake()` after the end. No weight, no USDC reward, no penalty. Since 2026-11-12 a direct `stake` reserves the new-stake bonus in the bonus vault (`reserveStake`, route 4, fail closed; see below). Ownership two-step, `renounceOwnership` reverts |
+| `contracts/staking-v3/V3BonusVault.sol` | The transition bonus book, namespace `real.staking.storage.V3BonusVault`: one v3 reservation per user (written by the migrator's `reserve` and, since 2026-11-12, by the pool's `reserveStake`) and one LP reservation per tokenId with `BonusEscrow`'s semantics (moved and scaled down only on `onRebalance`, forfeited on `onUnstake` before the unlock, untouchable after). `onEarlyExit` (a v3 `withdraw` before the end) forfeits the whole v3 reservation AND, since 2026-11-12, every active LP reservation of the same user; an LP `onUnstake` before the unlock forfeits only that LP reservation. Reserve now, fund later; three claims (`claim()` everything unlocked, `claimV3()` the v3 part, `claimLp(tokenId)` one LP part, 2026-11-12), each all or nothing for its call, `InsufficientFunds(requested, available)` when short; `recoverSurplus(to, amount)` above `totalReserved` only |
 | `contracts/staking-v3/StakingMigrator.sol` | The one-call transition after the staker's own sw2 `unstake()`: `compound` (USDC swapped through SwapRouter02 under its own `TwapGuard`, 300 s / 953 ticks), `moveToLp` (one position on spot ± 6,932 ticks rounded outward, the adapter's `_campaignRange` math, staked through `vault.stakeFor`; the USDC leg valued at the 1,800 s mean tick, `OracleHistory`), `claimRestake`. Each checks an EIP-712 `TransitionVoucher` (domain `StakingMigrator` / `1`) and spends its per-user nonce before any token moves. Routes 1 and 2 behind `pauseCompound` (vault guardian or operator) / `unpauseCompound` (operator), born paused; route 3 never paused. Namespace `real.staking.storage.StakingMigrator` |
 | `contracts/staking-v3/interfaces/IStakingV3.sol` | The three cross-contract interfaces |
 
@@ -1485,8 +1485,10 @@ listener's `onUnstake` first failed (`listenerMissedAt(tokenId)`, see "Review cl
   backend's `TransitionVoucher` (eligible principal and reward). The pool pulls the tokens from the
   migrator, so it can never credit more than it receives.
 - **The direct `StakeVoucher` binds no amount.** It says "this wallet may stake now" (user, nonce,
-  deadline). The amount is the caller's own tokens and earns nothing in the pool itself; the v3
-  bonus is reserved only by the migrator.
+  deadline). The amount is the caller's own tokens. Since 2026-11-12 a direct stake earns the
+  new-stake bonus (5 % scaled by the days left, reserved by the pool through `reserveStake`, see
+  below), so the voucher is what gates who earns it; the amount is bounded only by the shared
+  budget (`maxTotalReserved`).
 - **The migrator's `setSigner` is operator tier** (undelayed, the LP vault's operator), like the
   distributor's: a leaked voucher key must be replaceable without the 48 h delay. A leaked key lets
   its holder reserve bonuses on their own deposits only; the reservation still needs the tokens
@@ -1608,7 +1610,8 @@ Tests: `test/forge/unit/{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,Vaul
 `totalReserved` equals the sum of open reservations, I2 balance conservation, I3 scaling never raises,
 I4 a claim (`claim`, `claimV3`, `claimLp`) pays exactly or the vault is short, I5 `totalLpReserved`
 equals the sum of open LP reservations, I6 an early exit forfeits exactly the user's active LP
-reservations), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
+reservations, I7 a wrong `claimLp` reverts and changes nothing, I8 a direct stake reserves exactly
+`previewStakeBonus`), and `test/lp-staking/integration/StakingV3SepoliaFork.test.js`
 (the three routes end to end on the real Sepolia Uniswap deployment, the timelock batch, the
 rebalance scaling, early-exit forfeiture, claims before and after funding).
 
@@ -1634,6 +1637,25 @@ transfer, `nonReentrant`). Every claim emits `V3BonusClaimed(user, amount)` and
 once. No storage was added. Tests: `test_EarlyExit_*`, `test_ClaimV3_*`, `test_ClaimLp_*` in
 `test/forge/unit/V3BonusVault.t.sol`, `test_Withdraw_*ForfeitsTheV3AndTheLpPart` in
 `WeightedStakingPoolV3.t.sol`, `test_V3EarlyExit_*` in `VaultBonusListener.t.sol`, invariant I6.
+
+**The new-stake bonus (owner's decision of 2026-11-12).** `WeightedStakingPoolV3.stake` (the
+voucher path, not `stakeFor`) reserves `amount * STAKE_BONUS_BPS * daysLeft / (campaignDays *
+10_000)` (rounded down with `Math.mulDiv`; `STAKE_BONUS_BPS` = 500 is a constant; `campaignDays` =
+`endEpoch - activationEpoch` and `daysLeft` = `endEpoch - block.timestamp`, both in whole days
+rounded up, `daysLeft` capped at `campaignDays`; 47 of 90 days left = 2.61 %) for the caller through
+the new `V3BonusVault.reserveStake(user, amount, unlockAt)`, callable only by the registered pool
+(`NotPool`) and sharing `reserve`'s body (`_reserveV3`: `ZeroAddress`, `ZeroAmount`, the budget,
+the running amount, the unlock only later), event `BonusReserved(user, amount, unlockAt, 4)`
+(`ROUTE_STAKE`). The call comes after the stake's state changes, only when a bonus vault is linked
+and the bonus is above zero, and fails closed: `BudgetExceeded` or `NotPool` reverts the stake (no
+stake, no token moved, the nonce unspent). The bonus is part of the v3 reservation, so
+`onEarlyExit` forfeits it (unchanged code). The route bonuses and the new-stake bonuses share the
+one budget: a large direct stake (by a wallet the backend signs a voucher for) can use room the
+routes then lack, until it is withdrawn early. No storage was added to either contract; layouts
+checked offline against the recorded stack #6 implementations. Tests: `test_StakeBonus_*` in
+`WeightedStakingPoolV3.t.sol` (including the upgrade of a pool and vault pair from 5b1174c's code),
+`test_ReserveStake_*` in `V3BonusVault.t.sol`, `test_DirectStake_*` in `VaultBonusListener.t.sol`,
+invariant I8 (a direct stake reserves exactly `previewStakeBonus`).
 
 **The v3 pool, a separate minimal contract (decision 2026-11-10).** `WeightedStakingPoolV3` is not
 a copy of v2. It holds each wallet's $ASSET principal for the window and pays it back; the bonus
@@ -1705,15 +1727,17 @@ previous implementation (`contracts/lp-staking/mocks/WeightedStakingPoolV3Weight
 
 **Info (accepted, by design):**
 
-- `activationEpoch` gates nothing in v3. It is stored and read for information only (the UI and
-  the indexer show the window); stake, withdraw, the early-exit forfeit and both exits key on
-  `endEpoch` alone.
+- `activationEpoch` gates no action in v3: stake, withdraw, the early-exit forfeit and both exits
+  key on `endEpoch` alone. Since 2026-11-12 it sets the length of the new-stake bonus scale
+  (`campaignDays`); the UI and the indexer show it as the window's start.
 - `stakes(address)` keeps its selector (`0x16934fc4`) but now returns ONE word (the principal)
   instead of v2's four. A client decoding the old four-word tuple against the upgraded proxy
   fails, so every client vendors the new ABI together with the upgrade.
 - The direct `StakeVoucher(user, nonce, deadline)` binds no amount, by design: it says "this wallet
-  may stake now". The pool itself pays nothing on a stake; the only bonus is the one the migrator
-  reserves under the `TransitionVoucher`, which does bind the eligible amounts.
+  may stake now". The pool itself pays nothing on a stake. Since 2026-11-12 a direct stake earns
+  the new-stake bonus (below), which scales with the staked amount and is capped only by the
+  shared budget; the migrator's route bonuses stay bound to the `TransitionVoucher`'s eligible
+  amounts.
 
 The migrator's `TransitionVoucher` lost its `weight` field: `TransitionVoucher(address user,uint8
 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain

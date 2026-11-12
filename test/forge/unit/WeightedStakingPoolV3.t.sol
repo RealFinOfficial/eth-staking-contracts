@@ -13,6 +13,9 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {VmSafe} from "forge-std/Vm.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {WeightedStakingPoolV3At5b1174c} from "../utils/WeightedStakingPoolV3At5b1174c.sol";
+import {V3BonusVaultAt5b1174c} from "../utils/V3BonusVaultAt5b1174c.sol";
 
 /**
  * @notice {WeightedStakingPoolV3}: the minimal v3 pool of 2026-11-10. A direct `stake` behind the
@@ -428,10 +431,12 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
 
     function test_Withdraw_AFailingBonusVaultBlocksTheExit() public {
         WeightedStakingPoolV3 q = _unlinkedPool();
-        q.setBonusVault(address(new MockERC20Permit("NoHook", "NH", 0, 18)));
+        // Staked while unlinked: since 2026-11-12 a linked vault without the hooks would revert the
+        // direct stake itself (its new-stake bonus call), so the failing vault is linked after.
         bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
         vm.prank(alice);
         q.stake(AMOUNT, FAR_DEADLINE, sig);
+        q.setBonusVault(address(new MockERC20Permit("NoHook", "NH", 0, 18)));
         vm.prank(alice);
         vm.expectRevert();
         q.withdraw(AMOUNT);
@@ -487,7 +492,9 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(p.stakes(alice), 0);
         assertEq(p.totalStaked(), 0);
         (uint256 reserved,) = book.reservedOf(alice);
-        assertEq(reserved, 50e18, "an exit after the end keeps the bonus");
+        // The route bonus of 50 plus the new-stake bonus of the direct stake before the
+        // activation (5 % of 1,000, 2026-11-12).
+        assertEq(reserved, 50e18 + FULL, "an exit after the end keeps the bonus");
 
         vm.prank(alice);
         vm.expectRevert(bytes("Nothing to unstake"));
@@ -514,6 +521,348 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.prank(alice);
         vm.expectRevert(bytes("Nothing to unstake"));
         p.unstake();
+    }
+
+    // ──────────────────────── The new-stake bonus (2026-11-12) ─
+
+    /// @dev 5 % of 1,000 $ASSET: the full rate.
+    uint256 internal constant FULL = 50e18;
+    /// @dev 1,000 $ASSET x 5 % x 47 / 90, rounded down (2.61 %).
+    uint256 internal constant AT_47_OF_90 = 26_111_111_111_111_111_111;
+    /// @dev 1,000 $ASSET x 5 % x 1 / 90, rounded down.
+    uint256 internal constant AT_1_OF_90 = 555_555_555_555_555_555;
+
+    /// @dev A fresh 90-day campaign (or any window) with its own bonus vault (migrator `carol`, no
+    ///      LP vault) and the approvals of alice, bob and carol.
+    function _campaign(uint256 s, uint256 e, uint256 budget)
+        internal
+        returns (WeightedStakingPoolV3 q, V3BonusVault b)
+    {
+        q = _deployPoolV3(address(asset), s, e);
+        b = _deployBonusVault(address(asset), carol, address(q), address(0), budget);
+        q.setMigrator(carol);
+        q.setBonusVault(address(b));
+        vm.prank(alice);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(bob);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(carol);
+        asset.approve(address(q), type(uint256).max);
+    }
+
+    function _campaign90() internal returns (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) {
+        s = block.timestamp + 1 days;
+        e = s + 90 days;
+        (q, b) = _campaign(s, e, DEFAULT_BUDGET);
+    }
+
+    function _stakeOn(WeightedStakingPoolV3 q, address user, uint256 amount) internal {
+        bytes memory sig = _signStake(q, user, FAR_DEADLINE);
+        vm.prank(user);
+        q.stake(amount, FAR_DEADLINE, sig);
+    }
+
+    function _v3Of(V3BonusVault b, address user) internal view returns (uint256 amount) {
+        (amount,) = b.reservedOf(user);
+    }
+
+    function test_StakeBonus_TheRateConstant() public view {
+        assertEq(p.STAKE_BONUS_BPS(), 500);
+    }
+
+    function test_StakeBonus_TheFullRateOnTheFirstDay() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) = _campaign90();
+        vm.warp(s);
+        vm.expectEmit(address(b));
+        emit V3BonusVault.BonusReserved(alice, FULL, uint64(e), 4);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), FULL);
+        (, uint64 unlockAt) = b.reservedOf(alice);
+        assertEq(unlockAt, uint64(e), "unlocks at the pool's end");
+        vm.warp(s + 1 days - 1); // still the first day: 89 days and 1 second left, rounded up
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), FULL);
+        assertEq(b.totalReserved(), 2 * FULL);
+        assertEq(q.stakes(alice), AMOUNT, "the principal is credited in full");
+    }
+
+    function test_StakeBonus_47Of90DaysLeft() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 47 days);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), AT_47_OF_90);
+        vm.warp(e - 46 days - 1); // 46 days and 23:59:59 left: 47 whole days, rounded up
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), AT_47_OF_90);
+    }
+
+    function test_StakeBonus_TheLast24Hours() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 1 days);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), AT_1_OF_90);
+    }
+
+    function test_StakeBonus_OneSecondBeforeTheEndIsOneDay() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 1);
+        assertEq(q.previewStakeBonus(AMOUNT), AT_1_OF_90);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), AT_1_OF_90);
+        vm.warp(e);
+        assertEq(q.previewStakeBonus(AMOUNT), 0, "zero from the end");
+    }
+
+    /// @dev 30 days and 1 hour count as 31 campaign days: the first hour pays the full rate, the
+    ///      last 12 hours pay 1 / 31.
+    function test_StakeBonus_AWindowThatIsNotWholeDays() public {
+        uint256 s = block.timestamp + 1 days;
+        uint256 e = s + 30 days + 1 hours;
+        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e, DEFAULT_BUDGET);
+        vm.warp(s);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), FULL, "31 of 31 days");
+        vm.warp(e - 12 hours);
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), 1_612_903_225_806_451_612, "1,000 x 5 % x 1 / 31, rounded down");
+    }
+
+    /// @dev `p` opens one day ahead: 31 days left of a 30-day window, capped at the full rate.
+    function test_StakeBonus_BeforeTheActivationIsCappedAtTheFullRate() public {
+        assertLt(block.timestamp, start);
+        assertEq(p.previewStakeBonus(AMOUNT), FULL);
+        _stake(alice, AMOUNT);
+        assertEq(_v3Of(book, alice), FULL);
+    }
+
+    /// @dev At 1 / 90, 1,799 wei rounds to zero: the stake goes through with no reservation and no
+    ///      vault call (which would revert `ZeroAmount`); 1,800 wei earns 1 wei.
+    function test_StakeBonus_ATinyAmountRoundsToZeroAndStillStakes() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 1 hours);
+        _stakeOn(q, bob, 1800);
+        assertEq(_v3Of(b, bob), 1);
+        assertEq(q.previewStakeBonus(1799), 0);
+        vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
+        _stakeOn(q, alice, 1799);
+        assertEq(q.stakes(alice), 1799);
+        assertEq(_v3Of(b, alice), 0);
+        assertEq(b.totalReserved(), 1);
+    }
+
+    function test_StakeBonus_TwoStakesAtDifferentTimesAddUp() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) = _campaign90();
+        vm.warp(s);
+        _stakeOn(q, alice, AMOUNT);
+        vm.warp(e - 47 days);
+        _stakeOn(q, alice, AMOUNT);
+        (uint256 amount, uint64 unlockAt) = b.reservedOf(alice);
+        assertEq(amount, FULL + AT_47_OF_90);
+        assertEq(unlockAt, uint64(e));
+        assertEq(q.stakes(alice), 2 * AMOUNT);
+    }
+
+    function test_StakeBonus_ThePreviewIsWhatTheStakeReserves() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s,) = _campaign90();
+        vm.warp(s + 10 days + 5 hours);
+        uint256 preview = q.previewStakeBonus(777e18 + 3);
+        assertEq(preview, Math.mulDiv(777e18 + 3, 500 * 80, 90 * 10_000), "80 of 90 days left");
+        _stakeOn(q, alice, 777e18 + 3);
+        assertEq(_v3Of(b, alice), preview);
+    }
+
+    function test_StakeBonus_StakeForReservesNothingByItself() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s,) = _campaign90();
+        vm.warp(s);
+        vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
+        vm.prank(carol);
+        q.stakeFor(alice, AMOUNT);
+        assertEq(q.stakes(alice), AMOUNT);
+        assertEq(_v3Of(b, alice), 0);
+    }
+
+    function test_StakeBonus_NoBonusVaultNoBonus() public {
+        WeightedStakingPoolV3 q = _unlinkedPool();
+        assertEq(q.previewStakeBonus(AMOUNT), 0, "nothing would be reserved");
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
+        vm.prank(alice);
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
+        assertEq(q.stakes(alice), AMOUNT);
+    }
+
+    /// @dev A pool linked to a bonus vault whose own pool link is another address: the vault
+    ///      answers `NotPool` and the direct stake reverts (fail closed). That is the same outcome
+    ///      as an early `withdraw` on that pair, and the right one: a stake that cannot record its
+    ///      bonus must not go through silently without it.
+    function test_StakeBonus_AVaultLinkedToAnotherPoolRevertsTheStake() public {
+        WeightedStakingPoolV3 q = _unlinkedPool();
+        address other = makeAddr("otherPool");
+        V3BonusVault b = _deployBonusVault(address(asset), carol, other, address(0));
+        q.setBonusVault(address(b));
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
+        uint256 before = asset.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.NotPool.selector, address(q), other));
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
+        assertEq(q.stakes(alice), 0);
+        assertEq(asset.balanceOf(alice), before);
+    }
+
+    function test_StakeBonus_BudgetExceededRevertsTheStake() public {
+        uint256 s = block.timestamp + 1 days;
+        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, s + 90 days, 10e18);
+        vm.warp(s);
+        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
+        uint256 before = asset.balanceOf(alice);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 10e18));
+        q.stake(AMOUNT, FAR_DEADLINE, sig);
+        assertEq(q.stakes(alice), 0, "no stake");
+        assertEq(q.totalStaked(), 0);
+        assertEq(asset.balanceOf(alice), before, "no token moved");
+        assertEq(asset.balanceOf(address(q)), 0);
+        assertEq(q.nonces(alice), 0, "the voucher is not spent");
+        assertEq(b.totalReserved(), 0);
+    }
+
+    /// @dev A mover (route bonus + LP part) who also stakes directly; an early withdraw, partial or
+    ///      full, forfeits the direct-stake bonus with the rest.
+    function _moverWithADirectStake() internal returns (WeightedStakingPoolV3 q, V3BonusVault b, uint256 e) {
+        uint256 s;
+        (q, b, s, e) = _campaign90();
+        vm.startPrank(carol);
+        q.stakeFor(alice, AMOUNT);
+        b.reserve(alice, 100e18, uint64(e), 2);
+        b.reserveLp(7, alice, 80e18, uint64(e));
+        vm.stopPrank();
+        vm.warp(s);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), 100e18 + FULL, "a mover who stakes more gets both");
+    }
+
+    function test_StakeBonus_APartialWithdrawForfeitsItWithTheRouteAndTheLpPart() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,) = _moverWithADirectStake();
+        vm.expectEmit(address(b));
+        emit V3BonusVault.BonusForfeited(alice, 100e18 + FULL);
+        vm.expectEmit(address(b));
+        emit V3BonusVault.LpBonusForfeited(7, alice, 80e18);
+        vm.prank(alice);
+        q.withdraw(1);
+        assertEq(b.totalReserved(), 0);
+        assertEq(b.totalLpReserved(), 0);
+    }
+
+    function test_StakeBonus_AFullWithdrawForfeitsItWithTheRouteAndTheLpPart() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,) = _moverWithADirectStake();
+        vm.prank(alice);
+        q.withdraw(2 * AMOUNT);
+        assertEq(_v3Of(b, alice), 0);
+        assertEq(b.totalReserved(), 0);
+        assertEq(b.totalLpReserved(), 0);
+    }
+
+    function test_StakeBonus_PaidAfterTheEndByClaimV3AndByClaim() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) = _campaign90();
+        vm.prank(carol);
+        q.stakeFor(alice, AMOUNT);
+        vm.prank(carol);
+        b.reserve(alice, 100e18, uint64(e), 1);
+        vm.warp(s);
+        _stakeOn(q, alice, AMOUNT);
+        vm.warp(e - 47 days);
+        _stakeOn(q, bob, AMOUNT);
+        asset.approve(address(b), type(uint256).max);
+        b.fund(100e18 + FULL + AT_47_OF_90);
+        vm.warp(e);
+        vm.prank(alice);
+        assertEq(b.claimV3(), 100e18 + FULL, "the route bonus and the stake bonus together");
+        vm.prank(bob);
+        assertEq(b.claim(), AT_47_OF_90);
+        assertEq(b.totalReserved(), 0);
+    }
+
+    function test_StakeBonus_ARestakeAfterAForfeitingWithdrawEarnsOnlyTheNewBonus() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) = _campaign90();
+        vm.warp(s);
+        _stakeOn(q, alice, AMOUNT);
+        vm.warp(e - 47 days);
+        vm.prank(alice);
+        q.withdraw(AMOUNT);
+        assertEq(_v3Of(b, alice), 0);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), AT_47_OF_90, "only the new stake at 47 of 90");
+        assertEq(b.totalReserved(), AT_47_OF_90);
+    }
+
+    /// @dev The pool and the bonus vault on the code live before the new-stake bonus (5b1174c,
+    ///      verbatim copies in `test/forge/utils/`), state written, both upgraded: everything stored
+    ///      reads the same and a direct stake then reserves the right bonus.
+    function test_StakeBonus_UpgradeFromThePreviousPoolAndVault() public {
+        uint256 s = block.timestamp + 1 days;
+        uint256 e = s + 90 days;
+        WeightedStakingPoolV3 q = WeightedStakingPoolV3(
+            address(
+                new LPProxy(
+                    address(new WeightedStakingPoolV3At5b1174c()),
+                    abi.encodeCall(
+                        WeightedStakingPoolV3At5b1174c.initialize, (address(this), address(asset), s, e, voucherSigner)
+                    )
+                )
+            )
+        );
+        V3BonusVault b = V3BonusVault(
+            address(
+                new LPProxy(
+                    address(new V3BonusVaultAt5b1174c()),
+                    abi.encodeCall(
+                        V3BonusVaultAt5b1174c.initialize,
+                        (address(this), address(asset), carol, address(q), address(0), DEFAULT_BUDGET)
+                    )
+                )
+            )
+        );
+        q.setMigrator(carol);
+        q.setBonusVault(address(b));
+        vm.prank(alice);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(bob);
+        asset.approve(address(q), type(uint256).max);
+        vm.prank(carol);
+        asset.approve(address(q), type(uint256).max);
+
+        vm.startPrank(carol);
+        q.stakeFor(alice, AMOUNT);
+        b.reserve(alice, 100e18, uint64(e), 2);
+        b.reserveLp(7, alice, 80e18, uint64(e));
+        vm.stopPrank();
+        vm.warp(s);
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), 0, "the previous pool reserves no stake bonus");
+
+        q.upgradeToAndCall(address(new WeightedStakingPoolV3()), "");
+        b.upgradeToAndCall(address(new V3BonusVault()), "");
+
+        assertEq(q.stakes(alice), AMOUNT);
+        assertEq(q.stakes(bob), AMOUNT);
+        assertEq(q.totalStaked(), 2 * AMOUNT);
+        assertEq(q.nonces(bob), 1);
+        assertEq(q.endEpoch(), e);
+        assertEq(q.bonusVault(), address(b));
+        assertEq(q.migrator(), carol);
+        (uint256 v3, uint64 unlockAt) = b.reservedOf(alice);
+        assertEq(v3, 100e18);
+        assertEq(unlockAt, uint64(e));
+        (address lpUser, uint256 lp,,,) = b.lpReservation(7);
+        assertEq(lpUser, alice);
+        assertEq(lp, 80e18);
+        assertEq(b.totalReserved(), 180e18);
+        assertEq(b.totalLpReserved(), 80e18);
+        assertEq(b.lpTokensOf(alice).length, 1);
+
+        vm.warp(e - 47 days);
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), AT_47_OF_90, "the upgraded pair reserves the stake bonus");
+        assertEq(b.totalReserved(), 180e18 + AT_47_OF_90);
     }
 
     // ──────────────────────── Owner functions ──────────────────

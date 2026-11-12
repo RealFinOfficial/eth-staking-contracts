@@ -53,6 +53,14 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //    WeightedStakingPoolV3 lines 110 -> 117 (114 hit), branches 40 -> 41 (5 hit): the
 //    `BonusVaultLocked` guard in `setBonusVault` and the staking-token surplus check in
 //    `recoverERC20`, both hit; the three unhit lines are the same `--ir-minimum` artefacts.
+// ── Pinned floors, re-measured 2026-11-12, second time (the new-stake bonus) ──
+//    WeightedStakingPoolV3 lines 117 -> 133 (130 hit), branches 41 -> 46 (10 hit): `previewStakeBonus`,
+//    `_stakeBonus` and the bonus call in `stake`; the five new branches (vault linked, bonus above
+//    zero, no vault in the preview, after the end, the `daysLeft` cap) are all hit, the 36 unhit
+//    items are the same `require(cond, "reason")` checks as before. V3BonusVault lines 269 -> 275
+//    (272 hit), branches 46 -> 47 (47): `reserveStake` and the shared `_reserveV3`. The three unhit
+//    lines of each file are the `--ir-minimum` artefacts (the namespace accessor body,
+//    `_disableInitializers`, `__Ownable2Step_init`).
 // ── Pinned floors, re-measured 2026-11-12 (early exit forfeits both parts; claimV3 / claimLp) ──
 //    V3BonusVault lines 248 -> 269 (266 hit), branches 44 -> 46 (46): the LP loop in `onEarlyExit`,
 //    `claimV3`, `claimLp` with its `NotLpReservationUser` check, and the shared `_takeV3` /
@@ -303,12 +311,12 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 117, minHit: 114},
-    branches: {found: 41, minHit: 5},
+    lines: {found: 133, minHit: 130},
+    branches: {found: 46, minHit: 10},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 269, minHit: 266},
-    branches: {found: 46, minHit: 46},
+    lines: {found: 275, minHit: 272},
+    branches: {found: 47, minHit: 47},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
     lines: {found: 237, minHit: 231},

@@ -36,13 +36,16 @@ interface IV3BonusLpVault {
 
 /**
  * @title V3BonusVault
- * @notice The staking v3 transition bonus: reserved at the transition, paid in $ASSET after the v3
- *         pool's `endEpoch`. UUPS, owned by the `LPTimelock`.
+ * @notice The staking v3 bonus: reserved at the transition (and, since 2026-11-12, at a direct
+ *         stake in the v3 pool), paid in $ASSET after the v3 pool's `endEpoch`. UUPS, owned by the
+ *         `LPTimelock`.
  *
- *  TWO KINDS OF RESERVATION, both written only by the migrator:
- *    - the v3 reservation of a user ({reserve}): one running amount per user and the latest unlock
- *      time. A stake that stays to the end keeps it.
- *    - the LP reservation of one position ({reserveLp}), keyed by the position's tokenId, with the
+ *  TWO KINDS OF RESERVATION:
+ *    - the v3 reservation of a user: one running amount per user and the latest unlock time,
+ *      written by the migrator ({reserve}, routes 1 to 3) and by the v3 pool ({reserveStake},
+ *      route 4 = {ROUTE_STAKE}: the new-stake bonus of a direct `stake`, see the pool). Both add to
+ *      the same amount. A stake that stays to the end keeps it.
+ *    - the LP reservation of one position ({reserveLp}, the migrator only), keyed by the position's tokenId, with the
  *      exact semantics of `BonusEscrow`: the LP vault's {onRebalance} moves it to the new tokenId,
  *      scaled by min(1, valueNew / valueOld) at the vault's TWAP, so it never grows; the vault's
  *      {onUnstake} before the unlock forfeits it; after the unlock either hook SETTLES it
@@ -75,9 +78,11 @@ interface IV3BonusLpVault {
  *  protects). A forfeiture or a down-scaling lowers them and leaves the tokens here, so the surplus
  *  (`balance - totalReserved`) grows and only {recoverSurplus} (owner) can move it.
  *
- *  THE BUDGET. `maxTotalReserved` caps `totalReserved`: {reserve} and {reserveLp} revert
- *  {BudgetExceeded} when a reservation would take it above the cap, so the migrator's route call
- *  reverts with them. Set by the initializer and by the owner ({setMaxTotalReserved}).
+ *  THE BUDGET. `maxTotalReserved` caps `totalReserved`: {reserve}, {reserveLp} and {reserveStake}
+ *  revert {BudgetExceeded} when a reservation would take it above the cap, so the migrator's route
+ *  call, or the pool's direct stake, reverts with them (fail closed). The route bonuses and the
+ *  new-stake bonuses share this one budget. Set by the initializer and by the owner
+ *  ({setMaxTotalReserved}).
  *
  *  A MISSED NOTIFICATION. The LP vault's `onRebalance` to this contract fails CLOSED (since
  *  2026-11-10; a revert reverts the rebalance), its `onUnstake` fails OPEN: when that one reverts
@@ -115,6 +120,12 @@ contract V3BonusVault is
     IBonusEscrowHooks
 {
     using SafeERC20 for IERC20;
+
+    // ──────────────────────── Constants ────────────────────────
+
+    /// @notice The `route` of {BonusReserved} for the new-stake bonus of a direct v3 stake
+    ///         ({reserveStake}). Routes 1, 2 and 3 are the migrator's (compound, join LP, restake).
+    uint8 public constant ROUTE_STAKE = 4;
 
     // ──────────────────────── Storage ──────────────────────────
 
@@ -236,7 +247,7 @@ contract V3BonusVault is
      * @param owner_ The deployer while the deploy script wires the v3 contracts, then the timelock.
      * @param bonusToken_ $ASSET.
      * @param migrator_ The `StakingMigrator` proxy, or zero when it is wired later.
-     * @param pool_ The `WeightedStakingPoolV3` proxy (the {onEarlyExit} caller).
+     * @param pool_ The `WeightedStakingPoolV3` proxy (the {onEarlyExit} and {reserveStake} caller).
      * @param vault_ The `LPStakingVault` proxy (the {onUnstake} / {onRebalance} caller). Its pool
      *        must hold `bonusToken_`.
      * @param maxTotalReserved_ The cap on `totalReserved`, in bonus-token wei.
@@ -341,15 +352,7 @@ contract V3BonusVault is
      * @param route The transition route that earned it (1 compound, 2 join LP, 3 restake); event only.
      */
     function reserve(address user, uint256 amount, uint64 unlockAt, uint8 route) external onlyMigrator {
-        if (user == address(0)) revert ZeroAddress();
-        if (amount == 0) revert ZeroAmount();
-        V3BonusVaultStorage storage $ = _bonusStorage();
-        _checkBudget($, amount);
-        UserReservation storage r = $.reservations[user];
-        r.amount += amount;
-        if (unlockAt > r.unlockAt) r.unlockAt = unlockAt;
-        $.totalReserved += amount;
-        emit BonusReserved(user, amount, r.unlockAt, route);
+        _reserveV3(user, amount, unlockAt, route);
     }
 
     /// @notice Records the bonus of the LP position `tokenId`, credited to `user`. One per tokenId.
@@ -371,6 +374,21 @@ contract V3BonusVault is
         $.totalLpReserved += amount;
 
         emit LpBonusReserved(tokenId, user, amount, unlockAt);
+    }
+
+    // ──────────────────────── Pool functions ───────────────────
+
+    /**
+     * @notice The new-stake bonus (2026-11-12): adds `amount` to `user`'s v3 reservation for a
+     *         stake made directly in the v3 pool, with exactly the semantics of {reserve} (the
+     *         running amount, the unlock time only moves later, {BudgetExceeded} above the budget
+     *         the route bonuses share) and the event `BonusReserved(user, amount, unlockAt, 4)`
+     *         ({ROUTE_STAKE}). Only the registered pool ({NotPool}); a revert reverts the stake.
+     */
+    function reserveStake(address user, uint256 amount, uint64 unlockAt) external {
+        address pool_ = _bonusStorage().pool;
+        if (msg.sender != pool_) revert NotPool(msg.sender, pool_);
+        _reserveV3(user, amount, unlockAt, ROUTE_STAKE);
     }
 
     // ──────────────────────── Pool notification ────────────────
@@ -568,10 +586,11 @@ contract V3BonusVault is
         _setMigrator(migrator_);
     }
 
-    /// @notice Moves the {onEarlyExit} caller. Only TOGETHER with the pool's own `setBonusVault`
-    ///         (one timelock batch): a pool that still notifies this contract while it is no
-    ///         longer the registered pool has every early exit revert (fail closed), and a new pool
-    ///         without the notification would let an early exit keep its bonus.
+    /// @notice Moves the {onEarlyExit} and {reserveStake} caller. Only TOGETHER with the pool's
+    ///         own `setBonusVault` (one timelock batch): a pool that still notifies this contract
+    ///         while it is no longer the registered pool has every early exit and every direct
+    ///         stake with a bonus revert (fail closed), and a new pool without the notification
+    ///         would let an early exit keep its bonus.
     function setPool(address pool_) external onlyOwner {
         if (pool_ == address(0)) revert ZeroAddress();
         _setPool(pool_);
@@ -625,6 +644,20 @@ contract V3BonusVault is
         V3BonusVaultStorage storage $ = _bonusStorage();
         emit MaxTotalReservedSet($.maxTotalReserved, maxTotalReserved_);
         $.maxTotalReserved = maxTotalReserved_;
+    }
+
+    /// @dev The shared body of {reserve} and {reserveStake}: adds `amount` to `user`'s v3
+    ///      reservation under the budget; the unlock time only moves later.
+    function _reserveV3(address user, uint256 amount, uint64 unlockAt, uint8 route) private {
+        if (user == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        V3BonusVaultStorage storage $ = _bonusStorage();
+        _checkBudget($, amount);
+        UserReservation storage r = $.reservations[user];
+        r.amount += amount;
+        if (unlockAt > r.unlockAt) r.unlockAt = unlockAt;
+        $.totalReserved += amount;
+        emit BonusReserved(user, amount, r.unlockAt, route);
     }
 
     /// @dev Reverts {BudgetExceeded} when `amount` more would take `totalReserved` above the cap.

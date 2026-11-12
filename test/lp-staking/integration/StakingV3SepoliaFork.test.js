@@ -31,7 +31,8 @@
  *  10. george exits early while the listener reverts (fail open, `listenerMissedAt` before the
  *      unlock) and re-stakes the same NFT: the record is DEAD and `reconcileLp` forfeits it while
  *      re-staked; henry reaches the same state (kept for step 12); ivan joins LP
- *  11. a direct v3 stake with the backend's `StakeVoucher` (no weight): the replay is rejected;
+ *  11. a direct v3 stake with the backend's `StakeVoucher` (no weight) reserves its new-stake bonus
+ *      (route 4, 2026-11-12); the replay is rejected;
  *      carol withdraws from v3 early: the principal back in full (no penalty in v3) and her whole
  *      v3 reservation forfeited
  *  12. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
@@ -741,11 +742,18 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     const totalBefore = await poolV3.totalStaked();
     expect(await poolV3.nonces(deployer.address)).to.equal(0n);
     const sig = await signStakeVoucher(deployer, 0n);
+    // The new-stake bonus (2026-11-12): the direct stake reserves `previewStakeBonus` (route 4).
+    const bonus = await poolV3.previewStakeBonus(amount);
+    expect(bonus).to.be.greaterThan(0n);
+    expect(bonus).to.be.at.most((amount * 500n) / 10_000n, "at most 5 %");
     await expect(poolV3.connect(deployer).stake(amount, FAR, sig))
       .to.emit(poolV3, "Staked")
       .withArgs(deployer.address, amount)
       .and.to.emit(poolV3, "NonceUsed")
-      .withArgs(deployer.address, 0n);
+      .withArgs(deployer.address, 0n)
+      .and.to.emit(bonusVault, "BonusReserved")
+      .withArgs(deployer.address, bonus, await poolV3.endEpoch(), 4);
+    expect((await bonusVault.reservedOf(deployer.address))[0]).to.equal(bonus);
     expect(await poolV3.stakes(deployer.address)).to.equal(amount);
     expect(await poolV3.totalStaked()).to.equal(totalBefore + amount);
     expect(await poolV3.nonces(deployer.address)).to.equal(1n);
@@ -853,9 +861,12 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     await expect(bonusVault.connect(carol).reconcileLp(erinStaleId))
       .to.emit(bonusVault, "LpBonusForfeited")
       .withArgs(erinStaleId, erin.address, erinLp);
-    // What is left owed is the v3 remainder reservations of dave and george (their LP ones were forfeited).
+    // What is left owed is the v3 remainder reservations of dave and george (their LP ones were
+    // forfeited) and the deployer's new-stake bonus of its direct stake (unclaimed here).
     expect(await bonusVault.totalReserved()).to.equal(
-      (await bonusVault.reservedOf(dave.address))[0] + (await bonusVault.reservedOf(george.address))[0]
+      (await bonusVault.reservedOf(dave.address))[0] +
+        (await bonusVault.reservedOf(george.address))[0] +
+        (await bonusVault.reservedOf(deployer.address))[0]
     );
     expect(await bonusVault.totalLpReserved()).to.equal(0n);
 

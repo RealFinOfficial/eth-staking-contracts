@@ -858,10 +858,38 @@ notification failed before the unlock); any other record is stale and pays nothi
 below). Forfeited amounts stay in the vault as surplus
 (`recoverSurplus(to, amount)`, owner). `totalLpReserved()` is the LP part of `totalReserved()`.
 
-**The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve` and `reserveLp` revert
-`BudgetExceeded(requested, remaining)` above it, so the route call reverts with them. It is set at
-deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner (`setMaxTotalReserved`, event
-`MaxTotalReservedSet(previousMax, newMax)`, a timelock operation).
+**The new-stake bonus (decision of 2026-11-12).** A stake made DIRECTLY in the v3 pool
+(`stake(amount, deadline, signature)`, the voucher path; not `stakeFor`, which the migrator uses)
+earns a bonus of 5 % scaled by the whole days left in the campaign:
+
+`bonus = amount × STAKE_BONUS_BPS × daysLeft / (campaignDays × 10,000)`, rounded down
+
+- `STAKE_BONUS_BPS()` = 500, a constant of the pool implementation (no storage, no setter).
+- `campaignDays` = `endEpoch − activationEpoch` in whole days, rounded up. `daysLeft` =
+  `endEpoch − block.timestamp` in whole days, rounded up, capped at `campaignDays`: a stake before
+  the activation, and any stake on the first day, gets the full 5 %.
+- Example, 1,000 $ASSET in a 90-day campaign: 50 $ASSET on the first day; with 47 of 90 days left
+  1,000 × 5 % × 47 / 90 = 26.11 $ASSET (2.61 %); in the last 24 hours 1,000 × 5 % / 90 = 0.56 $ASSET.
+- `previewStakeBonus(amount)` (view) returns the bonus a direct stake of `amount` would reserve in
+  the current block: zero from `endEpoch` on and while the pool has no bonus vault.
+- The pool calls `V3BonusVault.reserveStake(user, bonus, endEpoch)` (the registered pool only,
+  `NotPool(caller, pool)` otherwise) after the stake's own state changes. It adds to the user's v3
+  reservation with exactly the semantics of `reserve` and emits `BonusReserved(user, amount,
+  unlockAt, 4)`: route 4 (`ROUTE_STAKE()`) is a direct stake, routes 1 to 3 are the migrator's.
+  The bonus unlocks at `endEpoch`, is forfeited by an early `withdraw` with the rest of the v3 part,
+  and is paid by `claimV3()` or `claim()` after the end. A bonus that rounds to zero reserves
+  nothing and the stake still goes through.
+- Fail closed: a revert of the bonus vault reverts the stake. With a pool linked to a vault whose
+  own pool is another address, every direct stake with a bonus reverts `NotPool`, as every early
+  `withdraw` already does on such a pair.
+
+**The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve`, `reserveLp` and
+`reserveStake` revert `BudgetExceeded(requested, remaining)` above it, so the route call, or the
+direct stake, reverts with them (the stake leaves no stake and moves no token). The route bonuses
+and the new-stake bonuses share this ONE budget: size `V3_MAX_TOTAL_RESERVED` for both, and note
+that a large direct stake uses room the routes then no longer have (it frees it again if it is
+withdrawn early). It is set at deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner
+(`setMaxTotalReserved`, event `MaxTotalReservedSet(previousMax, newMax)`, a timelock operation).
 
 **A failed listener notification (`BonusListenerFailed`).** Since 2026-11-10 the LP vault's
 `onRebalance` notification to the listener FAILS CLOSED like the escrow's (no `try`, all the
@@ -892,7 +920,7 @@ no USDC reward and no penalty. Its whole surface:
 
 | Call | Who / when | What it does |
 |---|---|---|
-| `stake(amount, deadline, signature)` | anyone, before `endEpoch` | pulls `amount` from the caller; needs the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)`, domain `("WeightedStakingPool", "1", chainId, pool proxy)`, signed by `signer()`, over the caller's next `nonces(user)`; the nonce is spent (`NonceUsed`). The voucher binds no amount |
+| `stake(amount, deadline, signature)` | anyone, before `endEpoch` | pulls `amount` from the caller; needs the backend's EIP-712 `StakeVoucher(address user,uint256 nonce,uint256 deadline)`, domain `("WeightedStakingPool", "1", chainId, pool proxy)`, signed by `signer()`, over the caller's next `nonces(user)`; the nonce is spent (`NonceUsed`). The voucher binds no amount. With a bonus vault linked it reserves the new-stake bonus (`previewStakeBonus(amount)`, route 4, see above) and reverts with the vault |
 | `stakeFor(user, amount)` | the `migrator()` only, before `endEpoch` | pulls from the migrator, credits `user` (`Staked` then `StakedFor`) |
 | `withdraw(amount)` | a staker, before `endEpoch` | the principal back in full; `bonusVault().onEarlyExit(user)` forfeits the whole v3 reservation AND every active LP reservation of the user, for any amount withdrawn, fail closed (also before the activation) |
 | `unstake()` / `emergencyUnstake()` | a staker, from `endEpoch` | the whole principal (`Unstaked` / `EmergencyUnstaked`); `emergencyUnstake` is kept on purpose and can be removed by a later upgrade |
@@ -901,7 +929,8 @@ no USDC reward and no penalty. Its whole surface:
 Views: `stakingToken()`, `activationEpoch()`, `endEpoch()`, `signer()`, `migrator()`, `bonusVault()`,
 `totalStaked()`, `stakes(user)` (the principal, ONE word under the old selector: vendor the new ABI
 with the upgrade), `nonces(user)`,
-`STAKE_VOUCHER_TYPEHASH()`. `activationEpoch` gates nothing; it is shown for information only.
+`STAKE_VOUCHER_TYPEHASH()`, `STAKE_BONUS_BPS()`, `previewStakeBonus(amount)`. `activationEpoch`
+gates no action; since 2026-11-12 it sets the length of the new-stake bonus scale (`campaignDays`).
 Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
 signer)`, `Staked(user, amount)`, `StakedFor(user, by, amount)`, `Withdrawn(user, amount)`,
 `Unstaked(user, amount)`, `EmergencyUnstaked(user, amount)`, `NonceUsed(user, nonce)`,
@@ -924,6 +953,13 @@ refuses `setVault` while `totalLpReserved()` is above zero (`LpReservationsOutst
 `setPool` is only ever sent in the same batch as the pool's `setBonusVault`.
 
 ### Deploying (`scripts/deploy-staking-v3.js`)
+
+The new-stake bonus (2026-11-12) needs no change to the script: the bonus vault's initializer
+already records the pool as its `pool()`, and the pool's existing `setBonusVault` link is the one
+`stake` calls. Only the budget it sets (`V3_MAX_TOTAL_RESERVED`) must now cover the direct-stake
+bonuses as well as the route bonuses. A live pair gets the rule by upgrading BOTH proxies (the pool
+and the bonus vault) in one timelock batch: a new pool on an old vault would revert every direct
+stake with a bonus (the old vault has no `reserveStake`).
 
 ```bash
 # 0. a live vault older than the listener needs the new implementation first

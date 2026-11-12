@@ -238,6 +238,74 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(book.totalReserved(), BONUS);
     }
 
+    // ──────────────────────── reserveStake (the pool, route 4) ─
+
+    function test_ReserveStake_OnlyThePool() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.NotPool.selector, stranger, poolStub));
+        book.reserveStake(alice, BONUS, UNLOCK);
+        vm.prank(carol); // the migrator may not use the pool's path either
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.NotPool.selector, carol, poolStub));
+        book.reserveStake(alice, BONUS, UNLOCK);
+        vm.prank(poolStub); // nor may the pool use the migrator's
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.NotMigrator.selector, poolStub, carol));
+        book.reserve(alice, BONUS, UNLOCK, 4);
+    }
+
+    function test_ReserveStake_HasTheSemanticsOfReserve() public {
+        assertEq(book.ROUTE_STAKE(), 4);
+        vm.startPrank(poolStub);
+        vm.expectRevert(V3BonusVault.ZeroAddress.selector);
+        book.reserveStake(address(0), BONUS, UNLOCK);
+        vm.expectRevert(V3BonusVault.ZeroAmount.selector);
+        book.reserveStake(alice, 0, UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusReserved(alice, BONUS, UNLOCK, 4);
+        book.reserveStake(alice, BONUS, UNLOCK);
+        book.reserveStake(alice, BONUS, UNLOCK - 10);
+        vm.stopPrank();
+        _reserve(alice, BONUS); // a route bonus adds to the same running amount
+        (uint256 amount, uint64 unlockAt) = book.reservedOf(alice);
+        assertEq(amount, 3 * BONUS);
+        assertEq(unlockAt, UNLOCK, "an earlier unlock never shortens it");
+        vm.prank(poolStub);
+        book.reserveStake(alice, BONUS, UNLOCK + 10);
+        (, unlockAt) = book.reservedOf(alice);
+        assertEq(unlockAt, UNLOCK + 10);
+        assertEq(book.totalReserved(), 4 * BONUS);
+        assertEq(book.totalLpReserved(), 0, "not LP");
+    }
+
+    /// @dev The route bonuses and the new-stake bonuses share the one budget.
+    function test_ReserveStake_SharesTheBudgetWithTheRoutes() public {
+        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
+        vm.prank(carol);
+        capped.reserve(alice, BONUS, UNLOCK, 1);
+        vm.prank(poolStub);
+        capped.reserveStake(bob, BONUS, UNLOCK);
+        vm.prank(poolStub);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
+        capped.reserveStake(bob, 1, UNLOCK);
+        vm.prank(carol);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
+        capped.reserve(alice, 1, UNLOCK, 1);
+    }
+
+    function test_ReserveStake_IsForfeitedByAnEarlyExitAndPaidAtTheEnd() public {
+        vm.prank(poolStub);
+        book.reserveStake(alice, BONUS, UNLOCK);
+        vm.prank(poolStub);
+        book.reserveStake(bob, 2 * BONUS, UNLOCK);
+        vm.expectEmit(address(book));
+        emit V3BonusVault.BonusForfeited(alice, BONUS);
+        vm.prank(poolStub);
+        book.onEarlyExit(alice);
+        book.fund(2 * BONUS);
+        vm.warp(UNLOCK);
+        vm.prank(bob);
+        assertEq(book.claimV3(), 2 * BONUS);
+    }
+
     // ──────────────────────── onEarlyExit ──────────────────────
 
     function test_EarlyExit_OnlyThePool() public {

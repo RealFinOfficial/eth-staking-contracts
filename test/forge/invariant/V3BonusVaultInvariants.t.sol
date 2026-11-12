@@ -5,16 +5,18 @@ import {Test} from "forge-std/Test.sol";
 
 import {StakingV3Harness} from "../utils/StakingV3Harness.sol";
 import {V3BonusVault} from "../../../contracts/staking-v3/V3BonusVault.sol";
+import {WeightedStakingPoolV3} from "../../../contracts/staking-v3/WeightedStakingPoolV3.sol";
 import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonusEscrowHooks.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
 
 /**
- * @notice Bounded actor on a bare {V3BonusVault}: the migrator's two reserves, the pool's early
+ * @notice Bounded actor on a {V3BonusVault} whose pool is a real v3 pool: the migrator's two
+ *         reserves, a direct `stake` in the pool (its new-stake bonus, route 4), the pool's early
  *         exit (v3 part and active LP parts), the vault's unstake and rebalance (with random value
  *         ratios), a `hold` step and a directed `claimHeld` step (the vault holds an id for its
  *         user from then on, a mocked `stakerOf`, so the held pay path of `_lpClaimable` is
- *         fuzzed), the permissionless
- *         `reconcileLp` (it forfeits an active id the vault does not hold), clock warps, funding,
+ *         fuzzed), the permissionless `reconcileLp` (it forfeits an active id the vault does not
+ *         hold), clock warps, funding,
  *         the three claims (`claim`, `claimV3`, `claimLp`), `claimLp` on another wallet's id and on
  *         an old id a rebalance deleted, and surplus recoveries. Per-step properties are checked
  *         around the step and kept as violation counters; state properties are checked by the
@@ -56,6 +58,12 @@ contract V3BonusVaultHandler is Test {
     uint256 public holds;
     /// @dev The old ids of rebalances that moved the record (deleted under the old id).
     uint256[] internal oldIds;
+    /// @dev The real v3 pool behind `pool` (the new-stake bonus, 2026-11-12) and its voucher key.
+    WeightedStakingPoolV3 internal immutable stakePool;
+    uint256 internal immutable signerPk;
+    /// @dev A direct stake whose v3 reservation did not grow by exactly `previewStakeBonus`.
+    uint256 public stakeBonusViolations;
+    uint256 public directStakes;
 
     constructor(
         V3BonusVault book_,
@@ -65,8 +73,12 @@ contract V3BonusVaultHandler is Test {
         address vault_,
         address owner_,
         int24 lower_,
-        int24 upper_
+        int24 upper_,
+        WeightedStakingPoolV3 stakePool_,
+        uint256 signerPk_
     ) {
+        stakePool = stakePool_;
+        signerPk = signerPk_;
         book = book_;
         asset = asset_;
         migrator = migrator_;
@@ -100,6 +112,38 @@ contract V3BonusVaultHandler is Test {
 
     /// @dev Rule of 2026-11-12: the exit forfeits the v3 part (while locked) and every ACTIVE LP
     ///      record of the user (open, before its unlock); every other record is left as it was.
+    /// @dev A direct stake in the real v3 pool, with a voucher from the pool's signer: the
+    ///      user's v3 reservation grows by exactly `previewStakeBonus(amount)` (route 4).
+    function stake(uint256 seed, uint256 amount) external {
+        if (block.timestamp >= stakePool.endEpoch()) return;
+        address user = _user(seed);
+        amount = bound(amount, 1, 1e24);
+        vm.prank(owner);
+        asset.transfer(user, amount);
+        vm.prank(user);
+        asset.approve(address(stakePool), amount);
+        uint256 preview = stakePool.previewStakeBonus(amount);
+        (uint256 before,) = book.reservedOf(user);
+        bytes32 domain = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("WeightedStakingPool"),
+                keccak256("1"),
+                block.chainid,
+                address(stakePool)
+            )
+        );
+        bytes32 structHash =
+            keccak256(abi.encode(stakePool.STAKE_VOUCHER_TYPEHASH(), user, stakePool.nonces(user), block.timestamp));
+        (uint8 v, bytes32 r, bytes32 sg) =
+            vm.sign(signerPk, keccak256(abi.encodePacked("\x19\x01", domain, structHash)));
+        vm.prank(user);
+        stakePool.stake(amount, block.timestamp, abi.encodePacked(r, sg, v));
+        (uint256 afterAmount,) = book.reservedOf(user);
+        if (afterAmount - before != preview) stakeBonusViolations++;
+        directStakes++;
+    }
+
     function earlyExit(uint256 seed) external {
         address user = _user(seed);
         uint256[] memory ids = book.lpTokensOf(user);
@@ -364,10 +408,22 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
     function setUp() public {
         _deployStakingV3();
         address migrator_ = makeAddr("bookMigrator");
-        address pool_ = makeAddr("bookPool");
+        // A real v3 pool (90 days from now) is the book's pool, so direct stakes reserve through it.
+        WeightedStakingPoolV3 stakePool = _deployPoolV3(address(asset), block.timestamp, block.timestamp + 90 days);
+        address pool_ = address(stakePool);
         book = _deployBonusVault(address(asset), migrator_, pool_, address(mathVault));
+        stakePool.setBonusVault(address(book));
         handler = new V3BonusVaultHandler(
-            book, asset, migrator_, pool_, address(mathVault), address(this), START_LOWER, START_UPPER
+            book,
+            asset,
+            migrator_,
+            pool_,
+            address(mathVault),
+            address(this),
+            START_LOWER,
+            START_UPPER,
+            stakePool,
+            voucherSignerPk
         );
         asset.approve(address(book), type(uint256).max);
         // The handler funds as the owner (this contract), which holds the $ASSET supply.
@@ -400,6 +456,11 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
     function invariant_ClaimPaysExactlyOrIsShort() public view {
         assertEq(handler.overpayViolations(), 0);
         assertEq(handler.shortClaimViolations(), 0);
+    }
+
+    /// @dev I8: a direct stake reserves exactly `previewStakeBonus` (the new-stake bonus).
+    function invariant_ADirectStakeReservesExactlyThePreview() public view {
+        assertEq(handler.stakeBonusViolations(), 0);
     }
 
     /// @dev I7: `claimLp` on another wallet's id reverts `NotLpReservationUser`, on an old id a
