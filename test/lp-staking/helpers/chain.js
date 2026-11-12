@@ -45,19 +45,41 @@ async function derivePinnedFees(provider) {
 }
 
 /**
+ * The gas limit a transaction without one is sent with: its `eth_estimateGas` result times
+ * 120 %. ethers would otherwise send the bare estimate, and the node estimates against a
+ * PENDING block whose timestamp is fixed when the estimate runs, while the transaction is mined
+ * in a block stamped when it is mined. The gas a zap or a swap needs depends on that timestamp
+ * (the TWAP guards on that path read the pool's oracle at `block.timestamp - window`): measured on
+ * the Sepolia fork at A7, the estimate ranges from 828,688 to 832,349 gas across one minute of
+ * block times. CI run 43233766411 (attempt 1) estimated A7 at 828,910 in one second and mined it
+ * in the next, where it needs 829,006: the inner call ran out of gas (816,433 used, 12,477 left,
+ * empty revert), reproduced locally byte for byte. The margin covers that drift; it costs
+ * nothing, since only the gas used is charged.
+ */
+const GAS_LIMIT_MARGIN_PCT = 120n;
+
+/**
  * Wraps a signer so every transaction it sends carries `fees`, unless the call site states
  * its own. Applied to every wallet the suite uses, which is what makes "no transaction
- * here depends on fee estimation" true rather than aspirational.
+ * here depends on fee estimation" true rather than aspirational. A transaction without a
+ * `gasLimit` gets its estimate plus {@link GAS_LIMIT_MARGIN_PCT}; a revert still surfaces from
+ * that estimate, so nothing is mined for it (the same path ethers takes).
  */
 function pinFees(signer, fees) {
   if (signer.__feesPinned) return signer;
   const send = signer.sendTransaction.bind(signer);
-  signer.sendTransaction = (tx) =>
-    send({
+  signer.sendTransaction = async (tx) => {
+    const full = {
       maxFeePerGas: fees.maxFeePerGas,
       maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
       ...tx,
-    });
+    };
+    if (full.gasLimit === undefined || full.gasLimit === null) {
+      const estimate = await signer.estimateGas(full);
+      full.gasLimit = (estimate * GAS_LIMIT_MARGIN_PCT) / 100n;
+    }
+    return send(full);
+  };
   signer.__feesPinned = true;
   return signer;
 }
@@ -250,6 +272,7 @@ function uintTopic(value) {
 }
 
 module.exports = {
+  GAS_LIMIT_MARGIN_PCT,
   derivePinnedFees,
   pinFees,
   makeWallets,
