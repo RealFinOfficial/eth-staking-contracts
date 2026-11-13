@@ -385,8 +385,8 @@
       "address": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
       "deployTx": "0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623",
       "block": 12112123,
-      "implementation": "0xE6077b572f218194333051F12D24eF6f63f3cC2c",
-      "implementationTx": "0x8d3de87028cb975d7913d00c7536ebe9e1c78a5c1230c2043c557753df1a3150",
+      "implementation": "0x6DF0B9231D70fEe953757672164Ca395a0C865Ff",
+      "implementationTx": "0xea35b43cae2dedc4a53e2aa2bd6f92157364376a5a1204a18e5711d5aa180ab0",
       "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "activationEpoch": 1794404858,
       "endEpoch": 1802180858,
@@ -400,18 +400,23 @@
         "executeTx": "0x6f64bd49ce4f0fb42e87b1d7998506efcd18ad6cb67a55db9dd849f8cd28da93",
         "executeBlock": 12117902
       },
-      "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893"
+      "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
+      "previousImplementation": "0xE6077b572f218194333051F12D24eF6f63f3cC2c",
+      "implementationBlock": 12124670,
+      "upgradeTx": "0xdb4693c9371defcb62c5bf7fbaa12231e069a3942e435afb3f1f440866866c4f"
     },
     "V3BonusVault": {
       "address": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
       "deployTx": "0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d",
       "block": 12112125,
-      "implementation": "0x986a26368226c4d439660791a7a5fe177571755E",
-      "implementationTx": "0xe33343416d26634f3f2484d932ab7313525f30772dd0678f61d52ff455e79850",
+      "implementation": "0x6470C27F8c1191AC98b48a52Da9Ea35a0D1a60BA",
+      "implementationTx": "0x0a9e3ffba73344ef589b452b19aa200c1f7541bcc4d25e398ccd9a332516efa1",
       "bonusToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "pool": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
       "vault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "maxTotalReserved": "100000000000000000000000",
+      "maxTotalReservedRetiredOn": "2026-11-13",
+      "maxTotalReservedRetiredReason": "the cap value set at initialization. The upgrade of 2026-11-13 removed the cap and the maxTotalReserved() getter. The value stays in slot 8 of the vault's namespace and is never read",
       "owner": "0xf2F678AC5260BB297682D54DcD945BCB78901E20",
       "ownerAccepted": {
         "timelockBatchId": "0xd0d5bd916cc9885d17acc6f9cf1473bd4e59e78cd7f69ca072ebc58126ad1360",
@@ -425,9 +430,9 @@
       "funded": "20000000000000000000000",
       "fundTx": "0xd3def6cbff5652d9f2d640fbb9ae1b55d36c10e4b070469aad0ab4c84bd37f4d",
       "fundBlock": 12117920,
-      "previousImplementation": "0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da",
-      "implementationBlock": 12119313,
-      "upgradeTx": "0x8aed8274c8a3db01d88b56f041702caa9cf745a98077e9a8552bb0d5d08ea0f3"
+      "previousImplementation": "0x986a26368226c4d439660791a7a5fe177571755E",
+      "implementationBlock": 12124670,
+      "upgradeTx": "0xdb4693c9371defcb62c5bf7fbaa12231e069a3942e435afb3f1f440866866c4f"
     },
     "StakingMigrator": {
       "address": "0x58a0464284020bF3368d3B629c5F693e94F8D893",

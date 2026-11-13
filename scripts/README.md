@@ -1046,8 +1046,8 @@ section), which cannot serve the test site. The registry kinds `WeightedStakingP
 
 | What | Address | Block | Transaction |
 |---|---|---|---|
-| `WeightedStakingPoolV3` proxy (impl `0xE6077b572f218194333051F12D24eF6f63f3cC2c`) | `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6` | 12112123 | `0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623` |
-| `V3BonusVault` proxy (impl `0x986a26368226c4d439660791a7a5fe177571755E` since 2026-11-12, previous `0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da`) | `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` | 12112125 | `0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d` |
+| `WeightedStakingPoolV3` proxy (impl `0x6DF0B9231D70fEe953757672164Ca395a0C865Ff` since 2026-11-13, previous `0xE6077b572f218194333051F12D24eF6f63f3cC2c`) | `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6` | 12112123 | `0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623` |
+| `V3BonusVault` proxy (impl `0x6470C27F8c1191AC98b48a52Da9Ea35a0D1a60BA` since 2026-11-13, previous `0x986a26368226c4d439660791a7a5fe177571755E` since 2026-11-12, before it `0xEe44bAE07AA5493108e1e0BEF92180D76CA8A8Da`) | `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1` | 12112125 | `0x1f1873da15c483724fa65adb896298afc752293aa2448b15d75315f6267f1d1d` |
 | `StakingMigrator` proxy (impl `0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A`) | `0x58a0464284020bF3368d3B629c5F693e94F8D893` | 12112127 | `0x96d588dbd3181c55ea813491aef280166fd3747a18b43beb4ae7a1a1e9fe25af` |
 | `pool.setBonusVault(0x2Daa…1fa1)`, then the three `transferOwnership(0xf2F6…1E20)` nominations | | | `0x79b38f447f9b57c925a2122bed87768bce190f7fee55ad590eafb4241a3aa741` (the `setBonusVault`) |
 
@@ -1056,6 +1056,10 @@ Parameters: activation 1794404858 (2026-11-11 15:47:38 Sofia, 13:47:38 UTC), end
 2026-11-11). Stake signer and migrator signer = the deployer `0x5576…8A35`. Swap guard 300 s and
 953 ticks, valuation window 1,800 s, `maxTotalReserved` 100,000 $ASSET, vault hook gas 400,000 /
 1,000,000 (all script defaults).
+
+Every earlier dated line of this section that names `maxTotalReserved()` or a bonus budget
+describes the state before 2026-11-13. The upgrade of 2026-11-13 (below) removed the getter and the
+cap, so neither exists any more.
 
 State: linked and funded on 2026-11-12. The timelock batch (`LPTimelock`
 `0xf2F678AC5260BB297682D54DcD945BCB78901E20`, tag `staking-v3`, id
@@ -1129,6 +1133,54 @@ upgrade, and no claim can be logged before the pool's end (2027-02-09 15:47:38 S
 The test server's indexer still runs the module version from before this change (evm-indexer
 `staking-v3-campaign` 1cbbb4a). The matching module version is a7068b2. It needs the stored ABI
 `LpStaking.V3BonusVault` refreshed and the engine restarted, at any time before the pool's end.
+
+Upgrade of the pool and the bonus vault on 2026-11-13. One `LPTimelock`
+`0xf2F678AC5260BB297682D54DcD945BCB78901E20` batch of 2 calls upgraded both proxies to
+implementations built from commit e4f9dc1. The first call is `upgradeToAndCall(newImplementation,
+0x)` on the `WeightedStakingPoolV3` proxy `0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6`, from the
+implementation `0xE6077b572f218194333051F12D24eF6f63f3cC2c` to the implementation
+`0x6DF0B9231D70fEe953757672164Ca395a0C865Ff`. The second call is the same function on the
+`V3BonusVault` proxy `0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1`, from the implementation
+`0x986a26368226c4d439660791a7a5fe177571755E` to the implementation
+`0x6470C27F8c1191AC98b48a52Da9Ea35a0D1a60BA`. Both implementations were deployed from commit
+e4f9dc1 with `IMPL_TARGET=WeightedStakingPoolV3` and `IMPL_TARGET=V3BonusVault` on `npx hardhat run
+scripts/deploy-implementation.js --network sepolia`. The pool implementation landed in block
+12124602 (09:53:36 Sofia, 07:53:36 UTC), tx
+`0xea35b43cae2dedc4a53e2aa2bd6f92157364376a5a1204a18e5711d5aa180ab0`, and its runtime code is 10,683
+bytes. The bonus vault implementation landed in block 12124603 (09:53:48 Sofia, 07:53:48 UTC), tx
+`0x0a9e3ffba73344ef589b452b19aa200c1f7541bcc4d25e398ccd9a332516efa1`, and its runtime code is 14,162
+bytes. `prepareUpgrade` validated both against the deployed storage layouts, and
+`scripts/validate-upgrade-safety.js --network sepolia` passed ("All upgrade-safety checks
+passed."). The batch (salt tag `v3-no-cap`, id
+`0x38d245593e2d78811c4dc6ae03300cd2f87f93f6d2461e2653081b123fcf7929`, batch file
+`implementation_documents/lp-staking-stake-to-lp-rollover/2026-11-13-stack6-v3-pool-vault-upgrade-batch.json`
+outside this repository) was scheduled in block 12124646 (10:02:24 Sofia, 08:02:24 UTC), tx
+`0x5514e554e8e5a8e12eee2853d48961c69aeb14984db64f9ee2518f67d0ad6b5f`, and executed in block 12124670
+(10:07:36 Sofia, 08:07:36 UTC), tx `0xdb4693c9371defcb62c5bf7fbaa12231e069a3942e435afb3f1f440866866c4f`.
+The new implementations add the commits f62d368, c825f72 and e4f9dc1 to the build of 2026-11-12 and
+change two things. A direct stake in the pool now reserves a new-stake bonus of 5 % of the stake,
+scaled by the whole days left until the pool's end (a started day counts as a whole day), and it
+reserves nothing when less than 24 hours are left. The bonus vault has no cap any more. Read back
+after the batch: the ERC-1967 implementation of the pool proxy is
+`0x6DF0B9231D70fEe953757672164Ca395a0C865Ff` and that of the bonus vault proxy is
+`0x6470C27F8c1191AC98b48a52Da9Ea35a0D1a60BA`. On the pool, `owner()` is the timelock, `migrator()` is
+`0x58a0464284020bF3368d3B629c5F693e94F8D893`, `bonusVault()` is
+`0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1`, `totalStaked()` is 0, `endEpoch()` is 1802180858,
+`STAKE_BONUS_BPS()` is 500, and `previewStakeBonus` for 1,000 $ASSET returns 49.444444444444444444
+$ASSET (5 % times 89 of 90 days left). On the bonus vault, `owner()` is the timelock, `migrator()`
+and `pool()` are unchanged, `totalReserved()` and `totalLpReserved()` are 0, the tREAL balance is
+20,000 and `ROUTE_STAKE()` is 4. `maxTotalReserved()` now reverts, because the getter is removed. The
+retired storage slot (slot 8 of the vault's namespace) still holds the old value 100,000e18 and is
+never read. In deployments.json the `V3BonusVault` entry keeps `maxTotalReserved` as the value of
+the initialization and marks it with `maxTotalReservedRetiredOn` and `maxTotalReservedRetiredReason`.
+No reservation existed at the time of the upgrade. Two implementations deployed on 2026-11-12 from
+f62d368 were never activated and are obsolete, so nobody should schedule them: the pool
+implementation `0x6202E7f0cD2CFe516076cFa795302C1f1d37a4a3` (block 12119803) and the bonus vault
+implementation `0x69ab8Ee4acdDD4fD440eA0BFF5cB0fe189A12AAc` (block 12119805). The test server's
+indexer still runs the module version from before these changes (evm-indexer `staking-v3-campaign`
+1cbbb4a). The matching module version is 66638c1. It needs the stored ABIs
+`LpStaking.V3BonusVault` and `LpStaking.WeightedStakingPoolV3` refreshed and the engine restarted,
+before the first direct stake that reserves a bonus.
 
 Two earlier attempts reverted and changed nothing: an `approve` sent with a fixed gas limit of
 120,000 ran out of gas (block 12117906, tx
