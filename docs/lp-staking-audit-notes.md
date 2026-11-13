@@ -1642,7 +1642,9 @@ once. No storage was added. Tests: `test_EarlyExit_*`, `test_ClaimV3_*`, `test_C
 voucher path, not `stakeFor`) reserves `amount * STAKE_BONUS_BPS * daysLeft / (campaignDays *
 10_000)` (rounded down with `Math.mulDiv`; `STAKE_BONUS_BPS` = 500 is a constant; `campaignDays` =
 `endEpoch - activationEpoch` and `daysLeft` = `endEpoch - block.timestamp`, both in whole days
-rounded up, `daysLeft` capped at `campaignDays`; 47 of 90 days left = 2.61 %) for the caller through
+rounded up, `daysLeft` capped at `campaignDays`; 47 of 90 days left = 2.61 %; with less than 24
+hours left (`endEpoch - block.timestamp < 1 days`) the bonus is zero and the vault is not called,
+owner's decision of 2026-11-12, while exactly 24 hours left still earns 1 / 90) for the caller through
 the new `V3BonusVault.reserveStake(user, amount, unlockAt)`, callable only by the registered pool
 (`NotPool`) and sharing `reserve`'s body (`_reserveV3`: `ZeroAddress`, `ZeroAmount`, the running
 amount, the unlock only later), event `BonusReserved(user, amount, unlockAt, 4)` (`ROUTE_STAKE`).

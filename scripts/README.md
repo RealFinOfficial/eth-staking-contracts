@@ -871,10 +871,15 @@ earns a bonus of 5 % scaled by the whole days left in the campaign:
 - `campaignDays` = `endEpoch − activationEpoch` in whole days, rounded up. `daysLeft` =
   `endEpoch − block.timestamp` in whole days, rounded up, capped at `campaignDays`: a stake before
   the activation, and any stake on the first day, gets the full 5 %.
+- With LESS than 24 hours left (`endEpoch − block.timestamp < 1 day`) a direct stake earns no bonus
+  (owner's decision of 2026-11-12): the pool does not call the bonus vault and the stake goes
+  through. With exactly 24 hours left the formula still applies (one day).
 - Example, 1,000 $ASSET in a 90-day campaign: 50 $ASSET on the first day; with 47 of 90 days left
-  1,000 × 5 % × 47 / 90 = 26.11 $ASSET (2.61 %); in the last 24 hours 1,000 × 5 % / 90 = 0.56 $ASSET.
+  1,000 × 5 % × 47 / 90 = 26.11 $ASSET (2.61 %); with exactly 24 hours left 1,000 × 5 % / 90 =
+  0.56 $ASSET; with less than 24 hours left nothing.
 - `previewStakeBonus(amount)` (view) returns the bonus a direct stake of `amount` would reserve in
-  the current block: zero from `endEpoch` on and while the pool has no bonus vault.
+  the current block: zero with less than 24 hours left, from `endEpoch` on, and while the pool has
+  no bonus vault.
 - The pool calls `V3BonusVault.reserveStake(user, bonus, endEpoch)` (the registered pool only,
   `NotPool(caller, pool)` otherwise) after the stake's own state changes. It adds to the user's v3
   reservation with exactly the semantics of `reserve` and emits `BonusReserved(user, amount,

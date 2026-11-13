@@ -594,25 +594,50 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(_v3Of(b, bob), AT_47_OF_90);
     }
 
-    function test_StakeBonus_TheLast24Hours() public {
+    /// @dev Exactly 24 hours left still earns the last day's rate, 1 / 90 of 5 % (2026-11-12).
+    function test_StakeBonus_Exactly24HoursLeftEarnsOneDay() public {
         (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
         vm.warp(e - 1 days);
+        assertEq(q.previewStakeBonus(AMOUNT), AT_1_OF_90);
         _stakeOn(q, alice, AMOUNT);
         assertEq(_v3Of(b, alice), AT_1_OF_90);
     }
 
-    function test_StakeBonus_OneSecondBeforeTheEndIsOneDay() public {
+    /// @dev 24 hours and one second left: two whole days rounded up, 2 / 90 of 5 %.
+    function test_StakeBonus_24HoursAndOneSecondLeftEarnsTwoDays() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 1 days - 1);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), 1_111_111_111_111_111_111, "1,000 x 5 % x 2 / 90, rounded down");
+    }
+
+    /// @dev Less than 24 hours left (one second less): no bonus, no vault call, the stake succeeds
+    ///      (owner's decision of 2026-11-12).
+    function test_StakeBonus_LessThan24HoursLeftEarnsNothing() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
+        vm.warp(e - 1 days + 1);
+        assertEq(q.previewStakeBonus(AMOUNT), 0);
+        vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(q.stakes(alice), AMOUNT, "the stake goes through");
+        assertEq(_v3Of(b, alice), 0);
+        assertEq(b.totalReserved(), 0);
+    }
+
+    /// @dev The last second of the window: no bonus, the stake succeeds; from the end, zero.
+    function test_StakeBonus_TheLastSecondEarnsNothing() public {
         (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
         vm.warp(e - 1);
-        assertEq(q.previewStakeBonus(AMOUNT), AT_1_OF_90);
+        assertEq(q.previewStakeBonus(AMOUNT), 0);
         _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), AT_1_OF_90);
+        assertEq(q.stakes(alice), AMOUNT);
+        assertEq(_v3Of(b, alice), 0);
         vm.warp(e);
         assertEq(q.previewStakeBonus(AMOUNT), 0, "zero from the end");
     }
 
     /// @dev 30 days and 1 hour count as 31 campaign days: the first hour pays the full rate, the
-    ///      last 12 hours pay 1 / 31.
+    ///      moment exactly 24 hours before the end pays 1 / 31 (less than 24 hours pays nothing).
     function test_StakeBonus_AWindowThatIsNotWholeDays() public {
         uint256 s = block.timestamp + 1 days;
         uint256 e = s + 30 days + 1 hours;
@@ -620,7 +645,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.warp(s);
         _stakeOn(q, alice, AMOUNT);
         assertEq(_v3Of(b, alice), FULL, "31 of 31 days");
-        vm.warp(e - 12 hours);
+        vm.warp(e - 1 days);
         _stakeOn(q, bob, AMOUNT);
         assertEq(_v3Of(b, bob), 1_612_903_225_806_451_612, "1,000 x 5 % x 1 / 31, rounded down");
     }
@@ -637,7 +662,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
     ///      vault call (which would revert `ZeroAmount`); 1,800 wei earns 1 wei.
     function test_StakeBonus_ATinyAmountRoundsToZeroAndStillStakes() public {
         (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1 hours);
+        vm.warp(e - 1 days); // exactly 24 hours left: the 1 / 90 rate
         _stakeOn(q, bob, 1800);
         assertEq(_v3Of(b, bob), 1);
         assertEq(q.previewStakeBonus(1799), 0);
