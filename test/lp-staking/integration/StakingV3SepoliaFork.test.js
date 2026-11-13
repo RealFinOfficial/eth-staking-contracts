@@ -351,7 +351,6 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       twapWindow: 300,
       maxDeviationTicks: 953,
       valuationWindow: 1800,
-      maxTotalReservedTokens: 100000n,
       vaultImplementation: vaultImplementations.current,
     };
     const vaultAddress = await vault.getAddress();
@@ -397,7 +396,8 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(await poolV3.bonusVault()).to.equal(result.addresses.bonusVault);
     expect(await poolV3.signer()).to.equal(backendSigner.address);
     expect(await poolV3.stakingToken()).to.equal(P.asset.address);
-    expect(await bonusVault.maxTotalReserved()).to.equal(ASSET(100_000));
+    // No cap since 2026-11-12: the vault has no `maxTotalReserved()` any more.
+    expect(bonusVault.interface.getFunction("maxTotalReserved", [])).to.equal(null);
 
     const batch = result.batch;
     await (await timelock.connect(multisig).getFunction("scheduleBatch")(

@@ -1487,8 +1487,8 @@ listener's `onUnstake` first failed (`listenerMissedAt(tokenId)`, see "Review cl
 - **The direct `StakeVoucher` binds no amount.** It says "this wallet may stake now" (user, nonce,
   deadline). The amount is the caller's own tokens. Since 2026-11-12 a direct stake earns the
   new-stake bonus (5 % scaled by the days left, reserved by the pool through `reserveStake`, see
-  below), so the voucher is what gates who earns it; the amount is bounded only by the shared
-  budget (`maxTotalReserved`).
+  below), so the voucher is what gates who earns it; since 2026-11-12 nothing bounds the amount
+  (no cap, see "No cap" below).
 - **The migrator's `setSigner` is operator tier** (undelayed, the LP vault's operator), like the
   distributor's: a leaked voucher key must be replaceable without the 48 h delay. A leaked key lets
   its holder reserve bonuses on their own deposits only; the reservation still needs the tokens
@@ -1511,7 +1511,7 @@ listener's `onUnstake` first failed (`listenerMissedAt(tokenId)`, see "Review cl
 | M1 — routes open before the timelock owns the contracts | `pool.setMigrator` and `bonusVault.setMigrator` moved from the deployer's direct wiring into the timelock batch, right after the three `acceptOwnership` calls |
 | M2 — a failed listener notification left a stale reservation payable | permissionless `V3BonusVault.reconcileLp(tokenId)`: forfeits an active LP reservation when `vault.stakerOf(tokenId) != user`, else a no-op |
 | M3 — several transitions per sw2 claim | `StakingMigrator.migrated(user)`: set by the first successful route call, later calls revert `AlreadyMigrated(user)`; the nonce check stays |
-| M4 — no cap on what the vault may owe | `V3BonusVault.maxTotalReserved` (initializer + owner `setMaxTotalReserved`, event `MaxTotalReservedSet`): `reserve` / `reserveLp` revert `BudgetExceeded(requested, remaining)` above it |
+| M4 — no cap on what the vault may owe | `V3BonusVault.maxTotalReserved` (initializer + owner `setMaxTotalReserved`, event `MaxTotalReservedSet`): `reserve` / `reserveLp` revert `BudgetExceeded(requested, remaining)` above it. REMOVED 2026-11-12 by the owner's decision ("no budget or cap limit"), see "No cap" below |
 | L1 — no custody check after `vault.stakeFor` | `moveToLp` asserts `ownerOf(tokenId) == vault && vault.stakerOf(tokenId) == caller`, else `CustodyAssertFailed(tokenId, owner, staker)` |
 | L2 — a swap at a moved spot raised the compound bonus | bonus base = principal + min(bought, `usdcInAsset(usdcAmount)`); `minAssetOut == 0` reverts `MinAssetOutZero` |
 | L3 — `setVault` could strand LP reservations | `setVault` reverts `LpReservationsOutstanding(totalLpReserved)` while any LP reservation is open; `setPool` only with the pool's `setBonusVault` |
@@ -1644,18 +1644,40 @@ voucher path, not `stakeFor`) reserves `amount * STAKE_BONUS_BPS * daysLeft / (c
 `endEpoch - activationEpoch` and `daysLeft` = `endEpoch - block.timestamp`, both in whole days
 rounded up, `daysLeft` capped at `campaignDays`; 47 of 90 days left = 2.61 %) for the caller through
 the new `V3BonusVault.reserveStake(user, amount, unlockAt)`, callable only by the registered pool
-(`NotPool`) and sharing `reserve`'s body (`_reserveV3`: `ZeroAddress`, `ZeroAmount`, the budget,
-the running amount, the unlock only later), event `BonusReserved(user, amount, unlockAt, 4)`
-(`ROUTE_STAKE`). The call comes after the stake's state changes, only when a bonus vault is linked
-and the bonus is above zero, and fails closed: `BudgetExceeded` or `NotPool` reverts the stake (no
-stake, no token moved, the nonce unspent). The bonus is part of the v3 reservation, so
-`onEarlyExit` forfeits it (unchanged code). The route bonuses and the new-stake bonuses share the
-one budget: a large direct stake (by a wallet the backend signs a voucher for) can use room the
-routes then lack, until it is withdrawn early. No storage was added to either contract; layouts
+(`NotPool`) and sharing `reserve`'s body (`_reserveV3`: `ZeroAddress`, `ZeroAmount`, the running
+amount, the unlock only later), event `BonusReserved(user, amount, unlockAt, 4)` (`ROUTE_STAKE`).
+The call comes after the stake's state changes, only when a bonus vault is linked and the bonus is
+above zero, and fails closed: `NotPool` reverts the stake (no stake, no token moved, the nonce
+unspent). The bonus is part of the v3 reservation, so `onEarlyExit` forfeits it (unchanged code).
+No storage was added to either contract; layouts
 checked offline against the recorded stack #6 implementations. Tests: `test_StakeBonus_*` in
 `WeightedStakingPoolV3.t.sol` (including the upgrade of a pool and vault pair from 5b1174c's code),
 `test_ReserveStake_*` in `V3BonusVault.t.sol`, `test_DirectStake_*` in `VaultBonusListener.t.sol`,
 invariant I8 (a direct stake reserves exactly `previewStakeBonus`).
+
+**No cap (owner's decision of 2026-11-12: "no budget or cap limit").** The cap of 2026-11-09
+(finding M4 above: `maxTotalReserved`, `setMaxTotalReserved`, `BudgetExceeded`, the initializer's
+`maxTotalReserved_` argument) is removed from `V3BonusVault`. It was our own safety limit, not a
+business rule: the company funds whatever is reserved before the end, and a claim reverts
+`InsufficientFunds(requested, available)` only while the vault holds less than that claim needs.
+`reserve`, `reserveLp` and `reserveStake` now record any amount and `totalReserved` grows without a
+limit (only uint256 overflow would stop it). The storage field `maxTotalReserved` stays in place,
+under its name and type, retired and unread, for the layout of the proxies deployed before
+2026-11-12 (on those it still holds the old cap); the event `MaxTotalReservedSet` stays declared,
+never emitted, so the initialization log of those proxies still decodes. What this changes for the
+earlier items: M4's bound on what the vault may owe no longer exists, so the amount owed is bounded
+only by what the routes and the direct stakes reserve (each route bonus is still bound to its
+`TransitionVoucher`'s eligible amounts; a direct stake's bonus is bound to the amount the staker
+locks for the window and gated by the backend's `StakeVoucher`); no reservation and no stake can
+fail on the vault's size any more, so the "shared budget" consequence of the new-stake bonus is
+gone; the funding duty is the operator's (`fund`, monitored by the backend's funding read) and an
+underfunded vault delays claims, it never loses a reservation. `recoverSurplus`, `setVault`'s
+`LpReservationsOutstanding` guard and the vault's listener link read `totalReserved` /
+`totalLpReserved`, not the cap, and are unchanged. Layouts checked offline against the recorded
+stack #6 implementations. Tests: `test_NoCap_*` in `V3BonusVault.t.sol` and
+`WeightedStakingPoolV3.t.sol` (including an upgrade from the capped 5b1174c code with its
+reservations at the cap), `test_Initialize_HasNoCapAndTheCapSurfaceIsGone`,
+`test_StakeBonus_AVeryLargeStakeIsNeverRefused`.
 
 **The v3 pool, a separate minimal contract (decision 2026-11-10).** `WeightedStakingPoolV3` is not
 a copy of v2. It holds each wallet's $ASSET principal for the window and pays it back; the bonus
@@ -1735,9 +1757,8 @@ previous implementation (`contracts/lp-staking/mocks/WeightedStakingPoolV3Weight
   fails, so every client vendors the new ABI together with the upgrade.
 - The direct `StakeVoucher(user, nonce, deadline)` binds no amount, by design: it says "this wallet
   may stake now". The pool itself pays nothing on a stake. Since 2026-11-12 a direct stake earns
-  the new-stake bonus (below), which scales with the staked amount and is capped only by the
-  shared budget; the migrator's route bonuses stay bound to the `TransitionVoucher`'s eligible
-  amounts.
+  the new-stake bonus (below), which scales with the staked amount and has no cap (2026-11-12);
+  the migrator's route bonuses stay bound to the `TransitionVoucher`'s eligible amounts.
 
 The migrator's `TransitionVoucher` lost its `weight` field: `TransitionVoucher(address user,uint8
 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain

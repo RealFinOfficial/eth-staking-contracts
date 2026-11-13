@@ -4,6 +4,7 @@ pragma solidity 0.8.38;
 import {StakingV3Harness} from "../utils/StakingV3Harness.sol";
 import {V3BonusVault} from "../../../contracts/staking-v3/V3BonusVault.sol";
 import {V3BonusVaultParent} from "../utils/V3BonusVaultParent.sol";
+import {V3BonusVaultAt5b1174c} from "../utils/V3BonusVaultAt5b1174c.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {IBonusEscrowHooks} from "../../../contracts/lp-staking/interfaces/IBonusEscrowHooks.sol";
 import {PositionValue} from "../../../contracts/lp-staking/libraries/PositionValue.sol";
@@ -79,24 +80,44 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(book.owner(), address(this));
         assertEq(book.totalReserved(), 0);
         assertEq(book.totalLpReserved(), 0);
-        assertEq(book.maxTotalReserved(), DEFAULT_BUDGET);
     }
 
-    function test_Initialize_AnnouncesTheBudget() public {
+    /// @dev No cap since 2026-11-12: the initializer takes none and announces none (the retired
+    ///      `MaxTotalReservedSet` is never emitted), and the cap's getter and setter are gone.
+    function test_Initialize_HasNoCapAndTheCapSurfaceIsGone() public {
         V3BonusVault impl = new V3BonusVault();
-        vm.expectEmit();
-        emit V3BonusVault.MaxTotalReservedSet(0, 5 * BONUS);
+        vm.recordLogs();
         V3BonusVault b = V3BonusVault(
             address(
                 new LPProxy(
                     address(impl),
                     abi.encodeCall(
-                        V3BonusVault.initialize, (address(this), address(asset), carol, poolStub, address(0), 5 * BONUS)
+                        V3BonusVault.initialize, (address(this), address(asset), carol, poolStub, address(0))
                     )
                 )
             )
         );
-        assertEq(b.maxTotalReserved(), 5 * BONUS);
+        VmSafe.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].topics[0] != V3BonusVault.MaxTotalReservedSet.selector, "no cap is announced");
+        }
+        (bool okGet,) = address(b).staticcall(abi.encodeWithSignature("maxTotalReserved()"));
+        assertFalse(okGet, "maxTotalReserved() is gone");
+        (bool okSet,) = address(b).call(abi.encodeWithSignature("setMaxTotalReserved(uint256)", 1));
+        assertFalse(okSet, "setMaxTotalReserved is gone");
+        (bool okOldInit,) = address(new V3BonusVault())
+            .call(
+                abi.encodeWithSignature(
+                    "initialize(address,address,address,address,address,uint256)",
+                    address(this),
+                    address(asset),
+                    carol,
+                    poolStub,
+                    address(0),
+                    1
+                )
+            );
+        assertFalse(okOldInit, "the six-argument initializer is gone");
     }
 
     function test_Initialize_RejectsZeroTokenOrPool() public {
@@ -104,23 +125,19 @@ contract V3BonusVaultTest is StakingV3Harness {
         vm.expectRevert(V3BonusVault.ZeroAddress.selector);
         new LPProxy(
             address(impl),
-            abi.encodeCall(
-                V3BonusVault.initialize, (address(this), address(0), carol, poolStub, address(0), DEFAULT_BUDGET)
-            )
+            abi.encodeCall(V3BonusVault.initialize, (address(this), address(0), carol, poolStub, address(0)))
         );
         vm.expectRevert(V3BonusVault.ZeroAddress.selector);
         new LPProxy(
             address(impl),
-            abi.encodeCall(
-                V3BonusVault.initialize, (address(this), address(asset), carol, address(0), address(0), DEFAULT_BUDGET)
-            )
+            abi.encodeCall(V3BonusVault.initialize, (address(this), address(asset), carol, address(0), address(0)))
         );
     }
 
     function test_Initialize_ImplementationIsLocked() public {
         V3BonusVault impl = new V3BonusVault();
         vm.expectRevert(Initializable.InvalidInitialization.selector);
-        impl.initialize(address(this), address(asset), carol, poolStub, address(0), DEFAULT_BUDGET);
+        impl.initialize(address(this), address(asset), carol, poolStub, address(0));
     }
 
     function test_SetVault_RejectsAVaultWithoutTheBonusToken() public {
@@ -276,19 +293,22 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(book.totalLpReserved(), 0, "not LP");
     }
 
-    /// @dev The route bonuses and the new-stake bonuses share the one budget.
-    function test_ReserveStake_SharesTheBudgetWithTheRoutes() public {
-        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
+    /// @dev No cap (2026-11-12): route bonuses, LP bonuses and new-stake bonuses of any size are
+    ///      all recorded, and `totalReserved` grows without a limit.
+    function test_NoCap_ReservationsOfAnySizeAreRecorded() public {
+        uint256 huge = 1e60;
         vm.prank(carol);
-        capped.reserve(alice, BONUS, UNLOCK, 1);
-        vm.prank(poolStub);
-        capped.reserveStake(bob, BONUS, UNLOCK);
-        vm.prank(poolStub);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
-        capped.reserveStake(bob, 1, UNLOCK);
+        book.reserve(alice, huge, UNLOCK, 1);
         vm.prank(carol);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
-        capped.reserve(alice, 1, UNLOCK, 1);
+        book.reserveLp(ID1, alice, huge, UNLOCK);
+        vm.prank(poolStub);
+        book.reserveStake(bob, huge, UNLOCK);
+        vm.prank(poolStub);
+        book.reserveStake(bob, huge, UNLOCK);
+        assertEq(book.totalReserved(), 4 * huge);
+        assertEq(book.totalLpReserved(), huge);
+        (uint256 v3Bob,) = book.reservedOf(bob);
+        assertEq(v3Bob, 2 * huge);
     }
 
     function test_ReserveStake_IsForfeitedByAnEarlyExitAndPaidAtTheEnd() public {
@@ -1056,7 +1076,7 @@ contract V3BonusVaultTest is StakingV3Harness {
                     address(parentImpl),
                     abi.encodeCall(
                         V3BonusVaultParent.initialize,
-                        (address(this), address(asset), carol, poolStub, address(mathVault), DEFAULT_BUDGET)
+                        (address(this), address(asset), carol, poolStub, address(mathVault), OLD_CODE_CAP)
                     )
                 )
             )
@@ -1083,7 +1103,6 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertFalse(f1);
         assertEq(b.totalReserved(), 10 * BONUS);
         assertEq(b.totalLpReserved(), 6 * BONUS);
-        assertEq(b.maxTotalReserved(), DEFAULT_BUDGET);
         uint256[] memory ids = b.lpTokensOf(bob);
         assertEq(ids.length, 1);
         assertEq(ids[0], ID2);
@@ -1148,60 +1167,55 @@ contract V3BonusVaultTest is StakingV3Harness {
         assertEq(asset.balanceOf(address(book)), 0);
     }
 
-    // ──────────────────────── The budget (maxTotalReserved) ───
+    // ──────────────────────── No cap (2026-11-12) ──────────────
 
-    function test_Budget_ReserveAndReserveLpStopAtTheCap() public {
-        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
+    /// @dev A proxy on the code before 2026-11-12 (5b1174c, verbatim copy) with a small cap and its
+    ///      reservations at the cap: the old code refuses one more wei; after the upgrade the same
+    ///      reservation, and one far above the old cap, are recorded. The retired cap stays in its
+    ///      storage slot (namespace slot 8), unread.
+    function test_NoCap_AnUpgradeFromTheCappedCodeAcceptsReservationsAboveTheOldCap() public {
+        V3BonusVault b = V3BonusVault(
+            address(
+                new LPProxy(
+                    address(new V3BonusVaultAt5b1174c()),
+                    abi.encodeCall(
+                        V3BonusVaultAt5b1174c.initialize,
+                        (address(this), address(asset), carol, poolStub, address(mathVault), 2 * BONUS)
+                    )
+                )
+            )
+        );
         vm.startPrank(carol);
-        capped.reserve(alice, BONUS, UNLOCK, 1);
-        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
-        assertEq(capped.totalReserved(), 2 * BONUS, "exactly the cap is allowed");
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
-        capped.reserve(bob, 1, UNLOCK, 3);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
-        capped.reserveLp(ID2, bob, 1, UNLOCK);
+        b.reserve(alice, BONUS, UNLOCK, 1);
+        b.reserveLp(ID1, alice, BONUS, UNLOCK);
+        vm.expectRevert(abi.encodeWithSelector(V3BonusVaultAt5b1174c.BudgetExceeded.selector, 1, 0));
+        b.reserve(bob, 1, UNLOCK, 3);
         vm.stopPrank();
-    }
+        assertEq(b.totalReserved(), 2 * BONUS, "at the old cap");
 
-    function test_Budget_ReportsTheRemainingRoom() public {
-        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), 2 * BONUS);
-        vm.startPrank(carol);
-        capped.reserve(alice, BONUS + 1, UNLOCK, 1);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, BONUS, BONUS - 1));
-        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
-        vm.stopPrank();
-    }
+        b.upgradeToAndCall(address(new V3BonusVault()), "");
 
-    function test_Budget_AForfeitureFreesRoom() public {
-        V3BonusVault capped = _deployBonusVault(address(asset), carol, poolStub, address(mathVault), BONUS);
         vm.prank(carol);
-        capped.reserveLp(ID1, alice, BONUS, UNLOCK);
-        vm.prank(address(mathVault));
-        capped.onUnstake(ID1);
+        b.reserve(bob, 1, UNLOCK, 3);
         vm.prank(carol);
-        capped.reserve(bob, BONUS, UNLOCK, 3);
-        assertEq(capped.totalReserved(), BONUS);
+        b.reserve(bob, 1_000_000 * BONUS, UNLOCK, 1);
+        vm.prank(poolStub);
+        b.reserveStake(bob, 1_000_000 * BONUS, UNLOCK);
+        assertEq(b.totalReserved(), 2 * BONUS + 1 + 2_000_000 * BONUS, "far above the old cap");
+        (uint256 v3Alice,) = b.reservedOf(alice);
+        assertEq(v3Alice, BONUS, "the old reservations read the same");
+        assertEq(b.totalLpReserved(), BONUS);
+        bytes32 base = 0x7ee3db96cd3f5364376de98c276fd460a05b617c20412712666abb0adcc73b00;
+        assertEq(uint256(vm.load(address(b), bytes32(uint256(base) + 8))), 2 * BONUS, "slot 8 keeps the retired cap");
     }
 
-    function test_SetMaxTotalReserved_OwnerOnlyAnnouncedAndBelowTheTotalStopsNewOnes() public {
+    /// @dev A fresh proxy never writes the retired field (namespace slot 8 stays zero).
+    function test_NoCap_TheRetiredFieldIsNeverWritten() public {
         _reserve(alice, BONUS);
-        vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
-        book.setMaxTotalReserved(0);
-
-        vm.expectEmit(address(book));
-        emit V3BonusVault.MaxTotalReservedSet(DEFAULT_BUDGET, BONUS / 2);
-        book.setMaxTotalReserved(BONUS / 2);
-        assertEq(book.maxTotalReserved(), BONUS / 2);
-        vm.prank(carol);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, 1, 0));
-        book.reserve(bob, 1, UNLOCK, 3);
-        (uint256 amount,) = book.reservedOf(alice);
-        assertEq(amount, BONUS, "an existing reservation is untouched");
-
-        book.setMaxTotalReserved(2 * BONUS);
-        _reserve(bob, BONUS);
-        assertEq(book.totalReserved(), 2 * BONUS);
+        vm.prank(poolStub);
+        book.reserveStake(alice, BONUS, UNLOCK);
+        bytes32 base = 0x7ee3db96cd3f5364376de98c276fd460a05b617c20412712666abb0adcc73b00;
+        assertEq(uint256(vm.load(address(book), bytes32(uint256(base) + 8))), 0);
     }
 
     // ──────────────────────── totalLpReserved ──────────────────

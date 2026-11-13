@@ -53,6 +53,11 @@ export const PINNED_BASIS = "forge-1.7-ir-minimum";
 //    WeightedStakingPoolV3 lines 110 -> 117 (114 hit), branches 40 -> 41 (5 hit): the
 //    `BonusVaultLocked` guard in `setBonusVault` and the staking-token surplus check in
 //    `recoverERC20`, both hit; the three unhit lines are the same `--ir-minimum` artefacts.
+// ── Pinned floors, re-measured 2026-11-13 (no cap: the budget of 2026-11-09 removed) ──
+//    V3BonusVault lines 275 -> 260 (257 hit), branches 47 -> 46 (46): `_checkBudget`, its branch,
+//    `setMaxTotalReserved`, `maxTotalReserved()` and the private setter are gone. The three unhit
+//    lines are the `--ir-minimum` artefacts (the namespace accessor body, `_disableInitializers`,
+//    `__Ownable2Step_init`).
 // ── Pinned floors, re-measured 2026-11-12, second time (the new-stake bonus) ──
 //    WeightedStakingPoolV3 lines 117 -> 133 (130 hit), branches 41 -> 46 (10 hit): `previewStakeBonus`,
 //    `_stakeBonus` and the bonus call in `stake`; the five new branches (vault linked, bonus above
@@ -315,8 +320,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 46, minHit: 10},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
-    lines: {found: 275, minHit: 272},
-    branches: {found: 47, minHit: 47},
+    lines: {found: 260, minHit: 257},
+    branches: {found: 46, minHit: 46},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
     lines: {found: 237, minHit: 231},

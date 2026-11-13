@@ -283,8 +283,9 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
   `fund(amount)` (anyone), `claim()` (the caller's unlocked v3 + LP amounts, all or nothing,
   `InsufficientFunds(requested, available)`), `recoverSurplus(to, amount)`, `setMigrator` /
   `setPool` / `setVault` (owner; `setVault` refused while `totalLpReserved() > 0`). No funding check
-  at the transition, but a budget: `maxTotalReserved` (initializer, owner `setMaxTotalReserved`),
-  `BudgetExceeded(requested, remaining)` above it. `totalLpReserved()` is the LP part of
+  at the transition and NO cap on what may be reserved (owner's decision of 2026-11-12; the cap of
+  2026-11-09 is removed, its storage field `maxTotalReserved` stays retired for the layout and the
+  event `MaxTotalReservedSet` stays declared for old logs). `totalLpReserved()` is the LP part of
   `totalReserved()`. `reconcileLp(tokenId)` (anyone; the backend calls it for every
   `BonusListenerFailed`) forfeits an active LP reservation whose position the vault no longer holds
   for its user

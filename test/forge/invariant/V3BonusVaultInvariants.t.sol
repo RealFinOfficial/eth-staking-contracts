@@ -65,7 +65,7 @@ contract V3BonusVaultHandler is Test {
     uint256 public stakeBonusViolations;
     uint256 public directStakes;
     /// @dev Direct stakes attempted while the window was open, and those that reverted (none may:
-    ///      the budget is unbounded here). Counted outside the reverting call, so a stake step
+    ///      no cap exists since 2026-11-12). Counted outside the reverting call, so a stake step
     ///      that always failed could not pass the I8 invariant vacuously.
     uint256 public stakeAttempts;
     uint256 public stakeFailures;

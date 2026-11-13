@@ -535,12 +535,9 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
 
     /// @dev A fresh 90-day campaign (or any window) with its own bonus vault (migrator `carol`, no
     ///      LP vault) and the approvals of alice, bob and carol.
-    function _campaign(uint256 s, uint256 e, uint256 budget)
-        internal
-        returns (WeightedStakingPoolV3 q, V3BonusVault b)
-    {
+    function _campaign(uint256 s, uint256 e) internal returns (WeightedStakingPoolV3 q, V3BonusVault b) {
         q = _deployPoolV3(address(asset), s, e);
-        b = _deployBonusVault(address(asset), carol, address(q), address(0), budget);
+        b = _deployBonusVault(address(asset), carol, address(q), address(0));
         q.setMigrator(carol);
         q.setBonusVault(address(b));
         vm.prank(alice);
@@ -554,7 +551,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
     function _campaign90() internal returns (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) {
         s = block.timestamp + 1 days;
         e = s + 90 days;
-        (q, b) = _campaign(s, e, DEFAULT_BUDGET);
+        (q, b) = _campaign(s, e);
     }
 
     function _stakeOn(WeightedStakingPoolV3 q, address user, uint256 amount) internal {
@@ -619,7 +616,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
     function test_StakeBonus_AWindowThatIsNotWholeDays() public {
         uint256 s = block.timestamp + 1 days;
         uint256 e = s + 30 days + 1 hours;
-        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e, DEFAULT_BUDGET);
+        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e);
         vm.warp(s);
         _stakeOn(q, alice, AMOUNT);
         assertEq(_v3Of(b, alice), FULL, "31 of 31 days");
@@ -709,21 +706,16 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(asset.balanceOf(alice), before);
     }
 
-    function test_StakeBonus_BudgetExceededRevertsTheStake() public {
-        uint256 s = block.timestamp + 1 days;
-        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, s + 90 days, 10e18);
+    /// @dev No cap (2026-11-12): a very large direct stake reserves its full bonus.
+    function test_StakeBonus_AVeryLargeStakeIsNeverRefused() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s,) = _campaign90();
+        uint256 huge = 1e40;
+        deal(address(asset), alice, huge);
         vm.warp(s);
-        bytes memory sig = _signStake(q, alice, FAR_DEADLINE);
-        uint256 before = asset.balanceOf(alice);
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 10e18));
-        q.stake(AMOUNT, FAR_DEADLINE, sig);
-        assertEq(q.stakes(alice), 0, "no stake");
-        assertEq(q.totalStaked(), 0);
-        assertEq(asset.balanceOf(alice), before, "no token moved");
-        assertEq(asset.balanceOf(address(q)), 0);
-        assertEq(q.nonces(alice), 0, "the voucher is not spent");
-        assertEq(b.totalReserved(), 0);
+        _stakeOn(q, alice, huge);
+        assertEq(q.stakes(alice), huge);
+        assertEq(_v3Of(b, alice), huge / 20, "5 % of any amount");
+        assertEq(b.totalReserved(), huge / 20);
     }
 
     /// @dev A mover (route bonus + LP part) who also stakes directly; an early withdraw, partial or
@@ -817,7 +809,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
                     address(new V3BonusVaultAt5b1174c()),
                     abi.encodeCall(
                         V3BonusVaultAt5b1174c.initialize,
-                        (address(this), address(asset), carol, address(q), address(0), DEFAULT_BUDGET)
+                        (address(this), address(asset), carol, address(q), address(0), OLD_CODE_CAP)
                     )
                 )
             )
@@ -866,61 +858,27 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(b.totalReserved(), 180e18 + AT_47_OF_90);
     }
 
-    // ──────────────────────── The shared budget, both directions ─
+    // ──────────────────────── No cap: routes and stakes together ─
 
-    /// @dev The harness stack (real pool `poolV3`, bonus vault, migrator; 90 days from now) with
-    ///      the budget set to exactly one bonus of 50 $ASSET (5 % of 1,000).
-    function _budgetOfOneBonus() internal {
-        bonusVault.setMaxTotalReserved(FULL);
+    /// @dev No cap (2026-11-12), on the real harness stack: a very large route bonus (route 3,
+    ///      `claimRestake`) and a very large direct stake both reserve in full, in either order,
+    ///      and `totalReserved` is their sum.
+    function test_NoCap_AVeryLargeRouteBonusAndAVeryLargeDirectStakeBothReserve() public {
+        uint256 huge = 1e40;
+        deal(address(asset), alice, huge);
+        deal(address(asset), bob, 2 * huge);
         _approveMigrator(alice);
         vm.prank(bob);
         asset.approve(address(poolV3), type(uint256).max);
-    }
 
-    /// @dev alice's route 3 (`claimRestake` of 1,000 $ASSET, 5 %: 50 $ASSET).
-    function _restakeAlice(uint256 nonce) internal returns (uint256) {
-        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, AMOUNT, 0, nonce);
+        _stakeOn(poolV3, bob, huge);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, huge, 0, 1);
         vm.prank(alice);
-        return migrator.claimRestake(AMOUNT, FAR_DEADLINE, _noPermit(), v);
-    }
-
-    /// @dev A direct stake that takes the last room makes another wallet's route call revert
-    ///      `BudgetExceeded`; the staker's early withdraw frees the room and the route goes through.
-    function test_SharedBudget_ADirectStakeTakesTheLastRoomFromTheRoutes() public {
-        _budgetOfOneBonus();
-        _stakeOn(poolV3, bob, AMOUNT);
-        assertEq(bonusVault.totalReserved(), FULL, "the budget is full");
-
-        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, AMOUNT, 0, 1);
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 0));
-        migrator.claimRestake(AMOUNT, FAR_DEADLINE, _noPermit(), v);
-        assertFalse(migrator.migrated(alice), "the route call left nothing behind");
-        assertEq(poolV3.stakes(alice), 0);
-
-        vm.prank(bob);
-        poolV3.withdraw(1); // early: forfeits bob's whole v3 part
-        assertEq(bonusVault.totalReserved(), 0, "the room is free again");
-        assertEq(_restakeAlice(1), FULL);
-        assertEq(_v3Of(bonusVault, alice), FULL);
-    }
-
-    /// @dev The reverse: a route bonus that takes the last room makes a direct stake revert.
-    function test_SharedBudget_ARouteBonusTakesTheLastRoomFromADirectStake() public {
-        _budgetOfOneBonus();
-        assertEq(_restakeAlice(1), FULL);
-        bytes memory sig = _signStake(poolV3, bob, FAR_DEADLINE);
-        uint256 before = asset.balanceOf(bob);
-        vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(V3BonusVault.BudgetExceeded.selector, FULL, 0));
-        poolV3.stake(AMOUNT, FAR_DEADLINE, sig);
-        assertEq(poolV3.stakes(bob), 0);
-        assertEq(asset.balanceOf(bob), before, "no token moved");
-
-        vm.prank(alice);
-        poolV3.withdraw(1); // alice leaves early: her route bonus is forfeited
-        _stakeOn(poolV3, bob, AMOUNT);
-        assertEq(_v3Of(bonusVault, bob), FULL);
+        assertEq(migrator.claimRestake(huge, FAR_DEADLINE, _noPermit(), v), huge / 20, "the route after a stake");
+        _stakeOn(poolV3, bob, huge); // and a stake after the route
+        assertEq(_v3Of(bonusVault, alice), huge / 20);
+        assertEq(_v3Of(bonusVault, bob), huge / 10);
+        assertEq(bonusVault.totalReserved(), 3 * huge / 20, "grows without a limit");
     }
 
     // ──────────────────────── The upgrade order guard ──────────
@@ -940,7 +898,7 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
                     address(new V3BonusVaultAt5b1174c()),
                     abi.encodeCall(
                         V3BonusVaultAt5b1174c.initialize,
-                        (address(this), address(asset), carol, address(q), address(0), DEFAULT_BUDGET)
+                        (address(this), address(asset), carol, address(q), address(0), OLD_CODE_CAP)
                     )
                 )
             )

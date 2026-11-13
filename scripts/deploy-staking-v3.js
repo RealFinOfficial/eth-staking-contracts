@@ -21,8 +21,8 @@ const lpTimelock = require("./lp-timelock");
 //      stakeSigner)` — the minimal pool of 2026-11-10: it holds the $ASSET principal for the
 //      window and pays it back; no weight, no USDC reward. `stakeSigner` signs the backend's
 //      `StakeVoucher(address user,uint256 nonce,uint256 deadline)` for a direct `stake`
-//   3. `V3BonusVault` + `LPProxy`, `initialize(deployer, $ASSET, migrator = 0, pool, lpVault,
-//      maxTotalReserved)` — the cap on what all reservations together may owe
+//   3. `V3BonusVault` + `LPProxy`, `initialize(deployer, $ASSET, migrator = 0, pool, lpVault)` —
+//      no cap on what the reservations may owe (owner's decision of 2026-11-12)
 //   4. `StakingMigrator(lpVault, USDC, $ASSET)` + `LPProxy`, `initialize(deployer, pool, bonusVault,
 //      migratorSigner, twapWindow, maxDeviationTicks, valuationWindow)` — born with routes 1 and 2
 //      PAUSED (`compoundPaused = true`) and the rates 1000 / 1000 / 500 bps
@@ -69,8 +69,6 @@ const lpTimelock = require("./lp-timelock");
 //   V3_TWAP_WINDOW            the migrator's swap guard window, default 300 (the zapper's)
 //   V3_TWAP_MAX_DEVIATION_TICKS  default 953 (the zapper's 1000 bps)
 //   V3_VALUATION_WINDOW       default 1800 (the adapter's): the mean tick valuing the LP USDC leg
-//   V3_MAX_TOTAL_RESERVED     whole $ASSET: the bonus vault's cap on all reservations together;
-//                             REQUIRED on mainnet, default 100000 on test networks
 //   V3_VAULT_IMPLEMENTATION   the new LPStakingVault implementation (deploy-implementation.js,
 //                             IMPL_TARGET=LPStakingVault) when the live vault predates the listener
 //   V3_BATCH_FILE             where to write the timelock batch; default a file in the OS temp dir
@@ -122,7 +120,6 @@ function readInteger(name, fallback) {
 
 /** The configuration, from the environment and the registry. Pure apart from the registry read. */
 function readConfig(chainId) {
-  const mainnet = pools.isMainnet(Number(chainId));
   const registry = pools.readRegistry()[String(chainId)] || {};
   const zapper = registry.LPZapper || {};
   const stakeSigner = readAddress("V3_STAKE_SIGNER");
@@ -138,7 +135,6 @@ function readConfig(chainId) {
     twapWindow: readInteger("V3_TWAP_WINDOW", 300),
     maxDeviationTicks: readInteger("V3_TWAP_MAX_DEVIATION_TICKS", 953),
     valuationWindow: readInteger("V3_VALUATION_WINDOW", 1800),
-    maxTotalReservedTokens: BigInt(readInteger("V3_MAX_TOTAL_RESERVED", mainnet ? undefined : 100000)),
     bonusHookGas: readInteger("LP_BONUS_HOOK_GAS", DEFAULT_BONUS_HOOK_GAS),
     bonusListenerGas: readInteger("LP_BONUS_LISTENER_GAS", DEFAULT_BONUS_LISTENER_GAS),
     vaultImplementation: process.env.V3_VAULT_IMPLEMENTATION
@@ -205,12 +201,6 @@ async function recordedProxy(chainId, kind) {
   return { address: hre.ethers.getAddress(address), recorded: true };
 }
 
-/** `config.maxTotalReservedTokens` whole $ASSET in wei, at the token's own decimals. */
-async function maxTotalReservedWei(config) {
-  const token = new hre.ethers.Contract(config.asset, ["function decimals() view returns (uint8)"], hre.ethers.provider);
-  return BigInt(config.maxTotalReservedTokens) * 10n ** BigInt(await token.decimals());
-}
-
 /**
  * Steps 2-4. Each proxy is recorded as soon as it exists; a kind already recorded is reused.
  * @returns {{pool, bonusVault, migrator}} `deployProxyPair` results, or `{address, recorded}`
@@ -253,11 +243,10 @@ async function deployPool({ chainId, deployer, config }) {
 }
 
 async function deployBonusVault({ chainId, deployer, config, pool }) {
-  const maxTotalReserved = await maxTotalReservedWei(config);
   const bonusVault = await deployProxyPair(
     BONUS_KIND,
     [],
-    [deployer.address, config.asset, hre.ethers.ZeroAddress, pool.address, config.lpVault, maxTotalReserved],
+    [deployer.address, config.asset, hre.ethers.ZeroAddress, pool.address, config.lpVault],
     deployer
   );
   pools.recordDeployment(chainId, BONUS_KIND, bonusVault.address, {
@@ -268,7 +257,6 @@ async function deployBonusVault({ chainId, deployer, config, pool }) {
     bonusToken: config.asset,
     pool: pool.address,
     vault: config.lpVault,
-    maxTotalReserved: maxTotalReserved.toString(),
     owner: deployer.address,
   });
   return bonusVault;
@@ -460,7 +448,6 @@ async function main() {
   console.log(`Migrator signer:    ${config.migratorSigner}`);
   console.log(`Swap guard:         ${config.twapWindow} s / ${config.maxDeviationTicks} ticks`);
   console.log(`Valuation window:   ${config.valuationWindow} s`);
-  console.log(`Bonus budget:       ${config.maxTotalReservedTokens} $ASSET (maxTotalReserved)`);
   console.log(`Hook gas:           escrow ${config.bonusHookGas} / listener ${config.bonusListenerGas} (LP_BONUS_HOOK_GAS / LP_BONUS_LISTENER_GAS)`);
   if (config.vaultImplementation) {
     console.log(`Vault upgrade to:   ${config.vaultImplementation} (upgradeToAndCall with initializeV2())`);

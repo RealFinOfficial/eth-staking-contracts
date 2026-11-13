@@ -302,13 +302,6 @@ const OWNER_TIER = {
       "the LP vault allowed to report unstakes and rebalances to the bonus vault, or address(0); " +
       "refused while totalLpReserved() is above zero (LpReservationsOutstanding)",
   },
-  setMaxTotalReserved: {
-    signature: "function setMaxTotalReserved(uint256 maxTotalReserved_)",
-    kinds: [V3_BONUS_KIND],
-    note:
-      "the bonus vault's cap on totalReserved, in wei (18 decimals); reserve and reserveLp revert " +
-      "BudgetExceeded above it. A cap below the current total stops new reservations only",
-  },
   setRates: {
     signature: "function setRates(uint16 compoundBps_, uint16 lpBps_, uint16 restakeBps_)",
     kinds: [MIGRATOR_KIND],

@@ -35,9 +35,9 @@ import "./interfaces/IStakingV3.sol";
  *      47 of 90 days left, 5 % / 90 in the last 24 hours; whole days rounded up, `daysLeft` capped
  *      at `campaignDays`, {previewStakeBonus}) through the vault's `reserveStake` (route 4),
  *      unlocked at `endEpoch` and forfeited by an early `withdraw` like every v3 reservation. A
- *      bonus that rounds to zero reserves nothing. Fail closed: the vault's revert reverts the
- *      stake, so a stake whose bonus the budget (`maxTotalReserved`, shared with the migrator's
- *      route bonuses) cannot take reverts `BudgetExceeded`. {stakeFor} reserves nothing itself.
+ *      bonus that rounds to zero reserves nothing. No cap limits the bonus (owner's decision of
+ *      2026-11-12). Fail closed: a revert of the vault (`NotPool`) reverts the stake. {stakeFor}
+ *      reserves nothing itself.
  *    - `stakeFor(user, amount)` before `endEpoch`: callable ONLY by the registered {migrator}. The
  *      tokens are pulled from the migrator and credited to `user`. No pool voucher is checked: the
  *      migrator has already verified the backend's `TransitionVoucher`.
@@ -236,7 +236,7 @@ contract WeightedStakingPoolV3 is
     /**
      * @notice Stake `amount` before `endEpoch`, with the backend's `StakeVoucher` for the caller.
      *         With a bonus vault linked, it also reserves the new-stake bonus ({previewStakeBonus})
-     *         for the caller; the stake reverts with the vault (`BudgetExceeded`, `NotPool`).
+     *         for the caller; the stake reverts with the vault (`NotPool`).
      * @param amount Tokens pulled from the caller.
      * @param deadline The voucher's expiry (unix seconds).
      * @param signature The signer's EIP-712 signature over (caller, the caller's next nonce, deadline).
@@ -256,7 +256,7 @@ contract WeightedStakingPoolV3 is
         _credit(msg.sender, amount);
 
         // The new-stake bonus (2026-11-12), after every state change of the stake. Fail closed: a
-        // revert of the bonus vault (`BudgetExceeded`, `NotPool`) reverts the stake.
+        // revert of the bonus vault (`NotPool`) reverts the stake.
         address bonusVault_ = $.bonusVault;
         if (bonusVault_ != address(0)) {
             uint256 bonus = _stakeBonus($, amount);

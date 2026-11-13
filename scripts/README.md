@@ -819,8 +819,11 @@ whatever voucher it carries. A replayed nonce still reverts `VoucherNonceUsed` f
 issues one voucher per sw2 claim and should read `migrated(user)` before it signs.
 
 The bonus is a RESERVATION in `V3BonusVault`, unlocked at the v3 pool's `endEpoch`. Nothing is
-paid or checked at the transition. The company funds the vault with $ASSET any time before the
-end (`fund(amount)` or a plain transfer).
+paid or checked at the transition. There is NO cap on what may be reserved (owner's decision of
+2026-11-12): every route bonus, LP bonus and new-stake bonus is recorded, whatever its size, and
+`totalReserved()` grows without a limit. The company funds the vault with $ASSET for what is
+reserved, any time before the end (`fund(amount)` or a plain transfer); a claim reverts
+`InsufficientFunds` only while the vault holds less than that claim needs.
 
 **Three claim functions (2026-11-12).** Each pays the caller only, from the vault's balance, under
 the same rules: `NothingToClaim()` when it would pay zero, `InsufficientFunds(requested, available)`
@@ -883,13 +886,11 @@ earns a bonus of 5 % scaled by the whole days left in the campaign:
   own pool is another address, every direct stake with a bonus reverts `NotPool`, as every early
   `withdraw` already does on such a pair.
 
-**The budget.** `maxTotalReserved()` caps `totalReserved()`: `reserve`, `reserveLp` and
-`reserveStake` revert `BudgetExceeded(requested, remaining)` above it, so the route call, or the
-direct stake, reverts with them (the stake leaves no stake and moves no token). The route bonuses
-and the new-stake bonuses share this ONE budget: size `V3_MAX_TOTAL_RESERVED` for both, and note
-that a large direct stake uses room the routes then no longer have (it frees it again if it is
-withdrawn early). It is set at deploy (`V3_MAX_TOTAL_RESERVED`) and by the owner
-(`setMaxTotalReserved`, event `MaxTotalReservedSet(previousMax, newMax)`, a timelock operation).
+**No cap (2026-11-12).** The cap of 2026-11-09 (`maxTotalReserved`, `setMaxTotalReserved`,
+`BudgetExceeded`) is removed from the bonus vault: no route call and no direct stake is ever
+refused for the size of its bonus. The proxies deployed before 2026-11-12 keep the old field in
+storage, unread, and their initialization log still carries the event `MaxTotalReservedSet`, which
+stays declared in the contract so indexers can decode it; the new code never emits it.
 
 **A failed listener notification (`BonusListenerFailed`).** Since 2026-11-10 the LP vault's
 `onRebalance` notification to the listener FAILS CLOSED like the escrow's (no `try`, all the
@@ -956,8 +957,8 @@ refuses `setVault` while `totalLpReserved()` is above zero (`LpReservationsOutst
 
 The new-stake bonus (2026-11-12) needs no change to the script: the bonus vault's initializer
 already records the pool as its `pool()`, and the pool's existing `setBonusVault` link is the one
-`stake` calls. Only the budget it sets (`V3_MAX_TOTAL_RESERVED`) must now cover the direct-stake
-bonuses as well as the route bonuses. A live pair gets the rule by upgrading BOTH proxies (the pool
+`stake` calls. The bonus vault's initializer takes no cap since 2026-11-12 (`initialize(owner,
+bonusToken, migrator, pool, vault)`). A live pair gets the rule by upgrading BOTH proxies (the pool
 and the bonus vault) in one timelock batch: a new pool on an old vault would revert every direct
 stake with a bonus (the old vault has no `reserveStake`).
 
@@ -967,7 +968,7 @@ IMPL_TARGET=LPStakingVault npx hardhat run scripts/deploy-implementation.js --ne
 
 # 1. the three proxies, the direct wiring, the nominations and the timelock batch file
 V3_ACTIVATION_EPOCH=<unix> V3_END_EPOCH=<unix> V3_STAKE_SIGNER=0xBackendKey \
-  V3_VAULT_IMPLEMENTATION=0xNewVaultImpl V3_MAX_TOTAL_RESERVED=100000 \
+  V3_VAULT_IMPLEMENTATION=0xNewVaultImpl \
   npx hardhat run scripts/deploy-staking-v3.js --network sepolia
 
 # 2. the batch it printed: schedule, wait the delay, execute
@@ -1004,13 +1005,12 @@ on mainnet.
 | `V3_LP_VAULT`, `V3_TIMELOCK` | the vault and the owner | the registry entries |
 | `V3_TWAP_WINDOW`, `V3_TWAP_MAX_DEVIATION_TICKS` | the migrator's swap guard | 300, 953 |
 | `V3_VALUATION_WINDOW` | the mean tick valuing the LP USDC leg (and capping the compound bonus) | 1800 |
-| `V3_MAX_TOTAL_RESERVED` | the bonus vault's cap on all reservations, in whole $ASSET | required on mainnet; 100000 on test networks |
 | `V3_VAULT_IMPLEMENTATION` | the vault implementation the batch upgrades to | none |
 | `LP_BONUS_HOOK_GAS`, `LP_BONUS_LISTENER_GAS` | the vault's hook gas allowances (see "Measuring the hook gas" below) | 400000, 1000000 |
 | `V3_BATCH_FILE` | where the batch file goes | a file in the OS temp dir |
 
 Owner-tier calls on the new contracts go through `lp-timelock.js` (`setMigrator`, `setBonusVault`,
-`setSigner` on the pool, `setPool`, `setVault`, `setMaxTotalReserved`, `recoverSurplusAmount` on
+`setSigner` on the pool, `setPool`, `setVault`, `recoverSurplusAmount` on
 the bonus vault,
 `setRates` on the migrator, `upgradeToAndCall`, `transferOwnership`, `acceptOwnership`, and
 `setBonusListener` and `setBonusHookGas` on the vault). The migrator's `setSigner`, `setTwapParams`, `pauseCompound` and

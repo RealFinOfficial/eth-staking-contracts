@@ -20,7 +20,7 @@ import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol
  *         over {MockMathPositionManager} (real Uniswap V3 liquidity math) and a pool mock at $0.25
  *         per $ASSET ($ASSET = token0, tick -290188, spacing 1). The three v3 proxies are deployed
  *         and wired the way `scripts/deploy-staking-v3.js` does it: the minimal pool, the bonus
- *         vault with a budget ({DEFAULT_BUDGET}), the pool's bonus vault, then (the timelock batch)
+ *         vault (no cap on reservations since 2026-11-12), the pool's bonus vault, then (the timelock batch)
  *         the two migrator links, the vault's bonus listener and stake operator.
  *
  *  The harness is the owner of every contract and the math vault's guardian and operator, so
@@ -36,8 +36,10 @@ abstract contract StakingV3Harness is ApeBondHarness {
     uint256 internal constant V3_DURATION = 90 days;
     uint32 internal constant VALUATION_WINDOW = 1800;
     uint24 internal constant SWAP_DEVIATION_TICKS = 953;
-    /// @dev The harness bonus vaults' `maxTotalReserved`: far above anything a test reserves.
-    uint256 internal constant DEFAULT_BUDGET = type(uint128).max;
+    /// @dev The cap argument the FROZEN copies' initializers still take (the code before
+    ///      2026-11-12, `test/forge/utils/V3BonusVault{Parent,At5b1174c}.sol`): far above
+    ///      anything a test reserves. The current `V3BonusVault` has no cap.
+    uint256 internal constant OLD_CODE_CAP = type(uint128).max;
 
     WeightedStakingPoolV3 internal poolV3;
     V3BonusVault internal bonusVault;
@@ -85,17 +87,9 @@ abstract contract StakingV3Harness is ApeBondHarness {
         internal
         returns (V3BonusVault)
     {
-        return _deployBonusVault(token, migrator_, pool_, vault_, DEFAULT_BUDGET);
-    }
-
-    function _deployBonusVault(address token, address migrator_, address pool_, address vault_, uint256 budget)
-        internal
-        returns (V3BonusVault)
-    {
         V3BonusVault impl = new V3BonusVault();
         LPProxy proxy = new LPProxy(
-            address(impl),
-            abi.encodeCall(V3BonusVault.initialize, (address(this), token, migrator_, pool_, vault_, budget))
+            address(impl), abi.encodeCall(V3BonusVault.initialize, (address(this), token, migrator_, pool_, vault_))
         );
         return V3BonusVault(address(proxy));
     }
