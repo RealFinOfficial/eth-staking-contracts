@@ -241,17 +241,14 @@
       "retiredInFavourOf": "0xf2F678AC5260BB297682D54DcD945BCB78901E20"
     },
     "WeightedStakingPoolTest": {
-      "address": "0xdB382c591420C3b7F38FEf6BD9EFd23fCaFD0298",
-      "deployTx": "0x60fb621c064751e164ad75d6857e5d8d1b1d8b48b5766a0cc0c3a1d0f0a1c680",
-      "block": 12098897,
+      "address": "0xf9cdefBBC271E58AfB0dcb1bf92Bb768e7a1a1eE",
+      "deployTx": "0xcd80a95d41a33704aba869effe1d1e259e5e06fa640f08aa78134fb36295c3fd",
+      "block": 12146761,
       "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "rewardToken": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
-      "activationEpoch": 1794244008,
-      "endEpoch": 1794247608,
-      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "purpose": "sw2-test: short-window v2 pool (60 min) for the staking v3 rehearsal of 2026-11-09; not sw2",
-      "rewardsAdded": "1000000000",
-      "addRewardsTx": "0x4f6e90eb241a2abcc47605379e8f99676ccec561cb4bb493fb9b26bb4a1807a0"
+      "activationEpoch": 1794825192,
+      "endEpoch": 1794911592,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "WeightedStakingPoolV3Retired": {
       "address": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
