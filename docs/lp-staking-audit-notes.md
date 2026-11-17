@@ -1486,8 +1486,8 @@ listener's `onUnstake` first failed (`listenerMissedAt(tokenId)`, see "Review cl
   migrator, so it can never credit more than it receives.
 - **The direct `StakeVoucher` binds no amount.** It says "this wallet may stake now" (user, nonce,
   deadline). The amount is the caller's own tokens. Since 2026-11-12 a direct stake earns the
-  new-stake bonus (5 % scaled by the days left, reserved by the pool through `reserveStake`, see
-  below), so the voucher is what gates who earns it; since 2026-11-12 nothing bounds the amount
+  new-stake bonus (since 2026-11-17 the full 5 % with 30 or more whole days left and nothing after,
+  reserved by the pool through `reserveStake`, see below), so the voucher is what gates who earns it; since 2026-11-12 nothing bounds the amount
   (no cap, see "No cap" below).
 - **The migrator's `setSigner` is operator tier** (undelayed, the LP vault's operator), like the
   distributor's: a leaked voucher key must be replaceable without the 48 h delay. A leaked key lets
@@ -1655,7 +1655,44 @@ No storage was added to either contract; layouts
 checked offline against the recorded stack #6 implementations. Tests: `test_StakeBonus_*` in
 `WeightedStakingPoolV3.t.sol` (including the upgrade of a pool and vault pair from 5b1174c's code),
 `test_ReserveStake_*` in `V3BonusVault.t.sol`, `test_DirectStake_*` in `VaultBonusListener.t.sol`,
-invariant I8 (a direct stake reserves exactly `previewStakeBonus`).
+invariant I8 (a direct stake reserves exactly `previewStakeBonus`). The day scale and the "last 24
+hours" rule of this paragraph are replaced by the 30-day rule of 2026-11-17 below.
+
+**The 30-day bonus rule (owner's decision of 2026-11-17).** What changed: every way into v3.0 (a
+direct `stake`, "stake more", and the migrator's `compound`, `moveToLp` and `claimRestake`, the LP
+reservation of `moveToLp` included) now follows ONE time rule. With `daysLeft = ceil((endEpoch -
+block.timestamp) / 1 days)`, the bonus is the FULL rate when `block.timestamp < endEpoch` and
+`daysLeft >= 30` (direct stake: `amount * STAKE_BONUS_BPS / 10_000`, no longer scaled by the days
+left; the routes: their formulas of before, unchanged), and ZERO otherwise. Equivalently the bonus
+applies iff `block.timestamp < bonusCutoff()`, where the new pool view `bonusCutoff()` returns
+`endEpoch - (BONUS_MIN_DAYS_LEFT - 1) days` = `endEpoch - 29 days` (zero, so never a bonus, if
+`endEpoch` is below 29 days). The boundary: one second before the cutoff 29 days and 1 second are
+left, which round up to 30, so the full rate applies; at the cutoff exactly 29 days are left, so
+nothing. Why: the product owner wants one simple rule for every entry, and before this change a
+late restake from v2.0 still got its whole 10 % / 5 % at any time before the end while a direct
+stake was scaled by the days left. How it is coded: the 30 is written once, as the pool constant
+`BONUS_MIN_DAYS_LEFT`; the pool's `_stakeBonus` and the migrator's new private `_bonusOpen()` both
+compare `block.timestamp` with the pool's `bonusCutoff()` (the migrator through
+`IWeightedStakingPoolV3Migration.bonusCutoff`). A zero bonus never calls the bonus vault: the pool
+skips `reserveStake`, the migrator skips `reserveLp` (its existing `lpBonus > 0` guard) and `reserve`
+(its existing `_reserve` zero guard), so no `BonusReserved` / `LpBonusReserved` is emitted and no
+storage of the vault (amount, `unlockAt`, LP record, `lpTokensOf`) is touched. The stake or route
+still succeeds; the route still marks the wallet `migrated` and emits `Compounded` / `MovedToLp` /
+`ClaimRestaked` with the bonus fields at zero. Not changed: storage layouts (checked with
+`validate-upgrade-safety.js --network sepolia` against the stack #6 manifest), every event and error
+signature (no event added), rates, claiming, forfeiture, unlock time, and the ApeBonds
+`BonusEscrow`. ABI: the pool gains `BONUS_MIN_DAYS_LEFT()` and `bonusCutoff()`; the migrator's ABI
+is unchanged. `activationEpoch` no longer enters any bonus. Upgrade order: the new migrator calls
+`bonusCutoff()` on the pool, so a new migrator on an old pool reverts every route; the pool is
+upgraded first, or in the same timelock batch before the migrator. A consequence to note: the rule
+reads only the time left, so a direct stake BEFORE `activationEpoch` with 30 or more days left earns
+the full rate even in a window shorter than 30 days; from its activation on, a window of 29 days
+or less never pays. Tests: `test_BonusRule_*` and `test_StakeBonus_*` in
+`WeightedStakingPoolV3.t.sol` (90 / 31 / 30 days left full, 29 / 1 day and the last second zero, the
+cutoff second, windows of 29 days or less, the zero-safe cutoff, the preview), `test_BonusRule_*`
+in `StakingMigrator.t.sol` (the cutoff second on each route, both parts of `moveToLp`, route 3 by
+days left), `testFuzz_DirectStake_BonusIsZeroOrTheFullRate` and
+`testFuzz_ClaimRestake_BonusIsZeroOrTheFullRate` in `fuzz/StakingV3Fuzz.t.sol`.
 
 **No cap (owner's decision of 2026-11-12: "no budget or cap limit").** The cap of 2026-11-09
 (finding M4 above: `maxTotalReserved`, `setMaxTotalReserved`, `BudgetExceeded`, the initializer's
@@ -1752,14 +1789,16 @@ previous implementation (`contracts/lp-staking/mocks/WeightedStakingPoolV3Weight
 **Info (accepted, by design):**
 
 - `activationEpoch` gates no action in v3: stake, withdraw, the early-exit forfeit and both exits
-  key on `endEpoch` alone. Since 2026-11-12 it sets the length of the new-stake bonus scale
-  (`campaignDays`); the UI and the indexer show it as the window's start.
+  key on `endEpoch` alone. From 2026-11-12 to 2026-11-17 it set the length of the new-stake bonus
+  scale (`campaignDays`); since the 30-day rule of 2026-11-17 no bonus reads it. The UI and the
+  indexer show it as the window's start.
 - `stakes(address)` keeps its selector (`0x16934fc4`) but now returns ONE word (the principal)
   instead of v2's four. A client decoding the old four-word tuple against the upgraded proxy
   fails, so every client vendors the new ABI together with the upgrade.
 - The direct `StakeVoucher(user, nonce, deadline)` binds no amount, by design: it says "this wallet
   may stake now". The pool itself pays nothing on a stake. Since 2026-11-12 a direct stake earns
-  the new-stake bonus (below), which scales with the staked amount and has no cap (2026-11-12);
+  the new-stake bonus (below), which scales with the staked amount and has no cap (2026-11-12),
+  and since 2026-11-17 only before the pool's `bonusCutoff()` (the 30-day rule);
   the migrator's route bonuses stay bound to the `TransitionVoucher`'s eligible amounts.
 
 The migrator's `TransitionVoucher` lost its `weight` field: `TransitionVoucher(address user,uint8

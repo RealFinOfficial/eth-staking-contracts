@@ -803,6 +803,17 @@ closed $ASSET staking window sw2 (`WeightedStakingPool` v2, mainnet
 | 2. join LP and compound | `moveToLp(usdcAmount, assetAmount, amount0Min, amount1Min, deadline, usdcPermit, assetPermit, v)` | one position on the band 6,932 ticks each side of the spot tick (-50 % / +100 %), from the whole USDC and the matching $ASSET, staked in the LP vault for the caller (custody asserted after the stake: `CustodyAssertFailed(tokenId, owner, staker)` unless the NFT is the vault's and credited to the caller); USDC dust refunded; the rest of the $ASSET staked in v3 | `lpBps` (1000) of (LP $ASSET leg + LP USDC leg valued at the 1,800 s mean tick), keyed by the tokenId; `lpBps` of the v3 remainder |
 | 3. claim and restake | `claimRestake(assetAmount, deadline, assetPermit, v)` | the principal only; the USDC stays in the wallet | `restakeBps` (500) of the principal |
 
+**The 30-day bonus rule (decision of 2026-11-17).** Every bonus in the table above, both parts of
+route 2 included, is reserved at its FULL rate only while 30 or more whole days are left before the
+v3 pool's `endEpoch` (`daysLeft = ceil((endEpoch − block.timestamp) / 1 day) ≥ 30`), i.e. strictly
+before `pool.bonusCutoff()` = `endEpoch − 29 days`. From the cutoff on (29 whole days left or fewer)
+every bonus of the route is ZERO: the route still runs, stakes, marks the wallet `migrated` and emits
+`Compounded` / `MovedToLp` / `ClaimRestaked` with the bonus fields at 0, and the bonus vault is not
+called (no `BonusReserved`, no `LpBonusReserved`). The bonus is never scaled by the days left. The
+same rule applies to a direct stake (below); the 30 is written once, as the pool's constant
+`BONUS_MIN_DAYS_LEFT()`, and the migrator reads the cutoff from the pool. Upgrade the pool no later
+than the migrator: a new migrator on an old pool reverts every route (no `bonusCutoff()` there).
+
 Every route needs the backend's `TransitionVoucher(address user,uint8 route,uint256
 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)`, EIP-712 domain
 `("StakingMigrator", "1", chainId, migrator proxy)`, signed by `migrator.signer()` (no `weight`
@@ -861,25 +872,28 @@ notification failed before the unlock); any other record is stale and pays nothi
 below). Forfeited amounts stay in the vault as surplus
 (`recoverSurplus(to, amount)`, owner). `totalLpReserved()` is the LP part of `totalReserved()`.
 
-**The new-stake bonus (decision of 2026-11-12).** A stake made DIRECTLY in the v3 pool
-(`stake(amount, deadline, signature)`, the voucher path; not `stakeFor`, which the migrator uses)
-earns a bonus of 5 % scaled by the whole days left in the campaign:
+**The new-stake bonus (decision of 2026-11-12, time rule of 2026-11-17).** A stake made DIRECTLY
+in the v3 pool (`stake(amount, deadline, signature)`, the voucher path, "stake more" included; not
+`stakeFor`, which the migrator uses) earns the full 5 % while 30 or more whole days are left, and
+nothing after that:
 
-`bonus = amount × STAKE_BONUS_BPS × daysLeft / (campaignDays × 10,000)`, rounded down
+`bonus = amount × STAKE_BONUS_BPS / 10,000`, rounded down, when `block.timestamp < bonusCutoff()`;
+otherwise `bonus = 0`
 
-- `STAKE_BONUS_BPS()` = 500, a constant of the pool implementation (no storage, no setter).
-- `campaignDays` = `endEpoch − activationEpoch` in whole days, rounded up. `daysLeft` =
-  `endEpoch − block.timestamp` in whole days, rounded up, capped at `campaignDays`: a stake before
-  the activation, and any stake on the first day, gets the full 5 %.
-- With LESS than 24 hours left (`endEpoch − block.timestamp < 1 day`) a direct stake earns no bonus
-  (owner's decision of 2026-11-12): the pool does not call the bonus vault and the stake goes
-  through. With exactly 24 hours left the formula still applies (one day).
-- Example, 1,000 $ASSET in a 90-day campaign: 50 $ASSET on the first day; with 47 of 90 days left
-  1,000 × 5 % × 47 / 90 = 26.11 $ASSET (2.61 %); with exactly 24 hours left 1,000 × 5 % / 90 =
-  0.56 $ASSET; with less than 24 hours left nothing.
+- `STAKE_BONUS_BPS()` = 500 and `BONUS_MIN_DAYS_LEFT()` = 30, constants of the pool implementation
+  (no storage, no setter).
+- `bonusCutoff()` (view) = `endEpoch − 29 days` (zero if `endEpoch` is itself below 29 days). One
+  second before it, 29 days and 1 second are left, which rounds up to 30 whole days: full bonus. At
+  it, exactly 29 days are left: no bonus. The bonus is NOT scaled by the days left, and
+  `activationEpoch` plays no part in it (the day scale and the "last 24 hours" rule of 2026-11-12
+  are replaced).
+- From the cutoff on the pool does not call the bonus vault and the stake goes through.
+- Example, 1,000 $ASSET in a 90-day campaign: 50 $ASSET with 90, 47, 31 or 30 days left; nothing
+  with 29 days, 1 day or the last second left. A window of 29 days or less earns no bonus from its
+  activation on.
 - `previewStakeBonus(amount)` (view) returns the bonus a direct stake of `amount` would reserve in
-  the current block: zero with less than 24 hours left, from `endEpoch` on, and while the pool has
-  no bonus vault.
+  the current block: zero from `bonusCutoff()` on (and so from `endEpoch` on), and while the pool
+  has no bonus vault.
 - The pool calls `V3BonusVault.reserveStake(user, bonus, endEpoch)` (the registered pool only,
   `NotPool(caller, pool)` otherwise) after the stake's own state changes. It adds to the user's v3
   reservation with exactly the semantics of `reserve` and emits `BonusReserved(user, amount,
@@ -935,8 +949,9 @@ no USDC reward and no penalty. Its whole surface:
 Views: `stakingToken()`, `activationEpoch()`, `endEpoch()`, `signer()`, `migrator()`, `bonusVault()`,
 `totalStaked()`, `stakes(user)` (the principal, ONE word under the old selector: vendor the new ABI
 with the upgrade), `nonces(user)`,
-`STAKE_VOUCHER_TYPEHASH()`, `STAKE_BONUS_BPS()`, `previewStakeBonus(amount)`. `activationEpoch`
-gates no action; since 2026-11-12 it sets the length of the new-stake bonus scale (`campaignDays`).
+`STAKE_VOUCHER_TYPEHASH()`, `STAKE_BONUS_BPS()`, `BONUS_MIN_DAYS_LEFT()`, `bonusCutoff()`,
+`previewStakeBonus(amount)`. `activationEpoch` gates no action and, since 2026-11-17, no longer
+enters the bonus either.
 Events: `PoolInitialized(stakingToken, activationEpoch, endEpoch,
 signer)`, `Staked(user, amount)`, `StakedFor(user, by, amount)`, `Withdrawn(user, amount)`,
 `Unstaked(user, amount)`, `EmergencyUnstaked(user, amount)`, `NonceUsed(user, nonce)`,
