@@ -11,7 +11,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 /**
  * @notice Property fuzzing of the staking v3 math: the rebalance scaling never raises a bonus, the
  *         route bonuses are exactly their rate of the bonus base (the compound's bought part at
- *         most at its TWAP value), the USDC valuation is monotonic,
+ *         most at its TWAP value), every v3.0 bonus is zero or its full rate on either side of
+ *         the 30-day cutoff (direct stake and all three routes), the USDC valuation is monotonic,
  *         and the recommended band always contains the +-6,932-tick band on the spacing grid.
  */
 contract StakingV3FuzzTest is StakingV3Harness {
@@ -102,6 +103,56 @@ contract StakingV3FuzzTest is StakingV3Harness {
         assertEq(reserved, bonus);
         assertTrue(migrator.migrated(alice));
         assertEq(poolV3.stakes(alice), principal);
+    }
+
+    /// @dev The same rule on route 1: zero or exactly `compoundBps` of the TWAP-capped base.
+    function testFuzz_Compound_BonusIsZeroOrTheFullRate(uint256 principal, uint256 reward, uint256 moment) public {
+        principal = bound(principal, 0, 100_000e18);
+        reward = bound(reward, 1, 100_000e6);
+        moment = bound(moment, v3Start, v3End - 1);
+        vm.warp(moment);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, principal, reward, 1);
+        vm.prank(alice);
+        (uint256 staked, uint256 bonus) =
+            migrator.compound(reward, principal, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        uint256 bought = reward * 4e18 / 1e6;
+        uint256 full = Math.mulDiv(principal + Math.min(bought, migrator.usdcInAsset(reward)), 1000, 10_000);
+        assertEq(bonus, moment < poolV3.bonusCutoff() ? full : 0);
+        assertTrue(bonus == 0 || bonus == full, "zero or the full rate");
+        (uint256 reserved,) = bonusVault.reservedOf(alice);
+        assertEq(reserved, bonus);
+        assertEq(staked, principal + bought, "the route always stakes in full");
+        assertEq(poolV3.stakes(alice), staked);
+        assertTrue(migrator.migrated(alice));
+    }
+
+    /// @dev The same rule on route 2, both parts: the LP reservation is zero or exactly `lpBps` of
+    ///      (LP $ASSET leg + LP USDC leg at the mean tick), the v3 remainder's reservation zero or
+    ///      exactly `lpBps` of the remainder, both on the same side of the cutoff.
+    function testFuzz_MoveToLp_BothPartsAreZeroOrTheFullRate(uint256 principal, uint256 reward, uint256 moment) public {
+        principal = bound(principal, 1_000e18, 100_000e18);
+        reward = bound(reward, 1e6, 10_000e6);
+        moment = bound(moment, v3Start, v3End - 1);
+        vm.warp(moment);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, principal, reward, 1);
+        uint256 usdcBefore = usdcToken.balanceOf(alice);
+        vm.prank(alice);
+        uint256 tokenId = migrator.moveToLp(reward, principal, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        uint256 usdcUsed = usdcBefore - usdcToken.balanceOf(alice);
+        uint256 remainder = poolV3.stakes(alice);
+        uint256 assetUsed = principal - remainder;
+        bool open = moment < poolV3.bonusCutoff();
+
+        uint256 fullLp = Math.mulDiv(assetUsed + migrator.usdcInAsset(usdcUsed), 1000, 10_000);
+        (address user, uint256 lpBonus,,,) = bonusVault.lpReservation(tokenId);
+        assertEq(lpBonus, open ? fullLp : 0, "the LP part");
+        assertEq(user, open && fullLp > 0 ? alice : address(0), "an LP record only with a bonus");
+        uint256 fullV3 = Math.mulDiv(remainder, 1000, 10_000);
+        (uint256 v3Bonus,) = bonusVault.reservedOf(alice);
+        assertEq(v3Bonus, open ? fullV3 : 0, "the v3 remainder");
+        assertEq(bonusVault.totalReserved(), lpBonus + v3Bonus);
+        assertEq(mathVault.stakerOf(tokenId), alice, "the position is always staked");
+        assertTrue(migrator.migrated(alice));
     }
 
     function testFuzz_UsdcInAsset_IsMonotonic(uint256 a, uint256 b) public view {

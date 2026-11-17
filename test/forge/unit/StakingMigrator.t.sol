@@ -14,6 +14,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {LPStakingVault} from "../../../contracts/lp-staking/LPStakingVault.sol";
+import {WeightedStakingPoolV3At5b1174c} from "../utils/WeightedStakingPoolV3At5b1174c.sol";
 
 /**
  * @notice {StakingMigrator}: the three routes end to end on the math rung (real liquidity math),
@@ -673,6 +674,66 @@ contract StakingMigratorTest is StakingV3Harness {
             assertTrue(migrator.migrated(user));
         }
         assertEq(bonusVault.totalReserved(), 3 * PRINCIPAL * 500 / 10_000);
+    }
+
+    /// @dev The upgrade-order guard: a NEW migrator linked to a pool still on the OLD code (5b1174c,
+    ///      the frozen copy, which has no `bonusCutoff()` and no fallback). Every route reverts with
+    ///      empty revert data (the call fails at the old pool's selector dispatch) and the whole
+    ///      transaction is undone: no token moves, no nonce is spent, no wallet is marked migrated,
+    ///      nothing is staked and no bonus is reserved. Why the pool is upgraded first.
+    function test_BonusRule_ANewMigratorOnAnOldPoolRevertsEveryRoute() public {
+        WeightedStakingPoolV3 old = WeightedStakingPoolV3(
+            address(
+                new LPProxy(
+                    address(new WeightedStakingPoolV3At5b1174c()),
+                    abi.encodeCall(
+                        WeightedStakingPoolV3At5b1174c.initialize,
+                        (address(this), address(asset), v3Start, v3End, voucherSigner)
+                    )
+                )
+            )
+        );
+        V3BonusVault book = _deployBonusVault(address(asset), address(0), address(old), address(mathVault));
+        StakingMigrator m = _deployMigrator(address(mathVault), address(usdcToken), address(asset), old, book);
+        old.setBonusVault(address(book));
+        old.setMigrator(address(m));
+        book.setMigrator(address(m));
+        mathVault.setStakeOperator(address(m), true);
+        m.unpauseCompound();
+        vm.startPrank(alice);
+        asset.approve(address(m), type(uint256).max);
+        usdcToken.approve(address(m), type(uint256).max);
+        vm.stopPrank();
+
+        StakingMigrator.Voucher memory v1 = _voucher(m, alice, 1, PRINCIPAL, REWARD, 1);
+        StakingMigrator.Voucher memory v2 = _voucher(m, alice, 2, PRINCIPAL, REWARD, 2);
+        StakingMigrator.Voucher memory v3 = _voucher(m, alice, 3, PRINCIPAL, 0, 3);
+        uint256 assetBefore = asset.balanceOf(alice);
+        uint256 usdcBefore = usdcToken.balanceOf(alice);
+        uint256 nftsBefore = mathNpm.balanceOf(address(mathVault));
+
+        vm.startPrank(alice);
+        vm.expectRevert(bytes(""));
+        m.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v1);
+        vm.expectRevert(bytes(""));
+        m.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v2);
+        vm.expectRevert(bytes(""));
+        m.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v3);
+        vm.stopPrank();
+
+        assertEq(asset.balanceOf(alice), assetBefore, "no $ASSET moved");
+        assertEq(usdcToken.balanceOf(alice), usdcBefore, "no USDC moved");
+        assertEq(mathNpm.balanceOf(address(mathVault)), nftsBefore, "no position staked");
+        assertEq(old.stakes(alice), 0, "nothing staked");
+        assertEq(old.totalStaked(), 0);
+        assertFalse(m.migrated(alice), "the wallet is not marked");
+        assertFalse(m.isNonceUsed(alice, 1));
+        assertFalse(m.isNonceUsed(alice, 2));
+        assertFalse(m.isNonceUsed(alice, 3));
+        assertEq(book.totalReserved(), 0, "no bonus reserved");
+        assertEq(book.totalLpReserved(), 0);
+        assertEq(asset.balanceOf(address(m)), 0);
+        assertEq(usdcToken.balanceOf(address(m)), 0);
     }
 
     function _reservedOf(address user) internal view returns (uint256 amount) {

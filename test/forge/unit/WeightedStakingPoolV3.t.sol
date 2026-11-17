@@ -654,6 +654,35 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         }
     }
 
+    /// @dev A direct stake BEFORE the activation of a 20-day window that opens in 10 days (its end
+    ///      30 days from now): the rule reads only the time left until the end, so the stake earns
+    ///      the full rate while 30 or more whole days are left (now, and 23:59:59 later) and
+    ///      nothing from the cutoff on, still before the activation and after it.
+    function test_StakeBonus_BeforeTheActivationOfAShortWindowFollowsTheDaysLeft() public {
+        uint256 s = block.timestamp + 10 days;
+        uint256 e = s + 20 days;
+        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e);
+        uint256 cutoff = q.bonusCutoff();
+        assertEq(cutoff, block.timestamp + 1 days, "30 - 29 = 1 day from now");
+        assertLt(cutoff, s, "the cutoff falls before the activation");
+
+        _stakeOn(q, alice, AMOUNT); // exactly 30 days left
+        assertEq(_v3Of(b, alice), FULL, "30 days left, before the activation: full");
+        vm.warp(cutoff - 1); // 29 days and 1 second left: 30 whole days
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), 2 * FULL, "one second before the cutoff: full");
+
+        uint256[3] memory moments = [cutoff, s - 1, s];
+        for (uint256 i = 0; i < 3; ++i) {
+            vm.warp(moments[i]);
+            assertEq(q.previewStakeBonus(AMOUNT), 0);
+            _stakeOn(q, bob, AMOUNT);
+        }
+        assertEq(q.stakes(bob), 3 * AMOUNT, "every stake goes through");
+        assertEq(_v3Of(b, bob), 0, "from the cutoff on, before or after the activation: nothing");
+        assertEq(b.totalReserved(), 2 * FULL);
+    }
+
     /// @dev Whole days are rounded up: a window of 29 days and 23 hours counts 30 days at its
     ///      activation, so its first 23 hours earn the full rate and the rest nothing.
     function test_StakeBonus_AWindowJustUnder30DaysEarnsOnlyInItsFirstHours() public {
