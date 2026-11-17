@@ -811,8 +811,10 @@ every bonus of the route is ZERO: the route still runs, stakes, marks the wallet
 `Compounded` / `MovedToLp` / `ClaimRestaked` with the bonus fields at 0, and the bonus vault is not
 called (no `BonusReserved`, no `LpBonusReserved`). The bonus is never scaled by the days left. The
 same rule applies to a direct stake (below); the 30 is written once, as the pool's constant
-`BONUS_MIN_DAYS_LEFT()`, and the migrator reads the cutoff from the pool. Upgrade the pool no later
-than the migrator: a new migrator on an old pool reverts every route (no `bonusCutoff()` there).
+`BONUS_MIN_DAYS_LEFT()`, and the migrator reads the cutoff from the pool. Upgrade both proxies in
+ONE timelock batch, the pool first and the migrator second. A new migrator on an old pool reverts
+every route (the old pool has no `bonusCutoff()`). A new pool with the old migrator is the opposite
+risk: the old migrator still reserves the full route bonuses after the cutoff.
 
 Every route needs the backend's `TransitionVoucher(address user,uint8 route,uint256
 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)`, EIP-712 domain

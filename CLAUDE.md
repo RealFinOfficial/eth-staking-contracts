@@ -276,16 +276,20 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
   fail closed), `unstake()` / `emergencyUnstake()` after the end, `setSigner` / `setMigrator` /
   `setBonusVault` / `recoverERC20` (owner), renounce disabled. Accounting: `stakes(user)` and
   `totalStaked()`. The v2-shaped fields of the stack #6 layout stay as deprecated slots, never written.
-  A direct `stake` reserves the new-stake bonus (`STAKE_BONUS_BPS` 500, route 4, `previewStakeBonus`)
-- **The 30-day bonus rule (2026-11-17)** — every way into v3.0 (direct stake, "stake more", and the
-  three migrator routes, both parts of `moveToLp` included) reserves its FULL rate, never scaled by
-  time, only while `block.timestamp < pool.bonusCutoff()` = `endEpoch - 29 days` (30 or more whole
-  days left, rounded up); from the cutoff on the bonus is ZERO and the stake or route still
-  succeeds, the vault is not called, the route events carry `bonus = 0`. The 30 is written once:
-  `WeightedStakingPoolV3.BONUS_MIN_DAYS_LEFT`; the migrator reads `bonusCutoff()` from the pool
-  (`IWeightedStakingPoolV3Migration`), so the pool is upgraded no later than the migrator. It
-  replaces the 2026-11-12 day scale and its "nothing in the last 24 hours" rule; the ApeBonds
-  `BonusEscrow` is a different programme and untouched
+  A direct `stake` reserves the new-stake bonus (`STAKE_BONUS_BPS` 500, route 4, `previewStakeBonus`).
+  - **The 30-day bonus rule (2026-11-17).** Every way into v3.0 (direct stake, "stake more", and
+    the three migrator routes, both parts of `moveToLp` included) reserves its FULL rate, never
+    scaled by time, only while `block.timestamp < pool.bonusCutoff()` = `endEpoch - 29 days` (30
+    or more whole days left, rounded up). From the cutoff on the bonus is ZERO: the stake or route
+    still succeeds, the vault is not called, and the route events carry `bonus = 0`. The 30 is
+    written once, as `WeightedStakingPoolV3.BONUS_MIN_DAYS_LEFT`, and the migrator reads
+    `bonusCutoff()` from the pool (`IWeightedStakingPoolV3Migration`). It replaces the 2026-11-12
+    day scale and its "nothing in the last 24 hours" rule. The ApeBonds `BonusEscrow` is a
+    different programme and is untouched.
+  - **Upgrade both in ONE timelock batch, pool first, migrator second.** A new migrator on an old
+    pool reverts every route, because the old pool has no `bonusCutoff()`. A new pool with the old
+    migrator is the opposite risk: the old migrator still reserves the full route bonuses after the
+    cutoff.
 - **`V3BonusVault.sol`** — the bonus book: `reserve(user, amount, unlockAt, route)` and
   `reserveLp(tokenId, user, amount, unlockAt)` (migrator only), `onEarlyExit(user)` (pool only:
   forfeits the WHOLE v3 reservation before the unlock), `onUnstake` / `onRebalance` (vault only,

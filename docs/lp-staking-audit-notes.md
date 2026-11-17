@@ -1683,16 +1683,22 @@ still succeeds; the route still marks the wallet `migrated` and emits `Compounde
 signature (no event added), rates, claiming, forfeiture, unlock time, and the ApeBonds
 `BonusEscrow`. ABI: the pool gains `BONUS_MIN_DAYS_LEFT()` and `bonusCutoff()`; the migrator's ABI
 is unchanged. `activationEpoch` no longer enters any bonus. Upgrade order: the new migrator calls
-`bonusCutoff()` on the pool, so a new migrator on an old pool reverts every route; the pool is
-upgraded first, or in the same timelock batch before the migrator. A consequence to note: the rule
+`bonusCutoff()` on the pool, so a new migrator on an old pool reverts every route (the whole
+transaction is undone; `test_BonusRule_ANewMigratorOnAnOldPoolRevertsEveryRoute`). The opposite
+mix is also wrong: a new pool with the old migrator still reserves the full route bonuses after the
+cutoff. Both proxies are therefore upgraded in ONE timelock batch, the pool first and the migrator
+second. A consequence to note: the rule
 reads only the time left, so a direct stake BEFORE `activationEpoch` with 30 or more days left earns
 the full rate even in a window shorter than 30 days; from its activation on, a window of 29 days
 or less never pays. Tests: `test_BonusRule_*` and `test_StakeBonus_*` in
 `WeightedStakingPoolV3.t.sol` (90 / 31 / 30 days left full, 29 / 1 day and the last second zero, the
 cutoff second, windows of 29 days or less, the zero-safe cutoff, the preview), `test_BonusRule_*`
 in `StakingMigrator.t.sol` (the cutoff second on each route, both parts of `moveToLp`, route 3 by
-days left), `testFuzz_DirectStake_BonusIsZeroOrTheFullRate` and
-`testFuzz_ClaimRestake_BonusIsZeroOrTheFullRate` in `fuzz/StakingV3Fuzz.t.sol`.
+days left, a new migrator on an old pool), `testFuzz_DirectStake_*`, `testFuzz_ClaimRestake_*`,
+`testFuzz_Compound_*` and `testFuzz_MoveToLp_*` "zero or the full rate" in
+`fuzz/StakingV3Fuzz.t.sol`, and
+`test_StakeBonus_BeforeTheActivationOfAShortWindowFollowsTheDaysLeft` for a stake before the
+activation of a 20-day window.
 
 **No cap (owner's decision of 2026-11-12: "no budget or cap limit").** The cap of 2026-11-09
 (finding M4 above: `maxTotalReserved`, `setMaxTotalReserved`, `BudgetExceeded`, the initializer's
