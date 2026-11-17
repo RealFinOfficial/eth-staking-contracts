@@ -382,8 +382,8 @@
       "address": "0xffE65d69154Bd0C9c521481524ADADE2b0fC48B6",
       "deployTx": "0x5fc511e51c822617ac9b516fccaa7ed2accf8d46142cc8738110ed1c4bdbc623",
       "block": 12112123,
-      "implementation": "0x6DF0B9231D70fEe953757672164Ca395a0C865Ff",
-      "implementationTx": "0xea35b43cae2dedc4a53e2aa2bd6f92157364376a5a1204a18e5711d5aa180ab0",
+      "implementation": "0xCCCCfBDc35E8dbeffE71a29a71BB4865ab71F959",
+      "implementationTx": "0x3f0dae31bd4f58c90bcec2a64ac801359517093ed5539626c9b9667a0feaf9b6",
       "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
       "activationEpoch": 1794404858,
       "endEpoch": 1802180858,
@@ -398,9 +398,9 @@
         "executeBlock": 12117902
       },
       "migrator": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
-      "previousImplementation": "0xE6077b572f218194333051F12D24eF6f63f3cC2c",
-      "implementationBlock": 12124670,
-      "upgradeTx": "0xdb4693c9371defcb62c5bf7fbaa12231e069a3942e435afb3f1f440866866c4f"
+      "previousImplementation": "0x6DF0B9231D70fEe953757672164Ca395a0C865Ff",
+      "implementationBlock": 12155283,
+      "upgradeTx": "0xf24de609be6ee60207e974dc4c49f105b6c9d7a2c026bb55f43dd05ec7c4b141"
     },
     "V3BonusVault": {
       "address": "0x2Daa6bC6f7FC8cc71CB5676dbC84bFCCFD661fa1",
@@ -435,8 +435,8 @@
       "address": "0x58a0464284020bF3368d3B629c5F693e94F8D893",
       "deployTx": "0x96d588dbd3181c55ea813491aef280166fd3747a18b43beb4ae7a1a1e9fe25af",
       "block": 12112127,
-      "implementation": "0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A",
-      "implementationTx": "0xea65e7233d1180126d6776cce348bb6d2fd93b496639bfcea1e095d973fecf41",
+      "implementation": "0xe6976FcEc3218DBcea20D1220b70D87461082a57",
+      "implementationTx": "0x4918175961de7a9a04d0fbddd9a53044c94e2d91a8a2c8ddc9a048c5dc011f52",
       "lpVault": "0x4B2f60D698d152ba1f5Aaf02acF42da8823B2eac",
       "usdc": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
       "asset": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
@@ -457,7 +457,10 @@
       },
       "compoundPaused": false,
       "unpauseCompoundTx": "0x79da457340b722518e2390a72f19f1c2dfa71070a5aceee96cb15af04b103194",
-      "unpauseCompoundBlock": 12117908
+      "unpauseCompoundBlock": 12117908,
+      "previousImplementation": "0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A",
+      "implementationBlock": 12155283,
+      "upgradeTx": "0xf24de609be6ee60207e974dc4c49f105b6c9d7a2c026bb55f43dd05ec7c4b141"
     }
   }
 }
