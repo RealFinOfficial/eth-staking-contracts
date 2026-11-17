@@ -528,10 +528,6 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
 
     /// @dev 5 % of 1,000 $ASSET: the full rate.
     uint256 internal constant FULL = 50e18;
-    /// @dev 1,000 $ASSET x 5 % x 47 / 90, rounded down (2.61 %).
-    uint256 internal constant AT_47_OF_90 = 26_111_111_111_111_111_111;
-    /// @dev 1,000 $ASSET x 5 % x 1 / 90, rounded down.
-    uint256 internal constant AT_1_OF_90 = 555_555_555_555_555_555;
 
     /// @dev A fresh 90-day campaign (or any window) with its own bonus vault (migrator `carol`, no
     ///      LP vault) and the approvals of alice, bob and carol.
@@ -568,6 +564,15 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(p.STAKE_BONUS_BPS(), 500);
     }
 
+    // ── The 30-day rule (2026-11-17): the full rate with 30 or more whole days left, else zero ──
+
+    function test_BonusRule_TheConstantAndTheCutoff() public {
+        assertEq(p.BONUS_MIN_DAYS_LEFT(), 30);
+        assertEq(p.bonusCutoff(), end - 29 days, "the first second with only 29 whole days left");
+        (WeightedStakingPoolV3 q,,, uint256 e) = _campaign90();
+        assertEq(q.bonusCutoff(), e - 29 days);
+    }
+
     function test_StakeBonus_TheFullRateOnTheFirstDay() public {
         (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s, uint256 e) = _campaign90();
         vm.warp(s);
@@ -577,98 +582,120 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         assertEq(_v3Of(b, alice), FULL);
         (, uint64 unlockAt) = b.reservedOf(alice);
         assertEq(unlockAt, uint64(e), "unlocks at the pool's end");
-        vm.warp(s + 1 days - 1); // still the first day: 89 days and 1 second left, rounded up
-        _stakeOn(q, bob, AMOUNT);
-        assertEq(_v3Of(b, bob), FULL);
-        assertEq(b.totalReserved(), 2 * FULL);
         assertEq(q.stakes(alice), AMOUNT, "the principal is credited in full");
     }
 
-    function test_StakeBonus_47Of90DaysLeft() public {
+    /// @dev 90, 31 and 30 whole days left: the full rate each time, NOT scaled by the days left.
+    function test_StakeBonus_90And31And30DaysLeftEarnTheFullRate() public {
         (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 47 days);
-        _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), AT_47_OF_90);
-        vm.warp(e - 46 days - 1); // 46 days and 23:59:59 left: 47 whole days, rounded up
-        _stakeOn(q, bob, AMOUNT);
-        assertEq(_v3Of(b, bob), AT_47_OF_90);
+        uint256[3] memory left = [uint256(90 days), 31 days, 30 days];
+        for (uint256 i = 0; i < 3; ++i) {
+            vm.warp(e - left[i]);
+            assertEq(q.previewStakeBonus(AMOUNT), FULL, "the preview");
+            uint256 before = _v3Of(b, alice);
+            _stakeOn(q, alice, AMOUNT);
+            assertEq(_v3Of(b, alice) - before, FULL, "the full 5 %");
+        }
+        assertEq(b.totalReserved(), 3 * FULL);
+        assertEq(q.stakes(alice), 3 * AMOUNT);
     }
 
-    /// @dev Exactly 24 hours left still earns the last day's rate, 1 / 90 of 5 % (2026-11-12).
-    function test_StakeBonus_Exactly24HoursLeftEarnsOneDay() public {
+    /// @dev 29 days, 1 day and the last second left: no bonus and no vault call, the stake succeeds.
+    function test_StakeBonus_29And1And0DaysLeftEarnNothingAndStillStake() public {
         (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1 days);
-        assertEq(q.previewStakeBonus(AMOUNT), AT_1_OF_90);
-        _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), AT_1_OF_90);
-    }
-
-    /// @dev 24 hours and one second left: two whole days rounded up, 2 / 90 of 5 %.
-    function test_StakeBonus_24HoursAndOneSecondLeftEarnsTwoDays() public {
-        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1 days - 1);
-        _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), 1_111_111_111_111_111_111, "1,000 x 5 % x 2 / 90, rounded down");
-    }
-
-    /// @dev Less than 24 hours left (one second less): no bonus, no vault call, the stake succeeds
-    ///      (owner's decision of 2026-11-12).
-    function test_StakeBonus_LessThan24HoursLeftEarnsNothing() public {
-        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1 days + 1);
-        assertEq(q.previewStakeBonus(AMOUNT), 0);
+        uint256[3] memory left = [uint256(29 days), 1 days, 1];
         vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
-        _stakeOn(q, alice, AMOUNT);
-        assertEq(q.stakes(alice), AMOUNT, "the stake goes through");
+        for (uint256 i = 0; i < 3; ++i) {
+            vm.warp(e - left[i]);
+            assertEq(q.previewStakeBonus(AMOUNT), 0, "the preview");
+            _stakeOn(q, alice, AMOUNT);
+            assertEq(q.stakes(alice), (i + 1) * AMOUNT, "the stake goes through");
+        }
         assertEq(_v3Of(b, alice), 0);
         assertEq(b.totalReserved(), 0);
-    }
-
-    /// @dev The last second of the window: no bonus, the stake succeeds; from the end, zero.
-    function test_StakeBonus_TheLastSecondEarnsNothing() public {
-        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1);
-        assertEq(q.previewStakeBonus(AMOUNT), 0);
-        _stakeOn(q, alice, AMOUNT);
-        assertEq(q.stakes(alice), AMOUNT);
-        assertEq(_v3Of(b, alice), 0);
         vm.warp(e);
         assertEq(q.previewStakeBonus(AMOUNT), 0, "zero from the end");
     }
 
-    /// @dev 30 days and 1 hour count as 31 campaign days: the first hour pays the full rate, the
-    ///      moment exactly 24 hours before the end pays 1 / 31 (less than 24 hours pays nothing).
-    function test_StakeBonus_AWindowThatIsNotWholeDays() public {
-        uint256 s = block.timestamp + 1 days;
-        uint256 e = s + 30 days + 1 hours;
-        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e);
-        vm.warp(s);
+    /// @dev The boundary second: one second before the cutoff (29 days and 1 second left, 30 whole
+    ///      days rounded up) earns the full rate, the cutoff itself (exactly 29 days left) nothing.
+    function test_StakeBonus_TheCutoffSecond() public {
+        (WeightedStakingPoolV3 q, V3BonusVault b,,) = _campaign90();
+        uint256 cutoff = q.bonusCutoff();
+        vm.warp(cutoff - 1);
+        assertEq(q.previewStakeBonus(AMOUNT), FULL);
         _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), FULL, "31 of 31 days");
-        vm.warp(e - 1 days);
+        assertEq(_v3Of(b, alice), FULL, "one second before the cutoff: full");
+        vm.warp(cutoff);
+        assertEq(q.previewStakeBonus(AMOUNT), 0);
+        vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
         _stakeOn(q, bob, AMOUNT);
-        assertEq(_v3Of(b, bob), 1_612_903_225_806_451_612, "1,000 x 5 % x 1 / 31, rounded down");
+        assertEq(q.stakes(bob), AMOUNT, "the stake goes through");
+        assertEq(_v3Of(b, bob), 0, "at the cutoff: nothing");
+        assertEq(b.totalReserved(), FULL);
     }
 
-    /// @dev `p` opens one day ahead: 31 days left of a 30-day window, capped at the full rate.
-    function test_StakeBonus_BeforeTheActivationIsCappedAtTheFullRate() public {
+    /// @dev A window of 29 days or less, staked into from its activation on: never a bonus.
+    function test_StakeBonus_AWindowOf29DaysOrLessNeverEarnsABonus() public {
+        uint256[2] memory lengths = [uint256(29 days), 20 days];
+        for (uint256 k = 0; k < 2; ++k) {
+            uint256 s = block.timestamp;
+            uint256 e = s + lengths[k];
+            (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e);
+            assertLe(q.bonusCutoff(), s, "the cutoff is not after the window opens");
+            uint256[3] memory moments = [s, s + 10 days, e - 1];
+            for (uint256 i = 0; i < 3; ++i) {
+                vm.warp(moments[i]);
+                assertEq(q.previewStakeBonus(AMOUNT), 0);
+                _stakeOn(q, bob, AMOUNT);
+            }
+            assertEq(q.stakes(bob), 3 * AMOUNT);
+            assertEq(b.totalReserved(), 0, "never a bonus, so the vault was never called");
+        }
+    }
+
+    /// @dev Whole days are rounded up: a window of 29 days and 23 hours counts 30 days at its
+    ///      activation, so its first 23 hours earn the full rate and the rest nothing.
+    function test_StakeBonus_AWindowJustUnder30DaysEarnsOnlyInItsFirstHours() public {
+        uint256 s = block.timestamp;
+        uint256 e = s + 29 days + 23 hours;
+        (WeightedStakingPoolV3 q, V3BonusVault b) = _campaign(s, e);
+        assertEq(q.bonusCutoff(), s + 23 hours);
+        _stakeOn(q, alice, AMOUNT);
+        assertEq(_v3Of(b, alice), FULL, "30 whole days left, rounded up");
+        vm.warp(s + 23 hours);
+        _stakeOn(q, bob, AMOUNT);
+        assertEq(_v3Of(b, bob), 0, "29 whole days left");
+    }
+
+    /// @dev An end earlier than 29 days after the unix epoch: the cutoff is zero (no underflow)
+    ///      and no stake can ever earn the bonus.
+    function test_BonusRule_TheCutoffIsZeroSafe() public {
+        WeightedStakingPoolV3 q = _deployPoolV3(address(asset), 0, 28 days);
+        assertEq(q.bonusCutoff(), 0);
+        q.setBonusVault(address(_deployBonusVault(address(asset), carol, address(q), address(0))));
+        assertEq(q.previewStakeBonus(AMOUNT), 0);
+    }
+
+    /// @dev `p` opens one day ahead: 31 days left before its activation, the full rate.
+    function test_StakeBonus_BeforeTheActivationEarnsTheFullRate() public {
         assertLt(block.timestamp, start);
         assertEq(p.previewStakeBonus(AMOUNT), FULL);
         _stake(alice, AMOUNT);
         assertEq(_v3Of(book, alice), FULL);
     }
 
-    /// @dev At 1 / 90, 1,799 wei rounds to zero: the stake goes through with no reservation and no
-    ///      vault call (which would revert `ZeroAmount`); 1,800 wei earns 1 wei.
+    /// @dev At 5 %, 19 wei rounds to zero: the stake goes through with no reservation and no vault
+    ///      call (which would revert `ZeroAmount`); 20 wei earns 1 wei.
     function test_StakeBonus_ATinyAmountRoundsToZeroAndStillStakes() public {
-        (WeightedStakingPoolV3 q, V3BonusVault b,, uint256 e) = _campaign90();
-        vm.warp(e - 1 days); // exactly 24 hours left: the 1 / 90 rate
-        _stakeOn(q, bob, 1800);
+        (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s,) = _campaign90();
+        vm.warp(s);
+        _stakeOn(q, bob, 20);
         assertEq(_v3Of(b, bob), 1);
-        assertEq(q.previewStakeBonus(1799), 0);
+        assertEq(q.previewStakeBonus(19), 0);
         vm.expectCall(address(b), abi.encodeWithSelector(V3BonusVault.reserveStake.selector), 0);
-        _stakeOn(q, alice, 1799);
-        assertEq(q.stakes(alice), 1799);
+        _stakeOn(q, alice, 19);
+        assertEq(q.stakes(alice), 19);
         assertEq(_v3Of(b, alice), 0);
         assertEq(b.totalReserved(), 1);
     }
@@ -679,17 +706,19 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         _stakeOn(q, alice, AMOUNT);
         vm.warp(e - 47 days);
         _stakeOn(q, alice, AMOUNT);
+        vm.warp(e - 10 days);
+        _stakeOn(q, alice, AMOUNT);
         (uint256 amount, uint64 unlockAt) = b.reservedOf(alice);
-        assertEq(amount, FULL + AT_47_OF_90);
+        assertEq(amount, 2 * FULL, "two full bonuses, nothing for the stake after the cutoff");
         assertEq(unlockAt, uint64(e));
-        assertEq(q.stakes(alice), 2 * AMOUNT);
+        assertEq(q.stakes(alice), 3 * AMOUNT);
     }
 
     function test_StakeBonus_ThePreviewIsWhatTheStakeReserves() public {
         (WeightedStakingPoolV3 q, V3BonusVault b, uint256 s,) = _campaign90();
         vm.warp(s + 10 days + 5 hours);
         uint256 preview = q.previewStakeBonus(777e18 + 3);
-        assertEq(preview, Math.mulDiv(777e18 + 3, 500 * 80, 90 * 10_000), "80 of 90 days left");
+        assertEq(preview, Math.mulDiv(777e18 + 3, 500, 10_000), "the full rate, 80 of 90 days left");
         _stakeOn(q, alice, 777e18 + 3);
         assertEq(_v3Of(b, alice), preview);
     }
@@ -790,12 +819,12 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         vm.warp(e - 47 days);
         _stakeOn(q, bob, AMOUNT);
         asset.approve(address(b), type(uint256).max);
-        b.fund(100e18 + FULL + AT_47_OF_90);
+        b.fund(100e18 + 2 * FULL);
         vm.warp(e);
         vm.prank(alice);
         assertEq(b.claimV3(), 100e18 + FULL, "the route bonus and the stake bonus together");
         vm.prank(bob);
-        assertEq(b.claim(), AT_47_OF_90);
+        assertEq(b.claim(), FULL);
         assertEq(b.totalReserved(), 0);
     }
 
@@ -808,8 +837,8 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
         q.withdraw(AMOUNT);
         assertEq(_v3Of(b, alice), 0);
         _stakeOn(q, alice, AMOUNT);
-        assertEq(_v3Of(b, alice), AT_47_OF_90, "only the new stake at 47 of 90");
-        assertEq(b.totalReserved(), AT_47_OF_90);
+        assertEq(_v3Of(b, alice), FULL, "only the new stake, at the full rate");
+        assertEq(b.totalReserved(), FULL);
     }
 
     /// @dev The pool and the bonus vault on the code live before the new-stake bonus (5b1174c,
@@ -879,8 +908,8 @@ contract WeightedStakingPoolV3Test is StakingV3Harness {
 
         vm.warp(e - 47 days);
         _stakeOn(q, bob, AMOUNT);
-        assertEq(_v3Of(b, bob), AT_47_OF_90, "the upgraded pair reserves the stake bonus");
-        assertEq(b.totalReserved(), 180e18 + AT_47_OF_90);
+        assertEq(_v3Of(b, bob), FULL, "the upgraded pair reserves the stake bonus");
+        assertEq(b.totalReserved(), 180e18 + FULL);
     }
 
     // ──────────────────────── No cap: routes and stakes together ─

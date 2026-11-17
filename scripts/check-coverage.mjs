@@ -49,6 +49,14 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-17 (the 30-day bonus rule, audit notes item 19) ──
+//    WeightedStakingPoolV3 lines 133 -> 132 (129 hit), branches 46 -> 45 (9 hit): the day scale of
+//    `_stakeBonus` (its "last 24 hours" condition and the `daysLeft` cap) is replaced by one
+//    comparison with the new `bonusCutoff()` view and its zero-safe subtraction; the three unhit
+//    lines are the same `--ir-minimum` artefacts, the 36 unhit branch items the same
+//    `require(cond, "reason")` checks. StakingMigrator lines 237 -> 242 (236 hit), branches
+//    37 -> 41 (41): `_bonusOpen()` and its four call-site conditions (compound, both parts of
+//    `_finishLp`, claimRestake), every one hit on both sides by the `test_BonusRule_*` tests.
 // ── Pinned floors, re-measured 2026-11-10, fourth time (review closure of the minimal v3 pool) ──
 //    WeightedStakingPoolV3 lines 110 -> 117 (114 hit), branches 40 -> 41 (5 hit): the
 //    `BonusVaultLocked` guard in `setBonusVault` and the staking-token surplus check in
@@ -316,16 +324,16 @@ export const PER_FILE_FLOORS = {
     branches: {found: 15, minHit: 15},
   },
   "contracts/staking-v3/WeightedStakingPoolV3.sol": {
-    lines: {found: 133, minHit: 130},
-    branches: {found: 46, minHit: 10},
+    lines: {found: 132, minHit: 129},
+    branches: {found: 45, minHit: 9},
   },
   "contracts/staking-v3/V3BonusVault.sol": {
     lines: {found: 260, minHit: 257},
     branches: {found: 46, minHit: 46},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
-    lines: {found: 237, minHit: 231},
-    branches: {found: 37, minHit: 37},
+    lines: {found: 242, minHit: 236},
+    branches: {found: 41, minHit: 41},
   },
 };
 

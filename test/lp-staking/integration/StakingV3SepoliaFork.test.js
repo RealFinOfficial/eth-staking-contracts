@@ -32,7 +32,8 @@
  *      unlock) and re-stakes the same NFT: the record is DEAD and `reconcileLp` forfeits it while
  *      re-staked; henry reaches the same state (kept for step 12); ivan joins LP
  *  11. a direct v3 stake with the backend's `StakeVoucher` (no weight) reserves its new-stake bonus
- *      (route 4, 2026-11-12); the replay is rejected;
+ *      (route 4, 2026-11-12; the full 5 %, before the 30-day cutoff of 2026-11-17); the replay is
+ *      rejected;
  *      carol withdraws from v3 early: the principal back in full (no penalty in v3) and her whole
  *      v3 reservation forfeited
  *  12. after the end: an unfunded claim reverts, a funded one pays; bob unstakes his LP after the
@@ -743,9 +744,12 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(await poolV3.nonces(deployer.address)).to.equal(0n);
     const sig = await signStakeVoucher(deployer, 0n);
     // The new-stake bonus (2026-11-12): the direct stake reserves `previewStakeBonus` (route 4).
+    // The 30-day rule (2026-11-17): before `bonusCutoff()` it is the full 5 %, never scaled.
+    expect(await poolV3.BONUS_MIN_DAYS_LEFT()).to.equal(30n);
+    expect(await poolV3.bonusCutoff()).to.equal((await poolV3.endEpoch()) - 29n * 86400n);
+    expect(BigInt(await now())).to.be.lessThan(await poolV3.bonusCutoff(), "still 30 whole days left");
     const bonus = await poolV3.previewStakeBonus(amount);
-    expect(bonus).to.be.greaterThan(0n);
-    expect(bonus).to.be.at.most((amount * 500n) / 10_000n, "at most 5 %");
+    expect(bonus).to.equal((amount * 500n) / 10_000n, "the full 5 %");
     await expect(poolV3.connect(deployer).stake(amount, FAR, sig))
       .to.emit(poolV3, "Staked")
       .withArgs(deployer.address, amount)

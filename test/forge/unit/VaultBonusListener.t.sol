@@ -534,10 +534,10 @@ contract VaultBonusListenerTest is StakingV3Harness {
         uint256 tokenId = _join();
         (, uint256 owedLp,,,) = bonusVault.lpReservation(tokenId);
         (uint256 routeV3,) = bonusVault.reservedOf(alice);
-        vm.warp(v3Start + 43 days); // 47 of 90 days left
+        vm.warp(v3Start + 43 days); // 47 of 90 days left: 30 or more, the full rate (2026-11-17)
         uint256 amount = 1_000e18;
         uint256 preview = poolV3.previewStakeBonus(amount);
-        assertEq(preview, 26_111_111_111_111_111_111, "1,000 x 5 % x 47 / 90");
+        assertEq(preview, 50e18, "1,000 x 5 %, not scaled by the days left");
         vm.prank(alice);
         asset.approve(address(poolV3), amount);
         bytes memory sig = _signStake(poolV3, alice, FAR_DEADLINE);

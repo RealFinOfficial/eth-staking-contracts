@@ -75,6 +75,15 @@ interface IMigratorPoolSpacing {
  *    3. {claimRestake}: pulls only the $ASSET principal (the USDC stays in the wallet), stakes it in
  *       v3 FOR the caller and reserves `restakeBps` of it.
  *
+ *  THE 30-DAY BONUS RULE (2026-11-17). Each route reserves its FULL rate (the formulas above,
+ *  never scaled by time) only while `block.timestamp < pool.bonusCutoff()`, i.e. while 30 or more
+ *  whole days (rounded up) are left before the v3 pool's `endEpoch`. From the cutoff on (29 whole
+ *  days left or fewer) every bonus of the route is zero, the LP part of {moveToLp} included: the
+ *  route still stakes, marks the wallet {migrated} and emits its event with the bonus fields at
+ *  zero, and the bonus vault is not called. The cutoff and its 30 days live in the pool
+ *  (`WeightedStakingPoolV3.bonusCutoff`, `BONUS_MIN_DAYS_LEFT`), the one definition shared with
+ *  the direct stake. The pool must therefore be upgraded no later than this migrator.
+ *
  *  ELIGIBILITY. Only amounts that came out of a real sw2 claim earn a bonus. The backend attests
  *  them with an EIP-712 `TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,
  *  uint256 eligibleReward,uint256 nonce,uint256 deadline)` (domain "StakingMigrator" / "1",
@@ -343,7 +352,7 @@ contract StakingMigrator is
      * @param minAssetOut The swap's `amountOutMinimum`; must be above zero ({MinAssetOutZero}).
      * @param deadline The call's own expiry.
      * @return staked The amount staked in v3 for the caller.
-     * @return bonus The v3 reservation added.
+     * @return bonus The v3 reservation added (zero from the pool's `bonusCutoff()` on).
      */
     function compound(
         uint256 usdcAmount,
@@ -368,7 +377,10 @@ contract StakingMigrator is
         MigratorStorage storage $ = _migratorStorage();
         uint64 unlockAt = _stakeV3(msg.sender, staked);
         // The bonus base values the bought part at the TWAP, never above what was actually bought.
-        bonus = Math.mulDiv(assetAmount + Math.min(bought, usdcInAsset(usdcAmount)), $.compoundBps, BPS);
+        // Zero from the pool's bonus cutoff on (the 30-day rule).
+        if (_bonusOpen()) {
+            bonus = Math.mulDiv(assetAmount + Math.min(bought, usdcInAsset(usdcAmount)), $.compoundBps, BPS);
+        }
         _reserve(msg.sender, bonus, unlockAt, ROUTE_COMPOUND);
 
         emit Compounded(msg.sender, assetAmount, usdcAmount, bought, staked, bonus);
@@ -417,7 +429,7 @@ contract StakingMigrator is
      * @notice Route 3: stake the $ASSET principal in v3; the USDC reward stays in the wallet.
      * @param assetAmount $ASSET principal pulled (<= eligiblePrincipal; > 0).
      * @param deadline The call's own expiry.
-     * @return bonus The v3 reservation added.
+     * @return bonus The v3 reservation added (zero from the pool's `bonusCutoff()` on).
      */
     function claimRestake(uint256 assetAmount, uint256 deadline, Permit calldata assetPermit, Voucher calldata v)
         external
@@ -431,7 +443,7 @@ contract StakingMigrator is
         _pull(asset, assetAmount, assetPermit);
 
         uint64 unlockAt = _stakeV3(msg.sender, assetAmount);
-        bonus = Math.mulDiv(assetAmount, _migratorStorage().restakeBps, BPS);
+        if (_bonusOpen()) bonus = Math.mulDiv(assetAmount, _migratorStorage().restakeBps, BPS);
         _reserve(msg.sender, bonus, unlockAt, ROUTE_RESTAKE);
 
         emit ClaimRestaked(msg.sender, assetAmount, bonus);
@@ -685,15 +697,18 @@ contract StakingMigrator is
     ) private {
         MigratorStorage storage $ = _migratorStorage();
         uint64 unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration($.stakingPool).endEpoch());
+        // Both parts follow the 30-day rule: zero from the pool's bonus cutoff on.
+        bool bonusOpen = _bonusOpen();
 
-        uint256 lpBonus = Math.mulDiv(assetUsed + usdcInAsset(usdcUsed), $.lpBps, BPS);
+        uint256 lpBonus;
+        if (bonusOpen) lpBonus = Math.mulDiv(assetUsed + usdcInAsset(usdcUsed), $.lpBps, BPS);
         if (lpBonus > 0) IV3BonusVaultReservations($.bonusVault).reserveLp(tokenId, msg.sender, lpBonus, unlockAt);
 
         uint256 remainder = assetAmount - assetUsed;
         uint256 v3Bonus;
         if (remainder > 0) {
             _stakeV3(msg.sender, remainder);
-            v3Bonus = Math.mulDiv(remainder, $.lpBps, BPS);
+            if (bonusOpen) v3Bonus = Math.mulDiv(remainder, $.lpBps, BPS);
             _reserve(msg.sender, v3Bonus, unlockAt, ROUTE_LP);
         }
 
@@ -714,6 +729,14 @@ contract StakingMigrator is
         unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration(stakingPool_).endEpoch());
     }
 
+    /// @dev The 30-day rule (2026-11-17): true while an entry still earns its bonus, i.e. strictly
+    ///      before the v3 pool's `bonusCutoff()` (30 or more whole days left before its end).
+    function _bonusOpen() private view returns (bool) {
+        return block.timestamp < IWeightedStakingPoolV3Migration(_migratorStorage().stakingPool).bonusCutoff();
+    }
+
+    /// @dev A zero `amount` (a zero rate, rounding, or the 30-day rule) reserves nothing and does
+    ///      not call the bonus vault.
     function _reserve(address user, uint256 amount, uint64 unlockAt, uint8 route) private {
         if (amount == 0) return;
         IV3BonusVaultReservations(_migratorStorage().bonusVault).reserve(user, amount, unlockAt, route);

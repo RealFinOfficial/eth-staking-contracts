@@ -67,6 +67,43 @@ contract StakingV3FuzzTest is StakingV3Harness {
         assertEq(bonus, principal * 500 / 10_000);
     }
 
+    /// @dev The 30-day rule (2026-11-17): at any moment of the window a direct stake reserves
+    ///      either nothing or exactly the full 5 %, never a scaled figure; the full rate exactly
+    ///      while `block.timestamp < bonusCutoff()`, and always what `previewStakeBonus` said.
+    function testFuzz_DirectStake_BonusIsZeroOrTheFullRate(uint256 amount, uint256 moment) public {
+        amount = bound(amount, 1, 1_000_000e18);
+        moment = bound(moment, v3Start, v3End - 1);
+        vm.warp(moment);
+        vm.prank(alice);
+        asset.approve(address(poolV3), amount);
+        uint256 preview = poolV3.previewStakeBonus(amount);
+        bytes memory sig = _signStake(poolV3, alice, FAR_DEADLINE);
+        vm.prank(alice);
+        poolV3.stake(amount, FAR_DEADLINE, sig);
+        (uint256 reserved,) = bonusVault.reservedOf(alice);
+        uint256 full = Math.mulDiv(amount, 500, 10_000);
+        assertEq(reserved, preview, "the preview is what the stake reserved");
+        assertEq(reserved, moment < poolV3.bonusCutoff() ? full : 0);
+        assertTrue(reserved == 0 || reserved == full, "zero or the full rate");
+        assertEq(poolV3.stakes(alice), amount, "the stake always succeeds");
+    }
+
+    /// @dev The same rule on route 3: zero or exactly `restakeBps` of the principal.
+    function testFuzz_ClaimRestake_BonusIsZeroOrTheFullRate(uint256 principal, uint256 moment) public {
+        principal = bound(principal, 1, 1_000_000e18);
+        moment = bound(moment, v3Start, v3End - 1);
+        vm.warp(moment);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, principal, 0, 1);
+        vm.prank(alice);
+        uint256 bonus = migrator.claimRestake(principal, FAR_DEADLINE, _noPermit(), v);
+        uint256 full = principal * 500 / 10_000;
+        assertEq(bonus, moment < poolV3.bonusCutoff() ? full : 0);
+        (uint256 reserved,) = bonusVault.reservedOf(alice);
+        assertEq(reserved, bonus);
+        assertTrue(migrator.migrated(alice));
+        assertEq(poolV3.stakes(alice), principal);
+    }
+
     function testFuzz_UsdcInAsset_IsMonotonic(uint256 a, uint256 b) public view {
         a = bound(a, 0, 1e15);
         b = bound(b, a, 1e15);

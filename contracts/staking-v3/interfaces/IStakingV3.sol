@@ -19,6 +19,11 @@ interface IWeightedStakingPoolV3Migration {
     /// @notice The end of the pool's active period; the bonus unlock time.
     function endEpoch() external view returns (uint256);
 
+    /// @notice The moment from which an entry into v3.0 earns no bonus (`endEpoch - 29 days`, the
+    ///         30-day rule of 2026-11-17). The migrator reserves its route bonuses only strictly
+    ///         before it.
+    function bonusCutoff() external view returns (uint256);
+
     /// @notice The staked token ($ASSET).
     function stakingToken() external view returns (address);
 }

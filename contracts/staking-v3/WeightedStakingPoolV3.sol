@@ -29,12 +29,12 @@ import "./interfaces/IStakingV3.sol";
  *      `StakeVoucher(address user,uint256 nonce,uint256 deadline)` signed by {signer} (the backend
  *      key; domain "WeightedStakingPool" / "1", verifying contract = this proxy). The voucher says
  *      "this wallet may stake"; it carries no amount and no weight. Its nonce is the user's next
- *      {nonces} value and is spent by the call. THE NEW-STAKE BONUS (decision of 2026-11-12): when
- *      a bonus vault is linked, the stake reserves `amount * STAKE_BONUS_BPS * daysLeft /
- *      (campaignDays * 10_000)` (rounded down; 5 % on the first day, 5 % x 47 / 90 = 2.61 % with
- *      47 of 90 days left, 5 % / 90 with exactly 24 hours left, NOTHING with less than 24 hours
- *      left; whole days rounded up, `daysLeft` capped at `campaignDays`, {previewStakeBonus})
- *      through the vault's `reserveStake` (route 4),
+ *      {nonces} value and is spent by the call. THE NEW-STAKE BONUS (decision of 2026-11-12, time
+ *      rule of 2026-11-17): when a bonus vault is linked and the stake comes before
+ *      {bonusCutoff} (30 or more whole days left, {BONUS_MIN_DAYS_LEFT}), the stake reserves the
+ *      full `amount * STAKE_BONUS_BPS / 10_000` (rounded down; NOT scaled by the days left);
+ *      from the cutoff on (29 whole days left or fewer) it reserves NOTHING and still succeeds
+ *      ({previewStakeBonus}). The reservation goes through the vault's `reserveStake` (route 4),
  *      unlocked at `endEpoch` and forfeited by an early `withdraw` like every v3 reservation. A
  *      bonus that rounds to zero reserves nothing. No cap limits the bonus (owner's decision of
  *      2026-11-12). Fail closed: a revert of the vault (`NotPool`) reverts the stake. {stakeFor}
@@ -52,9 +52,16 @@ import "./interfaces/IStakingV3.sol";
  *      be removed later).
  *
  *  ACCOUNTING. The per-wallet principal is {stakes}(user) and the sum is {totalStaked}.
- *  `activationEpoch` gates no action: every gate above keys on `endEpoch` alone. Since 2026-11-12
- *  it sets the length of the new-stake bonus scale (`campaignDays`); the UI and the indexer show
- *  it as the window's start.
+ *  `activationEpoch` gates no action: every gate above keys on `endEpoch` alone, and since
+ *  2026-11-17 the bonus no longer reads it either (the 2026-11-12 day scale is gone). The UI and
+ *  the indexer show it as the window's start.
+ *
+ *  THE 30-DAY BONUS RULE (2026-11-17). Every way into v3.0 (a direct {stake}, "stake more", and
+ *  the migrator's three routes, the LP part of `moveToLp` included) earns its FULL bonus rate when
+ *  `block.timestamp < bonusCutoff()` and NOTHING from then on. `bonusCutoff()` is
+ *  `endEpoch - (BONUS_MIN_DAYS_LEFT - 1) days` = `endEpoch - 29 days`: before it,
+ *  `ceil((endEpoch - block.timestamp) / 1 days) >= 30`. The migrator reads the cutoff from this
+ *  pool, so {BONUS_MIN_DAYS_LEFT} is the one place the 30 is written.
  *
  *  THE BONUS VAULT LINK. While the window is open (`block.timestamp < endEpoch`) a linked bonus
  *  vault cannot be unlinked or replaced ({BonusVaultLocked}): an unlinked pool would let every early
@@ -97,9 +104,14 @@ contract WeightedStakingPoolV3 is
     bytes32 public constant STAKE_VOUCHER_TYPEHASH =
         keccak256("StakeVoucher(address user,uint256 nonce,uint256 deadline)");
 
-    /// @notice The new-stake bonus rate of a direct {stake} on the first campaign day, in basis
-    ///         points (5 %); it scales down with the whole days left ({previewStakeBonus}).
+    /// @notice The new-stake bonus rate of a direct {stake}, in basis points (5 %): paid in full
+    ///         before {bonusCutoff}, not at all from it on ({previewStakeBonus}).
     uint16 public constant STAKE_BONUS_BPS = 500;
+
+    /// @notice The fewest whole days left (`endEpoch - block.timestamp`, rounded up) at which an
+    ///         entry into v3.0 still earns its bonus, for a direct stake and for every migrator
+    ///         route alike (rule of 2026-11-17). The only place this number is written.
+    uint256 public constant BONUS_MIN_DAYS_LEFT = 30;
 
     /// @dev The basis-point denominator of {STAKE_BONUS_BPS} (private: not part of the ABI).
     uint256 private constant BPS = 10_000;
@@ -199,8 +211,7 @@ contract WeightedStakingPoolV3 is
      * @param owner_ The owner: the deployer while the deploy script wires the three v3 contracts,
      *        then the `LPTimelock` (two-step handover).
      * @param stakingToken_ $ASSET.
-     * @param activationEpoch_ Start of the window: it gates nothing, and with `endEpoch_` sets the
-     *        new-stake bonus scale (`campaignDays`).
+     * @param activationEpoch_ Start of the window: it gates nothing.
      * @param endEpoch_ End of the window; also the bonus unlock time.
      * @param signer_ The `StakeVoucher` signer (the backend key).
      * @dev The migrator and the bonus vault do not exist yet when the pool is deployed (both take
@@ -260,7 +271,7 @@ contract WeightedStakingPoolV3 is
         // revert of the bonus vault (`NotPool`) reverts the stake.
         address bonusVault_ = $.bonusVault;
         if (bonusVault_ != address(0)) {
-            uint256 bonus = _stakeBonus($, amount);
+            uint256 bonus = _stakeBonus(amount);
             if (bonus > 0) {
                 IV3BonusVaultStakeBonus(bonusVault_).reserveStake(msg.sender, bonus, SafeCast.toUint64($.endEpoch));
             }
@@ -380,8 +391,7 @@ contract WeightedStakingPoolV3 is
         return address(_poolStorage().stakingToken);
     }
 
-    /// @notice The window's start: it gates no action; the new-stake bonus reads it for the
-    ///         campaign length ({previewStakeBonus}).
+    /// @notice The window's start: it gates no action.
     function activationEpoch() external view returns (uint256) {
         return _poolStorage().activationEpoch;
     }
@@ -391,18 +401,28 @@ contract WeightedStakingPoolV3 is
     }
 
     /**
-     * @notice The new-stake bonus a direct {stake} of `amount` would reserve now:
-     *         `amount * STAKE_BONUS_BPS * daysLeft / (campaignDays * 10_000)`, rounded down, where
-     *         `campaignDays` is `endEpoch - activationEpoch` in whole days rounded up and `daysLeft`
-     *         is `endEpoch - block.timestamp` in whole days rounded up, capped at `campaignDays`
-     *         (a stake before the activation gets the full rate). Zero when less than 24 hours are
-     *         left (`endEpoch - block.timestamp < 1 days`, owner's decision of 2026-11-12), from
-     *         `endEpoch` on, and while no bonus vault is linked (the stake then reserves nothing).
+     * @notice The moment from which an entry into v3.0 earns no bonus: `endEpoch - 29 days`
+     *         (`BONUS_MIN_DAYS_LEFT - 1` whole days before the end). Strictly before it at least
+     *         30 whole days (rounded up) are left and the full rate applies; at it and after it,
+     *         nothing. Zero when `endEpoch` is itself earlier than 29 days (no bonus ever). The
+     *         `StakingMigrator` reads it for its three routes (rule of 2026-11-17).
+     */
+    function bonusCutoff() public view returns (uint256) {
+        uint256 end = _poolStorage().endEpoch;
+        uint256 span = (BONUS_MIN_DAYS_LEFT - 1) * 1 days;
+        return end > span ? end - span : 0;
+    }
+
+    /**
+     * @notice The new-stake bonus a direct {stake} of `amount` would reserve now: the full
+     *         `amount * STAKE_BONUS_BPS / 10_000`, rounded down, while `block.timestamp <
+     *         bonusCutoff()` (30 or more whole days left), and zero from {bonusCutoff} on (29 whole
+     *         days left or fewer, the end included; rule of 2026-11-17) and while no bonus vault is
+     *         linked (the stake then reserves nothing).
      */
     function previewStakeBonus(uint256 amount) external view returns (uint256) {
-        PoolStorage storage $ = _poolStorage();
-        if ($.bonusVault == address(0)) return 0;
-        return _stakeBonus($, amount);
+        if (_poolStorage().bonusVault == address(0)) return 0;
+        return _stakeBonus(amount);
     }
 
     function signer() external view returns (address) {
@@ -442,16 +462,11 @@ contract WeightedStakingPoolV3 is
         emit Staked(user, amount);
     }
 
-    /// @dev The new-stake bonus of `amount` at the current block time ({previewStakeBonus}).
-    ///      Zero with less than 24 hours left (owner's decision of 2026-11-12), and so from the end
-    ///      on. `endEpoch > activationEpoch` (the initializer) keeps `campaignDays` at one or more.
-    function _stakeBonus(PoolStorage storage $, uint256 amount) private view returns (uint256) {
-        uint256 end = $.endEpoch;
-        if (block.timestamp >= end || end - block.timestamp < 1 days) return 0;
-        uint256 campaignDays = Math.ceilDiv(end - $.activationEpoch, 1 days);
-        uint256 daysLeft = Math.ceilDiv(end - block.timestamp, 1 days);
-        if (daysLeft > campaignDays) daysLeft = campaignDays;
-        return Math.mulDiv(amount, uint256(STAKE_BONUS_BPS) * daysLeft, campaignDays * BPS);
+    /// @dev The new-stake bonus of `amount` at the current block time ({previewStakeBonus}): the
+    ///      full rate before {bonusCutoff}, zero from it on (and so from the end on).
+    function _stakeBonus(uint256 amount) private view returns (uint256) {
+        if (block.timestamp >= bonusCutoff()) return 0;
+        return Math.mulDiv(amount, STAKE_BONUS_BPS, BPS);
     }
 
     /// @dev The shared body of `unstake` and `emergencyUnstake`: after the end, pay the whole stake.

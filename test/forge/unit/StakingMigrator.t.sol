@@ -550,6 +550,135 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
+    // ──────────────────────── The 30-day bonus rule (2026-11-17) ─
+
+    /// @dev Route 1 one second before the pool's cutoff (30 whole days left): the full rate.
+    function test_BonusRule_CompoundOneSecondBeforeTheCutoffEarnsTheFullRate() public {
+        vm.warp(poolV3.bonusCutoff() - 1);
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
+        uint256 bought = REWARD * 4e18 / 1e6;
+        uint256 bonus = _compoundBonus(PRINCIPAL, bought, REWARD, 1000);
+        vm.expectEmit(address(bonusVault));
+        emit V3BonusVault.BonusReserved(alice, bonus, uint64(v3End), 1);
+        vm.prank(alice);
+        (, uint256 b) = migrator.compound(REWARD, PRINCIPAL, bought, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        assertEq(b, bonus);
+        assertGt(b, 0);
+        assertEq(_reservedOf(alice), bonus);
+    }
+
+    /// @dev Route 1 at the cutoff (exactly 29 days left): the route succeeds, the wallet is
+    ///      migrated, `Compounded` carries `bonus = 0`, and the bonus vault is never called.
+    function test_BonusRule_CompoundAtTheCutoffSucceedsWithNoBonus() public {
+        vm.warp(poolV3.bonusCutoff());
+        StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
+        uint256 bought = REWARD * 4e18 / 1e6;
+        vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserve.selector), 0);
+        vm.expectEmit(address(migrator));
+        emit StakingMigrator.Compounded(alice, PRINCIPAL, REWARD, bought, PRINCIPAL + bought, 0);
+        vm.prank(alice);
+        (uint256 s, uint256 b) = migrator.compound(REWARD, PRINCIPAL, bought, FAR_DEADLINE, _noPermit(), _noPermit(), v);
+        assertEq(b, 0);
+        assertEq(s, PRINCIPAL + bought);
+        assertEq(poolV3.stakes(alice), PRINCIPAL + bought, "staked in full");
+        assertTrue(migrator.migrated(alice));
+        assertEq(bonusVault.totalReserved(), 0);
+    }
+
+    /// @dev Route 2 one second before the cutoff: both parts earn the full rate.
+    function test_BonusRule_MoveToLpOneSecondBeforeTheCutoffReservesBothParts() public {
+        vm.warp(poolV3.bonusCutoff() - 1);
+        (uint256 tokenId, uint256 usdcUsed) = _moveAlice();
+        uint256 v3Amount = poolV3.stakes(alice);
+        uint256 lpBonus = (PRINCIPAL - v3Amount + migrator.usdcInAsset(usdcUsed)) * 1000 / 10_000;
+        (address user, uint256 amount,,,) = bonusVault.lpReservation(tokenId);
+        assertEq(user, alice);
+        assertEq(amount, lpBonus, "the LP part at the full rate");
+        assertGt(lpBonus, 0);
+        assertEq(_reservedOf(alice), v3Amount * 1000 / 10_000, "the v3 remainder at the full rate");
+    }
+
+    /// @dev Route 2 at the cutoff: the position is minted and staked, the remainder is staked in
+    ///      v3, the wallet is migrated, `MovedToLp` carries `lpBonus = 0` and `v3Bonus = 0`, and
+    ///      neither `reserveLp` nor `reserve` is called.
+    function test_BonusRule_MoveToLpAtTheCutoffSucceedsWithNoBonus() public {
+        vm.warp(poolV3.bonusCutoff());
+        vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserveLp.selector), 0);
+        vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserve.selector), 0);
+        vm.recordLogs();
+        (uint256 tokenId,) = _moveAlice();
+        bytes32 topic = keccak256("MovedToLp(address,uint256,uint256,uint256,uint256,uint256,uint256)");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bool seen;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].emitter == address(migrator) && logs[i].topics[0] == topic) {
+                (,, uint256 restaked, uint256 lpBonus, uint256 v3Bonus) =
+                    abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+                assertGt(restaked, 0, "a remainder was staked in v3");
+                assertEq(lpBonus, 0);
+                assertEq(v3Bonus, 0);
+                seen = true;
+            }
+        }
+        assertTrue(seen, "MovedToLp emitted");
+        assertEq(mathVault.stakerOf(tokenId), alice, "the NFT is staked for alice");
+        assertGt(poolV3.stakes(alice), 0);
+        (address user,,,,) = bonusVault.lpReservation(tokenId);
+        assertEq(user, address(0), "no LP record");
+        assertTrue(migrator.migrated(alice));
+        assertEq(bonusVault.totalReserved(), 0);
+        assertEq(bonusVault.totalLpReserved(), 0);
+    }
+
+    /// @dev Route 3 one second before the cutoff (full) and at the cutoff (nothing).
+    function test_BonusRule_ClaimRestakeAtTheCutoffSecond() public {
+        uint256 cutoff = poolV3.bonusCutoff();
+        assertEq(cutoff, v3End - 29 days);
+        StakingMigrator.Voucher memory va = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
+        StakingMigrator.Voucher memory vb = _voucher(migrator, bob, 3, PRINCIPAL, 0, 1);
+        vm.warp(cutoff - 1);
+        vm.prank(alice);
+        assertEq(
+            migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), va),
+            PRINCIPAL * 500 / 10_000,
+            "one second before the cutoff: full"
+        );
+        vm.warp(cutoff);
+        vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserve.selector), 0);
+        vm.expectEmit(address(migrator));
+        emit StakingMigrator.ClaimRestaked(bob, PRINCIPAL, 0);
+        vm.prank(bob);
+        assertEq(migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), vb), 0, "at the cutoff: nothing");
+        assertEq(poolV3.stakes(bob), PRINCIPAL, "the restake itself succeeds");
+        assertTrue(migrator.migrated(bob));
+        assertEq(_reservedOf(bob), 0);
+        assertEq(bonusVault.totalReserved(), PRINCIPAL * 500 / 10_000);
+    }
+
+    /// @dev Route 3 with 90, 31 and 30 whole days left earns the full 5 % (never scaled); with 29
+    ///      days, 1 day and the last second left it earns nothing, and the restake still succeeds.
+    function test_BonusRule_ClaimRestakeByDaysLeft() public {
+        uint256[6] memory left = [uint256(90 days), 31 days, 30 days, 29 days, 1 days, 1];
+        for (uint256 i = 0; i < 6; ++i) {
+            address user = makeAddr(string(abi.encodePacked("restaker", vm.toString(i))));
+            deal(address(asset), user, PRINCIPAL);
+            _approveMigrator(user);
+            vm.warp(v3End - left[i]);
+            StakingMigrator.Voucher memory v = _voucher(migrator, user, 3, PRINCIPAL, 0, 1);
+            vm.prank(user);
+            uint256 b = migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
+            assertEq(b, i < 3 ? PRINCIPAL * 500 / 10_000 : 0);
+            assertEq(_reservedOf(user), b);
+            assertEq(poolV3.stakes(user), PRINCIPAL);
+            assertTrue(migrator.migrated(user));
+        }
+        assertEq(bonusVault.totalReserved(), 3 * PRINCIPAL * 500 / 10_000);
+    }
+
+    function _reservedOf(address user) internal view returns (uint256 amount) {
+        (amount,) = bonusVault.reservedOf(user);
+    }
+
     // ──────────────────────── Pause and admin tiers ────────────
 
     function test_Pause_GuardianOrOperatorPausesOnlyTheOperatorUnpauses() public {
