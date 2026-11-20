@@ -123,8 +123,9 @@ contract MintRefundConservationFuzzTest is LocalHarness {
         uint256 fee1Seed,
         uint256 consumeSeed
     ) public {
-        uint128 fees0 = uint128(bound(fee0Seed, 0, 100e18));
-        uint128 fees1 = uint128(bound(fee1Seed, 0, 100e6));
+        // 100 whole tokens of fees at most, on whichever side each token sits.
+        uint128 fees0 = uint128(bound(fee0Seed, 0, _p0() / 10));
+        uint128 fees1 = uint128(bound(fee1Seed, 0, _p1() / 10));
         uint256 consumeBps = bound(consumeSeed, MIN_CONSUME_BPS, 10_000);
 
         uint256 tokenId = _stakePosition(alice);
@@ -132,39 +133,39 @@ contract MintRefundConservationFuzzTest is LocalHarness {
         // Fees accrued while the liquidity was live. They must be funded on the mock, which
         // pays every `collect` out of its own balance.
         npmMock.setPendingFees(tokenId, fees0, fees1);
-        if (fees0 > 0) asset.transfer(address(npmMock), fees0);
-        if (fees1 > 0) usdcToken.transfer(address(npmMock), fees1);
+        if (fees0 > 0) _t0().transfer(address(npmMock), fees0);
+        if (fees1 > 0) _t1().transfer(address(npmMock), fees1);
         npmMock.setMintConsumeBps(consumeBps);
 
-        uint256 collected0 = P_ASSET + fees0;
-        uint256 collected1 = P_USDC + fees1;
+        uint256 collected0 = _p0() + fees0;
+        uint256 collected1 = _p1() + fees1;
 
-        uint256 aliceAssetBefore = asset.balanceOf(alice);
-        uint256 aliceUsdcBefore = usdcToken.balanceOf(alice);
-        uint256 npmAssetBefore = asset.balanceOf(address(npmMock));
-        uint256 npmUsdcBefore = usdcToken.balanceOf(address(npmMock));
+        uint256 alice0Before = _t0().balanceOf(alice);
+        uint256 alice1Before = _t1().balanceOf(alice);
+        uint256 npm0Before = _t0().balanceOf(address(npmMock));
+        uint256 npm1Before = _t1().balanceOf(address(npmMock));
 
         vm.prank(alice);
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
 
-        uint256 refund0 = asset.balanceOf(alice) - aliceAssetBefore;
-        uint256 refund1 = usdcToken.balanceOf(alice) - aliceUsdcBefore;
+        uint256 refund0 = _t0().balanceOf(alice) - alice0Before;
+        uint256 refund1 = _t1().balanceOf(alice) - alice1Before;
 
-        assertEq(refund0, collected0 - (collected0 * consumeBps) / 10_000, "the ASSET refund is exactly the residue");
-        assertEq(refund1, collected1 - (collected1 * consumeBps) / 10_000, "the USDC refund is exactly the residue");
-        assertEq(npmAssetBefore - asset.balanceOf(address(npmMock)), refund0, "every ASSET wei that left is refunded");
-        assertEq(npmUsdcBefore - usdcToken.balanceOf(address(npmMock)), refund1, "and every USDC wei likewise");
+        assertEq(refund0, collected0 - (collected0 * consumeBps) / 10_000, "the token0 refund is exactly the residue");
+        assertEq(refund1, collected1 - (collected1 * consumeBps) / 10_000, "the token1 refund is exactly the residue");
+        assertEq(npm0Before - _t0().balanceOf(address(npmMock)), refund0, "every token0 wei that left is refunded");
+        assertEq(npm1Before - _t1().balanceOf(address(npmMock)), refund1, "and every token1 wei likewise");
 
         _assertNoResidue();
     }
 
     // ──────────────────────── Helpers ──────────────────────────
 
-    /// @dev A USDC -> ASSET zap. `usdcIsToken0` is false on this harness, so the only legal
-    ///      swap direction is token1 -> token0.
+    /// @dev A USDC -> ASSET zap: the only legal direction is `zeroForOne == usdcIsToken0`.
     function _zapIn(address user, uint256 usdcAmount, uint256 swapIn) private returns (uint256 tokenId) {
-        SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: swapIn, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+        SwapParams memory swap = SwapParams({
+            zeroForOne: zapper.usdcIsToken0(), amountIn: swapIn, amountOutMin: 0, amount0Min: 0, amount1Min: 0
+        });
 
         vm.startPrank(user);
         usdcToken.approve(address(zapper), usdcAmount);

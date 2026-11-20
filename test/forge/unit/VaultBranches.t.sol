@@ -699,7 +699,7 @@ contract VaultBranchesTest is LocalHarness {
     function test_Rebalance_SwapAmountEqualToTheBalanceIsAllowed() public {
         uint256 tokenId = _stakePosition(alice);
         SwapParams memory swap =
-            SwapParams({zeroForOne: true, amountIn: P_ASSET, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: true, amountIn: _p0(), amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swap, FAR_DEADLINE);
@@ -709,11 +709,11 @@ contract VaultBranchesTest is LocalHarness {
     function test_Rebalance_SwapAmountOneWeiOverTheBalanceReverts() public {
         uint256 tokenId = _stakePosition(alice);
         SwapParams memory swap =
-            SwapParams({zeroForOne: true, amountIn: P_ASSET + 1, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: true, amountIn: _p0() + 1, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(LPStakingVault.SwapAmountExceedsBalance.selector, token0, P_ASSET + 1, P_ASSET)
+            abi.encodeWithSelector(LPStakingVault.SwapAmountExceedsBalance.selector, token0, _p0() + 1, _p0())
         );
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swap, FAR_DEADLINE);
     }
@@ -791,25 +791,25 @@ contract VaultBranchesTest is LocalHarness {
     /// @dev The token0-only arm: the position holds no token1 at all, so the second `if`
     ///      is false while the first is true.
     function test_RefundDust_TakesTheToken0OnlyArm() public {
-        uint256 tokenId = _stakeWithPrincipal(alice, P_ASSET, 0);
+        uint256 tokenId = _stakeWithPrincipal(alice, _p0(), 0);
         npmMock.setMintConsumeBps(5_000);
-        uint256 before = asset.balanceOf(alice);
+        uint256 before = _t0().balanceOf(alice);
 
         vm.recordLogs();
         vm.prank(alice);
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
 
         (uint256 refund0, uint256 refund1) = _lastRebalanceRefunds();
-        assertEq(refund0, P_ASSET / 2, "the unconsumed half of token0 must be refunded");
+        assertEq(refund0, _p0() / 2, "the unconsumed half of token0 must be refunded");
         assertEq(refund1, 0, "the token1 arm must not fire when there is no token1");
-        assertEq(asset.balanceOf(alice) - before, P_ASSET / 2, "and the refund must reach the staker");
+        assertEq(_t0().balanceOf(alice) - before, _p0() / 2, "and the refund must reach the staker");
     }
 
     /// @dev The mirror arm: token1 only.
     function test_RefundDust_TakesTheToken1OnlyArm() public {
-        uint256 tokenId = _stakeWithPrincipal(alice, 0, P_USDC);
+        uint256 tokenId = _stakeWithPrincipal(alice, 0, _p1());
         npmMock.setMintConsumeBps(5_000);
-        uint256 before = usdcToken.balanceOf(alice);
+        uint256 before = _t1().balanceOf(alice);
 
         vm.recordLogs();
         vm.prank(alice);
@@ -817,8 +817,8 @@ contract VaultBranchesTest is LocalHarness {
 
         (uint256 refund0, uint256 refund1) = _lastRebalanceRefunds();
         assertEq(refund0, 0, "the token0 arm must not fire when there is no token0");
-        assertEq(refund1, P_USDC / 2, "the unconsumed half of token1 must be refunded");
-        assertEq(usdcToken.balanceOf(alice) - before, P_USDC / 2, "and the refund must reach the staker");
+        assertEq(refund1, _p1() / 2, "the unconsumed half of token1 must be refunded");
+        assertEq(_t1().balanceOf(alice) - before, _p1() / 2, "and the refund must reach the staker");
     }
 
     function test_RefundDust_TakesBothArmsAtOnce() public {
@@ -830,8 +830,8 @@ contract VaultBranchesTest is LocalHarness {
         vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, _noSwap(), FAR_DEADLINE);
 
         (uint256 refund0, uint256 refund1) = _lastRebalanceRefunds();
-        assertEq(refund0, P_ASSET / 2, "half of token0 must come back");
-        assertEq(refund1, P_USDC / 2, "half of token1 must come back");
+        assertEq(refund0, _p0() / 2, "half of token0 must come back");
+        assertEq(refund1, _p1() / 2, "half of token1 must come back");
     }
 
     /**
@@ -1197,7 +1197,7 @@ contract VaultBranchesTest is LocalHarness {
             tokenId,
             NEW_TICK_LOWER,
             NEW_TICK_UPPER,
-            SwapParams({zeroForOne: true, amountIn: P_ASSET / 2, amountOutMin: 0, amount0Min: 0, amount1Min: 0}),
+            SwapParams({zeroForOne: true, amountIn: _p0() / 2, amountOutMin: 0, amount0Min: 0, amount1Min: 0}),
             FAR_DEADLINE
         );
 

@@ -130,16 +130,19 @@ contract ZapperBranchesTest is LocalHarness {
 
     /// @dev Both orientations must be accepted, and `usdcIsToken0` must record which one.
     function test_Constructor_RecordsWhichSideOfThePairIsUsdc() public view {
-        assertFalse(zapper.usdcIsToken0(), "the harness pins ASSET as token0, so USDC is token1");
+        assertEq(zapper.usdcIsToken0(), _usdcFirst(), "the harness's token order decides which side USDC is");
         assertEq(zapper.usdc(), address(usdcToken), "the USDC side must be stored as given");
         assertEq(zapper.asset(), address(asset), "the ASSET side must be stored as given");
     }
 
     function test_Constructor_AcceptsTheReversedPairOrientation() public {
+        // Naming the two sides the other way round: the asset as USDC and USDC as the asset.
         LPZapper reversed = _deployZapper(
             address(vault), address(npmMock), address(routerMock), token0, token1, address(asset), address(usdcToken)
         );
-        assertTrue(reversed.usdcIsToken0(), "naming token0 as the USDC side must flip the recorded orientation");
+        assertEq(
+            reversed.usdcIsToken0(), !_usdcFirst(), "naming the other side as USDC must flip the recorded orientation"
+        );
     }
 
     // ──────────────────────── zapIn amounts ────────────────────

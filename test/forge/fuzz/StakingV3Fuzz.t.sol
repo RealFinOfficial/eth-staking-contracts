@@ -31,8 +31,10 @@ contract StakingV3FuzzTest is StakingV3Harness {
         vm.prank(carol);
         book.reserveLp(1, alice, amount, uint64(block.timestamp + 1));
 
-        IBonusEscrowHooks.Snapshot memory o = IBonusEscrowHooks.Snapshot(START_LOWER, START_UPPER, oldL);
-        IBonusEscrowHooks.Snapshot memory n = IBonusEscrowHooks.Snapshot(R1_LOWER, R1_UPPER, newL);
+        IBonusEscrowHooks.Snapshot memory o =
+            IBonusEscrowHooks.Snapshot(_lo(START_LOWER, START_UPPER), _hi(START_LOWER, START_UPPER), oldL);
+        IBonusEscrowHooks.Snapshot memory n =
+            IBonusEscrowHooks.Snapshot(_lo(R1_LOWER, R1_UPPER), _hi(R1_LOWER, R1_UPPER), newL);
         vm.prank(address(mathVault));
         book.onRebalance(1, 2, o, n);
 

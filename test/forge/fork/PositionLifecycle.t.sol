@@ -151,7 +151,7 @@ contract PositionLifecycleTest is ForkHarness {
     function test_ZapIn_MintsStakesAndCreditsTheCaller() public {
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP_USDC);
@@ -218,7 +218,7 @@ contract PositionLifecycleTest is ForkHarness {
 
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP_USDC);

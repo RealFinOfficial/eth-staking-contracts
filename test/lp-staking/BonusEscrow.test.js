@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, upgrades } = require("hardhat");
 const {
   time,
@@ -146,8 +147,11 @@ describe("BonusEscrow", function () {
     // Both pool tokens at 18 decimals, so every principal below is in one unit. The bonus token
     // is `asset`, whichever side the addresses happen to sort it onto.
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    asset = await Token.deploy("Asset", "ASSET", SUPPLY, 18);
-    usdc = await Token.deploy("Quote", "QUOTE", SUPPLY, 18);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    ({ asset, usdc } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", SUPPLY, 18),
+      () => Token.deploy("Quote", "QUOTE", SUPPLY, 18)
+    ));
     other = await Token.deploy("Other", "OTHER", SUPPLY, 18);
     assetAddr = await asset.getAddress();
     usdcAddr = await usdc.getAddress();

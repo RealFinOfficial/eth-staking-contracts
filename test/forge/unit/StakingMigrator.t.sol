@@ -119,14 +119,14 @@ contract StakingMigratorTest is StakingV3Harness {
     }
 
     function test_Compound_RevertsWhenSpotIsOutsideTheTwapBound() public {
-        mathPool.setCurrentTick(PRICE_TICK + int24(SWAP_DEVIATION_TICKS) + 1);
+        mathPool.setCurrentTick(_tk(PRICE_TICK) + int24(SWAP_DEVIATION_TICKS) + 1);
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
         vm.expectRevert(
             abi.encodeWithSelector(
                 TwapGuard.TwapDeviationTooHigh.selector,
-                PRICE_TICK + int24(SWAP_DEVIATION_TICKS) + 1,
-                PRICE_TICK,
+                _tk(PRICE_TICK) + int24(SWAP_DEVIATION_TICKS) + 1,
+                _tk(PRICE_TICK),
                 int24(SWAP_DEVIATION_TICKS)
             )
         );
@@ -393,8 +393,8 @@ contract StakingMigratorTest is StakingV3Harness {
         (,,,,, int24 tl, int24 tu, uint128 liq,,,,) = mathNpm.positions(tokenId);
         assertEq(tl, lower);
         assertEq(tu, upper);
-        assertEq(tl, PRICE_TICK - 6932, "spacing 1: exactly -6,932 ticks");
-        assertEq(tu, PRICE_TICK + 6932, "spacing 1: exactly +6,932 ticks");
+        assertEq(tl, _tk(PRICE_TICK) - 6932, "spacing 1: exactly -6,932 ticks");
+        assertEq(tu, _tk(PRICE_TICK) + 6932, "spacing 1: exactly +6,932 ticks");
         assertGt(liq, 0);
         assertEq(asset.balanceOf(alice), assetBefore - PRINCIPAL, "no $ASSET comes back: the rest is staked");
         assertGt(usdcUsed, REWARD * 9999 / 10_000, "the position takes (almost) all the USDC");
@@ -478,7 +478,7 @@ contract StakingMigratorTest is StakingV3Harness {
     }
 
     function test_MoveToLp_RevertsWhenSpotIsOutsideTheTwapBound() public {
-        mathPool.setCurrentTick(PRICE_TICK - int24(SWAP_DEVIATION_TICKS) - 1);
+        mathPool.setCurrentTick(_tk(PRICE_TICK) - int24(SWAP_DEVIATION_TICKS) - 1);
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
         vm.expectRevert();
@@ -860,7 +860,7 @@ contract StakingMigratorTest is StakingV3Harness {
         assertEq(m.asset(), address(asset));
         assertEq(m.fee(), MATH_FEE);
         assertEq(m.tickSpacing(), 1);
-        assertTrue(m.assetIsToken0());
+        assertEq(m.assetIsToken0(), _assetIsToken0());
     }
 
     function test_Initialize_ImplementationIsLocked() public {
@@ -1004,17 +1004,19 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_UsdcInAsset_ValuesAtTheMeanTickNotTheSpot() public {
         uint256 atMean = migrator.usdcInAsset(1_000e6);
         assertApproxEqRel(atMean, 4_000e18, 0.001e18, "$1,000 at $0.25");
-        mathPool.setCurrentTick(PRICE_TICK + 500); // the spot moves, the mean does not
+        mathPool.setCurrentTick(_tk(PRICE_TICK + 500)); // the spot moves, the mean does not
         assertEq(migrator.usdcInAsset(1_000e6), atMean);
-        mathPool.setTwapTick(PRICE_TICK + 6932); // the mean doubles the $ASSET price
+        mathPool.setTwapTick(_tk(PRICE_TICK + 6932)); // the mean doubles the $ASSET price
         assertApproxEqRel(migrator.usdcInAsset(1_000e6), 2_000e18, 0.001e18);
     }
 
     // ──────────────────────── Flipped orientation ──────────────
 
-    function test_Flipped_AllRoutesWorkWithUsdcAsToken0() public {
+    /// @dev The flipped rung is the OTHER order than the main rung: USDC as token0 by default,
+    ///      $ASSET as token0 under `LP_TOKEN_ORDER=usdc-first`.
+    function test_Flipped_AllRoutesWorkInTheOtherTokenOrder() public {
         _deployFlippedRung();
-        assertFalse(flippedMigrator.assetIsToken0());
+        assertEq(flippedMigrator.assetIsToken0(), _usdcFirst(), "the other order than the main rung");
         assertApproxEqRel(flippedMigrator.usdcInAsset(1_000e6), 4_000e18, 0.001e18);
 
         vm.startPrank(alice);

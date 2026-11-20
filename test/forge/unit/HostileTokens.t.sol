@@ -305,11 +305,11 @@ contract HostileTokensTest is LocalHarness {
     ///      not brick the next swap, because the vault approves through `forceApprove`.
     function test_Blocklist_AStaleRouterAllowanceDoesNotBrickTheNextSwap() public {
         vm.prank(address(vault));
-        asset.approve(address(routerMock), 1); // a stale, non-zero standing allowance
+        _t0().approve(address(routerMock), 1); // a stale, non-zero standing allowance on the swapped token
 
         uint256 tokenId = _stakePosition(alice);
         SwapParams memory swap =
-            SwapParams({zeroForOne: true, amountIn: P_ASSET, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: true, amountIn: _p0(), amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, NEW_TICK_LOWER, NEW_TICK_UPPER, swap, FAR_DEADLINE);

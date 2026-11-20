@@ -168,8 +168,18 @@ contract VaultCustodyHandler is Test {
     function _stakeFresh(address actor) private {
         if (staked.length >= MAX_LIVE_POSITIONS) return;
 
+        // The position names the pool's real token order (either order: LP_TOKEN_ORDER).
+        bool assetFirst = address(asset) < address(usdc);
         npm.mintFake(
-            actor, address(asset), address(usdc), fee, TICK_LOWER, TICK_UPPER, 1e9, PRINCIPAL_ASSET, PRINCIPAL_USDC
+            actor,
+            assetFirst ? address(asset) : address(usdc),
+            assetFirst ? address(usdc) : address(asset),
+            fee,
+            TICK_LOWER,
+            TICK_UPPER,
+            1e9,
+            assetFirst ? PRINCIPAL_ASSET : PRINCIPAL_USDC,
+            assetFirst ? PRINCIPAL_USDC : PRINCIPAL_ASSET
         );
         uint256 tokenId = npm.lastMintedId();
 

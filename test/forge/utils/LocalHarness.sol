@@ -78,8 +78,8 @@ abstract contract LocalHarness is BaseForge {
 
     // ──────────────────────── The fake market ──────────────────
 
-    MockERC20Permit internal asset; // 18 decimals, always token0 (see {_deployTokens})
-    MockERC20Permit internal usdcToken; // 6 decimals, always token1
+    MockERC20Permit internal asset; // 18 decimals, token0 unless LP_TOKEN_ORDER=usdc-first
+    MockERC20Permit internal usdcToken; // 6 decimals, token1 unless LP_TOKEN_ORDER=usdc-first
     MockUniswapV3Pool internal poolMock;
     MockPositionManager internal npmMock;
     MockSwapRouter internal routerMock;
@@ -129,27 +129,27 @@ abstract contract LocalHarness is BaseForge {
     }
 
     /**
-     * @dev Both real profiles sort the 18-decimal side below the 6-decimal side (ASSET <
-     *      USDC on mainnet, tREAL < tUSDC on Sepolia), so the local tier pins the same
-     *      ordering — otherwise a test reading `token0` would mean a different token here
-     *      than on the fork. CREATE2 with a searched salt makes that a fact rather than a
-     *      deployment accident, and the search is deterministic for a fixed bytecode.
+     * @dev The order follows {BaseForge-_usdcFirst}. `asset-first` (the default) is the order of
+     *      both Ethereum profiles (ASSET < USDC on mainnet, tREAL < tUSDC on Sepolia);
+     *      `usdc-first` is the order of the Avalanche C-Chain pool. CREATE2 with a searched salt
+     *      makes the order a fact rather than a deployment accident, and the search is
+     *      deterministic for a fixed bytecode.
      */
     function _deployTokens() private {
+        bool usdcFirst = _usdcFirst();
         asset = new MockERC20Permit("Asset", "ASSET", MINT_SUPPLY_ASSET, 18);
 
         for (uint256 salt = 0; salt < 256; ++salt) {
             MockERC20Permit candidate =
                 new MockERC20Permit{salt: bytes32(salt)}("USD Coin", "USDC", MINT_SUPPLY_USDC, 6);
-            if (address(candidate) > address(asset)) {
+            if ((address(candidate) > address(asset)) != usdcFirst) {
                 usdcToken = candidate;
                 break;
             }
         }
-        require(address(usdcToken) != address(0), "LocalHarness: no salt sorted USDC above ASSET");
+        require(address(usdcToken) != address(0), "LocalHarness: no salt gave the chosen token order");
 
-        token0 = address(asset);
-        token1 = address(usdcToken);
+        (token0, token1) = usdcFirst ? (address(usdcToken), address(asset)) : (address(asset), address(usdcToken));
     }
 
     function _deployMarket() private {
@@ -158,8 +158,8 @@ abstract contract LocalHarness is BaseForge {
         routerMock = new MockSwapRouter();
 
         // 0.5 USDC per ASSET, the price both profiles initialize at.
-        routerMock.setRate(token1, token0, 2e18, 1e6); // USDC -> ASSET
-        routerMock.setRate(token0, token1, 1e6, 2e18); // ASSET -> USDC
+        routerMock.setRate(address(usdcToken), address(asset), 2e18, 1e6); // USDC -> ASSET
+        routerMock.setRate(address(asset), address(usdcToken), 1e6, 2e18); // ASSET -> USDC
         asset.transfer(address(routerMock), 100_000_000e18);
         usdcToken.transfer(address(routerMock), 100_000_000e6);
     }
@@ -230,6 +230,27 @@ abstract contract LocalHarness is BaseForge {
         asset.transfer(address(distributor), DISTRIBUTOR_FUNDING);
     }
 
+    // ──────────────────────── Token order helpers ──────────────
+
+    /// @notice The pool's token0 / token1 as tokens (both orders: see {BaseForge-_usdcFirst}).
+    function _t0() internal view returns (MockERC20Permit) {
+        return MockERC20Permit(token0);
+    }
+
+    function _t1() internal view returns (MockERC20Permit) {
+        return MockERC20Permit(token1);
+    }
+
+    /// @notice The principal {_createPosition} books on token0 / token1: {P_ASSET} on the $ASSET
+    ///         side and {P_USDC} on the USDC side, whichever side that is.
+    function _p0() internal view returns (uint256) {
+        return _usdcFirst() ? P_USDC : P_ASSET;
+    }
+
+    function _p1() internal view returns (uint256) {
+        return _usdcFirst() ? P_ASSET : P_USDC;
+    }
+
     // ──────────────────────── Position helpers ─────────────────
 
     /**
@@ -240,7 +261,8 @@ abstract contract LocalHarness is BaseForge {
         internal
         returns (uint256 tokenId)
     {
-        return _createPositionOn(holder, token0, token1, FEE, tickLower, tickUpper, liquidity, P_ASSET, P_USDC);
+        (uint256 p0, uint256 p1) = _usdcFirst() ? (P_USDC, P_ASSET) : (P_ASSET, P_USDC);
+        return _createPositionOn(holder, token0, token1, FEE, tickLower, tickUpper, liquidity, p0, p1);
     }
 
     function _createPositionOn(
@@ -256,8 +278,8 @@ abstract contract LocalHarness is BaseForge {
     ) internal returns (uint256 tokenId) {
         npmMock.mintFake(holder, t0, t1, fee_, tickLower, tickUpper, liquidity, principal0, principal1);
         tokenId = npmMock.lastMintedId();
-        if (t0 == token0 && principal0 > 0) asset.transfer(address(npmMock), principal0);
-        if (t1 == token1 && principal1 > 0) usdcToken.transfer(address(npmMock), principal1);
+        if (t0 == token0 && principal0 > 0) MockERC20Permit(token0).transfer(address(npmMock), principal0);
+        if (t1 == token1 && principal1 > 0) MockERC20Permit(token1).transfer(address(npmMock), principal1);
     }
 
     /// @notice Fabricates a position, approves the vault and stakes it as `holder`.

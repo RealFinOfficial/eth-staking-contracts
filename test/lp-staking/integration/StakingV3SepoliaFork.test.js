@@ -49,6 +49,7 @@
  */
 
 const fs = require("fs");
+const { usdcFirst } = require("../helpers/tokenOrder");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
@@ -116,6 +117,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   let asset, usdc, pool, npm, router, timelock, vault, sw2;
   let poolV3, bonusVault, migrator;
   let assetIsToken0;
+  let assetAddr; // tREAL, or its stand-in under LP_TOKEN_ORDER=usdc-first
   const tokens = {};
   const notes = [];
   let vaultImplementations;
@@ -246,20 +248,34 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       await ethers.getSigners()
     ).map(pin);
 
-    asset = new ethers.Contract(P.asset.address, C.ERC20_ABI, deployer);
+    // The $ASSET side: tREAL, which sorts below tUSDC on Sepolia; under LP_TOKEN_ORDER=usdc-first
+    // (the Avalanche order) a fresh 18-decimal stand-in, deployed again until it sorts ABOVE tUSDC.
+    assetAddr = P.asset.address;
+    if (usdcFirst()) {
+      const Stand = await ethers.getContractFactory("MockERC20Decimals", deployer);
+      for (let i = 0; ; i++) {
+        const t = await (await Stand.deploy("Test REAL (usdc-first)", "tREAL", ASSET(100_000_000), 18)).waitForDeployment();
+        assetAddr = await t.getAddress();
+        if (assetAddr.toLowerCase() > P.usdc.address.toLowerCase()) break;
+        if (i >= 32) throw new Error("no $ASSET stand-in address sorted above tUSDC");
+      }
+    }
+    asset = new ethers.Contract(assetAddr, C.ERC20_ABI, deployer);
     usdc = new ethers.Contract(P.usdc.address, C.ERC20_ABI, deployer);
     npm = new ethers.Contract(P.npm, C.NPM_ABI, deployer);
     router = new ethers.Contract(P.router, C.ROUTER_ABI, deployer);
-    ({ assetIsToken0 } = uni.sortTokens(P.asset.address, P.usdc.address));
-    tokens.token0 = assetIsToken0 ? P.asset.address : P.usdc.address;
-    tokens.token1 = assetIsToken0 ? P.usdc.address : P.asset.address;
+    ({ assetIsToken0 } = uni.sortTokens(assetAddr, P.usdc.address));
+    tokens.token0 = assetIsToken0 ? assetAddr : P.usdc.address;
+    tokens.token1 = assetIsToken0 ? P.usdc.address : assetAddr;
 
-    // Funding: real transfers from the holder of both supplies.
+    // Funding: real transfers from the holder of both supplies (the $ASSET stand-in of
+    // usdc-first is minted to the deployer, who funds from it).
     const funder = await impersonate(FUNDER);
-    await (await asset.connect(funder).transfer(deployer.address, ASSET(3_000_000))).wait();
+    const assetFunder = usdcFirst() ? deployer : funder;
+    if (!usdcFirst()) await (await asset.connect(funder).transfer(deployer.address, ASSET(3_000_000))).wait();
     await (await usdc.connect(funder).transfer(deployer.address, USDC(1_000_000))).wait();
     for (const user of [alice, bob, carol, dave, erin, frank, george, henry, ivan]) {
-      await (await asset.connect(funder).transfer(user.address, PRINCIPAL)).wait();
+      await (await asset.connect(assetFunder).transfer(user.address, PRINCIPAL)).wait();
     }
     for (const user of [deployer, alice, bob, carol]) {
       for (const token of [asset, usdc]) {
@@ -288,14 +304,19 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       usdcAmount: USDC(500_000),
     });
 
-    // The oracle: 400 slots, then more than 1,800 s of history written by real round trips.
-    await (await pool.increaseObservationCardinalityNext(400)).wait();
+    // The oracle: 1801 slots (the migrator's 1,800 s valuation window needs window + 1), grown in
+    // steps of 150 slots so no transaction passes the 16,777,216 gas cap of one transaction
+    // (EIP-7825; about 67,000 gas per new slot on the fork), then more than 1,800 s of history
+    // written by real round trips.
+    for (const next of C.oracleGrowthSizes(1, 1801)) {
+      await (await pool.increaseObservationCardinalityNext(next)).wait();
+    }
     for (let i = 0; i < 8; i++) {
       await advance(300);
-      await swap(deployer, P.usdc.address, P.asset.address, USDC(500));
-      await swap(deployer, P.asset.address, P.usdc.address, ASSET(1_000));
+      await swap(deployer, P.usdc.address, assetAddr, USDC(500));
+      await swap(deployer, assetAddr, P.usdc.address, ASSET(1_000));
     }
-    expect((await pool.slot0()).observationCardinality).to.equal(400n);
+    expect((await pool.slot0()).observationCardinality).to.equal(1801n);
 
     // The LP stack's owner and vault. The proxy runs the PREVIOUS implementation (746b22c, no
     // listener); the batch upgrades it to the current one, exactly like the live stacks.
@@ -325,7 +346,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     // The sw2 test pool: the v2 contract, a one-hour window, funded with tUSDC.
     const start = BigInt(await now());
     const Sw2 = await ethers.getContractFactory("WeightedStakingPool", deployer);
-    sw2 = await Sw2.deploy(P.asset.address, P.usdc.address, start, start + 3600n, backendSigner.address);
+    sw2 = await Sw2.deploy(assetAddr, P.usdc.address, start, start + 3600n, backendSigner.address);
     await sw2.waitForDeployment();
     await (await usdc.approve(await sw2.getAddress(), SW2_REWARD)).wait();
     await (await sw2.addRewards(SW2_REWARD)).wait();
@@ -345,7 +366,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       endEpoch: Number(start + 3600n + 30n * 86400n),
       stakeSigner: backendSigner.address,
       migratorSigner: backendSigner.address,
-      asset: P.asset.address,
+      asset: assetAddr,
       usdc: P.usdc.address,
       lpVault: await vault.getAddress(),
       timelock: await timelock.getAddress(),
@@ -396,7 +417,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(await bonusVault.migrator()).to.equal(ethers.ZeroAddress);
     expect(await poolV3.bonusVault()).to.equal(result.addresses.bonusVault);
     expect(await poolV3.signer()).to.equal(backendSigner.address);
-    expect(await poolV3.stakingToken()).to.equal(P.asset.address);
+    expect(await poolV3.stakingToken()).to.equal(assetAddr);
     // No cap since 2026-11-12: the vault has no `maxTotalReserved()` any more.
     expect(bonusVault.interface.getFunction("maxTotalReserved", [])).to.equal(null);
 
@@ -590,10 +611,14 @@ RUN("staking v3 transition on a Sepolia fork", function () {
   it("bob re-ranges: the LP reservation moves to the new tokenId, scaled down, and the listener did not fail", async function () {
     const before = (await bonusVault.lpReservation(bobTokenId)).amount;
     const tick = Number((await pool.slot0()).tick);
-    const newLower = Math.ceil((tick + 120) / SPACING) * SPACING; // the band above the price: $ASSET only
+    // The band on the $ASSET side of the price: above it with $ASSET as token0, below it with
+    // USDC as token0 (LP_TOKEN_ORDER=usdc-first).
+    const newLower = assetIsToken0
+      ? Math.ceil((tick + 120) / SPACING) * SPACING
+      : Math.floor((tick - 120) / SPACING) * SPACING - 60 * SPACING;
     const newUpper = newLower + 60 * SPACING;
     const noSwap = { zeroForOne: true, amountIn: 0n, amountOutMin: 0n, amount0Min: 0n, amount1Min: 0n };
-    expect(assetIsToken0, "tREAL sorts below tUSDC on Sepolia").to.equal(true);
+    expect(assetIsToken0, "the pair sorts in the LP_TOKEN_ORDER order").to.equal(!usdcFirst());
 
     // The listener's own cost on the real pool (its `previewTwap` -> `observe`), as the vault
     // would send it: old = the live position, new = the same band at half the liquidity.

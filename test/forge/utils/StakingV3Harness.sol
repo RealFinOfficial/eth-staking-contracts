@@ -29,8 +29,10 @@ import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol
  *
  *  The router mock swaps USDC into $ASSET at the pool's price, 4 $ASSET per USDC.
  *
- *  {_deployFlippedRung} builds a second, independent market where USDC is token0 (a fresh $ASSET
- *  token is salted above the USDC address), for the orientation branches of the migrator.
+ *  {_deployFlippedRung} builds a second, independent market in the OTHER token order than the main
+ *  rung (a fresh $ASSET token salted on the other side of the USDC address), for the orientation
+ *  branches of the migrator: USDC as token0 by default, $ASSET as token0 under
+ *  `LP_TOKEN_ORDER=usdc-first`.
  */
 abstract contract StakingV3Harness is ApeBondHarness {
     uint256 internal constant V3_DURATION = 90 days;
@@ -50,7 +52,7 @@ abstract contract StakingV3Harness is ApeBondHarness {
     uint256 internal v3Start;
     uint256 internal v3End;
 
-    // ── Flipped rung (USDC = token0) ──
+    // ── Flipped rung (the other token order than the main rung) ──
     MockERC20Permit internal flippedAsset;
     MockUniswapV3Pool internal flippedPool;
     MockMathPositionManager internal flippedNpm;
@@ -137,33 +139,31 @@ abstract contract StakingV3Harness is ApeBondHarness {
 
     // ──────────────────────── Flipped rung ─────────────────────
 
-    /// @notice A market where USDC sorts BELOW $ASSET: a fresh $ASSET is salted above `usdcToken`.
+    /// @notice A market in the other order than the main rung: a fresh $ASSET is salted above
+    ///         `usdcToken` (USDC = token0) by default, below it under `LP_TOKEN_ORDER=usdc-first`.
     function _deployFlippedRung() internal {
+        bool flippedUsdcFirst = !_usdcFirst();
         for (uint256 salt = 1000; salt < 1256; ++salt) {
             MockERC20Permit candidate = new MockERC20Permit{salt: bytes32(salt)}("Asset B", "ASSETB", 1e30, 18);
-            if (address(candidate) > address(usdcToken)) {
+            if ((address(candidate) > address(usdcToken)) == flippedUsdcFirst) {
                 flippedAsset = candidate;
                 break;
             }
         }
-        require(address(flippedAsset) != address(0), "StakingV3Harness: no salt sorted ASSET above USDC");
+        require(address(flippedAsset) != address(0), "StakingV3Harness: no salt gave the flipped order");
+        (address f0, address f1) =
+            flippedUsdcFirst ? (address(usdcToken), address(flippedAsset)) : (address(flippedAsset), address(usdcToken));
 
-        // $0.25 per $ASSET with USDC = token0: price = ASSET per USDC = 4e12 raw; tick = +290188.
-        int24 tick = -PRICE_TICK;
-        flippedPool = new MockUniswapV3Pool(address(usdcToken), address(flippedAsset), MATH_FEE);
+        // $0.25 per $ASSET in the flipped order: the main rung's tick negated (+290188 with USDC
+        // as token0, -290188 with $ASSET as token0).
+        int24 tick = -_tk(PRICE_TICK);
+        flippedPool = new MockUniswapV3Pool(f0, f1, MATH_FEE);
         flippedPool.setTicks(tick, tick);
         flippedPool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(tick));
         flippedNpm = new MockMathPositionManager(address(flippedPool));
 
         VaultProxyParams memory params = _vaultParams(
-            address(flippedNpm),
-            address(flippedPool),
-            address(usdcToken),
-            address(flippedAsset),
-            address(routerMock),
-            address(this),
-            MIN_TWAP_WINDOW,
-            500
+            address(flippedNpm), address(flippedPool), f0, f1, address(routerMock), address(this), MIN_TWAP_WINDOW, 500
         );
         params.fee = MATH_FEE;
         flippedVault = _deployVaultProxy(params);

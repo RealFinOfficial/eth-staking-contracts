@@ -29,10 +29,21 @@ concurrency:
 # `test-live/` appears in no job on purpose: it sends REAL Sepolia transactions with real
 # gas and is run by hand only. See README.md for its runbook.
 
+# ── Both token orders (2026-11-20) ─────────────────────────────────────────────────────────
+#
+# On Ethereum $ASSET is the first token of the Uniswap V3 pool, on Avalanche C-Chain USDC is.
+# Both jobs run once per order through LP_TOKEN_ORDER (asset-first | usdc-first); the harnesses
+# deploy their tokens in the chosen order (test/lp-staking/helpers/tokenOrder.js,
+# BaseForge._usdcFirst). The coverage gate runs once, on the default order.
+
 jobs:
   build:
-    name: hardhat (unit + fork suites)
+    name: hardhat (unit + fork suites, ${{ matrix.token_order }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        token_order: [asset-first, usdc-first]
 
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +79,7 @@ jobs:
         env:
           MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          LP_TOKEN_ORDER: ${{ matrix.token_order }}
 
       # The two spawned-node fork suites keep their node log, script logs and registry
       # copies in a scratch directory under the runner's /tmp (RPC keys already masked by
@@ -77,7 +89,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fork-suite-logs
+          name: fork-suite-logs-${{ matrix.token_order }}
           path: |
             /tmp/lp-sepoliafork-*
             /tmp/lp-localfork-*
@@ -85,8 +97,12 @@ jobs:
           if-no-files-found: warn
 
   forge:
-    name: forge (fork, unit, fuzz, invariant, coverage gate)
+    name: forge (fork, unit, fuzz, invariant, coverage gate, ${{ matrix.token_order }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        token_order: [asset-first, usdc-first]
 
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +136,7 @@ jobs:
         run: npm run test:forge:ci
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+          LP_TOKEN_ORDER: ${{ matrix.token_order }}
 
       # Blocking gate: per-file line and branch floors for the seven LP-staking contracts and
       # the four libraries they share. `--ir-minimum` is not a tuning knob — coverage disables the
@@ -127,6 +144,7 @@ jobs:
       # without it — so the npm script pins it and passes the basis in through
       # LP_COVERAGE_BASIS, which the checker refuses to grade a run without.
       - name: Coverage gate
+        if: matrix.token_order == 'asset-first'
         run: npm run coverage:forge:check
         env:
           SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}

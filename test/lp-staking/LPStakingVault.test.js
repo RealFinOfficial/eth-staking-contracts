@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, upgrades } = require("hardhat");
 const {
   time,
@@ -163,8 +164,11 @@ describe("LPStakingVault", function () {
     [owner, guardian, alice, bob, zapper, stranger, operatorSafe] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    const usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
-    const asset = await Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    const { usdc, asset } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18),
+      () => Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6)
+    );
 
     // Uniswap sorts the pair ascending by address, so which of USDC(6) and ASSET(18) ends up
     // as token0 is an accident of deployment order. The vault is token-agnostic, so the

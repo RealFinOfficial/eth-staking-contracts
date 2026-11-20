@@ -40,12 +40,14 @@ contract V3BonusVaultTest is StakingV3Harness {
         asset.approve(address(book), type(uint256).max);
     }
 
-    function _snap(uint128 liquidity) internal pure returns (IBonusEscrowHooks.Snapshot memory) {
-        return IBonusEscrowHooks.Snapshot({tickLower: START_LOWER, tickUpper: START_UPPER, liquidity: liquidity});
+    function _snap(uint128 liquidity) internal view returns (IBonusEscrowHooks.Snapshot memory) {
+        (int24 lower, int24 upper) = _band(START_LOWER, START_UPPER);
+        return IBonusEscrowHooks.Snapshot({tickLower: lower, tickUpper: upper, liquidity: liquidity});
     }
 
-    function _value(uint128 liquidity) internal pure returns (uint256) {
-        return PositionValue.valueAt(liquidity, START_LOWER, START_UPPER, PRICE_TICK, true);
+    function _value(uint128 liquidity) internal view returns (uint256) {
+        (int24 lower, int24 upper) = _band(START_LOWER, START_UPPER);
+        return PositionValue.valueAt(liquidity, lower, upper, _tk(PRICE_TICK), _assetIsToken0());
     }
 
     function _reserveLp(uint256 id, address user, uint256 amount) internal {
@@ -155,18 +157,20 @@ contract V3BonusVaultTest is StakingV3Harness {
         emit V3BonusVault.VaultSet(address(0), address(flippedVault));
         flipped.setVault(address(flippedVault));
         assertEq(flipped.vault(), address(flippedVault));
-        // $ASSET as token1: a rebalance to a smaller position scales down by the token1 valuation.
+        // The flipped rung is the other token order: a rebalance to a smaller position scales down by
+        // the valuation on the $ASSET side of THAT order (token1 by default, token0 under usdc-first).
         vm.prank(carol);
         flipped.reserveLp(ID1, alice, BONUS, UNLOCK);
-        IBonusEscrowHooks.Snapshot memory o =
-            IBonusEscrowHooks.Snapshot({tickLower: -START_UPPER, tickUpper: -START_LOWER, liquidity: L});
+        (int24 ml, int24 mu) = _band(START_LOWER, START_UPPER);
+        (int24 fl, int24 fu) = (-mu, -ml);
+        IBonusEscrowHooks.Snapshot memory o = IBonusEscrowHooks.Snapshot({tickLower: fl, tickUpper: fu, liquidity: L});
         IBonusEscrowHooks.Snapshot memory n =
-            IBonusEscrowHooks.Snapshot({tickLower: -START_UPPER, tickUpper: -START_LOWER, liquidity: L / 4});
+            IBonusEscrowHooks.Snapshot({tickLower: fl, tickUpper: fu, liquidity: L / 4});
         vm.prank(address(flippedVault));
         flipped.onRebalance(ID1, ID2, o, n);
         (, uint256 amount,,,) = flipped.lpReservation(ID2);
-        uint256 vo = PositionValue.valueAt(L, -START_UPPER, -START_LOWER, -PRICE_TICK, false);
-        uint256 vn = PositionValue.valueAt(L / 4, -START_UPPER, -START_LOWER, -PRICE_TICK, false);
+        uint256 vo = PositionValue.valueAt(L, fl, fu, -_tk(PRICE_TICK), !_assetIsToken0());
+        uint256 vn = PositionValue.valueAt(L / 4, fl, fu, -_tk(PRICE_TICK), !_assetIsToken0());
         assertEq(amount, Math.mulDiv(BONUS, vn, vo));
     }
 

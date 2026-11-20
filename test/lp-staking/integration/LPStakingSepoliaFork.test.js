@@ -177,6 +177,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
   let poolRun = null; // first `create-sepolia-pool.js` run
   let deployRun = null; // `deploy-lp-staking.js` run
   let growFromBlock = null; // S7, the oracle growth
+  let growFromNext = 1; // S7, the pool's observationCardinalityNext before the growth
   let deployFromBlock = null;
   let deployToBlock = null;
   let seedTokenId = null;
@@ -520,11 +521,15 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
     //      write after the growth switches the pool to the grown size (its one-slot buffer
     //      wraps at once), and the round trips leave more than the window of history.
     growFromBlock = (await head()) + 1;
-    ledger.record(
-      "S7",
-      "grow the oracle",
-      await chain.send(pool.connect(w.deployer).increaseObservationCardinalityNext(C.OBSERVATION_CARDINALITY))
-    );
+    // In steps of C.ORACLE_GROW_STEP slots: one transaction may use at most 16,777,216 gas.
+    growFromNext = Number((await pool.slot0()).observationCardinalityNext);
+    for (const size of C.oracleGrowthSizes(growFromNext, C.OBSERVATION_CARDINALITY)) {
+      ledger.record(
+        "S7",
+        `grow the oracle to ${size}`,
+        await chain.send(pool.connect(w.deployer).increaseObservationCardinalityNext(size))
+      );
+    }
     for (let i = 0; i < C.WARMUP_ROUNDS; i++) {
       await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
       const tickBefore = await uni.currentTick(pool);
@@ -1219,8 +1224,10 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         }),
         { [poolAddr.toLowerCase()]: pool.interface }
       );
-      expect(logs.length).to.equal(1);
-      expect(logs[0].args.observationCardinalityNextNew).to.equal(
+      const sizes = C.oracleGrowthSizes(growFromNext, C.OBSERVATION_CARDINALITY);
+      expect(logs.length).to.equal(sizes.length);
+      logs.forEach((log, i) => expect(log.args.observationCardinalityNextNew).to.equal(BigInt(sizes[i])));
+      expect(logs[logs.length - 1].args.observationCardinalityNextNew).to.equal(
         BigInt(C.OBSERVATION_CARDINALITY)
       );
       // A pool this run created starts at 1; a pre-existing one starts wherever it is.
@@ -2665,7 +2672,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
       }
 
       // The warm-up round trips are at least 60 s apart, which is what fills the oracle.
-      const warmup = timestamps.filter((t) => t.step === "S7" && t.label !== "grow the oracle").map((t) => t.ts);
+      const warmup = timestamps.filter((t) => t.step === "S7" && !t.label.startsWith("grow the oracle")).map((t) => t.ts);
       expect(warmup.length).to.equal(C.WARMUP_ROUNDS * 2);
       for (let i = 1; i < warmup.length; i++) {
         expect(warmup[i] - warmup[i - 1]).to.be.at.least(C.WARMUP_STEP_SECONDS);
@@ -2911,7 +2918,7 @@ describe(`LP staking — ${P.name} fork node (real ${P.asset.symbol}/${P.usdc.sy
         return acc;
       }, {});
       if (poolIsCreated) expect(counts.Initialize).to.equal(1);
-      expect(counts.IncreaseObservationCardinalityNext).to.equal(1);
+      expect(counts.IncreaseObservationCardinalityNext).to.equal(C.oracleGrowthSizes(growFromNext, C.OBSERVATION_CARDINALITY).length);
       // 16 warm-up swaps + 6 fee swaps + one swap leg each in A7, A8 and A10.
       expect(counts.Swap).to.equal(C.WARMUP_ROUNDS * 2 + C.FEE_ROUNDS * 2 + 3);
       expect(counts.Mint).to.be.greaterThan(0);

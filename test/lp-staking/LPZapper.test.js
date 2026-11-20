@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
@@ -151,9 +152,12 @@ describe("LPZapper", function () {
 
     // USDC carries a real EIP-2612 permit so `zapInWithPermit` can be driven end to end.
     const Permit = await ethers.getContractFactory("MockERC20Permit");
-    usdc = await Permit.deploy("USD Coin", "USDC", USDC(10_000_000), 6);
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    asset = await Token.deploy("Asset", "ASSET", ASSET(10_000_000), 18);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    ({ usdc, asset } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", ASSET(10_000_000), 18),
+      () => Permit.deploy("USD Coin", "USDC", USDC(10_000_000), 6)
+    ));
 
     usdcAddr = await usdc.getAddress();
     assetAddr = await asset.getAddress();

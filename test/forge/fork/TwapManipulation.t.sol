@@ -44,12 +44,12 @@ contract TwapColdOracleTest is ForkHarness {
 
     /**
      * @dev SEC-01, closed by audit L-04: a freshly created pool stores exactly one observation,
-     *      and `initialize` refuses it — the CURRENT cardinality 1 is below ceil(300 / 6) + 1.
+     *      and `initialize` refuses it — the CURRENT cardinality 1 is below 300 + 1.
      */
     function test_L04_AColdPoolRefusesTheVaultAtInitialize() public {
         (,,, uint16 cardinality,,,) = poolRef.slot0();
         assertEq(cardinality, 1, "a freshly created pool stores exactly one observation");
-        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
+        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(301)));
     }
 
     /// @dev Growing `observationCardinalityNext` alone does not count: the grown slots are used
@@ -59,7 +59,7 @@ contract TwapColdOracleTest is ForkHarness {
         (,,, uint16 cardinality, uint16 cardinalityNext,,) = poolRef.slot0();
         assertEq(cardinalityNext, OBSERVATION_CARDINALITY, "next is grown");
         assertEq(cardinality, 1, "current is not, until the next write");
-        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
+        _expectVaultRefused(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(301)));
     }
 
     /**
@@ -95,19 +95,19 @@ contract TwapColdOracleTest is ForkHarness {
         assertTrue(zapperWithin, "and the zapper's too");
     }
 
-    /// @dev On a live stack the setter applies the same rule against the real pool: 150 slots
-    ///      serve 300 s, not 1800 s (301 needed) and not 3600 s (601 needed).
+    /// @dev On a live stack the setter applies the same rule against the real pool: 601 slots
+    ///      serve 300 s, not 1800 s (1801 needed) and not 3600 s (3601 needed).
     function test_L04_SetTwapParamsRefusesAWindowTheRealPoolCannotServe() public {
         _warmPoolOracle();
         _deployStack();
 
         vm.startPrank(multisig);
         vm.expectRevert(
-            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(301))
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(1801))
         );
         vault.setTwapParams(1800, 953);
         vm.expectRevert(
-            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(601))
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(3601))
         );
         zapper.setTwapParams(3600, 953);
         vault.setTwapParams(WINDOW, 953);
@@ -189,7 +189,7 @@ contract TwapManipulationTest is ForkHarness {
         assertGt(_deviationTicks(), uint256(profile.maxDevTicks), "the push must actually leave the ceiling behind");
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.prank(alice);
         vm.expectPartialRevert(TwapGuard.TwapDeviationTooHigh.selector);
         vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
@@ -212,7 +212,7 @@ contract TwapManipulationTest is ForkHarness {
         _pushSpotUp(PUSH_UP_USDC);
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), 1_000e6);
         vm.expectPartialRevert(TwapGuard.TwapDeviationTooHigh.selector);
@@ -227,7 +227,7 @@ contract TwapManipulationTest is ForkHarness {
 
         (int24 spot, int24 twap, int24 maxDeviationTicks,) = vault.previewTwap();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(TwapGuard.TwapDeviationTooHigh.selector, spot, twap, maxDeviationTicks));
@@ -248,8 +248,11 @@ contract TwapManipulationTest is ForkHarness {
         vm.prank(multisig);
         vault.setTwapParams(MIN_TWAP_WINDOW, uint24(deviation));
 
+        // The tick left the range upward, so the position holds token1 only: swap token1 -> token0
+        // (USDC with $ASSET as token0, $ASSET with USDC as token0).
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: false, amountIn: 0, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+        swap.amountIn = token1 == profile.asset ? 1_000e18 : 1_000e6; // 1,000 whole token1
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
         assertEq(vault.stakerOf(newTokenId), alice, "deviation == ceiling must pass the guard");
@@ -268,7 +271,7 @@ contract TwapManipulationTest is ForkHarness {
         vault.setTwapParams(MIN_TWAP_WINDOW, uint24(deviation - 1));
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.prank(alice);
         vm.expectPartialRevert(TwapGuard.TwapDeviationTooHigh.selector);
         vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
@@ -294,8 +297,11 @@ contract TwapManipulationTest is ForkHarness {
             "after a full window at the new price the guard must reopen"
         );
 
+        // The tick left the range upward, so the position holds token1 only: swap token1 -> token0
+        // (USDC with $ASSET as token0, $ASSET with USDC as token0).
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: false, amountIn: 0, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+        swap.amountIn = token1 == profile.asset ? 1_000e18 : 1_000e6; // 1,000 whole token1
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
         assertEq(vault.stakerOf(newTokenId), alice, "a re-converged market must let the swap leg through again");
@@ -356,11 +362,11 @@ contract TwapManipulationTest is ForkHarness {
 
         // and the boundary itself passes the bounds, so the bound is exactly where it claims to
         // be: what refuses it on this pool is the history check that follows (audit L-04),
-        // since 150 slots cannot serve 3600 s (601 needed). The unit tier accepts it on a mock
+        // since 601 slots cannot serve 3600 s (3601 needed). The unit tier accepts it on a mock
         // pool that can.
         vm.prank(multisig);
         vm.expectRevert(
-            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(601))
+            abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, OBSERVATION_CARDINALITY, uint256(3601))
         );
         vault.setTwapParams(MAX_TWAP_WINDOW, 500);
         assertEq(vault.twapWindow(), before_, "a window the pool cannot serve must leave the stored one untouched");
@@ -389,7 +395,7 @@ contract TwapManipulationTest is ForkHarness {
 
         // Both legs still work at the parameters the deploy left behind.
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
@@ -398,7 +404,7 @@ contract TwapManipulationTest is ForkHarness {
         // Half the USDC is swapped so the mint gets both sides; a full-size swap would
         // leave the zapper with nothing to pair the ASSET against.
         SwapParams memory zapSwap =
-            SwapParams({zeroForOne: false, amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 500e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.startPrank(bob);
         usdcToken.approve(address(zapper), 1_000e6);
         uint256 zapped = zapper.zapIn(1_000e6, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, zapSwap, FAR_DEADLINE);

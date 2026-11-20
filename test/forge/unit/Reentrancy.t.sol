@@ -317,8 +317,8 @@ contract ReentrancyTest is LocalHarness {
     }
 
     /// @dev token0 -> token1 with the whole withdrawn principal.
-    function _swapAll() private pure returns (SwapParams memory) {
-        return SwapParams({zeroForOne: true, amountIn: P_ASSET, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+    function _swapAll() private view returns (SwapParams memory) {
+        return SwapParams({zeroForOne: true, amountIn: _p0(), amountOutMin: 0, amount0Min: 0, amount1Min: 0});
     }
 
     function _zapHalf() private view returns (SwapParams memory) {

@@ -118,7 +118,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         assertEq(adapter.token1(), token1, "token1 from the vault");
         assertEq(adapter.fee(), FEE, "the fee from the vault");
         assertEq(adapter.tickSpacing(), int24(60), "the spacing from the vault's pool");
-        assertTrue(adapter.bonusIsToken0(), "an ASSET bonus values in token0");
+        assertEq(adapter.bonusIsToken0(), _assetIsToken0(), "an ASSET bonus values in the $ASSET side");
         assertEq(adapter.guardian(), apeGuardian, "the guardian");
         assertEq(adapter.owner(), address(this), "the owner");
         assertFalse(adapter.depositsPaused(), "open");
@@ -131,7 +131,7 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         ApeBondPositionAdapter usdcAdapter = new ApeBondPositionAdapter(
             address(npmMock), address(vault), address(usdcEscrow), address(this), apeGuardian, MIN_CLIFF, 1800
         );
-        assertFalse(usdcAdapter.bonusIsToken0(), "a USDC bonus values in token1");
+        assertEq(usdcAdapter.bonusIsToken0(), _usdcFirst(), "a USDC bonus values in the USDC side");
     }
 
     /// @dev Both roles' initial state is in the logs from block one.
@@ -373,15 +373,15 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     }
 
     /// @dev The history check (audit L-04) runs in the constructor and in the setter: 1800 s needs
-    ///      ceil(1800 / 6) + 1 = 301 current slots, and 1800 s of history.
+    ///      1800 + 1 = 1801 current slots, and 1800 s of history.
     function test_ValuationWindow_TheHistoryCheckRunsInTheConstructorAndTheSetter() public {
-        poolMock.setObservationCardinality(300);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
+        poolMock.setObservationCardinality(1800);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1800), uint256(1801)));
         _adapterWith(1800);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1800), uint256(1801)));
         adapter.setValuationWindow(1800);
 
-        poolMock.setObservationCardinality(301);
+        poolMock.setObservationCardinality(1801);
         poolMock.setHistorySeconds(1799);
         vm.expectRevert(abi.encodeWithSelector(OracleHistory.HistoryTooShort.selector, uint32(1800)));
         _adapterWith(1800);
@@ -445,14 +445,13 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
      */
     function test_ValuationWindow_AHeldPriceMovesTheBonusByItsShareOfTheWindow() public {
         _deployMathRung();
-        int24 lower = PRICE_TICK - 6932; // -50 %
-        int24 upper = PRICE_TICK + 6932; // +100 %
+        (int24 lower, int24 upper) = _band(PRICE_TICK - 6932, PRICE_TICK + 6932); // -50 % / +100 %
         uint128 liquidity = 1e18;
 
         (, uint256 fair,) = mathAdapter.previewBonusAt(CAMPAIGN, liquidity, lower, upper);
 
-        int24 held = PRICE_TICK - 513;
-        mathPool.setTicks(held, PRICE_TICK);
+        int24 held = _tk(PRICE_TICK - 513); // a LOWER $ASSET price, in either order
+        mathPool.setTicks(held, _tk(PRICE_TICK));
         mathPool.setRecentTick(held, 300);
         (,,, bool withinBounds) = mathVault.previewTwap();
         assertTrue(withinBounds, "the held price passes the vault's own spot check");
@@ -1236,12 +1235,16 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     ///      purchase through it accepts the flipped band, values in token1, and refuses the
     ///      unflipped one.
     function test_CampaignRange_FlipsWhenTheBonusIsToken1() public {
-        (BonusEscrow usdcEscrow, ApeBondPositionAdapter usdcAdapter) = _usdcRoute();
-        assertFalse(usdcAdapter.bonusIsToken0(), "a USDC bonus is token1");
+        // A route whose bonus token is token0 and one whose bonus token is token1, in either
+        // token order; the token1 route is linked last, so it is the vault's escrow below.
+        (, ApeBondPositionAdapter token0Adapter) = _routeFor(token0);
+        (BonusEscrow usdcEscrow, ApeBondPositionAdapter usdcAdapter) = _routeFor(token1);
+        assertTrue(token0Adapter.bonusIsToken0(), "a token0 bonus is token0");
+        assertFalse(usdcAdapter.bonusIsToken0(), "a token1 bonus is token1");
         usdcAdapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(1200, 3000));
-        adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(1200, 3000));
+        token0Adapter.setCampaign(OTHER_CAMPAIGN, _campaignConfig(1200, 3000));
 
-        (int24 lower0, int24 upper0,) = adapter.campaignRange(OTHER_CAMPAIGN);
+        (int24 lower0, int24 upper0,) = token0Adapter.campaignRange(OTHER_CAMPAIGN);
         (int24 lower1, int24 upper1,) = usdcAdapter.campaignRange(OTHER_CAMPAIGN);
         assertEq(lower0, -1200, "token0: down below spot");
         assertEq(upper0, 3000, "token0: up above spot");
@@ -1255,16 +1258,15 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         poolMock.setCurrentTick(0);
 
         usdcAdapter.setCampaignCaller(OTHER_CAMPAIGN, address(soulZap), true);
-        uint256 flipped =
-            _createPositionOn(address(soulZap), token0, token1, FEE, -3000, 1200, BUY_LIQUIDITY, P_ASSET, P_USDC);
+        (uint256 p0, uint256 p1) = _pair(P_ASSET, P_USDC);
+        uint256 flipped = _createPositionOn(address(soulZap), token0, token1, FEE, -3000, 1200, BUY_LIQUIDITY, p0, p1);
         soulZap.deposit(usdcAdapter, address(npmMock), flipped, OTHER_CAMPAIGN, alice);
         uint256 value = PositionValue.valueAt(BUY_LIQUIDITY, -3000, 1200, int24(0), false);
         (address beneficiary, uint256 amount,,,) = usdcEscrow.reservationOf(flipped);
         assertEq(beneficiary, alice, "the flipped band is accepted");
         assertEq(amount, value * BONUS_BPS / 10_000, "valued in token1");
 
-        uint256 unflipped =
-            _createPositionOn(address(soulZap), token0, token1, FEE, -1200, 3000, BUY_LIQUIDITY, P_ASSET, P_USDC);
+        uint256 unflipped = _createPositionOn(address(soulZap), token0, token1, FEE, -1200, 3000, BUY_LIQUIDITY, p0, p1);
         vm.expectRevert(
             abi.encodeWithSelector(
                 ApeBondPositionAdapter.TickRangeOutsideTolerance.selector,
@@ -1342,8 +1344,10 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
         (int24 lower, int24 upper,) = adapter.campaignRange(OTHER_CAMPAIGN);
 
         int256 maxUsable = 887220;
-        int256 refLower = _refFloor(int256(spot) - down);
-        int256 refUpper = _refCeil(int256(spot) + up);
+        // An $ASSET bonus: "down" is below the tick when $ASSET is token0, above it when it is token1.
+        (int24 below, int24 above) = _assetIsToken0() ? (down, up) : (up, down);
+        int256 refLower = _refFloor(int256(spot) - below);
+        int256 refUpper = _refCeil(int256(spot) + above);
         if (refLower < -maxUsable) refLower = -maxUsable;
         if (refUpper > maxUsable) refUpper = maxUsable;
         assertEq(int256(lower), refLower, "the lower edge");
@@ -1408,7 +1412,12 @@ contract ApeBondAdapterBranchesTest is ApeBondHarness {
     ///      (the ASSET escrow owes nothing yet, so the vault may move its link), with the SoulZap
     ///      double allowlisted.
     function _usdcRoute() private returns (BonusEscrow e, ApeBondPositionAdapter a) {
-        e = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), address(0));
+        return _routeFor(address(usdcToken));
+    }
+
+    /// @dev A second route whose bonus token is `bonusToken`, linked to the vault.
+    function _routeFor(address bonusToken) private returns (BonusEscrow e, ApeBondPositionAdapter a) {
+        e = _deployBonusEscrowProxy(bonusToken, address(vault), address(this), address(0));
         a = new ApeBondPositionAdapter(
             address(npmMock), address(vault), address(e), address(this), apeGuardian, MIN_CLIFF, 1800
         );

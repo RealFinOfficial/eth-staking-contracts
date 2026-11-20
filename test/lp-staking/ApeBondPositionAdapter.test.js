@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
@@ -218,8 +219,11 @@ describe("ApeBondPositionAdapter", function () {
     [owner, guardian, alice, bob, stranger, keeper] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    asset = await Token.deploy("Asset", "ASSET", TOKENS(100_000_000), 18);
-    quote = await Token.deploy("Quote", "QUOTE", TOKENS(100_000_000), 18);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    ({ asset, usdc: quote } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", TOKENS(100_000_000), 18),
+      () => Token.deploy("Quote", "QUOTE", TOKENS(100_000_000), 18)
+    ));
     assetAddr = await asset.getAddress();
     quoteAddr = await quote.getAddress();
     [token0Addr, token1Addr] =
@@ -1262,12 +1266,13 @@ describe("ApeBondPositionAdapter", function () {
     });
 
     it("refuses a window the pool cannot serve, in the constructor and the setter (L-04)", async function () {
-      await pool.setObservationCardinality(300);
+      // 1800 s needs 1800 + 1 = 1801 current slots (one second per slot).
+      await pool.setObservationCardinality(1800);
       const Adapter = await ethers.getContractFactory("ApeBondPositionAdapter");
-      await expect(deployAdapter()).to.be.revertedWithCustomError(Adapter, "CardinalityTooLow").withArgs(300, 301);
+      await expect(deployAdapter()).to.be.revertedWithCustomError(Adapter, "CardinalityTooLow").withArgs(1800, 1801);
       await expect(adapter.setValuationWindow(1800))
         .to.be.revertedWithCustomError(adapter, "CardinalityTooLow")
-        .withArgs(300, 301);
+        .withArgs(1800, 1801);
       await pool.setObservationCardinality(65535);
       await pool.setHistorySeconds(1799);
       await expect(adapter.setValuationWindow(1800))

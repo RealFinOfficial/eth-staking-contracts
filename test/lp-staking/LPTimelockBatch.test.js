@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
@@ -71,8 +72,11 @@ describe("lp-timelock.js — batches", function () {
     [deployer, multisig, guardian, operatorSafe, adapter, other] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    const usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
-    const asset = await Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    const { usdc, asset } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18),
+      () => Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6)
+    );
 
     // Uniswap sorts the pair ascending by address; the vault only ever sees the sorted pair.
     const sorted =

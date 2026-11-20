@@ -9,6 +9,7 @@ import {ApeBondPositionAdapter} from "../../../contracts/lp-staking/ApeBondPosit
 import {PositionValue} from "../../../contracts/lp-staking/libraries/PositionValue.sol";
 import {TickMath} from "../../../contracts/lp-staking/libraries/TickMath.sol";
 import {MockSoulZapCaller} from "../../../contracts/lp-staking/mocks/MockSoulZapCaller.sol";
+import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
 import {MockUniswapV3Pool} from "../../../contracts/lp-staking/mocks/MockUniswapV3Pool.sol";
 import {MockMathPositionManager} from "../../../contracts/lp-staking/mocks/MockMathPositionManager.sol";
 import {INonfungiblePositionManager} from "../../../contracts/lp-staking/interfaces/INonfungiblePositionManager.sol";
@@ -97,6 +98,48 @@ abstract contract ApeBondHarness is LocalHarness {
     ApeBondPositionAdapter internal mathAdapter;
     MockSoulZapCaller internal mathSoulZap;
 
+    // ──────────────────────── Token order ──────────────────────
+    //
+    // Every tick constant above is written for $ASSET as token0 (a tick measures token1 per
+    // token0, so the $ASSET price rises with it). With USDC as token0 (`LP_TOKEN_ORDER=usdc-first`,
+    // the Avalanche order) the same price is the negated tick, and a band [lower, upper] becomes
+    // [-upper, -lower]. Tests pass every constant through these helpers, so one body runs in both
+    // orders.
+
+    /// @notice True when $ASSET is the pool's token0 (the default order).
+    function _assetIsToken0() internal view returns (bool) {
+        return !_usdcFirst();
+    }
+
+    /// @notice `assetFirstTick`, a tick written for $ASSET as token0, in the pool's real order.
+    function _tk(int24 assetFirstTick) internal view returns (int24) {
+        return _usdcFirst() ? -assetFirstTick : assetFirstTick;
+    }
+
+    /// @notice A band written for $ASSET as token0, in the pool's real order.
+    function _band(int24 lower, int24 upper) internal view returns (int24, int24) {
+        return _usdcFirst() ? (-upper, -lower) : (lower, upper);
+    }
+
+    /// @notice The lower / upper edge of {_band}, for call sites that take the two edges inline.
+    function _lo(int24 lower, int24 upper) internal view returns (int24 l) {
+        (l,) = _band(lower, upper);
+    }
+
+    function _hi(int24 lower, int24 upper) internal view returns (int24 u) {
+        (, u) = _band(lower, upper);
+    }
+
+    /// @notice An ($ASSET, USDC) amount pair as (amount0, amount1).
+    function _pair(uint256 assetAmount, uint256 usdcAmount) internal view returns (uint256, uint256) {
+        return _usdcFirst() ? (usdcAmount, assetAmount) : (assetAmount, usdcAmount);
+    }
+
+    /// @notice The inverse of {_pair}: (amount0, amount1) as ($ASSET, USDC).
+    function _assetUsdc(uint256 amount0, uint256 amount1) internal view returns (uint256, uint256) {
+        return _usdcFirst() ? (amount1, amount0) : (amount0, amount1);
+    }
+
     // ──────────────────────── Builders ─────────────────────────
 
     /// @notice The local rung: the {LocalHarness} stack plus the ApeBond route, linked.
@@ -117,8 +160,8 @@ abstract contract ApeBondHarness is LocalHarness {
     ///         $0.25 per ASSET, with its own escrow, adapter and caller.
     function _deployMathRung() internal {
         mathPool = new MockUniswapV3Pool(token0, token1, MATH_FEE);
-        mathPool.setTicks(PRICE_TICK, PRICE_TICK);
-        mathPool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(PRICE_TICK));
+        mathPool.setTicks(_tk(PRICE_TICK), _tk(PRICE_TICK));
+        mathPool.setSqrtPriceX96(TickMath.getSqrtRatioAtTick(_tk(PRICE_TICK)));
         mathNpm = new MockMathPositionManager(address(mathPool));
 
         VaultProxyParams memory params = _vaultParams(
@@ -186,7 +229,8 @@ abstract contract ApeBondHarness is LocalHarness {
     ///         the mint), held by the SoulZap double, its principal funded.
     function _mintForSoulZap(uint128 liquidity) internal returns (uint256 tokenId) {
         (int24 lower, int24 upper,) = adapter.campaignRange(CAMPAIGN);
-        return _createPositionOn(address(soulZap), token0, token1, FEE, lower, upper, liquidity, P_ASSET, P_USDC);
+        (uint256 p0, uint256 p1) = _pair(P_ASSET, P_USDC);
+        return _createPositionOn(address(soulZap), token0, token1, FEE, lower, upper, liquidity, p0, p1);
     }
 
     /// @notice One purchase through the router: mint, then `depositFor(beneficiary)`.
@@ -199,7 +243,7 @@ abstract contract ApeBondHarness is LocalHarness {
     ///         the moment, valued at the pool mock's TWAP.
     function _expectedBonus(uint128 liquidity) internal view returns (uint256 value, uint256 bonus) {
         (int24 lower, int24 upper,) = adapter.campaignRange(CAMPAIGN);
-        value = PositionValue.valueAt(liquidity, lower, upper, poolMock.twapTick(), true);
+        value = PositionValue.valueAt(liquidity, lower, upper, poolMock.twapTick(), _assetIsToken0());
         bonus = value * BONUS_BPS / 10_000;
         if (bonus < MIN_BONUS) bonus = 0;
     }
@@ -212,17 +256,20 @@ abstract contract ApeBondHarness is LocalHarness {
      *         `beneficiary` through the math adapter.
      */
     function _buyDocumentPosition(address beneficiary) internal returns (uint256 tokenId) {
-        tokenId = _mathMint(address(mathSoulZap), START_LOWER, START_UPPER, START_ASSET, START_USDC);
+        (int24 lower, int24 upper) = _band(START_LOWER, START_UPPER);
+        (uint256 a0, uint256 a1) = _pair(START_ASSET, START_USDC);
+        tokenId = _mathMint(address(mathSoulZap), lower, upper, a0, a1);
         mathSoulZap.deposit(mathAdapter, address(mathNpm), tokenId, CAMPAIGN, beneficiary);
     }
 
-    /// @notice A real-math position minted for `holder` from the harness's own tokens.
+    /// @notice A real-math position minted for `holder` from the harness's own tokens, in the
+    ///         pool's real order (ticks and amounts as token0 / token1).
     function _mathMint(address holder, int24 lower, int24 upper, uint256 amount0, uint256 amount1)
         internal
         returns (uint256 tokenId)
     {
-        asset.approve(address(mathNpm), amount0);
-        usdcToken.approve(address(mathNpm), amount1);
+        MockERC20Permit(token0).approve(address(mathNpm), amount0);
+        MockERC20Permit(token1).approve(address(mathNpm), amount1);
         (tokenId,,,) = mathNpm.mint(_mintParams(lower, upper, amount0, amount1, holder));
     }
 
@@ -249,7 +296,7 @@ abstract contract ApeBondHarness is LocalHarness {
     /// @notice The value of a math-rung position NFT at the pool's TWAP, in ASSET wei.
     function _mathValue(uint256 tokenId) internal view returns (uint256) {
         (,,,,, int24 lower, int24 upper, uint128 liquidity,,,,) = mathNpm.positions(tokenId);
-        return PositionValue.valueAt(liquidity, lower, upper, mathPool.twapTick(), true);
+        return PositionValue.valueAt(liquidity, lower, upper, mathPool.twapTick(), _assetIsToken0());
     }
 
     // ──────────────────────── Funding ──────────────────────────

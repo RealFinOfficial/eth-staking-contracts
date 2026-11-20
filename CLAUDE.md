@@ -253,7 +253,8 @@ operation, then funding and `lp-epoch.js set-amount`.
   configured window. `stake`, `unstake` and a swap-free `rebalance` never read the oracle
 - **The oracle is sized, not guessed (audit L-04).** Every window setter (the vault's and the
   zapper's `initialize` and `setTwapParams`) reverts unless the pool's CURRENT
-  `observationCardinality` is at least `ceil(window / 6) + 1` and `observe([window, 0])` succeeds
+  `observationCardinality` is at least `window + 1` (one second per slot since 2026-11-20, for
+  Avalanche; it was `ceil(window / 6) + 1`) and `observe([window, 0])` succeeds
   (`libraries/OracleHistory.sol`). The deploy script checks the same before it sends anything, so
   the pool must be grown AND wrapped first (`scripts/grow-oracle.js`)
 - **Guard defaults are wide on purpose.** `LP_TWAP_WINDOW=300`, `LP_TWAP_MAX_DEVIATION_BPS=1000`
@@ -373,6 +374,11 @@ contracts/           — Solidity source files
     V3BonusVault.sol          — reserve now, fund later; v3 and LP (tokenId) reservations
     StakingMigrator.sol       — the three transition routes behind a TransitionVoucher
     interfaces/IStakingV3.sol — the cross-contract calls
+    testnet/BurnStandIn.sol   — TEST STAND-IN of the bridge owner's burn contract (Sepolia only):
+                                his four entries, `Migrated` with the burn id, his reverts, an
+                                EIP-712 access signature MigrationAccess(address account,uint256 deadline)
+    testnet/PayoutStandIn.sol — TEST STAND-IN of his payout contract (Fuji only): `pay`, `Paid`
+    mocks/MockRealToken.sol   — the test $ASSET's features (REAL / ASSET, permit REAL/1, burnFrom)
 test/                — Hardhat test files (Mocha + Chai). 1063 tests, 0 pending (2026-11-09, staking v3)
   StakingPool.test.js         — 88 tests
   WeightedStakingPool.test.js — 40 tests
@@ -544,6 +550,20 @@ artifacts, shared by the repository owner on request.
 - Contracts test map (every tier, new tests and audit-finding tests marked): https://claude.ai/code/artifact/d04fc2cb-8da8-42c8-b91b-86ffcec1576b
 - Indexer test map (companion, evm-indexer): https://claude.ai/code/artifact/319b99b2-ccd0-48d9-93bc-fbef9c263c92
 - Expansion report (what landed, verification, audit findings SEC-01..05, open decisions): https://claude.ai/code/artifact/0ac9c23a-25bd-4fb3-8152-5673f6cac322
+
+### Both token orders (`LP_TOKEN_ORDER`, 2026-11-20)
+
+On Ethereum $ASSET is token0 of the Uniswap V3 pool, on Avalanche C-Chain USDC is. Every LP and
+staking v3 suite runs in both orders: `LP_TOKEN_ORDER=asset-first` (default) or `usdc-first`
+(`npm run test:usdc-first`, `npm run test:forge:usdc-first`); CI runs both jobs once per value.
+Hardhat fixtures deploy their pair through `test/lp-staking/helpers/tokenOrder.js`; Forge reads
+`BaseForge._usdcFirst()`, and the ApeBond math-rung tick constants stay written for $ASSET as
+token0 and pass through `_tk` / `_band` / `_pair`. Under `usdc-first` the fork suites that bind
+the profile's real tREAL swap in a fresh 18-decimal stand-in sorted above tUSDC (Forge fork tier,
+`StakingV3SepoliaFork`). `LPStakingFork` (the real mainnet ASSET/USDC pool) and
+`LPStakingSepoliaFork` (the real tREAL/tUSDC profile) bind deployed tokens whose order is a fact
+of the chain and run unchanged in both jobs; `LPStakingLocalFork` (mock tokens) runs the same
+scenario in the chosen order.
 
 ### The network profile
 

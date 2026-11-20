@@ -168,7 +168,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         bytes memory saved = address(bonusVault).code;
         vm.etch(address(bonusVault), address(new SilentListener()).code);
         vm.prank(alice);
-        newId = mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        newId = mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
         vm.etch(address(bonusVault), saved);
     }
 
@@ -327,8 +333,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.LpBonusForfeited(tokenId, alice, owedLp);
         vm.prank(alice);
-        uint256 newId =
-            mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        uint256 newId = mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
         (address moved,,,,) = bonusVault.lpReservation(newId);
         assertEq(moved, address(0));
         assertEq(mathVault.stakerOf(newId), alice);
@@ -427,7 +438,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         (, uint256 before,,,) = bonusVault.lpReservation(tokenId);
         // A band entirely above the price holds only $ASSET: the USDC leg is refunded, value drops.
         vm.prank(alice);
-        uint256 newId = mathVault.rebalance(tokenId, PRICE_TICK + 10, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        uint256 newId = mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _hi(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
 
         (address oldUser,,,,) = bonusVault.lpReservation(tokenId);
         assertEq(oldUser, address(0));
@@ -513,7 +530,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         vm.prank(alice);
         poolV3.withdraw(staked);
         vm.prank(alice);
-        uint256 newId = mathVault.rebalance(tokenId, PRICE_TICK + 10, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        uint256 newId = mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _hi(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
         (address moved,,,,) = bonusVault.lpReservation(newId);
         assertEq(moved, address(0), "nothing moved to the new id");
         (,,,, bool forfeited) = bonusVault.lpReservation(tokenId);
@@ -584,7 +607,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.LpBonusSettled(tokenId, alice);
         vm.prank(alice);
-        uint256 newId = mathVault.rebalance(tokenId, PRICE_TICK + 10, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        uint256 newId = mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _hi(PRICE_TICK + 10, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
 
         (address user, uint256 amount,,,) = bonusVault.lpReservation(tokenId);
         assertEq(user, alice, "the record stays under the old id");
@@ -641,7 +670,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         bytes memory saved = _withListenerDown();
         vm.prank(alice);
         vm.expectRevert(bytes("listener down"));
-        mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
         vm.etch(address(bonusVault), saved);
 
         // Vault and reservation untouched.
@@ -675,7 +710,11 @@ contract VaultBonusListenerTest is StakingV3Harness {
         vm.prank(alice);
         vm.expectRevert();
         mathVault.rebalance{gas: gasForAll}(
-            tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE
+            tokenId,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
         );
         assertEq(mathVault.stakerOf(tokenId), alice);
         (address user, uint256 amount,,,) = bonusVault.lpReservation(tokenId);
@@ -691,7 +730,13 @@ contract VaultBonusListenerTest is StakingV3Harness {
         mathVault.setBonusListener(address(0));
         vm.prank(alice);
         uint256 before = gasleft();
-        mathVault.rebalance(tokenId, PRICE_TICK - 6932, PRICE_TICK + 6932, _noSwapParams(), FAR_DEADLINE);
+        mathVault.rebalance(
+            tokenId,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _noSwapParams(),
+            FAR_DEADLINE
+        );
         uint256 used = before - gasleft();
         vm.revertToState(snap);
         return used;

@@ -145,7 +145,7 @@ contract SystemSweepHandler is Test {
 
         int24 lower = -int24(int256(bound(tickSeed, 1, 10))) * 60;
         SwapParams memory swap = SwapParams({
-            zeroForOne: true, // ASSET -> USDC; the vault accepts either direction
+            zeroForOne: !zapper.usdcIsToken0(), // ASSET -> USDC; the vault accepts either direction
             amountIn: bound(amountSeed, 0, PRINCIPAL_ASSET / 2),
             amountOutMin: 0,
             amount0Min: 0,
@@ -215,9 +215,10 @@ contract SystemSweepHandler is Test {
     }
 
     function _zapFor(address actor, uint256 usdcAmount, uint256 swapIn) private {
-        // `usdcIsToken0` is false on this harness, so USDC -> ASSET is token1 -> token0.
-        SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: swapIn, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+        // USDC -> ASSET: `zeroForOne == usdcIsToken0`, in either token order.
+        SwapParams memory swap = SwapParams({
+            zeroForOne: zapper.usdcIsToken0(), amountIn: swapIn, amountOutMin: 0, amount0Min: 0, amount1Min: 0
+        });
 
         vm.startPrank(actor);
         usdc.approve(address(zapper), usdcAmount);
@@ -232,8 +233,18 @@ contract SystemSweepHandler is Test {
     function _stakeFresh(address actor) private {
         if (staked.length >= MAX_LIVE_POSITIONS) return;
 
+        // The position names the pool's real token order (either order: LP_TOKEN_ORDER).
+        bool assetFirst = address(asset) < address(usdc);
         npm.mintFake(
-            actor, address(asset), address(usdc), fee, TICK_LOWER, TICK_UPPER, 1e9, PRINCIPAL_ASSET, PRINCIPAL_USDC
+            actor,
+            assetFirst ? address(asset) : address(usdc),
+            assetFirst ? address(usdc) : address(asset),
+            fee,
+            TICK_LOWER,
+            TICK_UPPER,
+            1e9,
+            assetFirst ? PRINCIPAL_ASSET : PRINCIPAL_USDC,
+            assetFirst ? PRINCIPAL_USDC : PRINCIPAL_ASSET
         );
         uint256 tokenId = npm.lastMintedId();
 

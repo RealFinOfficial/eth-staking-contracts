@@ -479,8 +479,8 @@ contract V3BonusVaultInvariantsTest is StakingV3Harness {
             pool_,
             address(mathVault),
             address(this),
-            START_LOWER,
-            START_UPPER,
+            _lo(START_LOWER, START_UPPER),
+            _hi(START_LOWER, START_UPPER),
             stakePool,
             voucherSignerPk
         );

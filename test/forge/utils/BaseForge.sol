@@ -89,6 +89,24 @@ abstract contract BaseForge is Test {
         profile = Profiles.byName(vm.envOr("LP_TEST_PROFILE", string("sepolia")));
     }
 
+    // ──────────────────────── Token order ──────────────────────
+
+    /**
+     * @notice True when the suites run with USDC as the pool's token0 (`LP_TOKEN_ORDER=usdc-first`),
+     *         false for $ASSET as token0 (`asset-first`, the default).
+     * @dev On Ethereum $ASSET is the first token of the Uniswap V3 pool, on Avalanche C-Chain USDC
+     *      is (2026-11-20), so every suite of the LP stack and of staking v3 runs in both orders:
+     *      CI runs the whole Forge tier once per value. The harnesses deploy their tokens so the
+     *      chosen order holds, and every order-dependent figure is derived from this switch. An
+     *      unknown value reverts rather than silently defaulting.
+     */
+    function _usdcFirst() internal view returns (bool) {
+        bytes32 order = keccak256(bytes(vm.envOr("LP_TOKEN_ORDER", string("asset-first"))));
+        if (order == keccak256("asset-first")) return false;
+        if (order == keccak256("usdc-first")) return true;
+        revert("BaseForge: unknown LP_TOKEN_ORDER (expected asset-first|usdc-first)");
+    }
+
     // ──────────────────────── Fork RPC ─────────────────────────
 
     /**

@@ -78,6 +78,7 @@
  */
 
 const fs = require("fs");
+const { usdcFirst } = require("../helpers/tokenOrder");
 const os = require("os");
 const path = require("path");
 
@@ -335,13 +336,22 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     assetAddr = await asset.getAddress();
     ledger.record("S1", "deploy tASSET", await asset.deploymentTransaction().wait(), []);
 
-    usdc = await (
-      await MockToken.deploy(C.USDC_NAME, C.USDC_SYMBOL, C.USDC_SUPPLY, 6)
-    ).waitForDeployment();
-    usdcAddr = await usdc.getAddress();
-    ledger.record("S2", "deploy tUSDC", await usdc.deploymentTransaction().wait(), []);
+    // tUSDC is deployed again (a new nonce, a new address) until the pair sorts in the order
+    // LP_TOKEN_ORDER names (helpers/tokenOrder.js): $ASSET as token0 by default, USDC as token0
+    // under usdc-first (the Avalanche order). Every attempt is one block, recorded under S2.
+    for (let attempt = 1; ; attempt++) {
+      usdc = await (
+        await MockToken.deploy(C.USDC_NAME, C.USDC_SYMBOL, C.USDC_SUPPLY, 6)
+      ).waitForDeployment();
+      usdcAddr = await usdc.getAddress();
+      const kept = (usdcAddr.toLowerCase() < assetAddr.toLowerCase()) === usdcFirst();
+      ledger.record("S2", kept ? "deploy tUSDC" : `deploy tUSDC (attempt ${attempt}, other side)`,
+        await usdc.deploymentTransaction().wait(), []);
+      if (kept) break;
+      if (attempt >= 32) throw new Error("no tUSDC address sorted in the LP_TOKEN_ORDER order");
+    }
 
-    // The sort order is whatever CREATE gave us; everything downstream is derived from it.
+    // Everything downstream is derived from the sort order.
     ({ assetIsToken0, token0, token1 } = uni.sortTokens(assetAddr, usdcAddr));
     zeroForOne = !assetIsToken0; // USDC -> ASSET, the only direction a zap may take
     initialSqrtPriceX96 = uni.initialSqrtPriceX96(assetIsToken0);
@@ -413,11 +423,14 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     //      write after the growth switches the pool to the grown size (its one-slot buffer
     //      wraps at once), and the round trips leave more than the window of history.
     growFromBlock = (await head()) + 1;
-    ledger.record(
-      "S7",
-      "grow the oracle",
-      await chain.send(pool.connect(w.deployer).increaseObservationCardinalityNext(C.OBSERVATION_CARDINALITY))
-    );
+    // In steps of C.ORACLE_GROW_STEP slots: one transaction may use at most 16,777,216 gas.
+    for (const size of C.oracleGrowthSizes(1, C.OBSERVATION_CARDINALITY)) {
+      ledger.record(
+        "S7",
+        `grow the oracle to ${size}`,
+        await chain.send(pool.connect(w.deployer).increaseObservationCardinalityNext(size))
+      );
+    }
     for (let i = 0; i < C.WARMUP_ROUNDS; i++) {
       await rpc.increaseTime(provider, C.WARMUP_STEP_SECONDS);
       const tickBefore = await uni.currentTick(pool);
@@ -1004,9 +1017,11 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         }),
         { [poolAddr.toLowerCase()]: pool.interface }
       );
-      expect(logs.length).to.equal(1);
+      const sizes = C.oracleGrowthSizes(1, C.OBSERVATION_CARDINALITY);
+      expect(logs.length).to.equal(sizes.length);
       expect(logs[0].args.observationCardinalityNextOld).to.equal(1n);
-      expect(logs[0].args.observationCardinalityNextNew).to.equal(
+      logs.forEach((log, i) => expect(log.args.observationCardinalityNextNew).to.equal(BigInt(sizes[i])));
+      expect(logs[logs.length - 1].args.observationCardinalityNextNew).to.equal(
         BigInt(C.OBSERVATION_CARDINALITY)
       );
     });
@@ -2420,7 +2435,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
       }
 
       // The warm-up round trips are at least 60 s apart, which is what fills the oracle.
-      const warmup = timestamps.filter((t) => t.step === "S7" && t.label !== "grow the oracle").map((t) => t.ts);
+      const warmup = timestamps.filter((t) => t.step === "S7" && !t.label.startsWith("grow the oracle")).map((t) => t.ts);
       expect(warmup.length).to.equal(C.WARMUP_ROUNDS * 2);
       for (let i = 1; i < warmup.length; i++) {
         expect(warmup[i] - warmup[i - 1]).to.be.at.least(C.WARMUP_STEP_SECONDS);
@@ -2666,7 +2681,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
         return acc;
       }, {});
       expect(counts.Initialize).to.equal(1);
-      expect(counts.IncreaseObservationCardinalityNext).to.equal(1);
+      expect(counts.IncreaseObservationCardinalityNext).to.equal(C.oracleGrowthSizes(1, C.OBSERVATION_CARDINALITY).length);
       // 16 warm-up swaps + 6 fee swaps + one swap leg each in A7, A8 and A10.
       expect(counts.Swap).to.equal(C.WARMUP_ROUNDS * 2 + C.FEE_ROUNDS * 2 + 3);
       expect(counts.Mint).to.be.greaterThan(0);
@@ -3435,7 +3450,7 @@ describe("LP staking — local fork node (fresh Uniswap V3 pool, mock tokens)", 
     it("G1 a dry run prints the plan and sends nothing", async function () {
       const nonce = await provider.getTransactionCount(w.deployer.address);
       const run = await runScript("scripts/grow-oracle.js", growEnv({ LP_ORACLE_DRY_RUN: "1" }));
-      expect(run.stdout).to.include(`increaseObservationCardinalityNext(${target}), then up to`);
+      expect(run.stdout).to.include(`increaseObservationCardinalityNext(${target}) in steps of at most 150 slots, then up to`);
       expect(run.stdout).to.include("LP_ORACLE_DRY_RUN=1: nothing was sent.");
       expect(await provider.getTransactionCount(w.deployer.address)).to.equal(nonce);
     });

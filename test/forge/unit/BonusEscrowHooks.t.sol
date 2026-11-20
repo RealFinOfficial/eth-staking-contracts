@@ -111,13 +111,15 @@ contract BonusEscrowHooksTest is ApeBondHarness {
 
         // Rebalance 1: the upper bound $0.00075 above the price. All USDC, almost no ASSET.
         vm.prank(alice);
-        v.id1 = mathVault.rebalance(v.id0, R1_LOWER, R1_UPPER, _noSwap(), FAR_DEADLINE);
+        (int24 l1, int24 u1) = _band(R1_LOWER, R1_UPPER);
+        v.id1 = mathVault.rebalance(v.id0, l1, u1, _noSwap(), FAR_DEADLINE);
         v.bonus1 = _assertMoved(v.id0, v.id1);
         assertApproxEqRel(asset.balanceOf(alice) - v.assetBefore, 19_885e18, 0.001e18, "about 19,885 ASSET refunded");
 
         // Rebalance 2: the lower bound $0.00075 below the price. Almost all USDC is refunded.
         vm.prank(alice);
-        v.id2 = mathVault.rebalance(v.id1, R2_LOWER, R2_UPPER, _noSwap(), FAR_DEADLINE);
+        (int24 l2, int24 u2) = _band(R2_LOWER, R2_UPPER);
+        v.id2 = mathVault.rebalance(v.id1, l2, u2, _noSwap(), FAR_DEADLINE);
         v.bonus2 = _assertMoved(v.id1, v.id2);
         // The document rounds its table (115 ASSET, 0.17 USDC left); the exact math leaves ~2.45 USDC.
         assertApproxEqRel(
@@ -125,6 +127,15 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         );
 
         _reportVector(v);
+    }
+
+    /// @dev The document's start band in the pool's real token order.
+    function _startLower() private view returns (int24 lower) {
+        (lower,) = _band(START_LOWER, START_UPPER);
+    }
+
+    function _startUpper() private view returns (int24 upper) {
+        (, upper) = _band(START_LOWER, START_UPPER);
     }
 
     /// @dev The reservation left `fromId` for `toId`, still alice's and still live; its amount.
@@ -160,7 +171,7 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         (, uint256 bonus0,,,) = mathEscrow.reservationOf(id0);
 
         vm.prank(alice);
-        uint256 id1 = mathVault.rebalance(id0, START_LOWER, START_UPPER, _noSwap(), FAR_DEADLINE);
+        uint256 id1 = mathVault.rebalance(id0, _startLower(), _startUpper(), _noSwap(), FAR_DEADLINE);
         (, uint256 bonus1,,,) = mathEscrow.reservationOf(id1);
 
         assertLe(bonus1, bonus0, "never more");
@@ -187,10 +198,11 @@ contract BonusEscrowHooksTest is ApeBondHarness {
         uint256 id0 = _buyDocumentPosition(alice);
         (, uint256 bonus0,,,) = mathEscrow.reservationOf(id0);
         uint256 value0 = _mathValue(id0);
-        mathNpm.setPendingFees(id0, 2_000e18, 500e6);
+        (uint256 f0, uint256 f1) = _pair(2_000e18, 500e6);
+        mathNpm.setPendingFees(id0, uint128(f0), uint128(f1));
 
         vm.prank(alice);
-        uint256 id1 = mathVault.rebalance(id0, START_LOWER, START_UPPER, _noSwap(), FAR_DEADLINE);
+        uint256 id1 = mathVault.rebalance(id0, _startLower(), _startUpper(), _noSwap(), FAR_DEADLINE);
 
         assertGt(_mathValue(id1), value0, "the compounded fees made the new position worth more");
         (, uint256 bonus1,,,) = mathEscrow.reservationOf(id1);

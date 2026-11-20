@@ -13,6 +13,7 @@ import {LPZapper} from "../../../contracts/lp-staking/LPZapper.sol";
 import {SwapParams} from "../../../contracts/lp-staking/libraries/TwapGuard.sol";
 import {INonfungiblePositionManager} from "../../../contracts/lp-staking/interfaces/INonfungiblePositionManager.sol";
 import {ISwapRouter02} from "../../../contracts/lp-staking/interfaces/ISwapRouter02.sol";
+import {MockERC20Decimals} from "../../../contracts/MockERC20Decimals.sol";
 
 /**
  * @title ForkHarness
@@ -107,9 +108,10 @@ abstract contract ForkHarness is BaseForge {
     uint256 internal constant WARMUP_SWAP_USDC = 25e6;
 
     /// @dev Oracle slots the deploy script grows the pool into (LP_OBSERVATION_CARDINALITY).
-    ///      The on-chain rule is ceil(window / 6) + 1 ({OracleHistory}, audit L-04); a 300 s
-    ///      window needs 51, and 150 is the deploy script's default floor.
-    uint16 internal constant OBSERVATION_CARDINALITY = 150;
+    ///      The on-chain rule is window + 1 ({OracleHistory}, audit L-04: one second per slot);
+    ///      a 300 s window needs 301 (the deploy script's default floor). 601 serves every window
+    ///      the fork tier sets (300, 450 and 600 s) and none above 600 s.
+    uint16 internal constant OBSERVATION_CARDINALITY = 601;
 
     // ──────────────────────── EIP-712 constants ────────────────
 
@@ -130,6 +132,7 @@ abstract contract ForkHarness is BaseForge {
         _loadProfile();
         vm.createSelectFork(_resolveForkRpc(), profile.pinnedBlock);
         assertEq(block.chainid, profile.chainId, "fork must report the profile's real chain id");
+        if (_usdcFirst()) _flipTokenOrder();
 
         _makeActors();
         _bindMarket();
@@ -190,6 +193,34 @@ abstract contract ForkHarness is BaseForge {
             }
         }
         revert(string.concat("ForkHarness: no code-free address found for actor '", name, "'"));
+    }
+
+    /**
+     * @dev `LP_TOKEN_ORDER=usdc-first`: the profile's real $ASSET sorts BELOW its USDC on both
+     *      profiles, so the Avalanche order (USDC as token0) needs another $ASSET. A fresh
+     *      18-decimal token with no permit (like tREAL) is salted ABOVE the profile's USDC and
+     *      replaces the profile's $ASSET; the pool of the pair is then created on the fork at the
+     *      same price, so the initial square-root price is inverted (2^192 / sqrtPriceX96).
+     *      Everything else (the real factory, position manager, router and USDC) stays real.
+     *      The actors are funded through {_fund}'s `deal` fallback, since no funder holds it.
+     */
+    function _flipTokenOrder() private {
+        address flipped;
+        for (uint256 salt = 0; salt < 256; ++salt) {
+            MockERC20Decimals candidate =
+                new MockERC20Decimals{salt: bytes32(salt)}("Test REAL (usdc-first)", "tREAL", 0, 18);
+            if (address(candidate) > profile.usdc) {
+                flipped = address(candidate);
+                break;
+            }
+        }
+        require(flipped != address(0), "ForkHarness: no salt sorted the $ASSET stand-in above USDC");
+        uint160 sqrtPrice = profile.initialSqrtPriceX96;
+        require(sqrtPrice != 0, "ForkHarness: usdc-first needs a profile price to invert");
+        profile.asset = flipped;
+        profile.pool = address(0);
+        profile.assetPermit = false;
+        profile.initialSqrtPriceX96 = uint160((uint256(1) << 192) / sqrtPrice);
     }
 
     /// @dev Binds the live Uniswap contracts and makes sure a pool exists to bind to.
@@ -406,14 +437,15 @@ abstract contract ForkHarness is BaseForge {
         vm.stopPrank();
     }
 
-    /// @notice Mints a real position NFT to `who` through the real position manager.
-    function _mintPositionFor(
-        address who,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 amount0Desired,
-        uint256 amount1Desired
-    ) internal returns (uint256 tokenId) {
+    /// @notice Mints a real position NFT to `who` through the real position manager. The two
+    ///         amounts are named by token ($ASSET, USDC) and placed on token0 / token1 in the
+    ///         pool's real order, so a caller reads the same in both token orders.
+    function _mintPositionFor(address who, int24 tickLower, int24 tickUpper, uint256 assetAmount, uint256 usdcAmount)
+        internal
+        returns (uint256 tokenId)
+    {
+        (uint256 amount0Desired, uint256 amount1Desired) =
+            token0 == profile.asset ? (assetAmount, usdcAmount) : (usdcAmount, assetAmount);
         vm.startPrank(who);
         IERC20Like(token0).approve(profile.npm, amount0Desired);
         IERC20Like(token1).approve(profile.npm, amount1Desired);
@@ -455,17 +487,33 @@ abstract contract ForkHarness is BaseForge {
         (, tick,,,,,) = poolRef.slot0();
     }
 
-    /// @notice Whale buys ASSET with USDC, pushing spot UP. ~175 ticks per 50k USDC at the
-    ///         seeded depth; nothing asserts on the rate, tests assert on the outcome.
+    /// @notice Pushes the pool's TICK up, sized as `usdcIn` USDC. With $ASSET as token0 the whale
+    ///         buys $ASSET with `usdcIn` USDC; with USDC as token0 (`usdc-first`) a rising tick is
+    ///         a FALLING $ASSET price, so the whale sells the same value of $ASSET (2e12 $ASSET wei
+    ///         per USDC unit, the profiles' 0.5 USDC price). ~175 ticks per 50k USDC at the seeded
+    ///         depth; nothing asserts on the rate, tests assert on the outcome.
     function _pushSpotUp(uint256 usdcIn) internal returns (int24 movedTo) {
+        if (token0 == profile.asset) _swap(whale, profile.usdc, profile.asset, usdcIn, 0);
+        else _swap(whale, profile.asset, profile.usdc, usdcIn * 2e12, 0);
+        return _currentTick();
+    }
+
+    /// @notice Pushes the pool's TICK down, sized as `assetIn` $ASSET (the mirror of {_pushSpotUp}).
+    function _pushSpotDown(uint256 assetIn) internal returns (int24 movedTo) {
+        if (token0 == profile.asset) _swap(whale, profile.asset, profile.usdc, assetIn, 0);
+        else _swap(whale, profile.usdc, profile.asset, assetIn / 2e12, 0);
+        return _currentTick();
+    }
+
+    /// @notice Whale buys $ASSET with `usdcIn` USDC (raises the $ASSET price in either order).
+    function _buyAsset(uint256 usdcIn) internal returns (int24 movedTo) {
         _swap(whale, profile.usdc, profile.asset, usdcIn, 0);
         return _currentTick();
     }
 
-    /// @notice Whale sells ASSET for USDC, pushing spot DOWN.
-    function _pushSpotDown(uint256 assetIn) internal returns (int24 movedTo) {
-        _swap(whale, profile.asset, profile.usdc, assetIn, 0);
-        return _currentTick();
+    /// @notice The `zeroForOne` of a USDC -> $ASSET swap in the pool's real order.
+    function _usdcIn() internal view returns (bool) {
+        return token0 == profile.usdc;
     }
 
     /// @notice |spot - TWAP| in ticks, as the guard measures it.

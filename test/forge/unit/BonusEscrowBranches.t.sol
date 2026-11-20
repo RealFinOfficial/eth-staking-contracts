@@ -77,16 +77,16 @@ contract BonusEscrowBranchesTest is ApeBondHarness {
     }
 
     function test_Constructor_ValuesInToken0WhenTheBonusIsToken0() public view {
-        assertEq(token0, address(asset), "the harness pins ASSET as token0");
-        assertTrue(book.bonusIsToken0(), "an ASSET bonus values positions in token0");
+        assertEq(token0 == address(asset), _assetIsToken0(), "the harness's token order");
+        assertEq(book.bonusIsToken0(), _assetIsToken0(), "an ASSET bonus values positions in the $ASSET side");
         assertEq(address(book.bonusToken()), address(asset), "the bonus token immutable");
         assertEq(book.vault(), address(vault), "the vault immutable");
     }
 
     function test_Constructor_ValuesInToken1WhenTheBonusIsToken1() public {
         BonusEscrow usdcBook = _deployBonusEscrowProxy(address(usdcToken), address(vault), address(this), carol);
-        assertFalse(usdcBook.bonusIsToken0(), "a USDC bonus values positions in token1");
-        assertEq(address(usdcBook.bonusToken()), token1, "and records token1 as the bonus token");
+        assertEq(usdcBook.bonusIsToken0(), _usdcFirst(), "a USDC bonus values positions in the USDC side");
+        assertEq(address(usdcBook.bonusToken()), address(usdcToken), "and records USDC as the bonus token");
     }
 
     /// @dev A bare implementation must be inert: its initializers are burnt in its constructor.

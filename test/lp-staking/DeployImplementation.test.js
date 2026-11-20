@@ -1,4 +1,5 @@
 const { expect } = require("chai");
+const { deployOrderedPair } = require("./helpers/tokenOrder");
 const { ethers, network, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 const { Manifest } = require("@openzeppelin/upgrades-core");
@@ -156,9 +157,12 @@ describe("deploy-implementation.js", function () {
     [deployer, multisig, guardian, operatorSafe, voucherSigner, alice] = await ethers.getSigners();
 
     const Token = await ethers.getContractFactory("MockERC20Decimals");
-    usdc = await Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6);
+    // The pair sorts in the order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+    ({ usdc, asset: assetToken } = await deployOrderedPair(
+      () => Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18),
+      () => Token.deploy("USD Coin", "USDC", 1_000_000n * 10n ** 6n, 6)
+    ));
     usdcAddr = await usdc.getAddress();
-    assetToken = await Token.deploy("Asset", "ASSET", 1_000_000n * 10n ** 18n, 18);
     assetAddr = await assetToken.getAddress();
 
     // Uniswap sorts the pair ascending by address, so which of the two ends up as token0 is

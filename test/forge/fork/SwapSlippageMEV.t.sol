@@ -56,7 +56,7 @@ contract SwapSlippageMEVTest is ForkHarness {
 
         // The vault's own swap, out of the position it just emptied.
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 400_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 400_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.prank(alice);
         uint256 newTokenId = vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
 
@@ -108,7 +108,7 @@ contract SwapSlippageMEVTest is ForkHarness {
         uint256 cleanLiquidity = _zapAndReadLiquidity(alice, lower, upper);
         vm.revertToState(snap);
 
-        _pushSpotUp(SANDWICH_USDC);
+        _buyAsset(SANDWICH_USDC); // the front-run buys what the victim buys
         assertLe(_deviationTicks(), uint256(profile.maxDevTicks), "the sandwich must stay inside the guard's ceiling");
         uint256 sandwichedLiquidity = _zapAndReadLiquidity(alice, lower, upper);
 
@@ -122,12 +122,16 @@ contract SwapSlippageMEVTest is ForkHarness {
         uint256 cleanOut = _swap(dave, profile.usdc, profile.asset, 10_000e6, 0);
         vm.revertToState(snap);
 
-        _pushSpotUp(SANDWICH_USDC);
+        _buyAsset(SANDWICH_USDC); // the front-run buys what the victim buys
 
         int24 tick = _currentTick();
         // 99.5% of the clean quote: tighter than the sandwich, looser than ordinary noise.
         SwapParams memory swap = SwapParams({
-            zeroForOne: false, amountIn: 10_000e6, amountOutMin: (cleanOut * 995) / 1000, amount0Min: 0, amount1Min: 0
+            zeroForOne: _usdcIn(),
+            amountIn: 10_000e6,
+            amountOutMin: (cleanOut * 995) / 1000,
+            amount0Min: 0,
+            amount1Min: 0
         });
 
         vm.startPrank(alice);
@@ -141,7 +145,7 @@ contract SwapSlippageMEVTest is ForkHarness {
     function test_Sandwich_MintMinimumsRevertTheZapBeforeTheMintLands() public {
         int24 tick = _currentTick();
         SwapParams memory swap = SwapParams({
-            zeroForOne: false,
+            zeroForOne: _usdcIn(),
             amountIn: 10_000e6,
             amountOutMin: 0,
             amount0Min: type(uint128).max, // unattainable on purpose
@@ -158,7 +162,7 @@ contract SwapSlippageMEVTest is ForkHarness {
     function test_Sandwich_MintMinimumsRevertTheRebalanceBeforeTheMintLands() public {
         uint256 tokenId = _mintAndStake(alice, 600);
         SwapParams memory swap = SwapParams({
-            zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: type(uint128).max, amount1Min: 0
+            zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: type(uint128).max, amount1Min: 0
         });
 
         vm.prank(alice);
@@ -174,7 +178,7 @@ contract SwapSlippageMEVTest is ForkHarness {
 
         uint256 absurd = 1_000_000_000e6;
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: absurd, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: absurd, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.prank(alice);
         vm.expectPartialRevert(LPStakingVault.SwapAmountExceedsBalance.selector);
@@ -185,7 +189,7 @@ contract SwapSlippageMEVTest is ForkHarness {
     function test_ZapIn_RevertsWhenSwapAmountExceedsTheInput() public {
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: ZAP_USDC + 1, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: ZAP_USDC + 1, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP_USDC);
@@ -248,7 +252,7 @@ contract SwapSlippageMEVTest is ForkHarness {
         uint256 tokenId = _mintAndStake(alice, 600);
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 1_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.prank(alice);
         vault.rebalance(tokenId, MIN_TICK_ALIGNED, MAX_TICK_ALIGNED, swap, FAR_DEADLINE);
 
@@ -263,7 +267,7 @@ contract SwapSlippageMEVTest is ForkHarness {
         uint256 assetBefore = asset.balanceOf(alice);
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP_USDC);
         zapper.zapIn(ZAP_USDC, _alignDown(tick) - 6000, _alignUp(tick) + 6000, swap, FAR_DEADLINE);
@@ -280,7 +284,7 @@ contract SwapSlippageMEVTest is ForkHarness {
     /// @dev Runs one zap-in for `who` and returns the liquidity the resulting position holds.
     function _zapAndReadLiquidity(address who, int24 lower, int24 upper) private returns (uint128 liquidity) {
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         vm.startPrank(who);
         usdcToken.approve(address(zapper), ZAP_USDC);
         uint256 tokenId = zapper.zapIn(ZAP_USDC, lower, upper, swap, FAR_DEADLINE);

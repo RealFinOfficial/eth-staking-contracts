@@ -184,7 +184,7 @@ contract PermitDomainsTest is ForkHarness {
     function test_ZapInWithPermit_SkipsThePermitWhenTheStandingAllowanceCoversIt() public {
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         PermitData memory permit =
             PermitData({value: ZAP_USDC, deadline: FAR_DEADLINE, v: 27, r: bytes32(0), s: bytes32(0)});
 
@@ -202,7 +202,7 @@ contract PermitDomainsTest is ForkHarness {
     function test_ZapInWithPermit_AllowanceEqualToTheValueStillSkipsThePermit() public {
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         PermitData memory permit =
             PermitData({value: ZAP_USDC, deadline: FAR_DEADLINE, v: 27, r: bytes32(0), s: bytes32(0)});
 
@@ -230,7 +230,7 @@ contract PermitDomainsTest is ForkHarness {
 
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
         PermitData memory permit =
             PermitData({value: ZAP_USDC, deadline: FAR_DEADLINE, v: 27, r: bytes32(0), s: bytes32(0)});
 
@@ -249,7 +249,7 @@ contract PermitDomainsTest is ForkHarness {
         uint256 standing = 90_000e6;
 
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), standing);
@@ -268,7 +268,7 @@ contract PermitDomainsTest is ForkHarness {
     function test_ZapIn_LeavesNoLingeringAllowanceOnTheRouterOrTheManager() public {
         int24 tick = _currentTick();
         SwapParams memory swap =
-            SwapParams({zeroForOne: false, amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
+            SwapParams({zeroForOne: _usdcIn(), amountIn: 10_000e6, amountOutMin: 0, amount0Min: 0, amount1Min: 0});
 
         vm.startPrank(alice);
         usdcToken.approve(address(zapper), ZAP_USDC);

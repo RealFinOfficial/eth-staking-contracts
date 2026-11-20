@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { deployOrderedPair } = require("./tokenOrder");
 const os = require("os");
 const path = require("path");
 
@@ -82,10 +83,13 @@ async function startWorld(prefix) {
     return new ethers.Contract(address, artifact.abi, signer);
   }
 
-  const asset = await deployArtifact("MockERC20Decimals", ["Asset", "ASSET", 10n ** 27n, 18]);
   // The pool mock prices 1:1 in RAW units, so both sides get the same raw supply; the 6
-  // decimals are only there for the deploy script's swapped-pair check.
-  const usdc = await deployArtifact("MockERC20Decimals", ["USD Coin", "USDC", 10n ** 27n, 6]);
+  // decimals are only there for the deploy script's swapped-pair check. The pair sorts in the
+  // order LP_TOKEN_ORDER names (helpers/tokenOrder.js).
+  const { asset, usdc } = await deployOrderedPair(
+    () => deployArtifact("MockERC20Decimals", ["Asset", "ASSET", 10n ** 27n, 18]),
+    () => deployArtifact("MockERC20Decimals", ["USD Coin", "USDC", 10n ** 27n, 6])
+  );
   const assetAddr = await asset.getAddress();
   const usdcAddr = await usdc.getAddress();
   const [token0Addr, token1Addr] =
@@ -150,8 +154,8 @@ async function startWorld(prefix) {
       LP_TIMELOCK_MIN_DELAY: "0",
       LP_TWAP_WINDOW: String(TWAP_WINDOW),
       // Explicit, so the repo's own .env (a Sepolia figure) never sizes this world's oracle:
-      // the adapter's 1800 s valuation window needs ceil(1800 / 6) + 1 = 301 slots (audit L-04).
-      LP_OBSERVATION_CARDINALITY: "301",
+      // the adapter's 1800 s valuation window needs 1800 + 1 = 1801 slots (audit L-04).
+      LP_OBSERVATION_CARDINALITY: "1801",
       ...extra,
     });
 

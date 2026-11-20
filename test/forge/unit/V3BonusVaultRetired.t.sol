@@ -93,8 +93,8 @@ contract V3BonusVaultRetiredTest is StakingV3Harness {
         vm.prank(alice);
         uint256 newId = mathVault.rebalance(
             tokenId,
-            PRICE_TICK - 6932,
-            PRICE_TICK + 6932,
+            _lo(PRICE_TICK - 6932, PRICE_TICK + 6932),
+            _hi(PRICE_TICK - 6932, PRICE_TICK + 6932),
             SwapParams({zeroForOne: true, amountIn: 0, amountOutMin: 0, amount0Min: 0, amount1Min: 0}),
             FAR_DEADLINE
         );
