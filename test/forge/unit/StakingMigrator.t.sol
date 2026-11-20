@@ -3,6 +3,7 @@ pragma solidity 0.8.38;
 
 import {StakingV3Harness} from "../utils/StakingV3Harness.sol";
 import {StakingMigrator} from "../../../contracts/staking-v3/StakingMigrator.sol";
+import {StakingMigratorBase} from "../../../contracts/staking-v3/StakingMigratorBase.sol";
 import {V3BonusVault} from "../../../contracts/staking-v3/V3BonusVault.sol";
 import {WeightedStakingPoolV3} from "../../../contracts/staking-v3/WeightedStakingPoolV3.sol";
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
@@ -42,13 +43,13 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 bonus = _compoundBonus(PRINCIPAL, bought, REWARD, 1000);
 
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.VoucherUsed(alice, 1, 1);
+        emit StakingMigratorBase.VoucherUsed(alice, 1, 1);
         vm.expectEmit(address(poolV3));
         emit WeightedStakingPoolV3.StakedFor(alice, address(migrator), staked);
         vm.expectEmit(address(bonusVault));
         emit V3BonusVault.BonusReserved(alice, bonus, uint64(v3End), 1);
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.Compounded(alice, PRINCIPAL, REWARD, bought, staked, bonus);
+        emit StakingMigratorBase.Compounded(alice, PRINCIPAL, REWARD, bought, staked, bonus);
 
         vm.prank(alice);
         (uint256 s, uint256 b) = migrator.compound(REWARD, PRINCIPAL, bought, FAR_DEADLINE, _noPermit(), _noPermit(), v);
@@ -100,14 +101,14 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.pauseCompound();
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.CompoundIsPaused.selector);
+        vm.expectRevert(StakingMigratorBase.CompoundIsPaused.selector);
         migrator.compound(REWARD, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_Compound_RevertsOnZeroUsdc() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.ZeroAmount.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAmount.selector);
         migrator.compound(0, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
@@ -171,7 +172,7 @@ contract StakingMigratorTest is StakingV3Harness {
         vm.prank(alice);
         migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), v);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.VoucherNonceUsed.selector, alice, 7));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.VoucherNonceUsed.selector, alice, 7));
         migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -188,17 +189,17 @@ contract StakingMigratorTest is StakingV3Harness {
         // A fresh, validly signed voucher on every route is refused.
         StakingMigrator.Voucher memory again = _voucher(migrator, alice, 3, PRINCIPAL, 0, 2);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.AlreadyMigrated.selector, alice));
         migrator.claimRestake(PRINCIPAL / 2, FAR_DEADLINE, _noPermit(), again);
 
         StakingMigrator.Voucher memory v1 = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 3);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.AlreadyMigrated.selector, alice));
         migrator.compound(REWARD, 0, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v1);
 
         StakingMigrator.Voucher memory v2 = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 4);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.AlreadyMigrated.selector, alice));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.AlreadyMigrated.selector, alice));
         migrator.moveToLp(REWARD, PRINCIPAL / 2, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v2);
     }
 
@@ -206,7 +207,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.PrincipalExceedsEligible.selector, PRINCIPAL + 1, PRINCIPAL)
+            abi.encodeWithSelector(StakingMigratorBase.PrincipalExceedsEligible.selector, PRINCIPAL + 1, PRINCIPAL)
         );
         migrator.claimRestake(PRINCIPAL + 1, FAR_DEADLINE, _noPermit(), v);
         assertFalse(migrator.migrated(alice));
@@ -220,7 +221,7 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_Compound_MinAssetOutZeroReverts() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.MinAssetOutZero.selector);
+        vm.expectRevert(StakingMigratorBase.MinAssetOutZero.selector);
         migrator.compound(REWARD, PRINCIPAL, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
@@ -259,7 +260,7 @@ contract StakingMigratorTest is StakingV3Harness {
         );
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.CustodyAssertFailed.selector, nextId, address(mathVault), bob)
+            abi.encodeWithSelector(StakingMigratorBase.CustodyAssertFailed.selector, nextId, address(mathVault), bob)
         );
         migrator.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
@@ -269,7 +270,9 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 nextId = mathNpm.nextTokenId();
         vm.mockCall(address(mathNpm), abi.encodeWithSignature("ownerOf(uint256)", nextId), abi.encode(stranger));
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.CustodyAssertFailed.selector, nextId, stranger, alice));
+        vm.expectRevert(
+            abi.encodeWithSelector(StakingMigratorBase.CustodyAssertFailed.selector, nextId, stranger, alice)
+        );
         migrator.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
@@ -286,14 +289,14 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_Voucher_AnotherUsersVoucherFailsTheSignature() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(bob);
-        vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
+        vm.expectRevert(StakingMigratorBase.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
     function test_Voucher_AStrangersSignatureIsRejected() public {
         StakingMigrator.Voucher memory v = _voucherSignedBy(migrator, alicePk, alice, 3, PRINCIPAL, 0, 1, FAR_DEADLINE);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
+        vm.expectRevert(StakingMigratorBase.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -301,7 +304,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         v.signature = hex"1234";
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
+        vm.expectRevert(StakingMigratorBase.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -309,14 +312,14 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         v.eligiblePrincipal = PRINCIPAL * 2;
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
+        vm.expectRevert(StakingMigratorBase.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
     function test_Voucher_WrongRouteIsRejected() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.WrongRoute.selector, 3, 1));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.WrongRoute.selector, 3, 1));
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -326,7 +329,7 @@ contract StakingMigratorTest is StakingV3Harness {
         vm.warp(block.timestamp + 1);
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.VoucherExpired.selector, block.timestamp - 1, block.timestamp)
+            abi.encodeWithSelector(StakingMigratorBase.VoucherExpired.selector, block.timestamp - 1, block.timestamp)
         );
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
@@ -335,7 +338,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.PrincipalExceedsEligible.selector, PRINCIPAL + 1, PRINCIPAL)
+            abi.encodeWithSelector(StakingMigratorBase.PrincipalExceedsEligible.selector, PRINCIPAL + 1, PRINCIPAL)
         );
         migrator.claimRestake(PRINCIPAL + 1, FAR_DEADLINE, _noPermit(), v);
     }
@@ -343,7 +346,7 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_Voucher_RewardAboveEligibleIsRejected() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 1, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.RewardExceedsEligible.selector, REWARD + 1, REWARD));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.RewardExceedsEligible.selector, REWARD + 1, REWARD));
         migrator.compound(REWARD + 1, PRINCIPAL, 1, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
@@ -351,7 +354,7 @@ contract StakingMigratorTest is StakingV3Harness {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.DeadlineExpired.selector, block.timestamp - 1, block.timestamp)
+            abi.encodeWithSelector(StakingMigratorBase.DeadlineExpired.selector, block.timestamp - 1, block.timestamp)
         );
         migrator.claimRestake(PRINCIPAL, block.timestamp - 1, _noPermit(), v);
     }
@@ -463,16 +466,16 @@ contract StakingMigratorTest is StakingV3Harness {
         migrator.pauseCompound();
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.CompoundIsPaused.selector);
+        vm.expectRevert(StakingMigratorBase.CompoundIsPaused.selector);
         migrator.moveToLp(REWARD, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
     }
 
     function test_MoveToLp_RevertsOnZeroAmounts() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 2, PRINCIPAL, REWARD, 1);
         vm.startPrank(alice);
-        vm.expectRevert(StakingMigrator.ZeroAmount.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAmount.selector);
         migrator.moveToLp(0, PRINCIPAL, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
-        vm.expectRevert(StakingMigrator.ZeroAmount.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAmount.selector);
         migrator.moveToLp(REWARD, 0, 0, 0, FAR_DEADLINE, _noPermit(), _noPermit(), v);
         vm.stopPrank();
     }
@@ -516,7 +519,7 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 usdcBefore = usdcToken.balanceOf(alice);
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, REWARD, 1);
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.ClaimRestaked(alice, PRINCIPAL, PRINCIPAL * 500 / 10_000);
+        emit StakingMigratorBase.ClaimRestaked(alice, PRINCIPAL, PRINCIPAL * 500 / 10_000);
         vm.prank(alice);
         uint256 b = migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
         assertEq(b, 1_000e18);
@@ -539,7 +542,7 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_ClaimRestake_RevertsOnZero() public {
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.ZeroAmount.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAmount.selector);
         migrator.claimRestake(0, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -576,7 +579,7 @@ contract StakingMigratorTest is StakingV3Harness {
         uint256 bought = REWARD * 4e18 / 1e6;
         vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserve.selector), 0);
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.Compounded(alice, PRINCIPAL, REWARD, bought, PRINCIPAL + bought, 0);
+        emit StakingMigratorBase.Compounded(alice, PRINCIPAL, REWARD, bought, PRINCIPAL + bought, 0);
         vm.prank(alice);
         (uint256 s, uint256 b) = migrator.compound(REWARD, PRINCIPAL, bought, FAR_DEADLINE, _noPermit(), _noPermit(), v);
         assertEq(b, 0);
@@ -647,7 +650,7 @@ contract StakingMigratorTest is StakingV3Harness {
         vm.warp(cutoff);
         vm.expectCall(address(bonusVault), abi.encodeWithSelector(V3BonusVault.reserve.selector), 0);
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.ClaimRestaked(bob, PRINCIPAL, 0);
+        emit StakingMigratorBase.ClaimRestaked(bob, PRINCIPAL, 0);
         vm.prank(bob);
         assertEq(migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), vb), 0, "at the cutoff: nothing");
         assertEq(poolV3.stakes(bob), PRINCIPAL, "the restake itself succeeds");
@@ -750,24 +753,24 @@ contract StakingMigratorTest is StakingV3Harness {
 
         vm.prank(stranger);
         vm.expectRevert(
-            abi.encodeWithSelector(StakingMigrator.NotGuardianOrOperator.selector, stranger, guardian_, operator_)
+            abi.encodeWithSelector(StakingMigratorBase.NotGuardianOrOperator.selector, stranger, guardian_, operator_)
         );
         migrator.pauseCompound();
 
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.CompoundPaused(guardian_);
+        emit StakingMigratorBase.CompoundPaused(guardian_);
         vm.prank(guardian_);
         migrator.pauseCompound();
         assertTrue(migrator.compoundPaused());
 
         vm.prank(guardian_);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.NotOperator.selector, guardian_, operator_));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.NotOperator.selector, guardian_, operator_));
         migrator.unpauseCompound();
 
         vm.prank(operator_);
         migrator.pauseCompound();
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.CompoundUnpaused(operator_);
+        emit StakingMigratorBase.CompoundUnpaused(operator_);
         vm.prank(operator_);
         migrator.unpauseCompound();
         assertFalse(migrator.compoundPaused());
@@ -776,15 +779,15 @@ contract StakingMigratorTest is StakingV3Harness {
     function test_SetSigner_OperatorOnlyNonZeroAndEffective() public {
         address operator_ = makeAddr("v3Operator");
         mathVault.setOperator(operator_);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.NotOperator.selector, address(this), operator_));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.NotOperator.selector, address(this), operator_));
         migrator.setSigner(bob);
 
         vm.prank(operator_);
-        vm.expectRevert(StakingMigrator.ZeroAddress.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAddress.selector);
         migrator.setSigner(address(0));
 
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.SignerSet(migratorSigner, bob);
+        emit StakingMigratorBase.SignerSet(migratorSigner, bob);
         vm.prank(operator_);
         migrator.setSigner(bob);
         assertEq(migrator.signer(), bob);
@@ -792,7 +795,7 @@ contract StakingMigratorTest is StakingV3Harness {
         // The old signer's vouchers stop working.
         StakingMigrator.Voucher memory v = _voucher(migrator, alice, 3, PRINCIPAL, 0, 1);
         vm.prank(alice);
-        vm.expectRevert(StakingMigrator.InvalidVoucherSignature.selector);
+        vm.expectRevert(StakingMigratorBase.InvalidVoucherSignature.selector);
         migrator.claimRestake(PRINCIPAL, FAR_DEADLINE, _noPermit(), v);
     }
 
@@ -801,23 +804,23 @@ contract StakingMigratorTest is StakingV3Harness {
         assertEq(migrator.twapWindow(), 600);
         assertEq(migrator.maxTwapDeviationTicks(), 500);
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.NotOperator.selector, stranger, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.NotOperator.selector, stranger, address(this)));
         migrator.setTwapParams(600, 500);
     }
 
     function test_SetRates_OwnerOnlyAndBounded() public {
         vm.expectEmit(address(migrator));
-        emit StakingMigrator.RatesSet(1, 2, 3);
+        emit StakingMigratorBase.RatesSet(1, 2, 3);
         migrator.setRates(1, 2, 3);
         assertEq(migrator.compoundBps(), 1);
         assertEq(migrator.lpBps(), 2);
         assertEq(migrator.restakeBps(), 3);
 
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidRate.selector, 10_001));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.InvalidRate.selector, 10_001));
         migrator.setRates(10_001, 0, 0);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidRate.selector, 10_001));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.InvalidRate.selector, 10_001));
         migrator.setRates(0, 10_001, 0);
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidRate.selector, 10_001));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.InvalidRate.selector, 10_001));
         migrator.setRates(0, 0, 10_001);
 
         vm.prank(stranger);
@@ -826,7 +829,7 @@ contract StakingMigratorTest is StakingV3Harness {
     }
 
     function test_Owner_RenounceIsDisabledAndUpgradeIsOwnerOnly() public {
-        vm.expectRevert(StakingMigrator.RenounceDisabled.selector);
+        vm.expectRevert(StakingMigratorBase.RenounceDisabled.selector);
         migrator.renounceOwnership();
 
         address impl = _deployMigratorImpl(address(mathVault), address(usdcToken), address(asset));
@@ -876,7 +879,7 @@ contract StakingMigratorTest is StakingV3Harness {
         address[3] memory bonuses = [address(bonusVault), address(0), address(bonusVault)];
         address[3] memory signers = [migratorSigner, migratorSigner, address(0)];
         for (uint256 i = 0; i < 3; ++i) {
-            vm.expectRevert(StakingMigrator.ZeroAddress.selector);
+            vm.expectRevert(StakingMigratorBase.ZeroAddress.selector);
             new LPProxy(
                 impl,
                 abi.encodeCall(
@@ -893,7 +896,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                StakingMigrator.TokenPairMismatch.selector,
+                StakingMigratorBase.TokenPairMismatch.selector,
                 address(usdcToken),
                 address(asset),
                 address(overture),
@@ -909,7 +912,7 @@ contract StakingMigratorTest is StakingV3Harness {
         );
         vm.expectRevert(
             abi.encodeWithSelector(
-                StakingMigrator.TokenPairMismatch.selector,
+                StakingMigratorBase.TokenPairMismatch.selector,
                 address(usdcToken),
                 address(asset),
                 address(asset),
@@ -927,7 +930,7 @@ contract StakingMigratorTest is StakingV3Harness {
 
     function test_Initialize_RejectsAValuationWindowOutOfBounds() public {
         address impl = _deployMigratorImpl(address(mathVault), address(usdcToken), address(asset));
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidValuationWindow.selector, 299, 300, 3600));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.InvalidValuationWindow.selector, 299, 300, 3600));
         new LPProxy(
             impl,
             abi.encodeCall(
@@ -935,7 +938,7 @@ contract StakingMigratorTest is StakingV3Harness {
                 (address(this), address(poolV3), address(bonusVault), migratorSigner, 300, 953, 299)
             )
         );
-        vm.expectRevert(abi.encodeWithSelector(StakingMigrator.InvalidValuationWindow.selector, 3601, 300, 3600));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.InvalidValuationWindow.selector, 3601, 300, 3600));
         new LPProxy(
             impl,
             abi.encodeCall(
@@ -959,13 +962,13 @@ contract StakingMigratorTest is StakingV3Harness {
     }
 
     function test_Constructor_RejectsZeroAndForeignTokens() public {
-        vm.expectRevert(StakingMigrator.ZeroAddress.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAddress.selector);
         new StakingMigrator(address(mathVault), address(0), address(asset));
-        vm.expectRevert(StakingMigrator.ZeroAddress.selector);
+        vm.expectRevert(StakingMigratorBase.ZeroAddress.selector);
         new StakingMigrator(address(mathVault), address(usdcToken), address(0));
         vm.expectRevert(
             abi.encodeWithSelector(
-                StakingMigrator.TokenPairMismatch.selector, address(usdcToken), carol, token0, token1
+                StakingMigratorBase.TokenPairMismatch.selector, address(usdcToken), carol, token0, token1
             )
         );
         new StakingMigrator(address(mathVault), address(usdcToken), carol);

@@ -4,50 +4,16 @@ pragma solidity 0.8.38;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/cryptography/EIP712Upgradeable.sol";
 
-import "../lp-staking/interfaces/INonfungiblePositionManager.sol";
-import "../lp-staking/interfaces/ISwapRouter02.sol";
 import "../lp-staking/libraries/OracleHistory.sol";
-import "../lp-staking/libraries/TickMath.sol";
-import "../lp-staking/libraries/TwapGuard.sol";
-import "./interfaces/IStakingV3.sol";
-
-/// @dev What the migrator reads from, and calls on, the `LPStakingVault` proxy.
-interface IMigratorLpVault {
-    function stakeFor(address user, uint256 tokenId) external;
-
-    function stakerOf(uint256 tokenId) external view returns (address);
-
-    function positionManager() external view returns (address);
-
-    function swapRouter() external view returns (address);
-
-    function pool() external view returns (address);
-
-    function token0() external view returns (address);
-
-    function token1() external view returns (address);
-
-    function fee() external view returns (uint24);
-
-    function guardian() external view returns (address);
-
-    function operator() external view returns (address);
-}
-
-/// @dev The one pool read the band needs beyond {IUniswapV3Pool}.
-interface IMigratorPoolSpacing {
-    function tickSpacing() external view returns (int24);
-}
+import "./StakingMigratorBase.sol";
+import "./StakingMigratorDeliveries.sol";
 
 /**
  * @title StakingMigrator
@@ -104,17 +70,26 @@ interface IMigratorPoolSpacing {
  *  Holds no funds between transactions; no ETH. Re-entrancy guarded; the voucher nonce is spent
  *  before any token moves.
  *
- *  ADMIN: owner (the timelock) — upgrades, {setRates}; operator (the LP vault's, read live) —
- *  {setSigner}, {setTwapParams}, {unpauseCompound}; guardian or operator — {pauseCompound}.
+ *  THE TRANSITION DELIVERIES (spec 01 §9.4, 2026-11-20). Three more entries, {compoundFor},
+ *  {moveToLpFor} and {claimRestakeFor}, are open ONLY to the {transitionReceiver}: it hands over the
+ *  tokens that arrived at a holder's receiving address and this contract stakes them FOR that
+ *  holder under the route of that address. Each delivery carries its own EIP-712 `DeliveryVoucher`
+ *  (the same domain and signer as the `TransitionVoucher`) whose nonce must equal the holder's
+ *  {deliveryOf} `nextNonce`, and whose cumulative limits cap what all deliveries of the holder may
+ *  take (`principalDelivered <= assetLimit <= eligiblePrincipal`, the same for the reward). The
+ *  first delivery stores the route and marks the holder {migrated}, so the direct routes refuse
+ *  him afterwards, and a holder who moved directly cannot receive a delivery. The bonus of a
+ *  delivery follows the voucher's `burnTime`, never the time of the stake: the full rate when
+ *  `burnTime < pool.bonusCutoff()`, nothing otherwise. Route 1 swaps under a floor of
+ *  {usdcInAsset} less {swapLimitBps}; route 2 mints its ONE position on the first delivery, only
+ *  when the matching $ASSET of the whole USDC is there ({MatchingAssetNotArrived}), and stakes every
+ *  later part in v3.
+ *
+ *  ADMIN: owner (the timelock) — upgrades, {setRates}, {setTransitionReceiver},
+ *  {initializeTransition}; operator (the LP vault's, read live) — {setSigner}, {setTwapParams},
+ *  {unpauseCompound}, {setSwapLimitBps}; guardian or operator — {pauseCompound}.
  */
-contract StakingMigrator is
-    Initializable,
-    UUPSUpgradeable,
-    Ownable2StepUpgradeable,
-    EIP712Upgradeable,
-    ReentrancyGuardTransient,
-    TwapGuard
-{
+contract StakingMigrator is UUPSUpgradeable, Ownable2StepUpgradeable, StakingMigratorBase {
     using SafeERC20 for IERC20;
 
     // ──────────────────────── Types ────────────────────────────
@@ -137,106 +112,6 @@ contract StakingMigrator is
         uint256 deadline;
         bytes signature;
     }
-
-    // ──────────────────────── Constants ────────────────────────
-
-    uint8 public constant ROUTE_COMPOUND = 1;
-    uint8 public constant ROUTE_LP = 2;
-    uint8 public constant ROUTE_RESTAKE = 3;
-
-    uint16 public constant BPS = 10_000;
-
-    /// @notice The recommended band's half-width: ln(2) / ln(1.0001) = 6931.47, rounded up. Below
-    ///         the spot tick that is -50 % of the price, above it +100 %.
-    int24 public constant LP_RANGE_TICKS = 6932;
-
-    bytes32 public constant TRANSITION_VOUCHER_TYPEHASH = keccak256(
-        "TransitionVoucher(address user,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 nonce,uint256 deadline)"
-    );
-
-    // ──────────────────────── Immutables ───────────────────────
-
-    IMigratorLpVault public immutable lpVault;
-    INonfungiblePositionManager public immutable positionManager;
-    ISwapRouter02 public immutable swapRouter;
-    address public immutable usdc;
-    address public immutable asset;
-    uint24 public immutable fee;
-    int24 public immutable tickSpacing;
-    bool public immutable assetIsToken0;
-
-    // ──────────────────────── Storage ──────────────────────────
-
-    /// @custom:storage-location erc7201:real.staking.storage.StakingMigrator
-    struct MigratorStorage {
-        address stakingPool;
-        address bonusVault;
-        address signer;
-        uint16 compoundBps;
-        uint16 lpBps;
-        uint16 restakeBps;
-        bool compoundPaused;
-        uint32 valuationWindow;
-        mapping(address => mapping(uint256 => bool)) usedNonces;
-        /// One transition per wallet: set by the first successful route call.
-        mapping(address => bool) migrated;
-    }
-
-    /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.StakingMigrator")) - 1)) & ~0xff
-    bytes32 private constant MIGRATOR_STORAGE = 0xa846ed032583543a4fbe67f8b477f1a29883d2f8c76050d7d3635994b7226e00;
-
-    function _migratorStorage() private pure returns (MigratorStorage storage $) {
-        assembly {
-            $.slot := MIGRATOR_STORAGE
-        }
-    }
-
-    // ──────────────────────── Events ───────────────────────────
-
-    event Compounded(
-        address indexed user, uint256 principal, uint256 usdcIn, uint256 assetBought, uint256 staked, uint256 bonus
-    );
-    event MovedToLp(
-        address indexed user,
-        uint256 indexed tokenId,
-        uint256 usdcIn,
-        uint256 assetToLp,
-        uint256 restaked,
-        uint256 lpBonus,
-        uint256 v3Bonus
-    );
-    event ClaimRestaked(address indexed user, uint256 principal, uint256 bonus);
-    event CompoundPaused(address by);
-    event CompoundUnpaused(address by);
-    event RatesSet(uint16 compoundBps, uint16 lpBps, uint16 restakeBps);
-    /// @notice A voucher nonce was spent (one per route call).
-    event VoucherUsed(address indexed user, uint256 nonce, uint8 route);
-    /// @notice USDC the position did not take, sent back to the caller by {moveToLp}.
-    event UsdcRefunded(address indexed user, uint256 amount);
-    event SignerSet(address previousSigner, address newSigner);
-    event ValuationWindowSet(uint32 window);
-
-    // ──────────────────────── Errors ───────────────────────────
-
-    error ZeroAddress();
-    error ZeroAmount();
-    error TokenPairMismatch(address usdc, address asset, address token0, address token1);
-    error InvalidRate(uint16 bps);
-    error InvalidValuationWindow(uint32 window, uint32 minWindow, uint32 maxWindow);
-    error CompoundIsPaused();
-    error DeadlineExpired(uint256 deadline, uint256 blockTimestamp);
-    error WrongRoute(uint8 expected, uint8 voucherRoute);
-    error VoucherExpired(uint256 deadline, uint256 blockTimestamp);
-    error VoucherNonceUsed(address user, uint256 nonce);
-    error InvalidVoucherSignature();
-    error PrincipalExceedsEligible(uint256 amount, uint256 eligible);
-    error RewardExceedsEligible(uint256 amount, uint256 eligible);
-    error NotOperator(address caller, address operator);
-    error NotGuardianOrOperator(address caller, address guardian, address operator);
-    error RenounceDisabled();
-    error AlreadyMigrated(address user);
-    error MinAssetOutZero();
-    error CustodyAssertFailed(uint256 tokenId, address owner, address staker);
 
     // ──────────────────────── Modifiers ────────────────────────
 
@@ -262,34 +137,21 @@ contract StakingMigrator is
 
     // ──────────────────────── Constructor ──────────────────────
 
+    /// @dev The delivery module ({StakingMigratorDeliveries}) this implementation created; the three
+    ///      delivery entries run there with `delegatecall`.
+    address private immutable deliveryModule;
+
     /**
      * @notice Deploys the IMPLEMENTATION. Its market references are read from the LP vault and kept
-     *         `immutable`, exactly like the zapper's.
+     *         `immutable`, exactly like the zapper's, and it creates its delivery module from the same
+     *         three arguments.
      * @param lpVault_ The `LPStakingVault` proxy.
      * @param usdc_ USDC; one of the vault pool's two tokens.
      * @param asset_ $ASSET; the other one.
      * @custom:oz-upgrades-unsafe-allow constructor state-variable-immutable
      */
-    constructor(address lpVault_, address usdc_, address asset_) TwapGuard(IMigratorLpVault(lpVault_).pool()) {
-        if (usdc_ == address(0) || asset_ == address(0)) revert ZeroAddress();
-        IMigratorLpVault v = IMigratorLpVault(lpVault_);
-        address token0_ = v.token0();
-        address token1_ = v.token1();
-        bool assetFirst = asset_ == token0_ && usdc_ == token1_;
-        if (!assetFirst && !(asset_ == token1_ && usdc_ == token0_)) {
-            revert TokenPairMismatch(usdc_, asset_, token0_, token1_);
-        }
-
-        lpVault = v;
-        positionManager = INonfungiblePositionManager(v.positionManager());
-        swapRouter = ISwapRouter02(v.swapRouter());
-        usdc = usdc_;
-        asset = asset_;
-        fee = v.fee();
-        tickSpacing = IMigratorPoolSpacing(address(pool)).tickSpacing();
-        assetIsToken0 = assetFirst;
-
-        _disableInitializers();
+    constructor(address lpVault_, address usdc_, address asset_) StakingMigratorBase(lpVault_, usdc_, asset_) {
+        deliveryModule = address(new StakingMigratorDeliveries(lpVault_, usdc_, asset_));
     }
 
     // ──────────────────────── Initializer ──────────────────────
@@ -420,7 +282,7 @@ contract StakingMigrator is
 
         positionManager.approve(address(lpVault), tokenId);
         lpVault.stakeFor(msg.sender, tokenId);
-        _assertCustody(tokenId);
+        _assertCustody(tokenId, msg.sender);
 
         _finishLp(tokenId, usdcAmount, usdcUsed, assetAmount, assetUsed);
     }
@@ -449,26 +311,44 @@ contract StakingMigrator is
         emit ClaimRestaked(msg.sender, assetAmount, bonus);
     }
 
-    // ──────────────────────── Previews ─────────────────────────
+    // ──────────────────────── Transition deliveries ────────────
 
-    /// @notice The band {moveToLp} mints on right now: 6,932 ticks each side of the spot tick,
-    ///         the lower edge rounded down and the upper edge up to the spacing, clamped to the usable range.
-    function lpRange() public view returns (int24 tickLower, int24 tickUpper) {
-        (, int24 currentTick,,,,,) = pool.slot0();
-        int256 spacing = tickSpacing;
-        tickLower = _clampToUsable(_floorToSpacing(int256(currentTick) - LP_RANGE_TICKS, spacing), spacing);
-        tickUpper = _clampToUsable(_ceilToSpacing(int256(currentTick) + LP_RANGE_TICKS, spacing), spacing);
+    /// @notice Route 1 for a transition holder: the receiver hands over what arrived at the holder's
+    ///         route-1 receiving address, the USDC is swapped under the swap floor and everything is
+    ///         staked in v3 for the holder. The {transitionReceiver} only. The body is
+    ///         {StakingMigratorDeliveries-compoundFor}.
+    function compoundFor(
+        address,
+        uint256,
+        uint256,
+        ITransitionMigrator.DeliveryLimits calldata,
+        ITransitionMigrator.DeliveryVoucher calldata
+    ) external returns (ITransitionMigrator.DeliveryResult memory) {
+        _delegateToDeliveries();
     }
 
-    /// @notice `usdcAmount` valued in $ASSET at the mean tick of {valuationWindow}.
-    function usdcInAsset(uint256 usdcAmount) public view returns (uint256) {
-        int24 tick = OracleHistory.meanTick(pool, _migratorStorage().valuationWindow);
-        uint256 sqrtP = TickMath.getSqrtRatioAtTick(tick);
-        uint256 q96 = 1 << 96;
-        // price = token1 per token0 = (sqrtP / 2^96)^2. USDC as token1 -> divide by it, as token0 -> multiply.
-        return assetIsToken0
-            ? Math.mulDiv(Math.mulDiv(usdcAmount, q96, sqrtP), q96, sqrtP)
-            : Math.mulDiv(Math.mulDiv(usdcAmount, sqrtP, q96), sqrtP, q96);
+    /// @notice Route 2 for a transition holder: ONE LP position on the first delivery, v3 for every
+    ///         later part. The {transitionReceiver} only. The body is
+    ///         {StakingMigratorDeliveries-moveToLpFor}.
+    function moveToLpFor(
+        address,
+        uint256,
+        uint256,
+        ITransitionMigrator.DeliveryLimits calldata,
+        ITransitionMigrator.DeliveryVoucher calldata
+    ) external returns (ITransitionMigrator.DeliveryResult memory) {
+        _delegateToDeliveries();
+    }
+
+    /// @notice Route 3 for a transition holder: the $ASSET is staked in v3. The {transitionReceiver}
+    ///         only. The body is {StakingMigratorDeliveries-claimRestakeFor}.
+    function claimRestakeFor(
+        address,
+        uint256,
+        ITransitionMigrator.DeliveryLimits calldata,
+        ITransitionMigrator.DeliveryVoucher calldata
+    ) external returns (ITransitionMigrator.DeliveryResult memory) {
+        _delegateToDeliveries();
     }
 
     // ──────────────────────── Views ────────────────────────────
@@ -512,6 +392,33 @@ contract StakingMigrator is
     /// @notice True once `user` has made their one transition (any route).
     function migrated(address user) external view returns (bool) {
         return _migratorStorage().migrated[user];
+    }
+
+    /// @notice The transition deliveries of `holder` so far.
+    function deliveryOf(address holder)
+        external
+        view
+        returns (
+            uint8 route,
+            bool lpCreated,
+            uint256 lpTokenId,
+            uint256 principalDelivered,
+            uint256 rewardDelivered,
+            uint256 nextNonce
+        )
+    {
+        Delivery storage d = _migratorStorage().deliveries[holder];
+        return (d.route, d.lpCreated, d.lpTokenId, d.principalDelivered, d.rewardDelivered, d.nextNonce);
+    }
+
+    /// @notice The only caller of the three delivery entries (zero: closed).
+    function transitionReceiver() external view returns (address) {
+        return _migratorStorage().transitionReceiver;
+    }
+
+    /// @notice How far below the TWAP value a route-1 delivery's swap may fill, in basis points.
+    function swapLimitBps() external view returns (uint16) {
+        return _migratorStorage().swapLimitBps;
     }
 
     /// @notice The EIP-712 digest the signer signs for `user`'s voucher.
@@ -563,6 +470,36 @@ contract StakingMigrator is
         _setRates(compoundBps_, lpBps_, restakeBps_);
     }
 
+    /**
+     * @notice Links the transition receiver and sets the swap limit to 3 %. Runs once: inside the
+     *         upgrade (`upgradeToAndCall`) of a live proxy, or right after a fresh deploy while the
+     *         deployer owns the proxy. Owner only.
+     */
+    function initializeTransition(address receiver_) external onlyOwner reinitializer(2) {
+        if (receiver_ == address(0)) revert ZeroAddress();
+        MigratorStorage storage $ = _migratorStorage();
+        $.transitionReceiver = receiver_;
+        $.swapLimitBps = INITIAL_SWAP_LIMIT_BPS;
+        emit TransitionReceiverSet(address(0), receiver_);
+        emit SwapLimitSet(0, INITIAL_SWAP_LIMIT_BPS);
+    }
+
+    /// @notice Replaces the transition receiver; zero closes the three delivery entries. Owner (the timelock).
+    function setTransitionReceiver(address receiver_) external onlyOwner {
+        MigratorStorage storage $ = _migratorStorage();
+        emit TransitionReceiverSet($.transitionReceiver, receiver_);
+        $.transitionReceiver = receiver_;
+    }
+
+    /// @notice Sets the route-1 delivery swap limit, `0 < bps <= MAX_SWAP_LIMIT_BPS`. The LP vault's
+    ///         operator, undelayed: raised for a large holder whose swap cannot pass at 3 %.
+    function setSwapLimitBps(uint16 bps) external onlyVaultOperator {
+        if (bps == 0 || bps > MAX_SWAP_LIMIT_BPS) revert InvalidSwapLimit(bps, MAX_SWAP_LIMIT_BPS);
+        MigratorStorage storage $ = _migratorStorage();
+        emit SwapLimitSet($.swapLimitBps, bps);
+        $.swapLimitBps = bps;
+    }
+
     function _authorizeUpgrade(address) internal override onlyOwner {}
 
     function renounceOwnership() public override onlyOwner {
@@ -580,10 +517,6 @@ contract StakingMigrator is
         $.lpBps = lpBps_;
         $.restakeBps = restakeBps_;
         emit RatesSet(compoundBps_, lpBps_, restakeBps_);
-    }
-
-    function _checkDeadline(uint256 deadline) private view {
-        if (block.timestamp > deadline) revert DeadlineExpired(deadline, block.timestamp);
     }
 
     /// @dev The whole eligibility check, then the nonce is spent and the wallet marked migrated —
@@ -618,75 +551,6 @@ contract StakingMigrator is
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
     }
 
-    /// @dev USDC -> $ASSET on the vault's pool, guarded. Returns what the balance actually gained.
-    function _swapUsdcForAsset(uint256 usdcAmount, uint256 minAssetOut) private returns (uint256 bought) {
-        _checkTwapDeviation();
-        uint256 before = IERC20(asset).balanceOf(address(this));
-        IERC20(usdc).forceApprove(address(swapRouter), usdcAmount);
-        swapRouter.exactInputSingle(
-            ISwapRouter02.ExactInputSingleParams({
-                tokenIn: usdc,
-                tokenOut: asset,
-                fee: fee,
-                recipient: address(this),
-                amountIn: usdcAmount,
-                amountOutMinimum: minAssetOut,
-                sqrtPriceLimitX96: 0
-            })
-        );
-        IERC20(usdc).forceApprove(address(swapRouter), 0);
-        bought = IERC20(asset).balanceOf(address(this)) - before;
-    }
-
-    /// @dev The adapter's custody check after `vault.stakeFor`: the NFT is the vault's and the vault
-    ///      credits it to the caller.
-    function _assertCustody(uint256 tokenId) private view {
-        address owner_ = positionManager.ownerOf(tokenId);
-        address staker = lpVault.stakerOf(tokenId);
-        if (owner_ != address(lpVault) || staker != msg.sender) revert CustodyAssertFailed(tokenId, owner_, staker);
-    }
-
-    /// @dev Mints on {lpRange} with the whole USDC and the whole $ASSET as the desired amounts; the
-    ///      position manager takes the matching pair and leaves the rest here.
-    function _mintBand(uint256 usdcAmount, uint256 assetAmount, uint256 amount0Min, uint256 amount1Min, uint256 deadline)
-        private
-        returns (uint256 tokenId, uint256 usdcUsed, uint256 assetUsed)
-    {
-        INonfungiblePositionManager.MintParams memory params =
-            _mintParams(usdcAmount, assetAmount, amount0Min, amount1Min, deadline);
-
-        IERC20(params.token0).forceApprove(address(positionManager), params.amount0Desired);
-        IERC20(params.token1).forceApprove(address(positionManager), params.amount1Desired);
-        uint256 used0;
-        uint256 used1;
-        (tokenId,, used0, used1) = positionManager.mint(params);
-        IERC20(params.token0).forceApprove(address(positionManager), 0);
-        IERC20(params.token1).forceApprove(address(positionManager), 0);
-        (assetUsed, usdcUsed) = assetIsToken0 ? (used0, used1) : (used1, used0);
-    }
-
-    function _mintParams(
-        uint256 usdcAmount,
-        uint256 assetAmount,
-        uint256 amount0Min,
-        uint256 amount1Min,
-        uint256 deadline
-    ) private view returns (INonfungiblePositionManager.MintParams memory params) {
-        (params.tickLower, params.tickUpper) = lpRange();
-        if (assetIsToken0) {
-            (params.token0, params.token1) = (asset, usdc);
-            (params.amount0Desired, params.amount1Desired) = (assetAmount, usdcAmount);
-        } else {
-            (params.token0, params.token1) = (usdc, asset);
-            (params.amount0Desired, params.amount1Desired) = (usdcAmount, assetAmount);
-        }
-        params.fee = fee;
-        params.amount0Min = amount0Min;
-        params.amount1Min = amount1Min;
-        params.recipient = address(this);
-        params.deadline = deadline;
-    }
-
     /// @dev Route 2 after the vault stake: the two reservations, the v3 remainder, the USDC refund.
     function _finishLp(
         uint256 tokenId,
@@ -695,38 +559,11 @@ contract StakingMigrator is
         uint256 assetAmount,
         uint256 assetUsed
     ) private {
-        MigratorStorage storage $ = _migratorStorage();
-        uint64 unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration($.stakingPool).endEpoch());
+        ITransitionMigrator.DeliveryResult memory r;
+        (r.lpTokenId, r.usdcToLp, r.assetToLp) = (tokenId, usdcUsed, assetUsed);
         // Both parts follow the 30-day rule: zero from the pool's bonus cutoff on.
-        bool bonusOpen = _bonusOpen();
-
-        uint256 lpBonus;
-        if (bonusOpen) lpBonus = Math.mulDiv(assetUsed + usdcInAsset(usdcUsed), $.lpBps, BPS);
-        if (lpBonus > 0) IV3BonusVaultReservations($.bonusVault).reserveLp(tokenId, msg.sender, lpBonus, unlockAt);
-
-        uint256 remainder = assetAmount - assetUsed;
-        uint256 v3Bonus;
-        if (remainder > 0) {
-            _stakeV3(msg.sender, remainder);
-            if (bonusOpen) v3Bonus = Math.mulDiv(remainder, $.lpBps, BPS);
-            _reserve(msg.sender, v3Bonus, unlockAt, ROUTE_LP);
-        }
-
-        uint256 usdcDust = usdcAmount - usdcUsed;
-        if (usdcDust > 0) {
-            IERC20(usdc).safeTransfer(msg.sender, usdcDust);
-            emit UsdcRefunded(msg.sender, usdcDust);
-        }
-
-        emit MovedToLp(msg.sender, tokenId, usdcUsed, assetUsed, remainder, lpBonus, v3Bonus);
-    }
-
-    /// @dev Stakes `amount` in v3 for `user` and returns the pool's end as the bonus unlock time.
-    function _stakeV3(address user, uint256 amount) private returns (uint64 unlockAt) {
-        address stakingPool_ = _migratorStorage().stakingPool;
-        IERC20(asset).forceApprove(stakingPool_, amount);
-        IWeightedStakingPoolV3Migration(stakingPool_).stakeFor(user, amount);
-        unlockAt = SafeCast.toUint64(IWeightedStakingPoolV3Migration(stakingPool_).endEpoch());
+        _settleLp(msg.sender, usdcAmount, assetAmount, _bonusOpen(), r);
+        emit MovedToLp(msg.sender, tokenId, usdcUsed, assetUsed, r.staked, r.lpBonus, r.v3Bonus);
     }
 
     /// @dev The 30-day rule (2026-11-17): true while an entry still earns its bonus, i.e. strictly
@@ -735,31 +572,17 @@ contract StakingMigrator is
         return block.timestamp < IWeightedStakingPoolV3Migration(_migratorStorage().stakingPool).bonusCutoff();
     }
 
-    /// @dev A zero `amount` (a zero rate, rounding, or the 30-day rule) reserves nothing and does
-    ///      not call the bonus vault.
-    function _reserve(address user, uint256 amount, uint64 unlockAt, uint8 route) private {
-        if (amount == 0) return;
-        IV3BonusVaultReservations(_migratorStorage().bonusVault).reserve(user, amount, unlockAt, route);
-    }
-
-    /// @dev The adapter's rounding: towards negative infinity on the spacing.
-    function _floorToSpacing(int256 tick, int256 spacing) private pure returns (int256 rounded) {
-        rounded = tick - tick % spacing;
-        if (rounded > tick) rounded -= spacing;
-    }
-
-    /// @dev The adapter's rounding: towards positive infinity on the spacing.
-    function _ceilToSpacing(int256 tick, int256 spacing) private pure returns (int256 rounded) {
-        rounded = tick - tick % spacing;
-        if (rounded < tick) rounded += spacing;
-    }
-
-    /// @dev The adapter's clamp into Uniswap's usable range, rounded inward to the spacing.
-    function _clampToUsable(int256 tick, int256 spacing) private pure returns (int24) {
-        int256 maxUsable = int256(TickMath.MAX_TICK) - int256(TickMath.MAX_TICK) % spacing;
-        int256 minUsable = int256(TickMath.MIN_TICK) - int256(TickMath.MIN_TICK) % spacing;
-        if (tick > maxUsable) return SafeCast.toInt24(maxUsable);
-        if (tick < minUsable) return SafeCast.toInt24(minUsable);
-        return SafeCast.toInt24(tick);
+    /// @dev Runs the current call's calldata on {deliveryModule} with `delegatecall` and returns or
+    ///      reverts with exactly its return data. The module was created by this implementation's own
+    ///      constructor and its address is immutable, so the target can never change; it has no
+    ///      `selfdestruct` and no `delegatecall` of its own.
+    /// @custom:oz-upgrades-unsafe-allow delegatecall
+    function _delegateToDeliveries() private {
+        (bool ok, bytes memory ret) = deliveryModule.delegatecall(msg.data);
+        assembly {
+            switch ok
+            case 0 { revert(add(ret, 0x20), mload(ret)) }
+            default { return(add(ret, 0x20), mload(ret)) }
+        }
     }
 }

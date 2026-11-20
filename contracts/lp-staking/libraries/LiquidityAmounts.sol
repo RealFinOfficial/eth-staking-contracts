@@ -2,6 +2,7 @@
 pragma solidity 0.8.38;
 
 import "@openzeppelin/contracts/utils/math/Math.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 // Vendored from Uniswap v3-periphery, branch `0.8`, `contracts/libraries/LiquidityAmounts.sol`
 // (https://github.com/Uniswap/v3-periphery/blob/0.8/contracts/libraries/LiquidityAmounts.sol), and
@@ -16,7 +17,14 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 // The `pragma` is raised from `>=0.5.0` to `^0.8.20` because the OpenZeppelin import requires it.
 // The original licence header is kept as upstream wrote it: this file is GPL-2.0-or-later
 // inside an MIT repository, which is an open question for the owner (B.3 decision document, open
-// item O6). Used only through {PositionValue}.
+// item O6). Used through {PositionValue}.
+//
+// Added 2026-11-20 for the `StakingMigrator`'s matching amount of a transition delivery (spec 01
+// §9.4.5): `getLiquidityForAmount0` and `getLiquidityForAmount1`, verbatim from the same upstream
+// file apart from the `toUint128` cast (OpenZeppelin `SafeCast.toUint128`, which reverts on
+// overflow instead of truncating), and two rounding-up amount functions, which upstream keeps in
+// v3-core's `SqrtPriceMath.getAmount0Delta` / `getAmount1Delta` with `roundUp = true`: the amounts
+// a pool charges a mint of `liquidity`.
 
 /// @title Liquidity amount functions
 /// @notice Provides functions for computing liquidity amounts from token amounts and prices
@@ -88,5 +96,68 @@ library LiquidityAmounts {
         } else {
             amount1 = getAmount1ForLiquidity(sqrtRatioAX96, sqrtRatioBX96, liquidity);
         }
+    }
+
+    /// @notice Computes the amount of liquidity received for a given amount of token0 and price range
+    /// @dev Calculates amount0 * (sqrt(upper) * sqrt(lower)) / (sqrt(upper) - sqrt(lower))
+    /// @param sqrtRatioAX96 A sqrt price representing the first tick boundary
+    /// @param sqrtRatioBX96 A sqrt price representing the second tick boundary
+    /// @param amount0 The amount0 being sent in
+    /// @return liquidity The amount of returned liquidity
+    function getLiquidityForAmount0(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint256 amount0
+    ) internal pure returns (uint128 liquidity) {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+        uint256 intermediate = Math.mulDiv(sqrtRatioAX96, sqrtRatioBX96, Q96);
+        unchecked {
+            return SafeCast.toUint128(Math.mulDiv(amount0, intermediate, sqrtRatioBX96 - sqrtRatioAX96));
+        }
+    }
+
+    /// @notice Computes the amount of liquidity received for a given amount of token1 and price range
+    /// @dev Calculates amount1 / (sqrt(upper) - sqrt(lower)).
+    /// @param sqrtRatioAX96 A sqrt price representing the first tick boundary
+    /// @param sqrtRatioBX96 A sqrt price representing the second tick boundary
+    /// @param amount1 The amount1 being sent in
+    /// @return liquidity The amount of returned liquidity
+    function getLiquidityForAmount1(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint256 amount1
+    ) internal pure returns (uint128 liquidity) {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+        unchecked {
+            return SafeCast.toUint128(Math.mulDiv(amount1, Q96, sqrtRatioBX96 - sqrtRatioAX96));
+        }
+    }
+
+    /// @notice {getAmount0ForLiquidity} rounded up: the token0 a pool charges a mint of `liquidity`
+    ///         (v3-core `SqrtPriceMath.getAmount0Delta(..., roundUp = true)`).
+    function getAmount0ForLiquidityRoundingUp(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint128 liquidity
+    ) internal pure returns (uint256 amount0) {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+        uint256 numerator = Math.mulDiv(
+            uint256(liquidity) << RESOLUTION,
+            sqrtRatioBX96 - sqrtRatioAX96,
+            sqrtRatioBX96,
+            Math.Rounding.Ceil
+        );
+        return Math.ceilDiv(numerator, sqrtRatioAX96);
+    }
+
+    /// @notice {getAmount1ForLiquidity} rounded up: the token1 a pool charges a mint of `liquidity`
+    ///         (v3-core `SqrtPriceMath.getAmount1Delta(..., roundUp = true)`).
+    function getAmount1ForLiquidityRoundingUp(
+        uint160 sqrtRatioAX96,
+        uint160 sqrtRatioBX96,
+        uint128 liquidity
+    ) internal pure returns (uint256 amount1) {
+        if (sqrtRatioAX96 > sqrtRatioBX96) (sqrtRatioAX96, sqrtRatioBX96) = (sqrtRatioBX96, sqrtRatioAX96);
+        return Math.mulDiv(liquidity, sqrtRatioBX96 - sqrtRatioAX96, Q96, Math.Rounding.Ceil);
     }
 }
