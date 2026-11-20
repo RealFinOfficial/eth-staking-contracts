@@ -391,7 +391,7 @@ const OWNER_TIER = {
     kinds: [ADAPTER_KIND],
     note:
       "sets the window whose mean tick values every bonus (audit L-02), 300..3600 s; the pool must " +
-      "already serve it (ceil(w / 6) + 1 current slots and w seconds of history)",
+      "already serve it (w + 1 current slots and w seconds of history)",
   },
   upgradeToAndCall: {
     signature: "function upgradeToAndCall(address newImplementation, bytes data)",

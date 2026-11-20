@@ -248,7 +248,7 @@ function readMinCliff(chainId) {
 /**
  * LP_APEBOND_VALUATION_WINDOW: the adapter's valuation window, in seconds (audit L-02): the window
  * whose arithmetic-mean tick values every position and so every bonus. Default 1800, bounded to
- * the adapter's 300..3600. The pool must already serve it (ceil(w / 6) + 1 current slots and w
+ * the adapter's 300..3600. The pool must already serve it (w + 1 current slots and w
  * seconds of history), or the adapter's constructor reverts. Read before anything is deployed.
  */
 function readValuationWindow() {

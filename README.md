@@ -500,9 +500,9 @@ pool holds the longest configured window of history, then deploy. This is item 7
 
 Growing the array is a separate step from filling it. Since audit L-04 the contracts refuse a
 window the pool cannot serve forever (`libraries/OracleHistory.sol`): the CURRENT
-`observationCardinality` must be at least `ceil(window / 6) + 1` and `observe([window, 0])` must
+`observationCardinality` must be at least `window + 1` (one second per slot, since 2026-11-20) and `observe([window, 0])` must
 succeed, at `initialize` and at every `setTwapParams`. The deploy script runs the same check before
-it sends anything, and `LP_OBSERVATION_CARDINALITY` (default the larger of 150 and that minimum)
+it sends anything, and `LP_OBSERVATION_CARDINALITY` (default the larger of 301 and that minimum)
 is refused below it. The guard defaults are deliberately wide: 300 s of
 lookback and 1000 bps (= 953 ticks) of tolerance, so a fast move never locks a staker out of
 re-ranging.

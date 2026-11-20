@@ -337,7 +337,8 @@ have been traded for a window.
 `OracleHistory.requireServes(pool, window)` (`libraries/OracleHistory.sol`): `TwapGuard._setTwapParams`
 (so `initialize` and `setTwapParams` of the vault and the zapper) and the ApeBond adapter's
 valuation window. It reverts `CardinalityTooLow(cardinality, needed)` unless the CURRENT
-`observationCardinality` (not `observationCardinalityNext`) is at least `ceil(window / 6) + 1`, and
+`observationCardinality` (not `observationCardinalityNext`) is at least `window + 1` (one second per
+slot since 2026-11-20, for blocks every second on Avalanche C-Chain; it was `ceil(window / 6) + 1`), and
 `HistoryTooShort(window)` unless `observe([window, 0])` succeeds. A pool's cardinality never
 decreases and it writes at most one observation per block, so a window that passes can never
 revert `OLD` afterwards. The cold state above is therefore unreachable for a stack: a vault cannot

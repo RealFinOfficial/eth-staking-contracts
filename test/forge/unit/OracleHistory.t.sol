@@ -10,7 +10,8 @@ import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 /**
  * @notice Audit L-04: every place that SETS a TWAP window checks that the pool can serve it now
  *         and forever after ({OracleHistory-requireServes}): the CURRENT observation cardinality
- *         is at least `ceil(window / 6) + 1`, and `observe([window, 0])` succeeds. Measured here
+ *         is at least `ceil(window / 1) + 1` = `window + 1` (one slot per second: Avalanche
+ *         C-Chain blocks can be one second apart), and `observe([window, 0])` succeeds. Measured here
  *         on the vault and the zapper, at `initialize` and at `setTwapParams`, against the pool
  *         mock whose cardinality and history are settable. The real pool's `OLD` is asserted in
  *         `test/forge/fork/TwapManipulation.t.sol`. The adapter's valuation window is in
@@ -23,39 +24,44 @@ contract OracleHistoryTest is LocalHarness {
 
     // ──────────────────────── The rule ─────────────────────────
 
-    /// @dev 150 slots serve a 300 s window (51 needed); 1800 s needs 301; 3600 s needs 601.
-    function test_Rule_300sPassesOn150SlotsAnd1800sNeeds301() public {
-        poolMock.setObservationCardinality(150);
-        vault.setTwapParams(300, 500);
-        assertEq(vault.twapWindow(), 300, "150 slots serve 300 s");
-
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(150), uint256(301)));
-        vault.setTwapParams(1800, 500);
-
-        poolMock.setObservationCardinality(300);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
-        vault.setTwapParams(1800, 500);
-
+    /// @dev 301 slots serve a 300 s window and no more; 1800 s needs 1801; 3600 s needs 3601.
+    function test_Rule_300sNeeds301And1800sNeeds1801() public {
         poolMock.setObservationCardinality(301);
-        vault.setTwapParams(1800, 500);
-        assertEq(vault.twapWindow(), 1800, "301 slots serve 1800 s");
+        vault.setTwapParams(300, 500);
+        assertEq(vault.twapWindow(), 300, "301 slots serve 300 s");
 
-        poolMock.setObservationCardinality(600);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(600), uint256(601)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(301), uint256(1801)));
+        vault.setTwapParams(1800, 500);
+
+        poolMock.setObservationCardinality(1800);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1800), uint256(1801)));
+        vault.setTwapParams(1800, 500);
+
+        poolMock.setObservationCardinality(1801);
+        vault.setTwapParams(1800, 500);
+        assertEq(vault.twapWindow(), 1800, "1801 slots serve 1800 s");
+
+        poolMock.setObservationCardinality(3600);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(3600), uint256(3601)));
         vault.setTwapParams(3600, 500);
     }
 
-    /// @dev The boundary of the rule: ceil(300 / 6) + 1 = 51, so 50 is refused and 51 accepted;
-    ///      a window off the 6 s grid rounds UP (301 s needs ceil(301 / 6) + 1 = 52).
-    function test_Rule_TheBoundaryIsCeilOfWindowOverSixPlusOne() public {
-        poolMock.setObservationCardinality(50);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(50), uint256(51)));
+    /// @dev The boundary of the rule: 300 / 1 + 1 = 301, so 300 is refused and 301 accepted;
+    ///      every extra second of window needs one extra slot (301 s needs 302).
+    function test_Rule_TheBoundaryIsWindowPlusOne() public {
+        poolMock.setObservationCardinality(300);
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(300), uint256(301)));
         vault.setTwapParams(300, 500);
 
-        poolMock.setObservationCardinality(51);
+        poolMock.setObservationCardinality(301);
         vault.setTwapParams(300, 500);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(51), uint256(52)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(301), uint256(302)));
         vault.setTwapParams(301, 500);
+    }
+
+    /// @dev The constant itself: one second per slot.
+    function test_Rule_OneSecondPerSlot() public pure {
+        assertEq(OracleHistory.MIN_SECONDS_PER_SLOT, 1);
     }
 
     /// @dev It reads the CURRENT cardinality, never `observationCardinalityNext`: grown slots
@@ -63,7 +69,7 @@ contract OracleHistoryTest is LocalHarness {
     function test_Rule_GrowingNextDoesNotCount() public {
         poolMock.setObservationCardinality(2);
         poolMock.increaseObservationCardinalityNext(1000);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(2), uint256(51)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(2), uint256(301)));
         vault.setTwapParams(300, 500);
     }
 
@@ -88,7 +94,7 @@ contract OracleHistoryTest is LocalHarness {
         uint32 windowBefore = vault.twapWindow();
         uint24 ticksBefore = vault.maxTwapDeviationTicks();
         poolMock.setObservationCardinality(10);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(10), uint256(51)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(10), uint256(301)));
         vault.setTwapParams(300, 777);
         assertEq(vault.twapWindow(), windowBefore, "window unchanged");
         assertEq(vault.maxTwapDeviationTicks(), ticksBefore, "ceiling unchanged");
@@ -119,12 +125,12 @@ contract OracleHistoryTest is LocalHarness {
         bytes memory zapperInit = abi.encodeCall(LPZapper.initialize, (address(this), address(this), 300, 500));
 
         poolMock.setObservationCardinality(1);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(301)));
         new LPProxy(address(vaultImpl), vaultInit);
-        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(51)));
+        vm.expectRevert(abi.encodeWithSelector(OracleHistory.CardinalityTooLow.selector, uint16(1), uint256(301)));
         new LPProxy(address(zapperImpl), zapperInit);
 
-        poolMock.setObservationCardinality(51);
+        poolMock.setObservationCardinality(301);
         poolMock.setHistorySeconds(299);
         vm.expectRevert(abi.encodeWithSelector(OracleHistory.HistoryTooShort.selector, uint32(300)));
         new LPProxy(address(vaultImpl), vaultInit);

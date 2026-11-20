@@ -124,14 +124,14 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
     });
 
     it("refuses a pool whose CURRENT cardinality cannot serve the window, before sending anything (L-04)", async function () {
-      // 300 s needs ceil(300 / 6) + 1 = 51 slots. A grown next size does not count.
-      await (await world.pool.setObservationCardinality(50)).wait();
+      // 300 s needs 300 + 1 = 301 slots. A grown next size does not count.
+      await (await world.pool.setObservationCardinality(300)).wait();
       await (await world.pool.increaseObservationCardinalityNext(1000)).wait();
       try {
         // Without the route the longest window is the vault's own 300 s.
         await refused(
           { LP_APEBOND_ENABLED: "0" },
-          /CURRENT observationCardinality is 50, below the 51 slots a 300s window needs .*nothing was sent/
+          /CURRENT observationCardinality is 300, below the 301 slots a 300s window needs .*nothing was sent/
         );
       } finally {
         await (await world.pool.setObservationCardinality(65535)).wait();
@@ -156,10 +156,10 @@ describe("deploy-lp-staking.js (LP_APEBOND_ENABLED=1) and deploy-apebond.js", fu
     });
 
     it("refuses a pool that cannot serve the valuation window, the longer of the two (L-04)", async function () {
-      // The vault's 300 s needs 51 slots; the adapter's default 1800 s needs 301.
-      await (await world.pool.setObservationCardinality(300)).wait();
+      // The vault's 300 s needs 301 slots; the adapter's default 1800 s needs 1801.
+      await (await world.pool.setObservationCardinality(1800)).wait();
       try {
-        await refused({}, /CURRENT observationCardinality is 300, below the 301 slots a 1800s window needs/);
+        await refused({}, /CURRENT observationCardinality is 1800, below the 1801 slots a 1800s window needs/);
       } finally {
         await (await world.pool.setObservationCardinality(65535)).wait();
       }

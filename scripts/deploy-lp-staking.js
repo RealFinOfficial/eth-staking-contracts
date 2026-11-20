@@ -49,7 +49,7 @@ const {
 //
 //   1. config, local validation and the on-chain checks (pool triple, decimals, factory)
 //   2. THE ORACLE, before anything is deployed (audit L-04): first the assertion the contracts
-//      make on chain — the CURRENT `observationCardinality` is at least `ceil(w / 6) + 1` and
+//      make on chain — the CURRENT `observationCardinality` is at least `w + 1` and
 //      `observe([w, 0])` succeeds, for the longest window this run configures. The vault's and
 //      the zapper's `initialize` revert otherwise, so the run stops HERE, with nothing sent,
 //      instead of half-way through the stack. Then `increaseObservationCardinalityNext` on the
@@ -151,11 +151,11 @@ const {
 //   LP_VAULT_CONTRACT         — TEST HOOK, refused on mainnet: the vault implementation's artifact
 //                               (LPStakingVault). The ApeBond activation suite deploys the lane-1
 //                               vault (LPStakingVaultLane1Mock) to rehearse the in-place upgrade
-//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (the larger of 150 and the
+//   LP_OBSERVATION_CARDINALITY — oracle slots to grow the pool into (the larger of 301 and the
 //                               minimum below). Must be at least the on-chain rule
-//                               ceil(w / 6) + 1 (OracleHistory, audit L-04), where w is the
-//                               longest window this run configures: 300 s needs >= 51,
-//                               1800 s >= 301, 3600 s >= 601. The pool's CURRENT cardinality
+//                               w + 1 (OracleHistory, audit L-04: one second per slot), where w
+//                               is the longest window this run configures: 300 s needs >= 301,
+//                               1800 s >= 1801, 3600 s >= 3601. The pool's CURRENT cardinality
 //                               must already reach that minimum when the run starts
 //
 // Optional env — the ApeBond route (B.3 decision document; Sepolia test stack #6, and the mainnet
@@ -172,7 +172,7 @@ const {
 //                                 seconds (86400); at least 1, and at least 86400 on mainnet
 //   LP_APEBOND_VALUATION_WINDOW — the adapter's valuation window, in seconds (1800), 300..3600
 //                                 (audit L-02). It counts in the oracle check of step 2: the pool
-//                                 must serve the LONGER of it and LP_TWAP_WINDOW (1800 s: 301 slots)
+//                                 must serve the LONGER of it and LP_TWAP_WINDOW (1800 s: 1801 slots)
 //   LP_APEBOND_CAMPAIGN_ID      — the campaign to configure (none). Its band is placed around the
 //                                 $ASSET price at each purchase, not fixed (decision of 14 Oct 2026):
 //   LP_APEBOND_DOWN_PCT         — how far below that price the band starts, in percent (50)
@@ -235,12 +235,15 @@ const MAX_BONUS_HOOK_GAS = 3000000;
 
 // Observation slots. The rule is the one the contracts enforce on chain when a window is set
 // (`libraries/OracleHistory.sol`, audit L-04): a pool writes at most one observation per block
-// and blocks are at least 12 s apart, halved to 6 s as headroom for a future slot-time cut, so
-// `ceil(window / 6) + 1` slots always span `window` seconds. 150 stays the floor of the default.
-const DEFAULT_OBSERVATION_CARDINALITY = 150;
-const MIN_SECONDS_PER_SLOT = 6; // OracleHistory.MIN_SECONDS_PER_SLOT
+// and two blocks are at least one second apart (Avalanche C-Chain can produce a block every
+// second), so `window + 1` slots always span `window` seconds. 301, what the default 300 s
+// window needs, is the floor of the default.
+const DEFAULT_OBSERVATION_CARDINALITY = 301;
+const MIN_SECONDS_PER_SLOT = 1; // OracleHistory.MIN_SECONDS_PER_SLOT
+/** The most oracle slots one growth transaction adds (about 10 million gas; grow-oracle.js too). */
+const ORACLE_GROW_STEP = 150;
 
-/** The cardinality `OracleHistory.requireServes` requires for `window`: ceil(window / 6) + 1. */
+/** The cardinality `OracleHistory.requireServes` requires for `window`: ceil(window / 1) + 1. */
 function requiredCardinality(window) {
   return Math.ceil(window / MIN_SECONDS_PER_SLOT) + 1;
 }
@@ -684,12 +687,16 @@ async function main() {
       `Skipping increaseObservationCardinalityNext — already ${cardinalityNext} >= ${observationCardinality}.`
     );
   } else {
+    // In steps of at most ORACLE_GROW_STEP slots: one slot costs up to about 67,000 gas and one
+    // transaction may use at most 16,777,216 gas (EIP-7825), so 1801 slots need twelve transactions.
     const poolAsDeployer = await hre.ethers.getContractAt("IUniswapV3Pool", poolAddress, deployer);
-    await pools.send(
-      `increaseObservationCardinalityNext(${observationCardinality})`,
-      deployer,
-      (o) => poolAsDeployer.increaseObservationCardinalityNext(observationCardinality, o)
-    );
+    for (let next = cardinalityNext; next < observationCardinality; ) {
+      next = Math.min(next + ORACLE_GROW_STEP, observationCardinality);
+      const size = next;
+      await pools.send(`increaseObservationCardinalityNext(${size})`, deployer, (o) =>
+        poolAsDeployer.increaseObservationCardinalityNext(size, o)
+      );
+    }
   }
   // The pool is not deployed by this script, but the size the stack was armed with is a
   // deployment fact of the same kind as the guard parameters, so it goes in the registry

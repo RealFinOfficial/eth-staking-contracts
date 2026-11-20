@@ -13,16 +13,20 @@ import "../interfaces/IUniswapV3Pool.sol";
  *  window. Three facts make that preventable when the window is SET rather than when it is read:
  *    - a pool's `observationCardinality` never decreases, and a pool has no admin;
  *    - a pool writes at most one observation per block;
- *    - blocks are at least {MIN_SECONDS_PER_SLOT} seconds apart (Ethereum: 12 s, halved here).
+ *    - blocks are at least {MIN_SECONDS_PER_SLOT} seconds apart (one second: Avalanche C-Chain
+ *      blocks can follow each other within a second, and a block timestamp only grows, so two
+ *      observations are at least one second apart; on Ethereum's 12 s slots this is generous).
  *
  *  So if, when a window `w` is set, (a) `observe([w, 0])` succeeds and (b) the CURRENT
- *  `observationCardinality` is at least `ceil(w / 6) + 1`, then `observe(w)` cannot revert
- *  afterwards: the stored observations always span at least `w` seconds.
+ *  `observationCardinality` is at least `ceil(w / 1) + 1` = `w + 1`, then `observe(w)` cannot
+ *  revert afterwards: the stored observations always span at least `w` seconds. (Until
+ *  2026-11-20 the constant was 6, a 12 s Ethereum slot halved; it became 1 for the launch on
+ *  Avalanche, with krumbgf's agreement of 2026-11-17.)
  *
  *  The CURRENT cardinality (slot0 field 4) is read, NOT `observationCardinalityNext`: grown
  *  slots are used only after the pool's index wraps the old buffer. Until then the old buffer
  *  keeps overwriting itself, and with a trade in every block its coverage can drop below `w`
- *  (150 slots cover only 1788 s in the worst case, under 1800 s).
+ *  (with a block every second, 1,800 slots cover only 1,799 s, under 1,800 s).
  *
  *  It is called from every place that sets a window ({TwapGuard-_setTwapParams}, which covers
  *  `initialize` and `setTwapParams` of the vault and the zapper, and the ApeBond adapter's
@@ -34,8 +38,9 @@ import "../interfaces/IUniswapV3Pool.sol";
  *  contract's constant by type name) and the one mean-tick computation ({meanTick}).
  */
 library OracleHistory {
-    /// Conservative block time: today's 12 s halved, so the guarantee survives 6 s slots.
-    uint256 internal constant MIN_SECONDS_PER_SLOT = 6;
+    /// The shortest possible gap between two observations: one second, so the guarantee holds on
+    /// a chain whose blocks come every second (Avalanche C-Chain).
+    uint256 internal constant MIN_SECONDS_PER_SLOT = 1;
 
     /// Shortest window any LP contract may configure, in seconds.
     uint32 internal constant MIN_WINDOW = 300;

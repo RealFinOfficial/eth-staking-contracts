@@ -98,13 +98,27 @@ const MAX_DEVIATION_BPS = 1000;
 /** What the script converts that into and the contract stores: floor(ln 1.10 / ln 1.0001). */
 const MAX_DEVIATION_TICKS = 953;
 /** Retuned by A19/A20 from the multisig. */
-const RETUNED_TWAP_WINDOW = 600;
+const RETUNED_TWAP_WINDOW = 400;
 /** `setTwapParams` takes ticks directly — no conversion on this path. */
 const RETUNED_MAX_DEVIATION_TICKS = 400;
 
-// Deploy default since 2026-08-26: 2 * ceil(window / 12) slots, so a 300 s window needs 50
-// and 150 leaves margin for the burst of trading a crash produces.
-const OBSERVATION_CARDINALITY = 150;
+// The on-chain rule (OracleHistory, one second per slot since 2026-11-20) is window + 1: the
+// 300 s window needs 301 and the retuned 400 s window needs 401, so the suites grow to 401.
+const OBSERVATION_CARDINALITY = 401;
+// Growing costs about 67,000 gas per new slot on the fork nodes (measured: 300 slots estimated at
+// 20.1 million gas) and one transaction may use at most 16,777,216 gas (EIP-7825), so the suites
+// grow in steps of 150 slots (about 10 million gas, 12 million with the send margin).
+const ORACLE_GROW_STEP = 150;
+
+/** The sizes the growth steps through, from `from` slots to `to`: e.g. 1 -> 401 is [151, 301, 401]. */
+function oracleGrowthSizes(from, to) {
+  const sizes = [];
+  for (let next = from; next < to; ) {
+    next = Math.min(next + ORACLE_GROW_STEP, to);
+    sizes.push(next);
+  }
+  return sizes;
+}
 
 /**
  * The timelock's `minDelay` for the fork suites, in seconds.
@@ -301,6 +315,8 @@ module.exports = {
   RETUNED_TWAP_WINDOW,
   RETUNED_MAX_DEVIATION_TICKS,
   OBSERVATION_CARDINALITY,
+  ORACLE_GROW_STEP,
+  oracleGrowthSizes,
   TIMELOCK_MIN_DELAY,
   ASSET,
   USDC,

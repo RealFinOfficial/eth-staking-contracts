@@ -181,8 +181,8 @@ launch deploy runs with `LP_APEBOND_ENABLED=1` and the production campaign —
 ### What `deploy-lp-staking.js` deploys, in order
 
 0. Before anything: the oracle check (audit L-04). The pool's CURRENT `observationCardinality` must
-   be at least `ceil(w / 6) + 1` and `observe([w, 0])` must answer, where `w` is the longer of
-   `LP_TWAP_WINDOW` and, with the ApeBond route, `LP_APEBOND_VALUATION_WINDOW` (1800 s: 301
+   be at least `w + 1` and `observe([w, 0])` must answer, where `w` is the longer of
+   `LP_TWAP_WINDOW` and, with the ApeBond route, `LP_APEBOND_VALUATION_WINDOW` (1800 s: 1801
    slots). Otherwise the run stops with nothing sent, because the vault's and the zapper's
    `initialize` (and the adapter's constructor) would revert. Then
    `increaseObservationCardinalityNext(LP_OBSERVATION_CARDINALITY)` when the next size is below it.
@@ -225,10 +225,11 @@ expected there.
 ### Growing the pool oracle (`scripts/grow-oracle.js`, audit L-04)
 
 Every window setter refuses a window the pool cannot serve forever: the CURRENT
-`observationCardinality` must be at least `ceil(w / 6) + 1` (300 s: 51, 1800 s: 301, 3600 s: 601)
+`observationCardinality` must be at least `w + 1` (one second per slot; 300 s: 301, 1800 s: 1801, 3600 s: 3601)
 and `observe([w, 0])` must answer. `increaseObservationCardinalityNext` only pre-pays slots; the
 pool switches to the grown size when its write index wraps the current buffer, one write per block.
-`grow-oracle.js` does both: it grows the next size to `LP_ORACLE_TARGET` (default 301) when needed,
+`grow-oracle.js` does both: it grows the next size to `LP_ORACLE_TARGET` (default 1801) when needed, in steps of at most
+`LP_ORACLE_GROW_STEP` (150, about 10 million gas) slots per transaction,
 then forces one observation write per block with `decreaseLiquidity` of ONE unit of liquidity on a
 dust in-range position it mints once (recorded as `oracleWarmupTokenId` on the `UniswapV3Pool`
 entry, reused on later runs), until `observationCardinality == LP_ORACLE_TARGET`. It prints its
@@ -239,11 +240,11 @@ hold that many seconds of history.
 
 ```bash
 LP_ORACLE_DRY_RUN=1 npx hardhat run scripts/grow-oracle.js --network sepolia   # the plan only
-LP_ORACLE_TARGET=301 npx hardhat run scripts/grow-oracle.js --network sepolia  # operator or deployer key
+LP_ORACLE_TARGET=1801 npx hardhat run scripts/grow-oracle.js --network sepolia  # operator or deployer key
 ```
 
-From 150 slots it takes up to 150 forced writes (about 30 minutes at 12 s blocks), fewer when the
-pool trades meanwhile. Mainnet: grow at least a day before the deployment; `CONFIRM=yes`.
+From N slots it takes up to N forced writes, one per block (301 slots: about an hour at 12 s
+blocks), fewer when the pool trades meanwhile. Mainnet: grow at least a day before the deployment; `CONFIRM=yes`.
 
 ### The checks before launch (`scripts/post-launch-check.js`, krumbgf's item 12)
 

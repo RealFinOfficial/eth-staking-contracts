@@ -8,8 +8,8 @@ const uniswapByChain = require("./lib/uniswap");
 //
 // The vault's and the zapper's `initialize` / `setTwapParams`, and the ApeBond adapter's
 // constructor / `setValuationWindow`, revert unless the pool's CURRENT `observationCardinality`
-// is at least ceil(window / 6) + 1 (`contracts/lp-staking/libraries/OracleHistory.sol`). 1800 s,
-// the adapter's default valuation window, needs 301 slots.
+// is at least window + 1 (`contracts/lp-staking/libraries/OracleHistory.sol`: one second per slot).
+// 1800 s, the adapter's default valuation window and the migrator's, needs 1801 slots.
 //
 // Growing is two separate facts on a Uniswap V3 pool:
 //   1. `increaseObservationCardinalityNext(target)` only PRE-PAYS the slots: it raises
@@ -18,6 +18,11 @@ const uniswapByChain = require("./lib/uniswap");
 //      A pool writes at most one observation per block, on a swap that moves the tick or on a
 //      liquidity change of an in-range position. From index i in a buffer of c slots that takes
 //      (c - i) more writes, each in its own block.
+//
+// Growing writes one storage slot per observation (about 67,000 gas each under the newest Ethereum
+// gas schedule, measured on a fork; about 22,000 on Avalanche), so the growth is sent in steps of at
+// most LP_ORACLE_GROW_STEP slots per transaction: 1801 slots in one call would cost far more than
+// the 16,777,216 gas one transaction may use on Ethereum (EIP-7825) or Fuji's 32 million gas block.
 //
 // This script does both: it settles a warm-up position (refusing, before anything is sent, a seed
 // the signer does not hold or one that would give too little liquidity), sends the growth when
@@ -36,7 +41,8 @@ const uniswapByChain = require("./lib/uniswap");
 // ──────────────────────── environment ────────────────────────
 //
 //   LP_POOL               the pool (default: the UniswapV3Pool entry in deployments.json)
-//   LP_ORACLE_TARGET      the observation count to reach (301 = ceil(1800 / 6) + 1)
+//   LP_ORACLE_TARGET      the observation count to reach (1801 = 1800 + 1)
+//   LP_ORACLE_GROW_STEP   the most slots one growth transaction adds (150, about 10 million gas)
 //   LP_ORACLE_WINDOW      the window to report observe() for (1800)
 //   LP_ORACLE_DRY_RUN     1 = print the plan, send nothing
 //   LP_ORACLE_SEED_HALF_WIDTH  half-width of the warm-up position, in tick spacings (10)
@@ -45,14 +51,15 @@ const uniswapByChain = require("./lib/uniswap");
 //   LP_NPM                NonfungiblePositionManager (per-chain default, scripts/lib/uniswap.js)
 //   CONFIRM=yes           required on mainnet
 //
-//     LP_ORACLE_TARGET=301 npx hardhat run scripts/grow-oracle.js --network sepolia
+//     LP_ORACLE_TARGET=1801 npx hardhat run scripts/grow-oracle.js --network avalanche-fuji
 
-const DEFAULT_TARGET = 301;
+const DEFAULT_TARGET = 1801;
+const DEFAULT_GROW_STEP = 150;
 const DEFAULT_WINDOW = 1800;
 const DEFAULT_SEED_HALF_WIDTH = 10;
 /** The warm-up position takes this share of the signer's balance of each token by default. */
 const DEFAULT_SEED_DIVISOR = 1_000_000n;
-const MIN_SECONDS_PER_SLOT = 6; // OracleHistory.MIN_SECONDS_PER_SLOT
+const MIN_SECONDS_PER_SLOT = 1; // OracleHistory.MIN_SECONDS_PER_SLOT
 
 const POOL_ABI = [
   "function token0() view returns (address)",
@@ -143,6 +150,7 @@ async function main() {
   const window = readInt("LP_ORACLE_WINDOW", DEFAULT_WINDOW, { min: 1, max: 2 ** 32 - 1 });
   const dryRun = process.env.LP_ORACLE_DRY_RUN === "1";
   const halfWidth = readInt("LP_ORACLE_SEED_HALF_WIDTH", DEFAULT_SEED_HALF_WIDTH, { min: 1, max: 1000 });
+  const growStep = readInt("LP_ORACLE_GROW_STEP", DEFAULT_GROW_STEP, { min: 1, max: 65535 });
 
   const registry = pools.readRegistry()[String(chainId)] || {};
   const poolAddress = hre.ethers.getAddress(
@@ -157,7 +165,7 @@ async function main() {
   const rule = (target - 1) * MIN_SECONDS_PER_SLOT;
   console.log(`Pool oracle on ${network} (chain ${chainId})`);
   console.log(`Pool:               ${poolAddress}`);
-  console.log(`Target:             ${target} slots (the rule ceil(w / 6) + 1 serves windows up to ${rule}s)`);
+  console.log(`Target:             ${target} slots (the rule w + 1 serves windows up to ${rule}s)`);
   console.log(
     `Now:                cardinality ${slot0.observationCardinality}, next ${slot0.observationCardinalityNext}, ` +
       `index ${slot0.observationIndex}`
@@ -172,7 +180,7 @@ async function main() {
   const needsGrowth = Number(slot0.observationCardinalityNext) < target;
   const writes = writesToWrap(slot0);
   console.log(
-    `Plan:               ${needsGrowth ? `increaseObservationCardinalityNext(${target}), then ` : ""}` +
+    `Plan:               ${needsGrowth ? `increaseObservationCardinalityNext(${target}) in steps of at most ${growStep} slots, then ` : ""}` +
       `up to ${writes} forced write(s), one per block, until the index wraps the buffer of ` +
       `${slot0.observationCardinality} (fewer if others trade meanwhile)`
   );
@@ -262,9 +270,10 @@ async function main() {
 
   // The growth comes after the warm-up position is settled, so a seed that cannot work is
   // refused with nothing sent at all.
-  if (needsGrowth) {
-    await pools.send(`increaseObservationCardinalityNext(${target})`, signer, (o) =>
-      pool.connect(signer).increaseObservationCardinalityNext(target, o)
+  while (Number(slot0.observationCardinalityNext) < target) {
+    const next = Math.min(Number(slot0.observationCardinalityNext) + growStep, target);
+    await pools.send(`increaseObservationCardinalityNext(${next})`, signer, (o) =>
+      pool.connect(signer).increaseObservationCardinalityNext(next, o)
     );
     slot0 = await pool.slot0();
   }

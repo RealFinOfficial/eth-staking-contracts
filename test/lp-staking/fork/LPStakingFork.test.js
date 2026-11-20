@@ -667,7 +667,10 @@ describe("LP staking — mainnet fork (Uniswap V3 ASSET/USDC 0.30%)", function (
 
       // 3. Grow the oracle. The live pool sits at cardinality 1, so `observe([300, 0])`
       //    reverts "OLD" until this runs — exactly as the deployment runbook describes.
-      await (await pool.increaseObservationCardinalityNext(150)).wait();
+      //    301 slots serve the 300 s window (window + 1, one second per slot), grown in two
+      //    steps: one transaction may use at most 16,777,216 gas, about 250 new slots.
+      await (await pool.increaseObservationCardinalityNext(151)).wait();
+      await (await pool.increaseObservationCardinalityNext(301)).wait();
 
       // 4. Standing approvals for the real router and position manager.
       for (const user of [deployer, alice, bob, carol, dave, whale]) {

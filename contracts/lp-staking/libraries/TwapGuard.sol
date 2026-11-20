@@ -170,7 +170,7 @@ abstract contract TwapGuard {
     /// @dev Bounds-checks and stores the TWAP parameters. Access control is the
     ///      inheriting contract's responsibility. After the bounds, the pool must be able to
     ///      serve the window now and forever after ({OracleHistory-requireServes}, audit L-04):
-    ///      the current observation cardinality is at least `ceil(window / 6) + 1` and
+    ///      the current observation cardinality is at least `window + 1` and
     ///      `observe([window, 0])` succeeds, else {OracleHistory-CardinalityTooLow} or
     ///      {OracleHistory-HistoryTooShort}. This runs inside `initialize` too, so a vault or a
     ///      zapper cannot be born on a pool that cannot serve its window.

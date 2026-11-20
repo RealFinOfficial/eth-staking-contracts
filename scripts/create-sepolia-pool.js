@@ -209,7 +209,7 @@ async function main() {
   console.log(
     `\nNext, in this order (audit L-04: the stack cannot be deployed on a pool without history):\n` +
       `  1. Seed liquidity in range of the current price.\n` +
-      `  2. LP_POOL=${created} LP_ORACLE_TARGET=<ceil(window / 6) + 1, 301 for the ApeBond route> \\\n` +
+      `  2. LP_POOL=${created} LP_ORACLE_TARGET=<window + 1, 1801 for a 1800 s window> \\\n` +
       `       npx hardhat run scripts/grow-oracle.js --network ${hre.network.name}\n` +
       `     grows the oracle and forces the writes that make the new size take effect.\n` +
       `  3. Wait until the pool holds the longest window's worth of history (LP_TWAP_WINDOW, and\n` +
