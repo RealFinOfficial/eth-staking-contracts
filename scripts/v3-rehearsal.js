@@ -31,6 +31,17 @@ const pools = require("./lib/pools");
 //
 //   V3R_ACTION=fund V3R_WALLETS=/tmp/w.json V3R_STATE=/tmp/s.json \
 //     npx hardhat run scripts/v3-rehearsal.js --network sepolia
+//
+// THE TWO-CHAIN TRANSITION (spec 01 §9.2, 2026-11-20), V3R_ACTION=tr-…, one step per run, every
+// Ethereum step sent by the staker's own wallet (TR_WHO = A | B | C | D), one after another:
+//   Sepolia   tr-unstake (TR_STAKING = the v1 or v2.0 test staking contract) -> tr-usdc (routes 1
+//             and 2: approve exactly R, then depositForBurn to the receiving address) -> tr-burn (the
+//             burn stand-in, destination = the receiving address; TR_ACCESS_FILE when required)
+//   Fuji      tr-mint-usdc (TR_MESSAGE, TR_ATTESTATION) -> tr-pay (TR_PART, by A) -> tr-deliver ->
+//             tr-pay -> tr-deliver (the top-up) -> tr-release; tr-status reads
+//   Common: TR_ROUTE (1 | 2 | 3), TR_RECEIVER (the Fuji TransitionReceiver; default the registry's).
+//   The same V3R_STATE file carries the burn id and the amounts from Sepolia to Fuji. The commands
+//   live in scripts/lib/transition-rehearsal.js (documented there).
 
 const E = hre.ethers;
 const STAKE = E.parseUnits("10000", 18);
@@ -386,10 +397,39 @@ function namedArgs(ev) {
   return out;
 }
 
+/** V3R_ACTION=tr-…: the two-chain transition commands (scripts/lib/transition-rehearsal.js). */
+async function runTransition(action, chainId) {
+  const transition = require("./lib/transition-rehearsal");
+  if (!transition.actions[action]) {
+    throw new Error(`V3R_ACTION must be one of ${Object.keys(transition.actions).join(", ")}`);
+  }
+  const stateFile = process.env.V3R_STATE;
+  if (!stateFile) throw new Error("Set V3R_STATE (a file outside the repo)");
+  const keys = process.env.V3R_WALLETS ? readJson(process.env.V3R_WALLETS, {}) : {};
+  const wallets = { A: await pools.getSigner() };
+  for (const w of ["B", "C", "D"]) if (keys[w]) wallets[w] = new E.Wallet(keys[w].privateKey, E.provider);
+  const ctx = {
+    action,
+    chainId,
+    env: process.env,
+    wallets,
+    stateFile,
+    state: readJson(stateFile, { txs: [] }),
+    registry: Object.fromEntries(
+      Object.entries(pools.readRegistry()[String(chainId)] || {}).map(([kind, entry]) => [kind, entry.address])
+    ),
+  };
+  ctx.state.txs = ctx.state.txs || [];
+  ctx.send = (who, label, build) => send(ctx, who, label, build);
+  console.log(`Action ${action} on chain ${chainId}; ${Object.entries(wallets).map(([w, s]) => `${w} ${s.address}`).join(", ")}`);
+  return transition.actions[action](ctx);
+}
+
 async function main() {
   const chainId = await pools.chainId();
   if (pools.isMainnet(chainId)) throw new Error("v3-rehearsal.js is a Sepolia rehearsal and refuses mainnet");
   const action = process.env.V3R_ACTION;
+  if (action && action.startsWith("tr-")) return runTransition(action, chainId);
   if (!actions[action]) throw new Error(`V3R_ACTION must be one of ${Object.keys(actions).join(", ")}`);
   const walletsFile = process.env.V3R_WALLETS;
   const stateFile = process.env.V3R_STATE;
@@ -448,7 +488,11 @@ async function main() {
   await actions[action](ctx);
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+module.exports = { runTransition };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}

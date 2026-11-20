@@ -1042,6 +1042,54 @@ knows the three kinds (the migrator's constructor arguments are read back from `
 `usdc()`, `asset()`), and `validate-upgrade-safety.js` checks all three (their layout half only
 where the registry records them).
 
+### The transition: receiver, stand-ins, access file, rehearsal (spec 01 §9, 2026-11-20)
+
+`deploy-staking-v3.js` also deploys the fourth proxy, `TransitionReceiver(migrator)` +
+`initialize(deployer, V3_TRANSITION_DELIVERER)` (zero deliverer = no service), right after the
+migrator. On a fresh deploy the deployer, still the migrator's owner, sends
+`migrator.initializeTransition(receiver)` (swap limit 3 %) and nominates the timelock for the
+receiver too; the batch gains `TransitionReceiver.acceptOwnership()` after the other three. On a LIVE
+migrator that predates the transition (no `transitionReceiver()`, owned by the timelock) the batch
+carries `StakingMigrator.upgradeToAndCall(V3_MIGRATOR_IMPLEMENTATION, initializeTransition(receiver))`
+instead (deploy the implementation first with `IMPL_TARGET=StakingMigrator
+deploy-implementation.js`). Registry kind `TransitionReceiver` (`address`, `implementation`,
+`deliverer`, `holderInitCodeHash`, `block`). The receiver's `setDeliverer` and `release` are the LP
+vault operator's, sent directly; the migrator's `setSwapLimitBps` too.
+
+The migrator's three delivery entries run in `StakingMigratorDeliveries`, a module the migrator
+implementation creates in its constructor and reaches with `delegatecall` (the migrator with the
+entries inline is 28,184 bytes, above the 24,576-byte limit; split: 24,256 + 15,779). Its only
+`delegatecall` is allowed by the `@custom:oz-upgrades-unsafe-allow delegatecall` annotation;
+`validate-upgrade-safety.js` also grades the migrator against every layout the committed manifests
+recorded (offline).
+
+```bash
+# Sepolia: the burn stand-in (TEST ONLY; refused on 1 and 43114), opened at once
+STANDIN=burn STANDIN_ACCESS_SIGNER=0xAccessKey STANDIN_CLOSE_AT=<unix> STANDIN_OPEN=yes \
+  npx hardhat run scripts/deploy-bridge-standins.js --network sepolia
+# Fuji: the payout stand-in (fund it with a plain transfer of the test $ASSET)
+STANDIN=payout npx hardhat run scripts/deploy-bridge-standins.js --network avalanche-fuji
+
+# the access signature file for a list of wallets (the key is read from a file, never printed)
+ACCESS_WALLETS=wallets.txt ACCESS_DEADLINE=<unix> ACCESS_SIGNER_KEY_FILE=<0600 file> \
+  ACCESS_OUT=/tmp/access.json npx hardhat run scripts/transition-access-file.js --network sepolia
+
+# the two-chain run, one step per command, the staker's own wallet (TR_WHO), same V3R_STATE file
+V3R_ACTION=tr-unstake TR_WHO=B TR_STAKING=0xV2TestPool ...   --network sepolia
+V3R_ACTION=tr-usdc    TR_WHO=B TR_ROUTE=1 TR_RECEIVER=0xFujiReceiver ... --network sepolia
+V3R_ACTION=tr-burn    TR_WHO=B TR_ROUTE=1 TR_RECEIVER=0xFujiReceiver [TR_ACCESS_FILE=…] --network sepolia
+V3R_ACTION=tr-mint-usdc TR_MESSAGE=0x… TR_ATTESTATION=0x… ... --network avalanche-fuji
+V3R_ACTION=tr-pay     TR_WHO=B TR_PART=<wei> ...             --network avalanche-fuji
+V3R_ACTION=tr-deliver TR_WHO=B TR_ROUTE=1 ...                --network avalanche-fuji
+V3R_ACTION=tr-release TR_WHO=B TR_ROUTE=1 ...                --network avalanche-fuji
+```
+
+The shared constants for the backend, the frontend and the indexer (`HOLDER_INIT_CODE_HASH`, CREATE2
+vectors, `DeliveryVoucher` typed-data vectors for 43114 and 43113) are in `test/vectors/transition.json`,
+and the ABIs in `abi/{TransitionReceiver,StakingMigrator,BurnStandIn,PayoutStandIn}.json`; both are
+written by `npx hardhat run scripts/export-transition-artifacts.js` and checked by
+`test/staking-v3/TransitionVectors.test.js`.
+
 ### The sw2 rehearsal pool (`scripts/deploy-weighted-test.js`)
 
 ```bash
