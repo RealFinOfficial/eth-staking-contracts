@@ -21,6 +21,11 @@ module.exports = {
   skipFiles: [
     // Test-only mocks. They exist to drive the contracts under test and are never deployed.
     "lp-staking/mocks",
+    "staking-v3/mocks",
+
+    // The two test stand-ins of the bridge owner's burn and payout contracts (Sepolia and Fuji
+    // only, never a mainnet). Their own suite is test/forge/unit/TransitionStandIns.t.sol.
+    "staking-v3/testnet",
 
     // Thin wrappers around stock OpenZeppelin contracts (ERC1967Proxy, TimelockController).
     // They exist so the repo owns their artifacts under `contracts/lp-staking/`; they add no
