@@ -1,0 +1,132 @@
+{
+  "description": "Transition vectors (spec 01 §9.3.1 and §9.4.1), generated from the compiled contracts by scripts/export-transition-artifacts.js; checked by test/staking-v3/TransitionVectors.test.js. The signer key is Hardhat's public account #0 key: TEST ONLY.",
+  "holderInitCodeHash": "0xc9fdfcb43183a49244ffe584d9e69edfb144922f0930ecd33fd099814b33579b",
+  "holderCreationCode": "0x60a0604052348015600e575f5ffd5b50336080526080516101d16100305f395f8181604d015260a101526101d15ff3fe608060405234801561000f575f5ffd5b5060043610610029575f3560e01c8063f2d5d56b1461002d575b5f5ffd5b61004061003b366004610166565b610042565b005b336001600160a01b037f000000000000000000000000000000000000000000000000000000000000000016146100925760405163b1d0d50760e01b81523360048201526024015b60405180910390fd5b6100c66001600160a01b0383167f0000000000000000000000000000000000000000000000000000000000000000836100ca565b5050565b6100d78383836001610104565b6100ff57604051635274afe760e01b81526001600160a01b0384166004820152602401610089565b505050565b60405163a9059cbb60e01b5f8181526001600160a01b038616600452602485905291602083604481808b5af1925060015f5114831661015a57838315161561014e573d5f823e3d81fd5b5f873b113d1516831692505b60405250949350505050565b5f5f60408385031215610177575f5ffd5b82356001600160a01b038116811461018d575f5ffd5b94602093909301359350505056fea26469706673582212203e75a2bda33bb069bbc3f8371a189a34ba5f107305d5281c3383e847e875563964736f6c63430008260033",
+  "receivingAddress": {
+    "formula": "address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), receiverProxy, keccak256(abi.encode(holder, uint8(route))), HOLDER_INIT_CODE_HASH)))))",
+    "vectors": [
+      {
+        "receiver": "0x1000000000000000000000000000000000000001",
+        "holder": "0x00000000000000000000000000000000000A11cE",
+        "route": 1,
+        "salt": "0x6203dd68657862fa26bd7c4a12a3a2b3bbf2220be739d51860c5d12e036c38ec",
+        "receivingAddress": "0x54837d02e6B7c2145240530C6d84fD0E0F0Cd31C"
+      },
+      {
+        "receiver": "0x1000000000000000000000000000000000000001",
+        "holder": "0x00000000000000000000000000000000000A11cE",
+        "route": 2,
+        "salt": "0x533c587bffbb1637d85d51c2579f057bd7b064547450f2adf0221dd98ef613de",
+        "receivingAddress": "0xcCaC04b907F5c5EFF9C1a9B75773c3a987D5aa07"
+      },
+      {
+        "receiver": "0x1000000000000000000000000000000000000001",
+        "holder": "0x00000000000000000000000000000000000A11cE",
+        "route": 3,
+        "salt": "0x3d5f08ca17424ce91ef6d6c19014cf2cfe6d08bfab17bdcb25acf796e78396c7",
+        "receivingAddress": "0x22efBdbCC8bdf6fA86A936dFC009CD87bB42F372"
+      },
+      {
+        "receiver": "0x2000000000000000000000000000000000000002",
+        "holder": "0x0000000000000000000000000000000000000BEE",
+        "route": 2,
+        "salt": "0xe984165c3af6daa6b672f0cec2053fe37b5966782dd33e58ffde05aa78e9c281",
+        "receivingAddress": "0x95903Dd759030Ddc98ac41d233E7cE7220f42f72"
+      }
+    ]
+  },
+  "deliveryVoucher": {
+    "typeString": "DeliveryVoucher(address holder,uint8 route,uint256 eligiblePrincipal,uint256 eligibleReward,uint256 assetLimit,uint256 usdcLimit,uint256 burnTime,uint256 nonce,uint256 deadline)",
+    "typeHash": "0xed4bddb6b9237a567a46d9ecef3a111b4c22c4d8f767abc84edc1cc10eb7f868",
+    "types": {
+      "DeliveryVoucher": [
+        {
+          "name": "holder",
+          "type": "address"
+        },
+        {
+          "name": "route",
+          "type": "uint8"
+        },
+        {
+          "name": "eligiblePrincipal",
+          "type": "uint256"
+        },
+        {
+          "name": "eligibleReward",
+          "type": "uint256"
+        },
+        {
+          "name": "assetLimit",
+          "type": "uint256"
+        },
+        {
+          "name": "usdcLimit",
+          "type": "uint256"
+        },
+        {
+          "name": "burnTime",
+          "type": "uint256"
+        },
+        {
+          "name": "nonce",
+          "type": "uint256"
+        },
+        {
+          "name": "deadline",
+          "type": "uint256"
+        }
+      ]
+    },
+    "vectors": [
+      {
+        "domain": {
+          "name": "StakingMigrator",
+          "version": "1",
+          "chainId": 43114,
+          "verifyingContract": "0x3000000000000000000000000000000000000003"
+        },
+        "domainSeparator": "0xd6f7b5f0c1c396897f0a1671f6117be874d77a46445b4656a4b7a21560e71b52",
+        "message": {
+          "holder": "0x00000000000000000000000000000000000A11cE",
+          "route": 2,
+          "eligiblePrincipal": "20000000000000000000000",
+          "eligibleReward": "1000000000",
+          "assetLimit": "12000000000000000000000",
+          "usdcLimit": "1000000000",
+          "burnTime": "1763600000",
+          "nonce": "1",
+          "deadline": "1763686400"
+        },
+        "structHash": "0xf68c793d3d3347f0512fa4c59b92a52952481f016f17e4c2d7ff156cb07e1150",
+        "digest": "0xe06cafbda9b7c56c85a7e2e26379cfa5d405ed82ce4428230f05bf512a3dd078",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signature": "0xbc4a28bc35eec0e0d03192284e494ce839beaf9e393166e677266492b079007d0d1363caf440d3cfd09df9499bc8b11c45fc6cec45333969f1b2da10ee613dbb1c"
+      },
+      {
+        "domain": {
+          "name": "StakingMigrator",
+          "version": "1",
+          "chainId": 43113,
+          "verifyingContract": "0x3000000000000000000000000000000000000003"
+        },
+        "domainSeparator": "0x57d7438add7f0e6ad515d90a2ce278e5028a2716b8acb1d02ea01c029fe22102",
+        "message": {
+          "holder": "0x00000000000000000000000000000000000A11cE",
+          "route": 2,
+          "eligiblePrincipal": "20000000000000000000000",
+          "eligibleReward": "1000000000",
+          "assetLimit": "12000000000000000000000",
+          "usdcLimit": "1000000000",
+          "burnTime": "1763600000",
+          "nonce": "1",
+          "deadline": "1763686400"
+        },
+        "structHash": "0xf68c793d3d3347f0512fa4c59b92a52952481f016f17e4c2d7ff156cb07e1150",
+        "digest": "0xb51236586a3480676412dd929553ec28cace266a3d8906a26bef7ccd7102a391",
+        "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "signature": "0x1e2af428db4dbc0e46290bffd6c1cd7d42198b4857fc257cb7e6b823e6e5d10c1dcbd257c5139419678840afd0d88e1c667a60f03f76cfcfdfa762530581dbe31c"
+      }
+    ]
+  }
+}
