@@ -31,7 +31,7 @@ const logScan = require("./lib/logs");
 //
 //   LP_DEPLOYER             the deploying key's ADDRESS (default: the configured signer's address)
 //   LP_EXPECTED_MIN_DELAY   the delay the timelock must have (172800)
-//   LP_LOG_CHUNK_BLOCKS     log scan chunk, at most 10,000 (10000)
+//   LP_LOG_CHUNK_BLOCKS     log scan chunk, at most 10,000 (the chain's, scripts/lib/logs.js)
 //   LP_LOG_FROM_BLOCK       first block to scan (default: the timelock's recorded deployment block)
 //   DEPLOYMENTS_FILE        redirects the registry, like every other script here
 //
@@ -86,7 +86,7 @@ async function main() {
   if (!deployer) deployer = (await pools.getSigner()).address;
   deployer = hre.ethers.getAddress(deployer);
   const expectedDelay = readBig("LP_EXPECTED_MIN_DELAY", DEFAULT_MIN_DELAY);
-  const chunk = Number(readBig("LP_LOG_CHUNK_BLOCKS", BigInt(MAX_LOG_CHUNK)));
+  const chunk = Number(readBig("LP_LOG_CHUNK_BLOCKS", BigInt(logScan.logChunkFor(chainId))));
   if (chunk < 1 || chunk > MAX_LOG_CHUNK) throw new Error(`LP_LOG_CHUNK_BLOCKS must be 1..${MAX_LOG_CHUNK} — got ${chunk}`);
   const latest = await hre.ethers.provider.getBlockNumber();
   const fromBlock = Number(readBig("LP_LOG_FROM_BLOCK", BigInt(timelockEntry.block || 0)));

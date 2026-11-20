@@ -47,6 +47,8 @@ const IMPERSONATION_TOPUP_WEI = 10_000n * 10n ** 18n; // 10,000 ETH
 const EXPLORERS = {
   1: "https://etherscan.io",
   11155111: "https://sepolia.etherscan.io",
+  43114: "https://snowtrace.io",
+  43113: "https://testnet.snowtrace.io",
 };
 
 const ERC20_ABI = [
@@ -64,8 +66,11 @@ async function chainId() {
   return Number((await hre.ethers.provider.getNetwork()).chainId);
 }
 
+/** Chains that move real funds: Ethereum (1) and Avalanche C-Chain (43114). */
+const MAINNET_CHAIN_IDS = new Set([1, 43114]);
+
 function isMainnet(id) {
-  return id === 1;
+  return MAINNET_CHAIN_IDS.has(Number(id));
 }
 
 function explorerAddress(id, address) {

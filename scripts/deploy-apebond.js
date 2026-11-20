@@ -6,7 +6,7 @@ const pools = require("./lib/pools");
 const apebond = require("./lib/apebond");
 const { deployContract } = require("./lib/proxies");
 // Infura caps `eth_getLogs` at 10,000 blocks per call: one chunked scanner for every script.
-const { MAX_LOG_CHUNK, scanLogs } = require("./lib/logs");
+const { MAX_LOG_CHUNK, logChunkFor, scanLogs } = require("./lib/logs");
 const { deployImplementation } = require("./deploy-implementation");
 const {
   TIMELOCK_KIND,
@@ -117,7 +117,7 @@ const {
 //                                scripts/lib/apebond.js
 //   LP_LOG_FROM_BLOCK            verify: first block of the adapter's event scan (its recorded
 //                                deployment block)
-//   LP_LOG_CHUNK_BLOCKS          verify: event-scan chunk, at most 10,000 (10000)
+//   LP_LOG_CHUNK_BLOCKS          verify: event-scan chunk, at most 10,000 (the chain's, scripts/lib/logs.js)
 //   LP_APEBOND_ASSERT_POSITIONS  comma-separated token ids whose staker must read the same
 //                                before and after (none)
 //   LP_APEBOND_BATCH_FILE        where the batch is filed (apebond-<mode>-batch.json beside the
@@ -840,7 +840,7 @@ function expectedAdapterRecord(entry, { pendingReplacement, guardian, valuationW
 
 /** Every log of the adapter's history events in [from, to], in chunks of at most 10,000 blocks. */
 async function scanAdapterHistory(adapterAddress, iface, from, to) {
-  const requested = Number(process.env.LP_LOG_CHUNK_BLOCKS || MAX_LOG_CHUNK);
+  const requested = Number(process.env.LP_LOG_CHUNK_BLOCKS || logChunkFor(await pools.chainId()));
   const chunk = Math.min(Math.max(1, requested), MAX_LOG_CHUNK);
   const topics = [ADAPTER_HISTORY_EVENTS.map((name) => iface.getEvent(name).topicHash)];
   const logs = await scanLogs(hre.ethers.provider, { address: adapterAddress, topics, fromBlock: from, toBlock: to, chunk });

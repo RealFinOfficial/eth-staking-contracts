@@ -234,6 +234,16 @@ async function main() {
   const env = {...process.env};
   if (sepolia.url) env.SEPOLIA_RPC_URL = sepolia.url;
   if (mainnet.url) env.MAINNET_RPC_URL = mainnet.url;
+  // The two Avalanche endpoints of [rpc_endpoints]: the override, else Infura. No fork test pins
+  // an Avalanche block yet, so there is no archive probe and no public fallback for them.
+  for (const [variable, host] of [
+    ["AVALANCHE_RPC_URL", "avalanche-mainnet"],
+    ["AVALANCHE_FUJI_RPC_URL", "avalanche-fuji"],
+  ]) {
+    if (!env[variable] && process.env.INFURA_API_KEY) {
+      env[variable] = `https://${host}.infura.io/v3/${process.env.INFURA_API_KEY}`;
+    }
+  }
   env.LP_FORK_RPC_REQUIRED = String(sepolia.configured || mainnet.configured);
 
   console.log(

@@ -49,6 +49,25 @@ module.exports = {
       chainId: 1,
       accounts: process.env.MAINNET_PRIVATE_KEY ? [process.env.MAINNET_PRIVATE_KEY] : [],
     },
+    // Avalanche C-Chain, where Testnet Staking and LP staking launch (2026-11-20). The same Infura
+    // key, AVALANCHE_RPC_URL overrides the endpoint. A mainnet: it signs with MAINNET_PRIVATE_KEY
+    // only, for the reason given at `mainnet` above, and `pools.isMainnet(43114)` makes every
+    // state-changing script demand CONFIRM=yes.
+    avalanche: {
+      url:
+        process.env.AVALANCHE_RPC_URL ||
+        `https://avalanche-mainnet.infura.io/v3/${process.env.INFURA_API_KEY}`,
+      chainId: 43114,
+      accounts: process.env.MAINNET_PRIVATE_KEY ? [process.env.MAINNET_PRIVATE_KEY] : [],
+    },
+    // Avalanche Fuji, the test chain of the launch. Signs with the testnet PRIVATE_KEY, like sepolia.
+    "avalanche-fuji": {
+      url:
+        process.env.AVALANCHE_FUJI_RPC_URL ||
+        `https://avalanche-fuji.infura.io/v3/${process.env.INFURA_API_KEY}`,
+      chainId: 43113,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
   },
   etherscan: {
     apiKey: process.env.ETHERSCAN_API_KEY || "",

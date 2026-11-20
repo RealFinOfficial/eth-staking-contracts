@@ -24,6 +24,19 @@ const UNISWAP_BY_CHAIN = {
     positionManager: "0x1238536071E1c677A632429e3655c799b22cDA52",
     swapRouter02: "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
   },
+  // Avalanche C-Chain. Checked read-only on 2026-11-20 (block 100,872,716): all three carry code,
+  // and the position manager and the router both report this factory from `factory()`.
+  43114: {
+    factory: "0x740b1c1de25031C31FF4fC9A62f554A55cdC1baD",
+    positionManager: "0x655C406EBFa14EE2006250925e54ec43AD184f8B",
+    swapRouter02: "0xbb00FF08d01D300023C629E8fFfFcb65A5a578cE",
+  },
+  // Avalanche Fuji. Checked the same way on 2026-11-20 (block 61,376,661).
+  43113: {
+    factory: "0x6739FCFDC0c6939939C0e8D55188E8D0D973E617",
+    positionManager: "0xd7144710b6152526fb33699b166b5917a73f67fe",
+    swapRouter02: "0x701067e5f83d71975988be412bbd922d806fd29d",
+  },
 };
 
 /** The three addresses for `chainId`, or an empty object when the chain has no defaults. */
