@@ -245,6 +245,9 @@ async function main() {
     }
   }
   env.LP_FORK_RPC_REQUIRED = String(sepolia.configured || mainnet.configured);
+  // `forge coverage` builds without the optimizer, so the few tests that compare compiled bytecode
+  // with an optimized literal (TransitionHolder's creation code) know to stand down there.
+  env.LP_FORGE_COVERAGE = String(process.argv[2] === "coverage");
 
   console.log(
     `forge fork RPC: sepolia=${sepolia.url ? hostOf(sepolia.url) : "UNRESOLVED"} (${sepolia.source}), ` +

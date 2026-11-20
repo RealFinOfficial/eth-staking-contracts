@@ -726,12 +726,12 @@ contract MigratorDeliveryTest is TransitionHarness {
             revert("expected MatchingAssetNotArrived");
         } catch (bytes memory err) {
             bytes4 sel;
-            assembly {
+            assembly ("memory-safe") {
                 sel := mload(add(err, 32))
             }
             assertEq(sel, StakingMigratorBase.MatchingAssetNotArrived.selector);
             uint256 got;
-            assembly {
+            assembly ("memory-safe") {
                 needed := mload(add(err, 36))
                 got := mload(add(err, 68))
             }

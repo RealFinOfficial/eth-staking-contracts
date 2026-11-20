@@ -49,6 +49,20 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-20 (the transition, spec 01 §9) ──
+//    StakingMigrator lines 242 -> 179 (172 hit), branches 41 -> 27 (27): its storage, events,
+//    errors, previews and shared helpers moved to StakingMigratorBase.sol, and its three delivery
+//    entries are forwarders into StakingMigratorDeliveries.sol (the split that keeps the migrator
+//    under EIP-170). Three files enter the gate: StakingMigratorBase.sol 98/102 lines, 16/16
+//    branches; StakingMigratorDeliveries.sol 111/116 lines, 38/39 branches; TransitionReceiver.sol
+//    94/98 lines, 18/21 branches. The unhit lines are the `--ir-minimum` artefacts (the namespace
+//    accessor bodies, `_disableInitializers`, the forwarder's assembly return); the unhit branch
+//    items are the `> 0` guards whose false arm the real migrator never takes (it always pulls what
+//    it is handed) and the `HolderPlacementFailed` arm, unreachable while CREATE2 lands where
+//    predicted. LiquidityAmounts lines 15 -> 29 (29), branches 7 -> 11 (11): the two
+//    liquidity-of-an-amount functions and the two rounding-up amount functions, every arm hit by
+//    test/forge/unit/LiquidityAmountsRounding.t.sol. TransitionHolder.sol stays OUT of the gate: what
+//    runs is the receiver's byte literal of it, which coverage cannot attribute to the source.
 // ── Pinned floors, re-measured 2026-11-17 (the 30-day bonus rule, audit notes item 19) ──
 //    WeightedStakingPoolV3 lines 133 -> 132 (129 hit), branches 46 -> 45 (9 hit): the day scale of
 //    `_stakeBonus` (its "last 24 hours" condition and the `daysLeft` cap) is replaced by one
@@ -312,8 +326,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 21, minHit: 21},
   },
   "contracts/lp-staking/libraries/LiquidityAmounts.sol": {
-    lines: {found: 15, minHit: 15},
-    branches: {found: 7, minHit: 7},
+    lines: {found: 29, minHit: 29},
+    branches: {found: 11, minHit: 11},
   },
   "contracts/lp-staking/libraries/PositionValue.sol": {
     lines: {found: 4, minHit: 4},
@@ -332,8 +346,20 @@ export const PER_FILE_FLOORS = {
     branches: {found: 46, minHit: 46},
   },
   "contracts/staking-v3/StakingMigrator.sol": {
-    lines: {found: 242, minHit: 236},
-    branches: {found: 41, minHit: 41},
+    lines: {found: 179, minHit: 172},
+    branches: {found: 27, minHit: 27},
+  },
+  "contracts/staking-v3/StakingMigratorBase.sol": {
+    lines: {found: 102, minHit: 98},
+    branches: {found: 16, minHit: 16},
+  },
+  "contracts/staking-v3/StakingMigratorDeliveries.sol": {
+    lines: {found: 116, minHit: 111},
+    branches: {found: 39, minHit: 38},
+  },
+  "contracts/staking-v3/TransitionReceiver.sol": {
+    lines: {found: 98, minHit: 94},
+    branches: {found: 21, minHit: 18},
   },
 };
 

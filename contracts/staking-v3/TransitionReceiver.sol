@@ -290,7 +290,7 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
         bytes memory code = HOLDER_CREATION_CODE;
         bytes32 salt = keccak256(abi.encode(holder, route));
         address placed;
-        assembly {
+        assembly ("memory-safe") {
             placed := create2(0, add(code, 0x20), mload(code), salt)
         }
         if (placed != receiving) revert HolderPlacementFailed(receiving, placed);

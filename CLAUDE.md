@@ -325,6 +325,17 @@ handover (the deployer wires them, nominates the timelock, the timelock batch ac
   or `initializeV2()` in a live upgrade; re-measure with `scripts/measure-hook-gas.js` after every
   fork. Foundry cannot reproduce Glamsterdam pricing
 
+- **The transition (spec 01 §9, 2026-11-20)**: `TransitionReceiver.sol` (a fourth UUPS proxy)
+  gives every holder one CREATE2 receiving address per route (`receivingAddressOf`, the fixed
+  `HOLDER_INIT_CODE_HASH` literal of `TransitionHolder.sol`); only `deliver` (the deliverer or the
+  holder) and `release` (the holder or the LP vault's operator, never paused) move what arrives
+  there. `deliver` hands the tokens to the migrator's `compoundFor` / `moveToLpFor` /
+  `claimRestakeFor`, open only to the receiver, each under its own EIP-712 `DeliveryVoucher` (nonce
+  = `deliveryOf(holder).nextNonce`, cumulative limits <= the eligible amounts), the bonus by the
+  voucher's `burnTime`, route 1 under the swap floor `swapLimitBps` (operator, 1..1,000, start 300).
+  The three entries' bodies are in `StakingMigratorDeliveries.sol`, reached by `delegatecall`
+  (the migrator would not fit EIP-170 otherwise); shared code in `StakingMigratorBase.sol`.
+
 Deploy: `scripts/deploy-staking-v3.js` (see scripts/README.md "Staking v3"); the sw2 rehearsal pool:
 `scripts/deploy-weighted-test.js`. Audit scope note: item 19 of `docs/lp-staking-audit-notes.md`.
 
@@ -372,8 +383,14 @@ contracts/           — Solidity source files
   staking-v3/          — The staking v3 campaign (see "Staking v3" above); UUPS, timelock-owned
     WeightedStakingPoolV3.sol — v2 as UUPS + the migrator's stakeFor + the early-exit notification
     V3BonusVault.sol          — reserve now, fund later; v3 and LP (tokenId) reservations
-    StakingMigrator.sol       — the three transition routes behind a TransitionVoucher
+    StakingMigrator.sol       — the three transition routes behind a TransitionVoucher, and the
+                                three delivery entries (forwarded to StakingMigratorDeliveries.sol)
+    StakingMigratorBase.sol   — the migrator's storage, events, errors and shared helpers
+    StakingMigratorDeliveries.sol — the bodies of compoundFor / moveToLpFor / claimRestakeFor
+    TransitionReceiver.sol    — the receiving addresses, deliver and release (spec 01 §9.3)
+    TransitionHolder.sol      — the readable source of the receiver's HOLDER_CREATION_CODE literal
     interfaces/IStakingV3.sol — the cross-contract calls
+    interfaces/ITransition.sol — the delivery types and the receiver-to-migrator calls
     testnet/BurnStandIn.sol   — TEST STAND-IN of the bridge owner's burn contract (Sepolia only):
                                 his four entries, `Migrated` with the burn id, his reverts, an
                                 EIP-712 access signature MigrationAccess(address account,uint256 deadline)
@@ -462,11 +479,16 @@ scripts/             — Deployment and interaction scripts (see scripts/README.
                               nominations, and the timelock batch file (listener, stake operator)
   deploy-weighted-test.js   — A short-window v2 pool (sw2 rehearsal) on Sepolia; refuses mainnet
   validate-upgrade-safety.js — UUPS implementation safety (network-free) and, against a
-                              committed manifest, the storage-layout check. CI runs it
+                              committed manifest, the storage-layout check; the migrator and the
+                              receiver also against every layout the manifests recorded. CI runs it
+  deploy-bridge-standins.js — The TEST-ONLY burn / payout stand-ins; refuses chains 1 and 43114
+  transition-access-file.js — The burn stand-in's access signature file for a list of wallets
+  export-transition-artifacts.js — test/vectors/transition.json and the four transition ABIs
   create-sepolia-pool.js    — Creates the integration ASSET-USDC pool; refuses to run on mainnet
   run-forge.mjs             — forge wrapper: loads .env, resolves the fork endpoint, runs forge
   check-coverage.mjs        — Blocking coverage gate; check-coverage.test.mjs tests it
-abi/                 — Checked-in ABIs for both pools, the five LP contracts and the ApeBond pair
+abi/                 — Checked-in ABIs for both pools, the five LP contracts, the ApeBond pair and the
+                       transition (TransitionReceiver, StakingMigrator, BurnStandIn, PayoutStandIn)
 deployments.json     — Deployed addresses keyed by chain id
 .env.example         — Every variable hardhat.config.js and the scripts read
 .github/workflows/ci.yml — Two jobs: hardhat (compile, upgrade-safety, unit + three fork
@@ -538,7 +560,9 @@ stack has no ApeBond route at all.
 
 **Staking v3** has no tier of its own either: the Foundry unit suites
 `{WeightedStakingPoolV3,V3BonusVault,StakingMigrator,VaultBonusListener}.t.sol`, `fuzz/StakingV3Fuzz.t.sol`,
-`invariant/V3BonusVaultInvariants.t.sol`, and the in-process Sepolia-fork suite
+`invariant/V3BonusVaultInvariants.t.sol`, the transition's `{TransitionReceiver,MigratorDelivery}.t.sol`,
+`fuzz/TransitionFuzz.t.sol`, `invariant/TransitionInvariants.t.sol` and Hardhat's `test/staking-v3/`,
+and the in-process Sepolia-fork suite
 `integration/StakingV3SepoliaFork.test.js` (a fresh tREAL/tUSDC pool on the real Sepolia Uniswap
 deployment, a one-hour sw2 test pool, `deploy-staking-v3.js` run in-process against a scratch
 registry, the timelock batch, the three routes, the rebalance scaling, the early exit and the

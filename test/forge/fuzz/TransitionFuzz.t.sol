@@ -104,7 +104,7 @@ contract TransitionFuzzTest is TransitionHarness {
             revert("one wei of $ASSET can never match");
         } catch (bytes memory err) {
             uint256 needed;
-            assembly {
+            assembly ("memory-safe") {
                 needed := mload(add(err, 36))
             }
             assertEq(bytes4(err), StakingMigratorBase.MatchingAssetNotArrived.selector);

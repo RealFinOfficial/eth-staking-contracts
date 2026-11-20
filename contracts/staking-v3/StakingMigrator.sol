@@ -579,7 +579,7 @@ contract StakingMigrator is UUPSUpgradeable, Ownable2StepUpgradeable, StakingMig
     /// @custom:oz-upgrades-unsafe-allow delegatecall
     function _delegateToDeliveries() private {
         (bool ok, bytes memory ret) = deliveryModule.delegatecall(msg.data);
-        assembly {
+        assembly ("memory-safe") {
             switch ok
             case 0 { revert(add(ret, 0x20), mload(ret)) }
             default { return(add(ret, 0x20), mload(ret)) }

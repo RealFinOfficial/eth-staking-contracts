@@ -56,7 +56,8 @@ contract TransitionReceiverTest is TransitionHarness {
         assertEq(keccak256(receiver.HOLDER_CREATION_CODE()), HolderCode.PINNED_HASH, "keccak256 of the literal");
     }
 
-    function test_HolderCode_TheLiteralIsTheCompiledReadableSource() public view {
+    function test_HolderCode_TheLiteralIsTheCompiledReadableSource() public {
+        _skipUnderCoverage();
         // The metadata tail differs between compilers' settings (Forge vs Hardhat); the code does not.
         assertEq(
             keccak256(HolderCode.stripMetadata(_literal())),
@@ -66,9 +67,10 @@ contract TransitionReceiverTest is TransitionHarness {
     }
 
     function test_HolderCode_TheLiteralDeploysTheSourcesRuntimeAndBehaviour() public {
+        _skipUnderCoverage();
         bytes memory code = _literal();
         address fromLiteral;
-        assembly {
+        assembly ("memory-safe") {
             fromLiteral := create(0, add(code, 0x20), mload(code))
         }
         address fromSource = address(new TransitionHolder());
@@ -111,6 +113,12 @@ contract TransitionReceiverTest is TransitionHarness {
         (ok,) = at_.call{value: 1}("");
         assertFalse(ok, "no receive");
         assertEq(asset.balanceOf(at_), 10e18, "nothing moved");
+    }
+
+    /// @dev `forge coverage` compiles without the optimizer, so the compiled TransitionHolder differs
+    ///      from the optimized literal there by construction; every other run checks it.
+    function _skipUnderCoverage() internal {
+        vm.skip(vm.envOr("LP_FORGE_COVERAGE", false), "coverage builds without the optimizer");
     }
 
     /// @dev The literal under test: the receiver's own constant.
