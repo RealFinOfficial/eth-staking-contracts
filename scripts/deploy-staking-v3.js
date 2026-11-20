@@ -8,7 +8,8 @@ const { deployProxyPair } = require("./lib/proxies");
 const lpTimelock = require("./lp-timelock");
 
 // Deploys the staking v3 campaign beside a LIVE LP stack: the three UUPS proxies
-// `WeightedStakingPoolV3`, `V3BonusVault` and `StakingMigrator`, wires what the deployer may wire
+// `WeightedStakingPoolV3`, `V3BonusVault` and `StakingMigrator`, and the transition's fourth proxy
+// `TransitionReceiver` (spec 01 §9.10, 2026-11-20), wires what the deployer may wire
 // while it still owns them (nothing that opens a route), nominates the `LPTimelock` as their owner,
 // and writes the ONE timelock batch that finishes the job. No route works before that batch: the
 // pool's and the bonus vault's `migrator` stay zero until the timelock owns all three.
@@ -26,14 +27,22 @@ const lpTimelock = require("./lp-timelock");
 //   4. `StakingMigrator(lpVault, USDC, $ASSET)` + `LPProxy`, `initialize(deployer, pool, bonusVault,
 //      migratorSigner, twapWindow, maxDeviationTicks, valuationWindow)` — born with routes 1 and 2
 //      PAUSED (`compoundPaused = true`) and the rates 1000 / 1000 / 500 bps
-//   5. the DIRECT wiring, sent by the deployer while it owns the three proxies (skipped when
-//      already on chain): `pool.setBonusVault(bonusVault)`; then `transferOwnership(timelock)` on
-//      all three — a NOMINATION (Ownable2Step), the deployer stays owner until the timelock accepts
+//   4b. `TransitionReceiver(migrator)` + `LPProxy`, `initialize(deployer, deliverer)` — the receiving
+//      side of the transition; `deliverer` is the service key (V3_TRANSITION_DELIVERER, zero = none)
+//   5. the DIRECT wiring, sent by the deployer while it owns the proxies (skipped when already on
+//      chain): `pool.setBonusVault(bonusVault)`; `migrator.initializeTransition(receiver)` when the
+//      deployer still owns a migrator that carries it and has no receiver yet; then
+//      `transferOwnership(timelock)` on all four — a NOMINATION (Ownable2Step), the deployer stays
+//      owner until the timelock accepts
 //   6. the TIMELOCK batch (owner tier, one operation, in this order), written to a file
 //      `lp-timelock.js` reads:
 //        WeightedStakingPoolV3.acceptOwnership()
 //        V3BonusVault.acceptOwnership()
 //        StakingMigrator.acceptOwnership()
+//        TransitionReceiver.acceptOwnership()
+//        StakingMigrator.upgradeToAndCall(V3_MIGRATOR_IMPLEMENTATION, initializeTransition(receiver))
+//                       only on a LIVE migrator the timelock already owns that predates the
+//                       transition (no transitionReceiver()); the one operation of spec 01 §9.10
 //        WeightedStakingPoolV3.setMigrator(migrator)   the routes open only here, after the timelock
 //        V3BonusVault.setMigrator(migrator)            owns all three contracts
 //        LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, initializeV2())   only when the
@@ -47,8 +56,8 @@ const lpTimelock = require("./lp-timelock");
 //      end (`V3BonusVault.fund`), and `StakingMigrator.unpauseCompound()` once the pool has the
 //      liquidity routes 1 and 2 need (the vault's operator)
 //
-// The three proxies are recorded in deployments.json (kinds `WeightedStakingPoolV3`,
-// `V3BonusVault`, `StakingMigrator`) as each one exists, so a failed run loses no address. A run
+// The four proxies are recorded in deployments.json (kinds `WeightedStakingPoolV3`,
+// `V3BonusVault`, `StakingMigrator`, `TransitionReceiver`) as each one exists, so a failed run loses no address. A run
 // RESUMES: every kind already recorded for the chain (with code at its address) is reused and
 // printed as "recorded" instead of being deployed again, and every wiring step and batch call is
 // skipped when its effect is already on chain. To deploy afresh, remove the three entries first.
@@ -71,6 +80,11 @@ const lpTimelock = require("./lp-timelock");
 //   V3_VALUATION_WINDOW       default 1800 (the adapter's): the mean tick valuing the LP USDC leg
 //   V3_VAULT_IMPLEMENTATION   the new LPStakingVault implementation (deploy-implementation.js,
 //                             IMPL_TARGET=LPStakingVault) when the live vault predates the listener
+//   V3_TRANSITION_DELIVERER   the TransitionReceiver's service key (spec 03 §9.4); default zero:
+//                             no service, every holder delivers or releases from its own wallet
+//   V3_MIGRATOR_IMPLEMENTATION  the new StakingMigrator implementation (deploy-implementation.js,
+//                             IMPL_TARGET=StakingMigrator) when the live migrator predates the
+//                             transition; the batch upgrades it with initializeTransition(receiver)
 //   V3_BATCH_FILE             where to write the timelock batch; default a file in the OS temp dir
 //   CONFIRM=yes               required on mainnet
 //
@@ -80,6 +94,13 @@ const lpTimelock = require("./lp-timelock");
 const POOL_KIND = lpTimelock.V3_POOL_KIND;
 const BONUS_KIND = lpTimelock.V3_BONUS_KIND;
 const MIGRATOR_KIND = lpTimelock.MIGRATOR_KIND;
+const RECEIVER_KIND = lpTimelock.RECEIVER_KIND;
+
+const MIGRATOR_TRANSITION_ABI = [
+  "function transitionReceiver() view returns (address)",
+  "function initializeTransition(address receiver_)",
+];
+const RECEIVER_ABI = ["function HOLDER_INIT_CODE_HASH() view returns (bytes32)"];
 
 /** The vault's defaults (`BONUS_HOOK_GAS` / `BONUS_LISTENER_GAS`), written by `initializeV2`. */
 const DEFAULT_BONUS_HOOK_GAS = 400000;
@@ -140,6 +161,12 @@ function readConfig(chainId) {
     vaultImplementation: process.env.V3_VAULT_IMPLEMENTATION
       ? readAddress("V3_VAULT_IMPLEMENTATION")
       : null,
+    deliverer: process.env.V3_TRANSITION_DELIVERER
+      ? readAddress("V3_TRANSITION_DELIVERER")
+      : hre.ethers.ZeroAddress,
+    migratorImplementation: process.env.V3_MIGRATOR_IMPLEMENTATION
+      ? readAddress("V3_MIGRATOR_IMPLEMENTATION")
+      : null,
   };
   if (config.endEpoch <= config.activationEpoch) {
     throw new Error(`V3_END_EPOCH (${config.endEpoch}) must be after V3_ACTIVATION_EPOCH (${config.activationEpoch})`);
@@ -160,6 +187,19 @@ async function checkMarket(config) {
     );
   }
   return { token0, token1, pool: hre.ethers.getAddress(await vault.pool()) };
+}
+
+/**
+ * The migrator's transition receiver, or `null` when its code predates the transition (no
+ * `transitionReceiver()`): such a migrator is upgraded with `initializeTransition`.
+ */
+async function migratorReceiver(migratorAddress) {
+  const migrator = new hre.ethers.Contract(migratorAddress, MIGRATOR_TRANSITION_ABI, hre.ethers.provider);
+  try {
+    return hre.ethers.getAddress(await migrator.transitionReceiver());
+  } catch {
+    return null;
+  }
 }
 
 /** Whether the live vault already carries `bonusListener()` (the staking v3 vault revision). */
@@ -212,7 +252,35 @@ async function deployContracts({ chainId, deployer, config }) {
   const migrator =
     (await recordedProxy(chainId, MIGRATOR_KIND)) ||
     (await deployMigrator({ chainId, deployer, config, pool, bonusVault }));
-  return { pool, bonusVault, migrator };
+  const receiver =
+    (await recordedProxy(chainId, RECEIVER_KIND)) || (await deployReceiver({ chainId, deployer, config, migrator }));
+  return { pool, bonusVault, migrator, receiver };
+}
+
+/**
+ * Step 4b: the `TransitionReceiver` (constructor: the migrator PROXY, which it reads its asset,
+ * USDC and LP vault from) behind its own `LPProxy`, owned by the deployer until the timelock accepts.
+ */
+async function deployReceiver({ chainId, deployer, config, migrator }) {
+  // A config built in code (the fork suite's) may leave the deliverer out: zero, as readConfig's default.
+  const deliverer = config.deliverer || hre.ethers.ZeroAddress;
+  const receiver = await deployProxyPair(RECEIVER_KIND, [migrator.address], [deployer.address, deliverer], deployer);
+  const holderInitCodeHash = await new hre.ethers.Contract(
+    receiver.address,
+    RECEIVER_ABI,
+    hre.ethers.provider
+  ).HOLDER_INIT_CODE_HASH();
+  pools.recordDeployment(chainId, RECEIVER_KIND, receiver.address, {
+    deployTx: receiver.tx.hash,
+    block: receiver.receipt.blockNumber,
+    implementation: receiver.impl.address,
+    implementationTx: receiver.impl.tx.hash,
+    migrator: migrator.address,
+    deliverer,
+    holderInitCodeHash,
+    owner: deployer.address,
+  });
+  return receiver;
 }
 
 async function deployPool({ chainId, deployer, config }) {
@@ -305,14 +373,24 @@ async function wireDirect({ deployer, addresses, timelock }) {
   const pool = await hre.ethers.getContractAt(POOL_KIND, addresses.pool, deployer);
   const bonusVault = await hre.ethers.getContractAt(BONUS_KIND, addresses.bonusVault, deployer);
   const migrator = await hre.ethers.getContractAt(MIGRATOR_KIND, addresses.migrator, deployer);
+  const receiver = await hre.ethers.getContractAt(RECEIVER_KIND, addresses.receiver, deployer);
 
   if (!sameAddress(await pool.bonusVault(), addresses.bonusVault)) {
     await pools.send("pool.setBonusVault(bonusVault)", deployer, (o) => pool.setBonusVault(addresses.bonusVault, o));
+  }
+  // The receiver link while the deployer still owns a migrator that carries the transition. A live
+  // migrator the timelock owns gets it inside the batch's upgrade instead (timelockOps).
+  const linked = await migratorReceiver(addresses.migrator);
+  if (linked !== null && linked === hre.ethers.ZeroAddress && sameAddress(await migrator.owner(), deployer.address)) {
+    await pools.send("migrator.initializeTransition(receiver)", deployer, (o) =>
+      migrator.initializeTransition(addresses.receiver, o)
+    );
   }
   for (const [label, contract] of [
     [POOL_KIND, pool],
     [BONUS_KIND, bonusVault],
     [MIGRATOR_KIND, migrator],
+    [RECEIVER_KIND, receiver],
   ]) {
     const owner = await contract.owner();
     const pending = await contract.pendingOwner();
@@ -331,18 +409,52 @@ async function timelockOps({
   lpVault,
   timelock,
   vaultImplementation,
+  migratorImplementation = null,
   bonusHookGas = DEFAULT_BONUS_HOOK_GAS,
   bonusListenerGas = DEFAULT_BONUS_LISTENER_GAS,
 }) {
   const ops = [];
-  for (const [kind, address] of [
+  const owned = [
     [POOL_KIND, addresses.pool],
     [BONUS_KIND, addresses.bonusVault],
     [MIGRATOR_KIND, addresses.migrator],
-  ]) {
+  ];
+  if (addresses.receiver) owned.push([RECEIVER_KIND, addresses.receiver]);
+  for (const [kind, address] of owned) {
     const contract = await hre.ethers.getContractAt(kind, address);
     if (!sameAddress(await contract.owner(), timelock) && sameAddress(await contract.pendingOwner(), timelock)) {
       ops.push({ target: address, kind, fn: "acceptOwnership", args: [] });
+    }
+  }
+  // The transition on a LIVE migrator (spec 01 §9.10): one upgrade that runs initializeTransition.
+  if (addresses.receiver) {
+    const linked = await migratorReceiver(addresses.migrator);
+    if (linked === null) {
+      if (!migratorImplementation) {
+        throw new Error(
+          `The StakingMigrator ${addresses.migrator} predates the transition (no transitionReceiver()). Deploy the ` +
+            "new implementation first (IMPL_TARGET=StakingMigrator npx hardhat run scripts/deploy-implementation.js) " +
+            "and pass it as V3_MIGRATOR_IMPLEMENTATION; the batch upgrades the migrator with initializeTransition."
+        );
+      }
+      const data = new hre.ethers.Interface(MIGRATOR_TRANSITION_ABI).encodeFunctionData("initializeTransition", [
+        addresses.receiver,
+      ]);
+      ops.push({
+        target: addresses.migrator,
+        kind: MIGRATOR_KIND,
+        fn: "upgradeToAndCall",
+        args: [migratorImplementation, data],
+      });
+    } else if (linked === hre.ethers.ZeroAddress) {
+      // A migrator that carries the transition but was never linked, now owned by the timelock: the
+      // reinitializer was not used, so the owner can still run it (as part of the batch).
+      ops.push({ target: addresses.migrator, kind: MIGRATOR_KIND, fn: "initializeTransition", args: [addresses.receiver] });
+    } else if (!sameAddress(linked, addresses.receiver)) {
+      throw new Error(
+        `The StakingMigrator ${addresses.migrator} is linked to the receiver ${linked}, not ${addresses.receiver}; ` +
+          "replacing it is a deliberate timelock operation (setTransitionReceiver), not part of this deploy"
+      );
     }
   }
   // The two links that open the routes, only once the timelock owns everything.
@@ -411,6 +523,7 @@ async function deployStakingV3({ config, deployer, batchFile = null }) {
     pool: deployed.pool.address,
     bonusVault: deployed.bonusVault.address,
     migrator: deployed.migrator.address,
+    receiver: deployed.receiver.address,
   };
   await wireDirect({ deployer, addresses, timelock: config.timelock });
 
@@ -419,6 +532,7 @@ async function deployStakingV3({ config, deployer, batchFile = null }) {
     lpVault: config.lpVault,
     timelock: config.timelock,
     vaultImplementation: config.vaultImplementation,
+    migratorImplementation: config.migratorImplementation,
     bonusHookGas: config.bonusHookGas,
     bonusListenerGas: config.bonusListenerGas,
   });
@@ -448,6 +562,10 @@ async function main() {
   console.log(`Migrator signer:    ${config.migratorSigner}`);
   console.log(`Swap guard:         ${config.twapWindow} s / ${config.maxDeviationTicks} ticks`);
   console.log(`Valuation window:   ${config.valuationWindow} s`);
+  console.log(`Deliverer:          ${config.deliverer} (V3_TRANSITION_DELIVERER; zero = no service)`);
+  if (config.migratorImplementation) {
+    console.log(`Migrator upgrade:   ${config.migratorImplementation} (upgradeToAndCall with initializeTransition)`);
+  }
   console.log(`Hook gas:           escrow ${config.bonusHookGas} / listener ${config.bonusListenerGas} (LP_BONUS_HOOK_GAS / LP_BONUS_LISTENER_GAS)`);
   if (config.vaultImplementation) {
     console.log(`Vault upgrade to:   ${config.vaultImplementation} (upgradeToAndCall with initializeV2())`);
@@ -463,6 +581,7 @@ async function main() {
   console.log(`WeightedStakingPoolV3: ${addresses.pool}`);
   console.log(`V3BonusVault:          ${addresses.bonusVault}`);
   console.log(`StakingMigrator:       ${addresses.migrator}`);
+  console.log(`TransitionReceiver:    ${addresses.receiver}`);
 
   if (batch) {
     console.log(`\n── The timelock batch (${batch.calls.length} calls, id ${batch.id}) ──`);
@@ -493,10 +612,13 @@ module.exports = {
   POOL_KIND,
   BONUS_KIND,
   MIGRATOR_KIND,
+  RECEIVER_KIND,
   readConfig,
   recordedProxy,
   checkMarket,
   deployContracts,
+  deployReceiver,
+  migratorReceiver,
   wireDirect,
   timelockOps,
   deployStakingV3,

@@ -218,7 +218,9 @@ const ADAPTER_KIND = "ApeBondPositionAdapter";
 const V3_POOL_KIND = "WeightedStakingPoolV3";
 const V3_BONUS_KIND = "V3BonusVault";
 const MIGRATOR_KIND = "StakingMigrator";
-const V3_KINDS = [V3_POOL_KIND, V3_BONUS_KIND, MIGRATOR_KIND];
+/** The transition's receiving contract (spec 01 §9.3, 2026-11-20): a fourth v3 proxy. */
+const RECEIVER_KIND = "TransitionReceiver";
+const V3_KINDS = [V3_POOL_KIND, V3_BONUS_KIND, MIGRATOR_KIND, RECEIVER_KIND];
 
 const OWNER_TIER = {
   acceptOwnership: {
@@ -301,6 +303,20 @@ const OWNER_TIER = {
     note:
       "the LP vault allowed to report unstakes and rebalances to the bonus vault, or address(0); " +
       "refused while totalLpReserved() is above zero (LpReservationsOutstanding)",
+  },
+  setTransitionReceiver: {
+    signature: "function setTransitionReceiver(address receiver_)",
+    kinds: [MIGRATOR_KIND],
+    note:
+      "replaces the only caller of the three transition delivery entries, or address(0) to close them; " +
+      "the receiving addresses belong to the receiver, so a new receiver means new addresses",
+  },
+  initializeTransition: {
+    signature: "function initializeTransition(address receiver_)",
+    kinds: [MIGRATOR_KIND],
+    note:
+      "links the transition receiver and sets the swap limit to 3 %; runs once (reinitializer 2), " +
+      "normally as the data of the migrator's upgradeToAndCall",
   },
   setRates: {
     signature: "function setRates(uint16 compoundBps_, uint16 lpBps_, uint16 restakeBps_)",
@@ -1848,6 +1864,7 @@ module.exports = {
   V3_POOL_KIND,
   V3_BONUS_KIND,
   MIGRATOR_KIND,
+  RECEIVER_KIND,
   V3_KINDS,
   OWNER_TIER,
   OWNER_TIER_INTERFACE,

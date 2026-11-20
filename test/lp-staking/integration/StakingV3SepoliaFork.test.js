@@ -385,6 +385,7 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       "acceptOwnership",
       "acceptOwnership",
       "acceptOwnership",
+      "acceptOwnership",
       "setMigrator",
       "setMigrator",
       "upgradeToAndCall",
@@ -395,18 +396,31 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       result.addresses.pool,
       result.addresses.bonusVault,
       result.addresses.migrator,
+      result.addresses.receiver,
       result.addresses.pool,
       result.addresses.bonusVault,
       vaultAddress,
       vaultAddress,
       vaultAddress,
     ]);
-    expect(JSON.parse(fs.readFileSync(batchFile, "utf8"))).to.have.length(8);
-    expect(result.batch.calls[5].args[1]).to.equal(vault.interface.encodeFunctionData("initializeV2", []));
+    expect(JSON.parse(fs.readFileSync(batchFile, "utf8"))).to.have.length(9);
+    expect(result.batch.calls[6].args[1]).to.equal(vault.interface.encodeFunctionData("initializeV2", []));
 
     const recorded = JSON.parse(fs.readFileSync(path.join(scratch, "deployments.json"), "utf8"));
     const chainKey = String((await ethers.provider.getNetwork()).chainId);
-    expect(Object.keys(recorded[chainKey])).to.include.members(["WeightedStakingPoolV3", "V3BonusVault", "StakingMigrator"]);
+    expect(Object.keys(recorded[chainKey])).to.include.members([
+      "WeightedStakingPoolV3",
+      "V3BonusVault",
+      "StakingMigrator",
+      "TransitionReceiver",
+    ]);
+    // The transition (spec 01 §9.10): the deployer linked the receiver while it owned the migrator.
+    const receiverContract = await ethers.getContractAt("TransitionReceiver", result.addresses.receiver);
+    expect(recorded[chainKey].TransitionReceiver.holderInitCodeHash).to.equal(
+      await receiverContract.HOLDER_INIT_CODE_HASH()
+    );
+    expect(await receiverContract.migrator()).to.equal(result.addresses.migrator);
+    expect(await receiverContract.pendingOwner()).to.equal(await timelock.getAddress());
 
     poolV3 = await ethers.getContractAt("WeightedStakingPoolV3", result.addresses.pool);
     bonusVault = await ethers.getContractAt("V3BonusVault", result.addresses.bonusVault);
@@ -430,7 +444,11 @@ RUN("staking v3 transition on a Sepolia fork", function () {
       batch.targets, batch.values, batch.payloads, batch.predecessor, batch.salt
     )).wait();
 
-    for (const c of [poolV3, bonusVault, migrator]) expect(await c.owner()).to.equal(await timelock.getAddress());
+    for (const c of [poolV3, bonusVault, migrator, receiverContract]) {
+      expect(await c.owner()).to.equal(await timelock.getAddress());
+    }
+    expect(await migrator.transitionReceiver()).to.equal(result.addresses.receiver);
+    expect(await migrator.swapLimitBps()).to.equal(300n);
     expect(await implementationOf(vaultAddress)).to.equal(vaultImplementations.current, "upgraded in the batch");
     expect(await vault.owner()).to.equal(await timelock.getAddress(), "the vault's state survived the upgrade");
     expect(await vault.operator()).to.equal(multisig.address);
@@ -460,7 +478,10 @@ RUN("staking v3 transition on a Sepolia fork", function () {
     expect(rerun.pool.address).to.equal(result.addresses.pool);
     expect(rerun.bonusVault.address).to.equal(result.addresses.bonusVault);
     expect(rerun.migrator.address).to.equal(result.addresses.migrator);
-    expect(rerun.pool.recorded && rerun.bonusVault.recorded && rerun.migrator.recorded).to.equal(true);
+    expect(rerun.receiver.address).to.equal(result.addresses.receiver);
+    expect(rerun.pool.recorded && rerun.bonusVault.recorded && rerun.migrator.recorded && rerun.receiver.recorded).to.equal(
+      true
+    );
     expect(lpTimelock.OWNER_TIER.setBonusListener.kinds).to.deep.equal(["LPStakingVault"]);
   });
 

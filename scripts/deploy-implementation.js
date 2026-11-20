@@ -74,7 +74,7 @@ const pools = require("./lib/pools");
 //
 //   IMPL_TARGET              LPStakingVault | RewardsDistributor | LPEpochRegistry |
 //                            TokenOverture | LPZapper | BonusEscrow | WeightedStakingPoolV3 |
-//                            V3BonusVault | StakingMigrator. One kind per run, because each is a
+//                            V3BonusVault | StakingMigrator | TransitionReceiver. One kind per run, because each is a
 //                            separate implementation, a separate deploy and a separate
 //                            timelock operation
 //   IMPL_PROXY_ADDRESS       overrides the registry lookup of the proxy
@@ -124,6 +124,8 @@ const IMPL_KINDS = [
   "WeightedStakingPoolV3",
   "V3BonusVault",
   "StakingMigrator",
+  // The transition's receiving contract (spec 01 §9.3).
+  "TransitionReceiver",
 ];
 
 /**
@@ -192,6 +194,11 @@ const CONSTRUCTOR_SOURCES = {
     getters: ["lpVault", "usdc", "asset"],
     registryKeys: ["lpVault", "usdc", "asset"],
   },
+  TransitionReceiver: {
+    // constructor(migrator); asset, USDC and the LP vault are read from the migrator
+    getters: ["migrator"],
+    registryKeys: ["migrator"],
+  },
 };
 
 /** The view surface the constructor arguments are read through. Nothing else is called. */
@@ -226,6 +233,7 @@ const IMMUTABLE_ABI = {
     "function usdc() view returns (address)",
     "function asset() view returns (address)",
   ],
+  TransitionReceiver: ["function migrator() view returns (address)"],
 };
 
 /** Compares two constructor values the way Solidity would: addresses case-insensitively. */
