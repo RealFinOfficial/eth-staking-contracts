@@ -3,9 +3,10 @@ const path = require("path");
 
 const hre = require("hardhat");
 
-// Upgrade-safety gate for the nine UUPS implementations: the five LP proxies (LPStakingVault,
-// RewardsDistributor, LPEpochRegistry, TokenOverture, LPZapper), the ApeBond BonusEscrow and the
-// three staking v3 proxies (WeightedStakingPoolV3, V3BonusVault, StakingMigrator).
+// Upgrade-safety gate for the ten UUPS implementations: the five LP proxies (LPStakingVault,
+// RewardsDistributor, LPEpochRegistry, TokenOverture, LPZapper), the ApeBond BonusEscrow, the
+// three staking v3 proxies (WeightedStakingPoolV3, V3BonusVault, StakingMigrator) and the
+// transition's TransitionReceiver (2026-11-20).
 // Runs in CI on every push, with no secrets and no network access of its own.
 //
 // Two questions, and they are not the same question:
@@ -23,6 +24,13 @@ const hre = require("hardhat");
 //      the mistakes that make `claimed[token][user]` or `stakers[tokenId]` read as something
 //      else after an upgrade. This half runs only for networks whose manifest is checked in,
 //      because that manifest IS the baseline.
+//
+//   3. **Is this implementation a legal successor of EVERY layout ever recorded for it?**
+//      Network-free, always on: every committed `.openzeppelin/*.json` manifest keeps the storage
+//      layout of each implementation it ever saw, keyed by its ERC-7201 namespace. A contract
+//      with `recordedLayouts: true` is graded against each of those layouts with
+//      `getStorageUpgradeReport`, offline. This is how the StakingMigrator's appended transition
+//      fields (2026-11-20) are checked against all three implementations stack #6 has run.
 //
 // Four of the six carry `immutable` protocol references set in the implementation constructor
 // (the vault's market, the registry's distributor, the zapper's market, the escrow's bonus
@@ -120,9 +128,21 @@ const CONTRACTS = [
   },
   {
     name: "StakingMigrator",
-    // (lpVault, usdc, asset). The constructor reads the vault's market; never run here.
+    // (lpVault, usdc, asset). The constructor reads the vault's market; never run here. Its one
+    // `delegatecall` (to the delivery module its own constructor creates) is allowed by the
+    // `@custom:oz-upgrades-unsafe-allow delegatecall` annotation on that function, not here.
     constructorArgs: [DUMMY.address, DUMMY.address, "0x0000000000000000000000000000000000000002"],
     newKind: true,
+    namespace: "erc7201:real.staking.storage.StakingMigrator",
+    recordedLayouts: true,
+  },
+  {
+    name: "TransitionReceiver",
+    // (migrator). The constructor reads the migrator's asset, usdc and lpVault; never run here.
+    constructorArgs: [DUMMY.address],
+    newKind: true,
+    namespace: "erc7201:real.staking.storage.TransitionReceiver",
+    recordedLayouts: true,
   },
 ];
 
@@ -147,6 +167,48 @@ function readRecordedKinds(chainId) {
   if (!fs.existsSync(file)) return new Set();
   const entry = JSON.parse(fs.readFileSync(file, "utf8"))[String(chainId)] || {};
   return new Set(Object.keys(entry));
+}
+
+/**
+ * Half 3: grades each `recordedLayouts` contract against every layout the committed manifests
+ * recorded under its namespace. Offline: the layouts are in the manifests, the new one in the
+ * build info.
+ * @returns {Promise<Array<{name: string, address: string, ok: boolean, line: string}>>}
+ */
+async function checkRecordedLayouts(contracts = CONTRACTS, manifestDir = MANIFEST_DIR) {
+  const core = require("@openzeppelin/upgrades-core");
+  const { readValidations } = require("@openzeppelin/hardhat-upgrades/dist/utils/validations");
+  const validations = await readValidations(hre);
+  const manifests = fs.existsSync(manifestDir)
+    ? fs.readdirSync(manifestDir).filter((f) => f.endsWith(".json") && !f.startsWith("unknown-"))
+    : [];
+  const results = [];
+  for (const { name, namespace, recordedLayouts } of contracts) {
+    if (!recordedLayouts) continue;
+    const factory = await hre.ethers.getContractFactory(name);
+    const updated = core.getStorageLayout(validations, core.getVersion(factory.bytecode));
+    let seen = 0;
+    for (const file of manifests) {
+      const recorded = JSON.parse(fs.readFileSync(path.join(manifestDir, file), "utf8"));
+      for (const impl of Object.values(recorded.impls || {})) {
+        if (!impl.layout || !(impl.layout.namespaces || {})[namespace]) continue;
+        seen += 1;
+        const report = core.getStorageUpgradeReport(impl.layout, updated, core.withValidationDefaults({}));
+        results.push({
+          name,
+          address: impl.address,
+          ok: report.ok,
+          line: report.ok
+            ? `OK    ${name}: a legal successor of the layout recorded for ${impl.address} (${file})`
+            : `FAIL  ${name}: not a successor of the layout recorded for ${impl.address} (${file})\n${report.explain()}`,
+        });
+      }
+    }
+    if (seen === 0) {
+      results.push({ name, address: "-", ok: true, line: `SKIP  ${name}: no recorded layout of ${namespace} yet` });
+    }
+  }
+  return results;
 }
 
 async function main() {
@@ -226,13 +288,24 @@ async function main() {
     }
   }
 
+  // ── half 3: every recorded layout of the namespace, network-free ─────────────────────
+  console.log("");
+  for (const result of await checkRecordedLayouts()) {
+    console.log(result.line);
+    if (!result.ok) failures.push(`${result.name} (recorded layout ${result.address})`);
+  }
+
   if (failures.length > 0) {
     throw new Error(`Upgrade-safety validation failed for: ${failures.join(", ")}`);
   }
   console.log("\nAll upgrade-safety checks passed.");
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+module.exports = { CONTRACTS, checkRecordedLayouts };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
