@@ -265,6 +265,55 @@ describe("Transition (spec 01 §9)", function () {
       expect(await w.receiver.HOLDER_INIT_CODE_HASH()).to.equal(PINNED_HASH);
     });
 
+    it("the split's AST: one delegatecall, to the constructor-set immutable; none in the module", async function () {
+      const walk = (node, visit, stack = []) => {
+        if (!node || typeof node !== "object") return;
+        if (node.nodeType || node.nodeType === undefined) visit(node, stack);
+        for (const value of Object.values(node)) {
+          if (Array.isArray(value)) value.forEach((v) => walk(v, visit, [...stack, node]));
+          else if (value && typeof value === "object") walk(value, visit, [...stack, node]);
+        }
+      };
+      const find = async (source) => {
+        const name = source.split("/").pop().replace(".sol", "");
+        const info = await hre.artifacts.getBuildInfo(`${source}:${name}`);
+        const ast = info.output.sources[source].ast;
+        const hits = { delegatecall: [], callcode: [], selfdestruct: [], assignments: [] };
+        walk(ast, (n, stack) => {
+          if (n.nodeType === "MemberAccess" && ["delegatecall", "callcode"].includes(n.memberName)) {
+            hits[n.memberName].push(n);
+          }
+          if (n.nodeType === "YulFunctionCall" && ["delegatecall", "callcode", "selfdestruct"].includes(n.functionName.name)) {
+            hits[n.functionName.name].push(n);
+          }
+          if (n.nodeType === "Identifier" && n.name === "selfdestruct") hits.selfdestruct.push(n);
+          if (n.nodeType === "Assignment" && n.leftHandSide.name === "deliveryModule") {
+            hits.assignments.push(stack.filter((s) => s.nodeType === "FunctionDefinition").pop());
+          }
+        });
+        return { ast, hits };
+      };
+      for (const source of ["contracts/staking-v3/StakingMigratorDeliveries.sol", "contracts/staking-v3/StakingMigratorBase.sol"]) {
+        const { hits } = await find(source);
+        expect(hits.delegatecall, source).to.have.length(0);
+        expect(hits.callcode, source).to.have.length(0);
+        expect(hits.selfdestruct, source).to.have.length(0);
+      }
+      const { ast, hits } = await find("contracts/staking-v3/StakingMigrator.sol");
+      expect(hits.callcode).to.have.length(0);
+      expect(hits.selfdestruct).to.have.length(0);
+      expect(hits.delegatecall).to.have.length(1);
+      expect(hits.delegatecall[0].expression.nodeType).to.equal("Identifier");
+      expect(hits.delegatecall[0].expression.name).to.equal("deliveryModule");
+      let declaration;
+      walk(ast, (n) => {
+        if (n.nodeType === "VariableDeclaration" && n.name === "deliveryModule" && n.stateVariable) declaration = n;
+      });
+      expect(declaration.mutability).to.equal("immutable");
+      expect(hits.assignments).to.have.length(1);
+      expect(hits.assignments[0].kind).to.equal("constructor");
+    });
+
     it("the migrator fits EIP-170 and so does its delivery module", async function () {
       for (const name of ["StakingMigrator", "StakingMigratorDeliveries", "TransitionReceiver"]) {
         const artifact = await hre.artifacts.readArtifact(name);
