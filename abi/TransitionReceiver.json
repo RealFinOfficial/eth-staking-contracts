@@ -170,6 +170,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "OnlySelf",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -194,6 +199,22 @@
   {
     "inputs": [],
     "name": "ReentrancyGuardReentrantCall",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "holder",
+        "type": "address"
+      },
+      {
+        "internalType": "uint8",
+        "name": "route",
+        "type": "uint8"
+      }
+    ],
+    "name": "ReleaseFailed",
     "type": "error"
   },
   {
@@ -826,6 +847,34 @@
       }
     ],
     "name": "release",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "receiving",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "releaseLeg",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

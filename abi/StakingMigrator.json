@@ -582,6 +582,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "required",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "delivered",
+        "type": "uint256"
+      }
+    ],
+    "name": "UsdcBelowVoucher",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "UsdcNotAccepted",
     "type": "error"
