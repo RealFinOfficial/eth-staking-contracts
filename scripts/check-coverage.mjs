@@ -49,6 +49,10 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-23 (the holder release switch) ──
+//    TransitionReceiver lines 103 -> 112 (108 hit), branches 28 -> 31 (28): `setHolderRelease`, the
+//    `holderReleaseOpen` view and the `HolderReleaseClosed` arm of `release`; every new line and arm
+//    is hit, the 4 unhit lines and 3 unhit branch items are the same as before.
 // ── Pinned floors, re-measured 2026-11-23 (the review fixes of the transition) ──
 //    StakingMigratorDeliveries lines 116 -> 117 (111 hit), branches 39 -> 40 (38): the first route-2
 //    delivery's `UsdcBelowVoucher` check, both arms hit. TransitionReceiver lines 98 -> 103 (99 hit),
@@ -364,8 +368,8 @@ export const PER_FILE_FLOORS = {
     branches: {found: 40, minHit: 38},
   },
   "contracts/staking-v3/TransitionReceiver.sol": {
-    lines: {found: 103, minHit: 99},
-    branches: {found: 28, minHit: 25},
+    lines: {found: 112, minHit: 108},
+    branches: {found: 31, minHit: 28},
   },
 };
 
