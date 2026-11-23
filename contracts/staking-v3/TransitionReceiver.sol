@@ -27,8 +27,9 @@ import "./interfaces/ITransition.sol";
  *      allow stays at the address;
  *    - {release} sends the whole balance of both tokens to the holder's own address, never anywhere
  *      else, each token as its own leg so a token that refuses the transfer cannot lock the other.
- *      The LP vault's operator may call it at any time. The holder itself may call it only while
- *      the operator's switch {holderReleaseOpen} is on ({setHolderRelease}); it is off after
+ *      The LP vault's operator may call it at any time, also for its own receiving address. Any
+ *      other holder may call it for itself only while the operator's switch {holderReleaseOpen} is
+ *      on ({setHolderRelease}); it is off after
  *      deployment and nothing turns it on by itself (the contract does not read the end of Testnet
  *      Staking). The switch is not a pause: it never stops {deliver} nor the operator's
  *      {release}, and what was already delivered (the Testnet Staking stake, the LP position) is the
@@ -248,15 +249,16 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
      *      reverts (the holder on USDC's blacklist, USDC paused) is rolled back whole, its token
      *      stays at the receiving address and its amount is reported as 0 in {Released}; the other
      *      leg still pays. {NothingToRelease} when both balances are zero, {ReleaseFailed} when a
-     *      balance exists and every attempted leg reverted. The operator is read only when the
-     *      caller is not the holder.
+     *      balance exists and every attempted leg reverted. The operator is read when the caller is
+     *      not the holder, or when the holder calls while {holderReleaseOpen} is off (an operator that
+     *      is itself the holder still releases); the holder's call while it is on never reads it.
      */
     function release(address holder, uint8 route) external nonReentrant {
         if (msg.sender != holder) {
             address operator_ = ITransitionLpVault(lpVault).operator();
             if (msg.sender != operator_) revert NotHolderOrOperator(msg.sender, holder, operator_);
         } else if (!_receiverStorage().holderReleaseOpen) {
-            revert HolderReleaseClosed();
+            if (msg.sender != ITransitionLpVault(lpVault).operator()) revert HolderReleaseClosed();
         }
         address receiving = _place(holder, route);
 

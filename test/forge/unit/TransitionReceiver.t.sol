@@ -423,6 +423,17 @@ contract TransitionReceiverTest is TransitionHarness {
         assertEq(asset.balanceOf(alice), a0 + 2 * P);
     }
 
+    function test_ReleaseSwitch_ClosedTheOperatorAsHolderReleasesToItself() public {
+        _payAsset(address(this), R1, P); // the harness is the LP vault's operator and the holder
+        _payUsdc(address(this), R1, R);
+        uint256 a0 = asset.balanceOf(address(this));
+        uint256 u0 = usdcToken.balanceOf(address(this));
+        receiver.release(address(this), R1); // closed
+        assertEq(asset.balanceOf(address(this)), a0 + P);
+        assertEq(usdcToken.balanceOf(address(this)), u0 + R);
+        assertEq(asset.balanceOf(_at(address(this), R1)), 0);
+    }
+
     function test_ReleaseSwitch_OnlyTheOperatorSetsIt() public {
         _handOverReceiver();
         address[4] memory callers = [receiverOwner, deliverer, alice, stranger];
@@ -858,13 +869,38 @@ contract TransitionReceiverIsolatedTest is Test {
         assertEq(assetToken.balanceOf(at_), 100, "nothing moved");
     }
 
-    /// @dev Review finding 7: the holder's own release never reads the LP vault's operator.
-    function test_Release_TheHolderNeverReadsTheOperator() public {
+    /// @dev Review finding 7: while the switch is on, the holder's own release never reads the LP
+    ///      vault's operator.
+    function test_ReleaseSwitch_OpenTheHolderNeverReadsTheOperator() public {
         _openHolderRelease(receiver);
         _fund(3, 100, 0);
         vm.expectCall(address(vault), abi.encodeWithSignature("operator()"), 0);
         vm.prank(holder);
         receiver.release(holder, 3);
         assertEq(assetToken.balanceOf(holder), 100);
+    }
+
+    /// @dev The operator is itself a staker with a receiving address: with the switch off it still
+    ///      releases its own address, and the tokens arrive at the operator's own address.
+    function test_ReleaseSwitch_ClosedTheOperatorReleasesItsOwnReceivingAddress() public {
+        address at_ = receiver.receivingAddressOf(operator, 3);
+        assetToken.transfer(at_, 100);
+        usdcToken.transfer(at_, 50);
+        vm.prank(operator);
+        receiver.release(operator, 3);
+        assertEq(assetToken.balanceOf(operator), 100);
+        assertEq(usdcToken.balanceOf(operator), 50);
+        assertEq(assetToken.balanceOf(at_), 0);
+        assertEq(usdcToken.balanceOf(at_), 0);
+    }
+
+    function test_ReleaseSwitch_ClosedAHolderThatIsNotTheOperatorIsRefused() public {
+        _fund(3, 100, 50);
+        vm.prank(holder);
+        vm.expectRevert(TransitionReceiver.HolderReleaseClosed.selector);
+        receiver.release(holder, 3);
+        address at_ = receiver.receivingAddressOf(holder, 3);
+        assertEq(assetToken.balanceOf(at_), 100, "nothing moved");
+        assertEq(usdcToken.balanceOf(at_), 50);
     }
 }
