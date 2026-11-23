@@ -1054,8 +1054,43 @@ migrator that predates the transition (no `transitionReceiver()`, owned by the t
 carries `StakingMigrator.upgradeToAndCall(V3_MIGRATOR_IMPLEMENTATION, initializeTransition(receiver))`
 instead (deploy the implementation first with `IMPL_TARGET=StakingMigrator
 deploy-implementation.js`). Registry kind `TransitionReceiver` (`address`, `implementation`,
-`deliverer`, `holderInitCodeHash`, `block`). The receiver's `setDeliverer` and `release` are the LP
-vault operator's, sent directly; the migrator's `setSwapLimitBps` too.
+`deliverer`, `holderInitCodeHash`, `block`). The receiver's `setDeliverer`, `setHolderRelease` and
+`release` are the LP vault operator's, sent directly; the migrator's `setSwapLimitBps` too.
+
+**The holder release switch (2026-11-23).** `TransitionReceiver.release(holder, route)` by the holder
+itself passes only while `holderReleaseOpen()` is true, otherwise it reverts `HolderReleaseClosed()`.
+The switch is false after deployment and after an upgrade from the earlier implementation; only the
+LP vault's operator sets it (`setHolderRelease(bool)`, no delay, event `HolderReleaseSet(bool)`; any
+other caller reverts `NotOperator`). Nothing opens it by itself: the contract does not read the end
+of Testnet Staking. The operator's `release` and every `deliver` are unaffected, and a staker's
+delivered stake and LP position leave through Testnet Staking's `withdraw` / `unstake` and the LP
+vault's `unstake` as before.
+
+**The stand-ins, the bridge owner's state of 2026-11-23.** `BurnStandIn(token, owner, accessSigner)`:
+EIP-712 domain `("ASSET Migration", "1")`, signed type `MigrationAccess(address from,uint256
+deadline)` with `from` = the caller (65 bytes r || s || v, low s, v 27 or 28, valid while
+`block.timestamp <= deadline`; `accessDigest(from, deadline)` returns the digest). `closeAt()` is 0
+until the owner's `open()` (once), which sets `closeAt = now + 90 days`; `extendCloseAt(t)` only
+later, also after the end (that reopens the burn); `opened()` stays true. A burn passes while
+`opened && !paused && block.timestamp <= closeAt`. `blockedDestination(address)` (the token and the
+stand-in are blocked by the constructor; test setter `setBlockedDestination(address, bool)`).
+While `requireSignature` is off the two long variants ignore `deadline` and `signature`; while it is
+on the two short ones revert. The checks, first failing wins: `AccessSignatureRequired`,
+`AccessSignatureExpired(deadline)`, `InvalidAccessSignature`, `EnforcedPause`, `NotOpened`,
+`MigrationClosed(closeAt)`, `ZeroDestination`, `DestinationBlocked(destination)`,
+`AmountBelowMinimum(amount)`, then the token's own error. `setOpened` and `setCloseAt` are gone.
+`PayoutStandIn.pay(id, destination, amount, burnAmount)`: `amount == 0` only as the id's FIRST
+payment (a wholly held burn: `Paid(id, destination, 0, 0, burnAmount)`, no transfer); a later zero
+and `burnAmount == 0` revert; top-ups above zero as before.
+
+`deploy-bridge-standins.js` (burn): `STANDIN_CLOSE_AT` is removed (refused when set).
+`STANDIN_REQUIRE_SIGNATURE` (default `yes`) sends `setRequireSignature(true)` BEFORE `open()`;
+`STANDIN_OPEN=yes` sends `open()`. The deployer must own the stand-in for both sends. The registry
+entry (address, `deployTx`, `block`, then `closeAt`, `opened`, `requireSignature` read back) is
+written right after the deployment; an entry the chain already holds under `BurnStandIn` /
+`PayoutStandIn` moves to `BurnStandInRetired` / `PayoutStandInRetired` with `retiredInFavourOf`.
+`transition-access-file.js` signs the new domain and the field `from`; the bridge owner's deadline is
+90 days from the deployment of the burn contract.
 
 The migrator's three delivery entries run in `StakingMigratorDeliveries`, a module the migrator
 implementation creates in its constructor and reaches with `delegatecall` (the migrator with the
@@ -1065,8 +1100,8 @@ entries inline is 28,184 bytes, above the 24,576-byte limit; split: 24,256 + 15,
 recorded (offline).
 
 ```bash
-# Sepolia: the burn stand-in (TEST ONLY; refused on 1 and 43114), opened at once
-STANDIN=burn STANDIN_ACCESS_SIGNER=0xAccessKey STANDIN_CLOSE_AT=<unix> STANDIN_OPEN=yes \
+# Sepolia: the burn stand-in (TEST ONLY; refused on 1 and 43114), requirement on, then opened
+STANDIN=burn STANDIN_ACCESS_SIGNER=0xAccessKey STANDIN_OPEN=yes \
   npx hardhat run scripts/deploy-bridge-standins.js --network sepolia
 # Fuji: the payout stand-in (fund it with a plain transfer of the test $ASSET)
 STANDIN=payout npx hardhat run scripts/deploy-bridge-standins.js --network avalanche-fuji
@@ -1079,10 +1114,15 @@ ACCESS_WALLETS=wallets.txt ACCESS_DEADLINE=<unix> ACCESS_SIGNER_KEY_FILE=<0600 f
 V3R_ACTION=tr-unstake TR_WHO=B TR_STAKING=0xV2TestPool ...   --network sepolia
 V3R_ACTION=tr-usdc    TR_WHO=B TR_ROUTE=1 TR_RECEIVER=0xFujiReceiver ... --network sepolia
 V3R_ACTION=tr-burn    TR_WHO=B TR_ROUTE=1 TR_RECEIVER=0xFujiReceiver [TR_ACCESS_FILE=…] --network sepolia
+#   the long variant whenever TR_ACCESS_FILE has the wallet, also while the requirement is off
+V3R_ACTION=tr-block   TR_WHO=B TR_ROUTE=1 TR_RECEIVER=0xFujiReceiver ... --network sepolia  # A blocks B's receiving address
+V3R_ACTION=tr-unblock TR_DESTINATION=0x… ...                 --network sepolia  # or any TR_DESTINATION
 V3R_ACTION=tr-mint-usdc TR_MESSAGE=0x… TR_ATTESTATION=0x… ... --network avalanche-fuji
-V3R_ACTION=tr-pay     TR_WHO=B TR_PART=<wei> ...             --network avalanche-fuji
+V3R_ACTION=tr-pay     TR_WHO=B TR_PART=<wei> ...             --network avalanche-fuji  # TR_PART=0: wholly held, first payment only
 V3R_ACTION=tr-deliver TR_WHO=B TR_ROUTE=1 ...                --network avalanche-fuji
-V3R_ACTION=tr-release TR_WHO=B TR_ROUTE=1 ...                --network avalanche-fuji
+V3R_ACTION=tr-holder-release-on ...                          --network avalanche-fuji  # A = the LP vault's operator
+V3R_ACTION=tr-release TR_WHO=B TR_ROUTE=1 ...                --network avalanche-fuji  # refused while the switch is off
+V3R_ACTION=tr-holder-release-off ...                         --network avalanche-fuji
 ```
 
 The shared constants for the backend, the frontend and the indexer (`HOLDER_INIT_CODE_HASH`, CREATE2

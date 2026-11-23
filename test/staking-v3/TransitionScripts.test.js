@@ -52,36 +52,37 @@ describe("Transition scripts", function () {
       expect(() => s.refuseMainnet(43113)).to.not.throw();
     });
 
-    it("needs the access signer and an explicit closeAt for the burn stand-in", function () {
+    it("needs the access signer, refuses STANDIN_CLOSE_AT and turns the requirement on by default", function () {
       const s = require("../../scripts/deploy-bridge-standins");
       const owner = "0x0000000000000000000000000000000000000001";
       expect(() => s.readConfig(11155111, { STANDIN: "nope" }, owner)).to.throw(/burn or payout/);
       expect(() => s.readConfig(11155111, { STANDIN: "burn" }, owner)).to.throw(/STANDIN_ACCESS_SIGNER/);
-      expect(() => s.readConfig(11155111, { STANDIN: "burn", STANDIN_ACCESS_SIGNER: owner }, owner)).to.throw(
-        /STANDIN_CLOSE_AT/
-      );
-      const c = s.readConfig(11155111, { STANDIN: "burn", STANDIN_ACCESS_SIGNER: owner, STANDIN_CLOSE_AT: "1800000000" }, owner);
+      const base = { STANDIN: "burn", STANDIN_ACCESS_SIGNER: owner };
+      expect(() => s.readConfig(11155111, { ...base, STANDIN_CLOSE_AT: "1800000000" }, owner)).to.throw(/STANDIN_CLOSE_AT is removed/);
+      const c = s.readConfig(11155111, base, owner);
       expect(c.token).to.equal(s.TEST_ASSET[11155111]);
-      expect(c.closeAt).to.equal(1800000000);
+      expect(c.requireSignature).to.equal(true, "default yes");
+      expect(c.open).to.equal(false);
+      expect(s.readConfig(11155111, { ...base, STANDIN_REQUIRE_SIGNATURE: "no", STANDIN_OPEN: "yes" }, owner)).to.include({
+        requireSignature: false,
+        open: true,
+      });
+      expect(() => s.readConfig(11155111, { ...base, STANDIN_REQUIRE_SIGNATURE: "maybe" }, owner)).to.throw(/yes or no/);
       expect(s.readConfig(43113, { STANDIN: "payout" }, owner).token).to.equal(s.TEST_ASSET[43113]);
     });
 
-    it("deploys and records both stand-ins on a test chain", async function () {
+    it("deploys both stand-ins, the requirement on BEFORE open(), closeAt read back, the old entries retired", async function () {
       const [deployer, accessSigner] = await ethers.getSigners();
       const token = await (await ethers.getContractFactory("MockRealToken")).deploy(deployer.address, P);
       const registryFile = path.join(scratch, "deployments.json");
+      const oldBurn = { address: "0x00000000000000000000000000000000000000B1", block: 7, closeAt: 1803204300 };
+      const oldPayout = { address: "0x00000000000000000000000000000000000000B2", block: 8 };
+      fs.writeFileSync(registryFile, JSON.stringify({ 31337: { BurnStandIn: oldBurn, PayoutStandIn: oldPayout } }));
       const s = withRegistry(registryFile, "../../scripts/deploy-bridge-standins");
-      const now = (await ethers.provider.getBlock("latest")).timestamp;
       const burnAddr = await s.deployStandIn({
         config: s.readConfig(
           31337,
-          {
-            STANDIN: "burn",
-            STANDIN_TOKEN: await token.getAddress(),
-            STANDIN_ACCESS_SIGNER: accessSigner.address,
-            STANDIN_CLOSE_AT: String(now + 86400),
-            STANDIN_OPEN: "yes",
-          },
+          { STANDIN: "burn", STANDIN_TOKEN: await token.getAddress(), STANDIN_ACCESS_SIGNER: accessSigner.address, STANDIN_OPEN: "yes" },
           deployer.address
         ),
         deployer,
@@ -92,22 +93,66 @@ describe("Transition scripts", function () {
       });
       const burn = await ethers.getContractAt("BurnStandIn", burnAddr);
       expect(await burn.opened()).to.equal(true);
+      expect(await burn.requireSignature()).to.equal(true);
       expect(await burn.accessSigner()).to.equal(accessSigner.address);
+
+      // The order of the sends after the deployment: setRequireSignature(true), then open().
       const recorded = JSON.parse(fs.readFileSync(registryFile, "utf8"))["31337"];
+      const sent = [];
+      let openTime;
+      for (let n = recorded.BurnStandIn.block + 1; n <= (await ethers.provider.getBlockNumber()); n++) {
+        const block = await ethers.provider.getBlock(n, true);
+        for (const tx of block.prefetchedTransactions) {
+          if (tx.to && tx.to.toLowerCase() === burnAddr.toLowerCase()) {
+            const parsed = burn.interface.parseTransaction(tx);
+            sent.push(`${parsed.name}(${parsed.args.join(",")})`);
+            if (parsed.name === "open") openTime = block.timestamp;
+          }
+        }
+      }
+      expect(sent).to.deep.equal(["setRequireSignature(true)", "open()"]);
+      expect(await burn.closeAt()).to.equal(BigInt(openTime + 90 * 86400));
+
       expect(recorded.BurnStandIn.address).to.equal(burnAddr);
-      expect(recorded.BurnStandIn.closeAt).to.equal(now + 86400);
+      expect(recorded.BurnStandIn.deployTx).to.match(/^0x[0-9a-f]{64}$/);
+      expect(recorded.BurnStandIn.closeAt).to.equal(openTime + 90 * 86400);
+      expect(recorded.BurnStandIn.opened).to.equal(true);
+      expect(recorded.BurnStandIn.requireSignature).to.equal(true);
+      expect(recorded.BurnStandInRetired).to.deep.equal({ ...oldBurn, retiredInFavourOf: burnAddr });
       expect(recorded.PayoutStandIn.address).to.equal(payoutAddr);
+      expect(recorded.PayoutStandInRetired).to.deep.equal({ ...oldPayout, retiredInFavourOf: payoutAddr });
+    });
+
+    it("without STANDIN_OPEN the stand-in stays closed with closeAt 0", async function () {
+      const [deployer, accessSigner] = await ethers.getSigners();
+      const token = await (await ethers.getContractFactory("MockRealToken")).deploy(deployer.address, P);
+      const registryFile = path.join(scratch, "deployments.json");
+      const s = withRegistry(registryFile, "../../scripts/deploy-bridge-standins");
+      const burnAddr = await s.deployStandIn({
+        config: s.readConfig(
+          31337,
+          { STANDIN: "burn", STANDIN_TOKEN: await token.getAddress(), STANDIN_ACCESS_SIGNER: accessSigner.address, STANDIN_REQUIRE_SIGNATURE: "no" },
+          deployer.address
+        ),
+        deployer,
+      });
+      const burn = await ethers.getContractAt("BurnStandIn", burnAddr);
+      expect(await burn.opened()).to.equal(false);
+      expect(await burn.closeAt()).to.equal(0n);
+      expect(await burn.requireSignature()).to.equal(false);
+      const recorded = JSON.parse(fs.readFileSync(registryFile, "utf8"))["31337"];
+      expect(recorded.BurnStandIn).to.include({ closeAt: 0, opened: false, requireSignature: false });
+      expect(recorded.BurnStandInRetired).to.equal(undefined, "nothing to retire");
     });
   });
 
   describe("deploy-bridge-standins.js: the record comes first", function () {
-    it("records the burn stand-in even when the optional setOpened(true) fails", async function () {
+    it("records the burn stand-in even when the setRequireSignature(true) after it fails", async function () {
       const [deployer, accessSigner, otherOwner] = await ethers.getSigners();
       const token = await (await ethers.getContractFactory("MockRealToken")).deploy(deployer.address, P);
       const registryFile = path.join(scratch, "deployments.json");
       const s = withRegistry(registryFile, "../../scripts/deploy-bridge-standins");
-      const now = (await ethers.provider.getBlock("latest")).timestamp;
-      // The stand-in is owned by another account, so the deployer's setOpened(true) reverts.
+      // The stand-in is owned by another account, so the deployer's setRequireSignature(true) reverts.
       const config = s.readConfig(
         31337,
         {
@@ -115,7 +160,6 @@ describe("Transition scripts", function () {
           STANDIN_TOKEN: await token.getAddress(),
           STANDIN_OWNER: otherOwner.address,
           STANDIN_ACCESS_SIGNER: accessSigner.address,
-          STANDIN_CLOSE_AT: String(now + 86400),
           STANDIN_OPEN: "yes",
         },
         deployer.address
@@ -126,6 +170,7 @@ describe("Transition scripts", function () {
       expect(recorded.BurnStandIn.owner).to.equal(otherOwner.address);
       const burn = await ethers.getContractAt("BurnStandIn", recorded.BurnStandIn.address);
       expect(await burn.opened()).to.equal(false);
+      expect(await burn.requireSignature()).to.equal(false);
     });
   });
 
@@ -174,11 +219,10 @@ describe("Transition scripts", function () {
       const burn = await (await ethers.getContractFactory("BurnStandIn")).deploy(
         await token.getAddress(),
         deployer.address,
-        signerWallet.address,
-        now + 86400
+        signerWallet.address
       );
-      await burn.setOpened(true);
       await burn.setRequireSignature(true);
+      await burn.open();
       await token.transfer(alice.address, P);
       await token.transfer(bob.address, P);
 
@@ -200,12 +244,24 @@ describe("Transition scripts", function () {
         deadline,
       });
       expect(entries).to.deep.equal([{ address: alice.address, deadline, signature: entries[0].signature }]);
-      expect(await burn.accessDigest(alice.address, deadline)).to.equal(
+      // The bridge owner's format, written out here independently of the script's constants.
+      const independent = ethers.TypedDataEncoder.hash(
+        { name: "ASSET Migration", version: "1", chainId: 31337, verifyingContract: await burn.getAddress() },
+        { MigrationAccess: [{ name: "from", type: "address" }, { name: "deadline", type: "uint256" }] },
+        { from: alice.address, deadline }
+      );
+      expect(await burn.accessDigest(alice.address, deadline)).to.equal(independent);
+      expect(
         ethers.TypedDataEncoder.hash(access.accessDomain(31337, await burn.getAddress()), access.ACCESS_TYPES, {
-          account: alice.address,
+          from: alice.address,
           deadline,
         })
-      );
+      ).to.equal(independent);
+      const sig = ethers.Signature.from(entries[0].signature);
+      expect(ethers.getBytes(entries[0].signature)).to.have.length(65, "r || s || v");
+      expect([27, 28]).to.include(sig.v);
+      expect(BigInt(sig.s) <= ethers.N / 2n).to.equal(true, "low s");
+      expect(ethers.recoverAddress(independent, entries[0].signature)).to.equal(signerWallet.address);
 
       const dest = "0x00000000000000000000000000000000000000d1";
       await token.connect(alice).approve(await burn.getAddress(), P);
@@ -221,7 +277,7 @@ describe("Transition scripts", function () {
   });
 
   describe("the two-chain rehearsal commands (v3-rehearsal.js tr-…)", function () {
-    it("unstake, USDC, burn, Circle mint, a payout in parts, deliver, a top-up, release", async function () {
+    it("unstake, USDC, a blocked receiver, burn, Circle mint, a wholly held payout, parts, deliver, a top-up, the release switch, release", async function () {
       const { actions, receivingAddress } = require("../../scripts/lib/transition-rehearsal");
       const w = await deployWorld();
       const [deployer] = await ethers.getSigners();
@@ -238,14 +294,13 @@ describe("Transition scripts", function () {
       await sepAsset.transfer(await source.getAddress(), P);
       await w.usdc.transfer(await source.getAddress(), R);
       const messenger = await (await ethers.getContractFactory("MockTokenMessengerV2")).deploy();
-      const now = (await ethers.provider.getBlock("latest")).timestamp;
+      const accessKey = ethers.Wallet.createRandom();
       const burn = await (await ethers.getContractFactory("BurnStandIn")).deploy(
         await sepAsset.getAddress(),
-        deployer.address,
-        deployer.address,
-        now + 30 * 86400
+        w.signer.address, // A owns the stand-in (tr-block / tr-unblock)
+        accessKey.address
       );
-      await burn.setOpened(true);
+      await burn.connect(w.signer).open(); // the requirement stays OFF here
 
       // "Fuji": the payout stand-in (owned by A = the migrator's voucher signer) and Circle's transmitter.
       const payout = await (await ethers.getContractFactory("PayoutStandIn")).deploy(await w.asset.getAddress(), w.signer.address);
@@ -289,7 +344,21 @@ describe("Transition scripts", function () {
       expect(dep.sender).to.equal(staker.address);
       expect(await w.usdc.allowance(staker.address, messenger.target)).to.equal(0n, "exactly R was approved");
 
-      const b = await run("tr-burn", { TR_BURN_STANDIN: burn.target });
+      // A blocked receiver: refused before anything is burned; unblocked, the burn passes.
+      const blocked = await run("tr-block", { TR_BURN_STANDIN: burn.target });
+      expect(blocked).to.deep.equal({ destination: at, blocked: true }, "the default is the staker's receiving address");
+      await expect(run("tr-burn", { TR_BURN_STANDIN: burn.target })).to.be.rejected;
+      expect(await burn.nextSeq()).to.equal(0n);
+      expect((await run("tr-unblock", { TR_BURN_STANDIN: burn.target })).blocked).to.equal(false);
+
+      // The access file has the wallet: the long variant is used although the requirement is off.
+      const accessFile = path.join(scratch, "access-file.json");
+      const { buildAccessFile } = require("../../scripts/transition-access-file");
+      const entries = await buildAccessFile({ chainId: 31337, standIn: burn.target, wallet: accessKey, wallets: [staker.address], deadline: 1 });
+      fs.writeFileSync(accessFile, JSON.stringify(entries));
+      const b = await run("tr-burn", { TR_BURN_STANDIN: burn.target, TR_ACCESS_FILE: accessFile });
+      const burnTx = await ethers.provider.getTransaction(b.burn.tx);
+      expect(burn.interface.parseTransaction(burnTx).signature).to.equal("migrate(uint256,address,uint256,bytes)");
       expect(b.burn.destination).to.equal(at);
       expect(b.burn.amount).to.equal(P.toString());
       expect(b.burn.seq).to.equal("0");
@@ -297,6 +366,13 @@ describe("Transition scripts", function () {
       const message = ethers.AbiCoder.defaultAbiCoder().encode(["address", "uint256"], [at, R]);
       await run("tr-mint-usdc", { TR_MESSAGE: message, TR_ATTESTATION: "0x01", TR_MESSAGE_TRANSMITTER: transmitter.target });
       expect(await w.usdc.balanceOf(at)).to.equal(R);
+
+      // A wholly held burn first (Paid 0, no transfer), then the payout after an appeal, in parts.
+      await expect(run("tr-pay", { TR_PAYOUT_STANDIN: payout.target })).to.be.rejectedWith(/Set TR_PART/);
+      const held = await run("tr-pay", { TR_PART: "0", TR_PAYOUT_STANDIN: payout.target });
+      expect(held.payments[0]).to.include({ amount: "0", paidTotal: "0" });
+      expect(await w.asset.balanceOf(at)).to.equal(0n, "nothing arrived");
+      await expect(run("tr-pay", { TR_PART: "0", TR_PAYOUT_STANDIN: payout.target })).to.be.rejected; // a second zero
 
       await run("tr-pay", { TR_PART: String(P / 2n), TR_PAYOUT_STANDIN: payout.target });
       await run("tr-deliver", {});
@@ -313,10 +389,18 @@ describe("Transition scripts", function () {
       expect(status.delivery.nextNonce).to.equal("2");
 
       await w.usdc.transfer(at, 5n); // a stray transfer to the address
-      await w.receiver.connect(w.owner).setHolderRelease(true); // the operator opens the holder's release
+      await expect(run("tr-release", {})).to.be.rejectedWith(/switch is off/);
+      await expect(run("tr-holder-release-on", {})).to.be.rejectedWith(/operator's/); // A is not the operator here
+      const a = ctx.wallets.A;
+      ctx.wallets.A = w.owner; // the LP vault's operator of the test world
+      expect(await run("tr-holder-release-on", {})).to.deep.equal({ holderReleaseOpen: true });
+      ctx.wallets.A = a;
       const before = await w.usdc.balanceOf(staker.address);
       await run("tr-release", {});
       expect(await w.usdc.balanceOf(staker.address)).to.equal(before + 5n);
+      ctx.wallets.A = w.owner;
+      expect(await run("tr-holder-release-off", {})).to.deep.equal({ holderReleaseOpen: false });
+      ctx.wallets.A = a;
 
       const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
       expect(saved.transition.B.burn.id).to.equal(b.burn.id);

@@ -53,9 +53,12 @@ const stakeCommands = require("./lib/stake-rehearsal");
 // Ethereum step sent by the staker's own wallet (TR_WHO = A | B | C | D), one after another:
 //   Sepolia   tr-unstake (TR_STAKING = the v1 or v2.0 test staking contract) -> tr-usdc (routes 1
 //             and 2: approve exactly R, then depositForBurn to the receiving address) -> tr-burn (the
-//             burn stand-in, destination = the receiving address; TR_ACCESS_FILE when required)
-//   Fuji      tr-mint-usdc (TR_MESSAGE, TR_ATTESTATION) -> tr-pay (TR_PART, by A) -> tr-deliver ->
-//             tr-pay -> tr-deliver (the top-up) -> tr-release; tr-status reads
+//             burn stand-in, destination = the receiving address; the long variant whenever
+//             TR_ACCESS_FILE has the wallet); tr-block / tr-unblock (A, the stand-in's owner)
+//   Fuji      tr-mint-usdc (TR_MESSAGE, TR_ATTESTATION) -> tr-pay (TR_PART, by A; 0 = wholly held,
+//             first payment only) -> tr-deliver -> tr-pay -> tr-deliver (the top-up) ->
+//             tr-holder-release-on (A, the LP vault's operator) -> tr-release; tr-holder-release-off;
+//             tr-status reads
 //   Common: TR_ROUTE (1 | 2 | 3), TR_RECEIVER (the Fuji TransitionReceiver; default the registry's).
 //   The same V3R_STATE file carries the burn id and the amounts from Sepolia to Fuji. The commands
 //   live in scripts/lib/transition-rehearsal.js (documented there).

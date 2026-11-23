@@ -8,9 +8,10 @@ const pools = require("./lib/pools");
 // array of {"address", "deadline", "signature"}, one entry per wallet, each signature the burn
 // stand-in's access signature for (that wallet, deadline), signed with the stand-in's access signer.
 //
-// The digest is BurnStandIn's own EIP-712 message (its NatSpec):
-//     domain  EIP712Domain(name "BurnStandIn", version "1", chainId, verifyingContract = the stand-in)
-//     type    MigrationAccess(address account,uint256 deadline)
+// The digest is the bridge owner's EIP-712 message (his format of 2026-11-23), which the stand-in copies:
+//     domain  EIP712Domain(name "ASSET Migration", version "1", chainId, verifyingContract = the stand-in)
+//     type    MigrationAccess(address from,uint256 deadline)     from = the wallet that burns
+//     bytes   65, r || s || v, low s, v = 27 or 28
 // The site only passes the bytes on to `migrate(..., deadline, signature)`; it never builds them.
 //
 // Signs locally and sends nothing. When the stand-in is reachable it checks, read-only, that the key
@@ -35,14 +36,14 @@ const pools = require("./lib/pools");
 
 const ACCESS_TYPES = {
   MigrationAccess: [
-    { name: "account", type: "address" },
+    { name: "from", type: "address" },
     { name: "deadline", type: "uint256" },
   ],
 };
 
 /** The stand-in's EIP-712 domain. */
 function accessDomain(chainId, standIn) {
-  return { name: "BurnStandIn", version: "1", chainId: BigInt(chainId), verifyingContract: hre.ethers.getAddress(standIn) };
+  return { name: "ASSET Migration", version: "1", chainId: BigInt(chainId), verifyingContract: hre.ethers.getAddress(standIn) };
 }
 
 /** Parses ACCESS_WALLETS: a comma list, or a file of lines or a JSON array. Checksummed, de-duplicated. */
@@ -81,7 +82,7 @@ async function buildAccessFile({ chainId, standIn, wallet, wallets, deadline }) 
   const domain = accessDomain(chainId, standIn);
   const entries = [];
   for (const account of wallets) {
-    const signature = await wallet.signTypedData(domain, ACCESS_TYPES, { account, deadline: BigInt(deadline) });
+    const signature = await wallet.signTypedData(domain, ACCESS_TYPES, { from: account, deadline: BigInt(deadline) });
     entries.push({ address: account, deadline: Number(deadline), signature });
   }
   return entries;
@@ -128,7 +129,7 @@ async function main() {
   const entries = await buildAccessFile({ chainId, standIn, wallet, wallets, deadline });
   for (const e of entries) {
     const recovered = hre.ethers.verifyTypedData(accessDomain(chainId, standIn), ACCESS_TYPES, {
-      account: e.address,
+      from: e.address,
       deadline: BigInt(e.deadline),
     }, e.signature);
     if (recovered !== wallet.address) throw new Error(`The signature of ${e.address} does not recover the signer`);

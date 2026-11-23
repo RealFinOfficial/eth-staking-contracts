@@ -13,17 +13,28 @@ const hre = require("hardhat");
 //                  `depositForBurn(R, 1, bytes32(receivingAddress), USDC, bytes32(0), 0, 2000)`
 //                  (domain 1 = Avalanche, standard transfer). Two transactions, in this order
 //   tr-burn        the burn of P in the burn stand-in with `destination` = the receiving address:
-//                  `approve` + `migrate`, with the access signature from TR_ACCESS_FILE when the
-//                  stand-in requires one; records the burn id, seq and block time
+//                  `approve` + `migrate`. Whenever TR_ACCESS_FILE has an entry for the wallet the
+//                  long variant with its deadline and signature is used, also while the stand-in's
+//                  requirement is off (the stand-in then ignores both, as the bridge does); without
+//                  an entry the short variant, refused when the requirement is on. Records the burn
+//                  id, seq and block time
+//   tr-block       the stand-in's owner (A) blocks a receiver: `setBlockedDestination(d, true)`
+//   tr-unblock     ... and unblocks it (`false`). d = TR_DESTINATION, or by default the staker's
+//                  (TR_WHO) receiving address of TR_ROUTE at TR_RECEIVER
 // On the LP test chain (Fuji):
 //   tr-mint-usdc   completes the Circle transfer: `receiveMessage(TR_MESSAGE, TR_ATTESTATION)` on
 //                  MessageTransmitterV2 (the message and attestation from Circle's sandbox API)
 //   tr-pay         one part of the payout: `PayoutStandIn.pay(id, destination, TR_PART, burnAmount)`
-//                  by its owner (A), for the burn recorded by tr-burn
+//                  by its owner (A), for the burn recorded by tr-burn. TR_PART=0 is a wholly held
+//                  burn (allowed only as the burn's first payment: `Paid` with 0, no transfer)
 //   tr-deliver     `TransitionReceiver.deliver` by the holder itself, with a DeliveryVoucher signed by
 //                  A (the migrator's voucher signer in the rehearsal) whose limits are what arrived so
 //                  far, capped by P and R; run it again after a later tr-pay for a top-up
-//   tr-release     `TransitionReceiver.release` by the holder
+//   tr-release     `TransitionReceiver.release` by the holder (only while the holder release switch
+//                  is on; refused before sending otherwise)
+//   tr-holder-release-on / tr-holder-release-off
+//                  `TransitionReceiver.setHolderRelease(true / false)` by A, which must be the LP
+//                  vault's operator (checked before sending)
 //   tr-status      read-only: the receiving address, its balances, deliveryOf, the stake
 //
 // The receiving address is a CREATE2 address of the Fuji receiver (TR_RECEIVER), computed off-chain
@@ -52,6 +63,7 @@ const TOKEN_MESSENGER_ABI = [
   "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
 ];
 const MESSAGE_TRANSMITTER_ABI = ["function receiveMessage(bytes message, bytes attestation) returns (bool)"];
+const OPERATOR_ABI = ["function operator() view returns (address)"];
 const SOURCE_ABI = [
   "function unstake() returns (uint256)",
   "event Unstaked(address indexed user, uint256 amount, uint256 reward, uint256 userWeight, uint256 totalEffectiveWeight)",
@@ -126,6 +138,36 @@ function parseLog(iface, receipt, name, address) {
 
 async function blockTime(blockNumber) {
   return BigInt((await E.provider.getBlock(blockNumber)).timestamp);
+}
+
+/** tr-block / tr-unblock: setBlockedDestination on the burn stand-in, by its owner A. */
+async function setBlocked(ctx, blocked) {
+  const standIn = await E.getContractAt("BurnStandIn", readAddress(ctx.env, "TR_BURN_STANDIN", ctx.registry.BurnStandIn));
+  let fallback;
+  if (!ctx.env.TR_DESTINATION && ctx.env.TR_RECEIVER && ctx.env.TR_ROUTE) {
+    fallback = receivingAddress(readAddress(ctx.env, "TR_RECEIVER"), ctx.wallets[who(ctx)].address, readRoute(ctx.env));
+  }
+  const destination = readAddress(ctx.env, "TR_DESTINATION", fallback);
+  await ctx.send("A", `setBlockedDestination(${destination}, ${blocked})`, (s, o) =>
+    standIn.connect(s).setBlockedDestination(destination, blocked, o)
+  );
+  const now = await standIn.blockedDestination(destination);
+  console.log(`blockedDestination(${destination}) = ${now}`);
+  return { destination, blocked: now };
+}
+
+/** tr-holder-release-on / -off: setHolderRelease on the receiver, by A = the LP vault's operator. */
+async function setHolderRelease(ctx, open) {
+  const receiver = await E.getContractAt("TransitionReceiver", readAddress(ctx.env, "TR_RECEIVER", ctx.registry.TransitionReceiver));
+  const vault = new E.Contract(await receiver.lpVault(), OPERATOR_ABI, E.provider);
+  const operator = await vault.operator();
+  if (operator.toLowerCase() !== ctx.wallets.A.address.toLowerCase()) {
+    throw new Error(`setHolderRelease is the LP vault operator's (${operator}), not A ${ctx.wallets.A.address}`);
+  }
+  await ctx.send("A", `setHolderRelease(${open})`, (s, o) => receiver.connect(s).setHolderRelease(open, o));
+  const now = await receiver.holderReleaseOpen();
+  console.log(`holderReleaseOpen() = ${now}`);
+  return { holderReleaseOpen: now };
 }
 
 const actions = {
@@ -252,8 +294,11 @@ const actions = {
     const w = who(ctx);
     const rec = record(ctx, w);
     if (!rec.burn) throw new Error(`No burn recorded for ${w}; run tr-burn first (same V3R_STATE file)`);
-    const part = BigInt(ctx.env.TR_PART || 0);
-    if (part === 0n) throw new Error("Set TR_PART (wei of $ASSET for this part)");
+    const raw = ctx.env.TR_PART;
+    if (raw === undefined || raw === "" || !/^[0-9]+$/.test(String(raw))) {
+      throw new Error("Set TR_PART (wei of $ASSET for this part; 0 = a wholly held burn, first payment only)");
+    }
+    const part = BigInt(raw);
     const payout = await E.getContractAt("PayoutStandIn", readAddress(ctx.env, "TR_PAYOUT_STANDIN", ctx.registry.PayoutStandIn));
     const receipt = await ctx.send("A", `pay(${rec.burn.id}, ${rec.burn.destination}, ${part})`, (s, o) =>
       payout.connect(s).pay(rec.burn.id, rec.burn.destination, part, BigInt(rec.burn.amount), o)
@@ -324,12 +369,35 @@ const actions = {
     return rec;
   },
 
+  /** Source chain: the burn stand-in's owner (A) blocks a receiver. */
+  async "tr-block"(ctx) {
+    return setBlocked(ctx, true);
+  },
+
+  /** Source chain: the burn stand-in's owner (A) unblocks a receiver. */
+  async "tr-unblock"(ctx) {
+    return setBlocked(ctx, false);
+  },
+
+  /** LP chain: the LP vault's operator (A) opens the holder's own release. */
+  async "tr-holder-release-on"(ctx) {
+    return setHolderRelease(ctx, true);
+  },
+
+  /** LP chain: the LP vault's operator (A) closes the holder's own release. */
+  async "tr-holder-release-off"(ctx) {
+    return setHolderRelease(ctx, false);
+  },
+
   /** LP chain: release by the holder. */
   async "tr-release"(ctx) {
     const w = who(ctx);
     const route = readRoute(ctx.env);
     const receiver = await E.getContractAt("TransitionReceiver", readAddress(ctx.env, "TR_RECEIVER", ctx.registry.TransitionReceiver));
     const holder = ctx.wallets[w].address;
+    if (!(await receiver.holderReleaseOpen())) {
+      throw new Error("The holder release switch is off; run tr-holder-release-on first (A = the LP vault's operator)");
+    }
     const receipt = await ctx.send(w, `release(${holder}, ${route})`, (s, o) => receiver.connect(s).release(holder, route, o));
     const ev = parseLog(receiver.interface, receipt, "Released", await receiver.getAddress());
     const rec = record(ctx, w);
