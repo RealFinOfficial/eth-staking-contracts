@@ -313,6 +313,7 @@ describe("Transition scripts", function () {
       expect(status.delivery.nextNonce).to.equal("2");
 
       await w.usdc.transfer(at, 5n); // a stray transfer to the address
+      await w.receiver.connect(w.owner).setHolderRelease(true); // the operator opens the holder's release
       const before = await w.usdc.balanceOf(staker.address);
       await run("tr-release", {});
       expect(await w.usdc.balanceOf(staker.address)).to.equal(before + 5n);

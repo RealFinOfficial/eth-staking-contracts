@@ -18,7 +18,7 @@ import {ITransitionMigrator} from "../../../contracts/staking-v3/interfaces/ITra
  * @notice Drives a random sequence of every external function the transition touches, by every
  *         role: payments into the nine receiving addresses (three holders, three routes), `deliver`
  *         with fresh vouchers whose limits are random up to the eligible amount, `release` by the
- *         holder or the operator, and "noise": `pull` on a holding contract, the three delivery
+ *         holder (while the operator's release switch is on) or the operator, the switch itself, and "noise": `pull` on a holding contract, the three delivery
  *         entries, the migrator's direct routes and admin, Testnet Staking's withdraw, the bonus
  *         vault's claims and the receiver's admin, each by a random actor. Around every call it
  *         compares the balances of all nine addresses and flags any decrease that is not the exact
@@ -194,6 +194,15 @@ contract TransitionHandler is Test {
         } catch {
             _check(b, _snap(), type(uint256).max, 0, 0);
         }
+    }
+
+    /// @dev The operator's switch for the holder's own release (the holder's `release` above reverts
+    ///      `HolderReleaseClosed` while it is off, and moves nothing).
+    function setHolderRelease(bool open) external {
+        Snap memory b = _snap();
+        vm.prank(operator);
+        receiver.setHolderRelease(open);
+        _check(b, _snap(), type(uint256).max, 0, 0);
     }
 
     // ──────────────────────── Noise ────────────────────────────

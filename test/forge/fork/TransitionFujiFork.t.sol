@@ -244,6 +244,7 @@ contract TransitionFujiForkTest is TransitionHarness {
     // ──────────────────────── The routes ───────────────────────
 
     function test_FujiFork_EveryRouteWithTheRealUniswapContracts() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         // Route 1: 10,000 $ASSET and 2 USDC, then a top-up of 1,000 $ASSET.
         _payAsset(alice, R1, 10_000e18);
         _payUsdc(alice, R1, 2e6);

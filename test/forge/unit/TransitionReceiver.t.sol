@@ -13,6 +13,7 @@ import {MockHookERC20} from "../../../contracts/lp-staking/mocks/MockHookERC20.s
 import {TransitionHolder} from "../../../contracts/staking-v3/TransitionHolder.sol";
 import {TransitionReceiver} from "../../../contracts/staking-v3/TransitionReceiver.sol";
 import {TransitionReceiverV2Mock} from "../../../contracts/staking-v3/mocks/TransitionReceiverV2Mock.sol";
+import {TransitionReceiverAt2df7223} from "../utils/TransitionReceiverAt2df7223.sol";
 import {ITransitionMigrator} from "../../../contracts/staking-v3/interfaces/ITransition.sol";
 import {V3BonusVault} from "../../../contracts/staking-v3/V3BonusVault.sol";
 
@@ -93,6 +94,7 @@ contract TransitionReceiverTest is TransitionHarness {
     }
 
     function test_HolderCode_APlacedHolderObeysOnlyTheReceiverProxy() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         _payAsset(alice, R3, 10e18);
         _payUsdc(alice, R3, 1e6); // placed by the release below
         vm.prank(alice);
@@ -300,6 +302,7 @@ contract TransitionReceiverTest is TransitionHarness {
     // ──────────────────────── release ──────────────────────────
 
     function test_Release_TheHolderTakesBothTokensBack() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         _payAsset(alice, R1, P);
         _payUsdc(alice, R1, R);
         uint256 a0 = asset.balanceOf(alice);
@@ -341,6 +344,7 @@ contract TransitionReceiverTest is TransitionHarness {
     }
 
     function test_Release_ChecksTheRouteAndRefusesAnEmptyAddress() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(TransitionReceiver.InvalidRoute.selector, uint8(0)));
         receiver.release(alice, 0);
@@ -350,6 +354,7 @@ contract TransitionReceiverTest is TransitionHarness {
     }
 
     function test_Release_WorksAfterTheEndAndWhileTheTradingRoutesArePaused() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         _payAsset(alice, R1, P);
         _payUsdc(alice, R1, R);
         migrator.pauseCompound();
@@ -360,6 +365,7 @@ contract TransitionReceiverTest is TransitionHarness {
     }
 
     function test_Release_TheRestAfterADeliveryGoesToTheHolder() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         _payAsset(alice, R3, P + 7e18);
         _deliver(alice, R3, _dv(alice, R3, P, 0));
         uint256 a0 = asset.balanceOf(alice);
@@ -367,6 +373,124 @@ contract TransitionReceiverTest is TransitionHarness {
         receiver.release(alice, R3);
         assertEq(asset.balanceOf(alice), a0 + 7e18);
         assertEq(poolV3.stakes(alice), P, "the stake stays");
+    }
+
+    // ──────────────────────── The holder release switch ────────
+
+    function test_ReleaseSwitch_ClosedAfterDeployment() public view {
+        assertFalse(receiver.holderReleaseOpen(), "closed until the operator opens it");
+    }
+
+    function test_ReleaseSwitch_TheHolderIsRefusedWhileClosed() public {
+        _payAsset(alice, R1, P);
+        _payUsdc(alice, R1, R);
+        vm.prank(alice);
+        vm.expectRevert(TransitionReceiver.HolderReleaseClosed.selector);
+        receiver.release(alice, R1);
+        assertEq(asset.balanceOf(_at(alice, R1)), P, "nothing moved");
+        assertEq(usdcToken.balanceOf(_at(alice, R1)), R);
+    }
+
+    function test_ReleaseSwitch_TheHolderReleasesWhileOpenAndNotAfterItCloses() public {
+        _payAsset(alice, R1, P);
+        vm.expectEmit(address(receiver));
+        emit TransitionReceiver.HolderReleaseSet(true);
+        receiver.setHolderRelease(true); // the harness is the LP vault's operator
+        assertTrue(receiver.holderReleaseOpen());
+        uint256 a0 = asset.balanceOf(alice);
+        vm.prank(alice);
+        receiver.release(alice, R1);
+        assertEq(asset.balanceOf(alice), a0 + P);
+
+        vm.expectEmit(address(receiver));
+        emit TransitionReceiver.HolderReleaseSet(false);
+        receiver.setHolderRelease(false);
+        assertFalse(receiver.holderReleaseOpen());
+        _payAsset(alice, R1, 1e18);
+        vm.prank(alice);
+        vm.expectRevert(TransitionReceiver.HolderReleaseClosed.selector);
+        receiver.release(alice, R1);
+    }
+
+    function test_ReleaseSwitch_TheOperatorReleasesInBothStates() public {
+        _payAsset(alice, R3, P);
+        uint256 a0 = asset.balanceOf(alice);
+        receiver.release(alice, R3); // closed
+        assertEq(asset.balanceOf(alice), a0 + P);
+        receiver.setHolderRelease(true);
+        _payAsset(alice, R3, P);
+        receiver.release(alice, R3); // open
+        assertEq(asset.balanceOf(alice), a0 + 2 * P);
+    }
+
+    function test_ReleaseSwitch_OnlyTheOperatorSetsIt() public {
+        _handOverReceiver();
+        address[4] memory callers = [receiverOwner, deliverer, alice, stranger];
+        for (uint256 i = 0; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(abi.encodeWithSelector(TransitionReceiver.NotOperator.selector, callers[i], address(this)));
+            receiver.setHolderRelease(true);
+        }
+        assertFalse(receiver.holderReleaseOpen());
+    }
+
+    function test_ReleaseSwitch_StrangersAreStillRefusedWithTheOldError() public {
+        receiver.setHolderRelease(true);
+        _payAsset(alice, R3, P);
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(TransitionReceiver.NotHolderOrOperator.selector, bob, alice, address(this))
+        );
+        receiver.release(alice, R3);
+    }
+
+    /// @dev The switch closes only the receiving address: what was delivered is the staker's own
+    ///      stake and position, and both exits stay open.
+    function test_ReleaseSwitch_ClosedStillLetsADeliveredStakerWithdrawAndUnstake() public {
+        _payUsdc(alice, R2, R);
+        _payAsset(alice, R2, P);
+        ITransitionMigrator.DeliveryResult memory r = _deliver(alice, R2, _dv(alice, R2, P, R));
+        assertFalse(receiver.holderReleaseOpen());
+        assertGt(r.lpTokenId, 0);
+        assertGt(r.staked, 0);
+
+        uint256 a0 = asset.balanceOf(alice);
+        vm.prank(alice);
+        poolV3.withdraw(r.staked);
+        assertEq(asset.balanceOf(alice), a0 + r.staked, "the Testnet Staking principal back in full");
+        assertEq(poolV3.stakes(alice), 0);
+
+        vm.prank(alice);
+        mathVault.unstake(r.lpTokenId);
+        assertEq(mathNpm.ownerOf(r.lpTokenId), alice, "the position back to the staker");
+    }
+
+    function test_ReleaseSwitch_ClosedAfterAnUpgradeFromThePreviousImplementation() public {
+        TransitionReceiverAt2df7223 oldImpl = new TransitionReceiverAt2df7223(address(migrator));
+        TransitionReceiver r = TransitionReceiver(
+            address(
+                new LPProxy(
+                    address(oldImpl), abi.encodeCall(TransitionReceiverAt2df7223.initialize, (address(this), deliverer))
+                )
+            )
+        );
+        address at_ = r.receivingAddressOf(alice, R3);
+        asset.transfer(at_, P);
+        vm.prank(alice);
+        TransitionReceiverAt2df7223(address(r)).release(alice, R3); // the old rule: the holder may
+        asset.transfer(at_, P);
+
+        r.upgradeToAndCall(address(new TransitionReceiver(address(migrator))), "");
+        assertFalse(r.holderReleaseOpen(), "closed after the upgrade");
+        assertEq(r.deliverer(), deliverer, "the deliverer survives");
+        assertEq(r.receivingAddressOf(alice, R3), at_);
+        vm.prank(alice);
+        vm.expectRevert(TransitionReceiver.HolderReleaseClosed.selector);
+        r.release(alice, R3);
+        r.setHolderRelease(true);
+        vm.prank(alice);
+        r.release(alice, R3);
+        assertEq(asset.balanceOf(at_), 0);
     }
 
     // ──────────────────────── setDeliverer ─────────────────────
@@ -446,6 +570,7 @@ contract TransitionReceiverTest is TransitionHarness {
     // ──────────────────────── Upgrade keeps every address ──────
 
     function test_Upgrade_KeepsEveryReceivingAddressAndAPlacedHolderStillPays() public {
+        receiver.setHolderRelease(true); // the holder's own release (the harness is the operator)
         address[4] memory holders = [alice, bob, carol, stranger];
         address[12] memory before;
         for (uint256 h = 0; h < 4; ++h) {
@@ -544,6 +669,12 @@ contract TransitionReceiverIsolatedTest is Test {
         v.deadline = FAR;
     }
 
+    /// @dev The holder's own release is allowed only while the operator's switch is on.
+    function _openHolderRelease(TransitionReceiver r) internal {
+        vm.prank(operator);
+        r.setHolderRelease(true);
+    }
+
     function _l() internal pure returns (ITransitionMigrator.DeliveryLimits memory) {
         return ITransitionMigrator.DeliveryLimits(0, 0, 0, FAR);
     }
@@ -638,6 +769,7 @@ contract TransitionReceiverIsolatedTest is Test {
         MockHookERC20 hook = new MockHookERC20("Hook", "HOOK", 1e30, 18);
         ScriptedMigrator m = new ScriptedMigrator(address(hook), address(usdcToken), address(vault));
         TransitionReceiver r = _receiverFor(address(m));
+        _openHolderRelease(r);
         address at_ = r.receivingAddressOf(holder, 3);
         hook.transfer(at_, 100);
 
@@ -669,6 +801,7 @@ contract TransitionReceiverIsolatedTest is Test {
         address assetAddr = blockableAsset ? address(bAsset) : address(assetToken);
         ScriptedMigrator m = new ScriptedMigrator(assetAddr, address(bUsdc), address(vault));
         r = _receiverFor(address(m));
+        _openHolderRelease(r);
         at_ = r.receivingAddressOf(holder, 1);
         if (blockableAsset) bAsset.transfer(at_, 100);
         else assetToken.transfer(at_, 100);
@@ -710,6 +843,7 @@ contract TransitionReceiverIsolatedTest is Test {
     }
 
     function test_Release_ReleaseLegIsOpenOnlyToTheReceiverItself() public {
+        _openHolderRelease(receiver);
         address at_ = receiver.receivingAddressOf(holder, 3);
         assetToken.transfer(at_, 100);
         vm.prank(holder);
@@ -726,6 +860,7 @@ contract TransitionReceiverIsolatedTest is Test {
 
     /// @dev Review finding 7: the holder's own release never reads the LP vault's operator.
     function test_Release_TheHolderNeverReadsTheOperator() public {
+        _openHolderRelease(receiver);
         _fund(3, 100, 0);
         vm.expectCall(address(vault), abi.encodeWithSignature("operator()"), 0);
         vm.prank(holder);

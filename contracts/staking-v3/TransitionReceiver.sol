@@ -25,9 +25,14 @@ import "./interfaces/ITransition.sol";
  *      `StakingMigrator` entry of the address's route, which stakes them FOR the holder under a
  *      delivery voucher signed by the migrator's separate voucher key; what the voucher does not
  *      allow stays at the address;
- *    - {release} (the holder or the LP vault's operator) sends the whole balance of both tokens to
- *      the holder's own address, never anywhere else, each token as its own leg so a token that
- *      refuses the transfer cannot lock the other. Never pausable.
+ *    - {release} sends the whole balance of both tokens to the holder's own address, never anywhere
+ *      else, each token as its own leg so a token that refuses the transfer cannot lock the other.
+ *      The LP vault's operator may call it at any time. The holder itself may call it only while
+ *      the operator's switch {holderReleaseOpen} is on ({setHolderRelease}); it is off after
+ *      deployment and nothing turns it on by itself (the contract does not read the end of Testnet
+ *      Staking). The switch is not a pause: it never stops {deliver} nor the operator's
+ *      {release}, and what was already delivered (the Testnet Staking stake, the LP position) is the
+ *      staker's own and leaves through those contracts' own exits.
  *  The first {deliver} or {release} for a holder and route places a {TransitionHolder} at the
  *  address with CREATE2; that contract can only hand its tokens to this proxy.
  *
@@ -37,11 +42,11 @@ import "./interfaces/ITransition.sol";
  *  setting, and a new hash would move every receiving address. An upgrade of this contract must
  *  keep both literals unchanged.
  *
- *  No pause and no guardian: the trading routes pause in the migrator (`pauseCompound`), and
- *  {release} is an exit. Holds no tokens between transactions; no ETH.
+ *  No pause and no guardian: the trading routes pause in the migrator (`pauseCompound`), and the
+ *  operator's {release} is always an exit. Holds no tokens between transactions; no ETH.
  *
- *  ADMIN: owner (the timelock) — upgrades, ownership; operator (the LP vault's, read live) —
- *  {setDeliverer}, {release}.
+ *  ADMIN: owner (the timelock) — upgrades, ownership; operator (the LP vault's, read live, no
+ *  delay) — {setDeliverer}, {setHolderRelease}, {release} at any time.
  */
 contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgradeable, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -87,6 +92,8 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     struct ReceiverStorage {
         /// The service key that may {deliver} for any holder (zero: no service).
         address deliverer;
+        /// True while the holder itself may {release} (false after deployment; the operator's switch).
+        bool holderReleaseOpen;
     }
 
     /// @dev keccak256(abi.encode(uint256(keccak256("real.staking.storage.TransitionReceiver")) - 1)) & ~0xff
@@ -125,6 +132,7 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     );
     event HolderPlaced(address indexed holder, uint8 indexed route, address receivingAddress);
     event DelivererSet(address previousDeliverer, address newDeliverer);
+    event HolderReleaseSet(bool open);
 
     // ──────────────────────── Errors ───────────────────────────
 
@@ -133,6 +141,7 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     error NotDelivererOrHolder(address caller, address deliverer, address holder);
     error NotHolderOrOperator(address caller, address holder, address operator);
     error NotOperator(address caller, address operator);
+    error HolderReleaseClosed();
     error NothingToDeliver(address holder, uint8 route);
     error NothingToRelease(address holder, uint8 route);
     error HolderPlacementFailed(address expected, address placed);
@@ -233,7 +242,8 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
 
     /**
      * @notice Sends the whole $ASSET and USDC balance of the holder's receiving address of `route` to
-     *         `holder`, never to another address. The holder or the LP vault's operator. Never paused.
+     *         `holder`, never to another address. The LP vault's operator at any time; the holder only
+     *         while {holderReleaseOpen} ({HolderReleaseClosed} otherwise).
      * @dev Each token is its own leg ({releaseLeg}, called on this contract inside `try`): a leg that
      *      reverts (the holder on USDC's blacklist, USDC paused) is rolled back whole, its token
      *      stays at the receiving address and its amount is reported as 0 in {Released}; the other
@@ -245,6 +255,8 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
         if (msg.sender != holder) {
             address operator_ = ITransitionLpVault(lpVault).operator();
             if (msg.sender != operator_) revert NotHolderOrOperator(msg.sender, holder, operator_);
+        } else if (!_receiverStorage().holderReleaseOpen) {
+            revert HolderReleaseClosed();
         }
         address receiving = _place(holder, route);
 
@@ -294,6 +306,20 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     /// @notice The service key that may {deliver} for any holder.
     function deliverer() external view returns (address) {
         return _receiverStorage().deliverer;
+    }
+
+    /// @notice Opens (true) or closes (false) the holder's own {release}. The LP vault's operator,
+    ///         undelayed; the owner is refused. The operator's {release} is never affected.
+    function setHolderRelease(bool open) external {
+        address operator_ = ITransitionLpVault(lpVault).operator();
+        if (msg.sender != operator_) revert NotOperator(msg.sender, operator_);
+        _receiverStorage().holderReleaseOpen = open;
+        emit HolderReleaseSet(open);
+    }
+
+    /// @notice True while the holder itself may {release}.
+    function holderReleaseOpen() external view returns (bool) {
+        return _receiverStorage().holderReleaseOpen;
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner {}

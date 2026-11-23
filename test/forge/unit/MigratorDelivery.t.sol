@@ -83,6 +83,7 @@ contract MigratorDeliveryTest is TransitionHarness {
     }
 
     function test_Access_AZeroReceiverClosesTheEntries() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         vm.expectEmit(address(migrator));
         emit StakingMigratorBase.TransitionReceiverSet(address(receiver), address(0));
         migrator.setTransitionReceiver(address(0));
@@ -277,6 +278,7 @@ contract MigratorDeliveryTest is TransitionHarness {
     }
 
     function test_Order_TheEndStopsEveryEntryAndReleaseStillWorks() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         _payAsset(alice, R1, P);
         _payUsdc(alice, R1, R);
         ITransitionMigrator.DeliveryVoucher memory v = _dv(alice, R1, P, R);
@@ -439,6 +441,7 @@ contract MigratorDeliveryTest is TransitionHarness {
     // ──────────────────────── One option per wallet ────────────
 
     function test_OneOption_AFirstDeliveryAfterADirectEntryReverts() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         StakingMigrator.Voucher memory direct = _voucher(migrator, alice, 3, 1_000e18, 0, 1);
         vm.prank(alice);
         migrator.claimRestake(1_000e18, FAR_DEADLINE, _noPermit(), direct);
@@ -837,6 +840,7 @@ contract MigratorDeliveryTest is TransitionHarness {
     }
 
     function test_Parts_TokensAtAnotherHoldersAddressBelongToHim() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         _payAsset(bob, R3, P + 1e18); // sent to bob's address
         _deliver(bob, R3, _dv(bob, R3, P, 0));
         assertEq(poolV3.stakes(bob), P);
@@ -1023,6 +1027,7 @@ contract MigratorDeliveryTest is TransitionHarness {
     // ──────────────────────── Gas ──────────────────────────────
 
     function test_Gas_DeliverPerRouteAndRelease() public {
+        receiver.setHolderRelease(true); // the holders release themselves below (the harness is the operator)
         _payAsset(alice, R1, P);
         _payUsdc(alice, R1, R);
         _payAsset(bob, R2, P);

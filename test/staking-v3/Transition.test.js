@@ -63,6 +63,7 @@ describe("Transition (spec 01 §9)", function () {
     it("a placed holder runs the source's runtime and obeys only the receiver", async function () {
       await w.payAsset(w.alice, 3, 10n);
       await w.payUsdc(w.alice, 3, 1n);
+      await w.receiver.connect(w.owner).setHolderRelease(true); // the operator opens the holder's release
       await expect(w.receiver.connect(w.alice).release(w.alice.address, 3)).to.emit(w.receiver, "HolderPlaced");
       const at = await w.at(w.alice, 3);
       const holder = await ethers.getContractAt("TransitionHolder", at);
@@ -222,6 +223,33 @@ describe("Transition (spec 01 §9)", function () {
       await w.receiver.connect(w.owner).release(w.alice.address, 1); // the operator
       expect(await w.asset.balanceOf(w.alice.address)).to.equal(before + P);
       expect(await w.usdc.balanceOf(await w.at(w.alice, 1))).to.equal(0n);
+    });
+
+    it("the holder releases only while the operator's switch is on; the operator at any time", async function () {
+      expect(await w.receiver.holderReleaseOpen()).to.equal(false, "closed after deployment");
+      await w.payAsset(w.alice, 3, P);
+      await expect(w.receiver.connect(w.alice).release(w.alice.address, 3)).to.be.revertedWithCustomError(
+        w.receiver,
+        "HolderReleaseClosed"
+      );
+      for (const who of [w.stranger, w.deliverer, w.alice]) {
+        await expect(w.receiver.connect(who).setHolderRelease(true))
+          .to.be.revertedWithCustomError(w.receiver, "NotOperator")
+          .withArgs(who.address, w.owner.address);
+      }
+      await expect(w.receiver.connect(w.owner).setHolderRelease(true)).to.emit(w.receiver, "HolderReleaseSet").withArgs(true);
+      const before = await w.asset.balanceOf(w.alice.address);
+      await w.receiver.connect(w.alice).release(w.alice.address, 3);
+      expect(await w.asset.balanceOf(w.alice.address)).to.equal(before + P);
+
+      await expect(w.receiver.connect(w.owner).setHolderRelease(false)).to.emit(w.receiver, "HolderReleaseSet").withArgs(false);
+      await w.payAsset(w.alice, 3, P);
+      await expect(w.receiver.connect(w.alice).release(w.alice.address, 3)).to.be.revertedWithCustomError(
+        w.receiver,
+        "HolderReleaseClosed"
+      );
+      await w.receiver.connect(w.owner).release(w.alice.address, 3); // the operator, switch off
+      expect(await w.asset.balanceOf(w.alice.address)).to.equal(before + 2n * P);
     });
 
     it("setDeliverer and setSwapLimitBps are the operator's, setTransitionReceiver the owner's", async function () {
