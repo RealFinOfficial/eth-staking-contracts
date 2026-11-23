@@ -1103,6 +1103,41 @@ SW2_TEST_REWARD=1000 WEIGHT_SIGNER=0xBackendKey \
 `STAKING_TOKEN` / `REWARD_TOKEN` default to the `LPZapper` entry's tokens. It refuses mainnet and
 records the pool as `WeightedStakingPoolTest`.
 
+### Funding and staking into one named test contract (`scripts/v3-rehearsal.js`, 2026-11-23)
+
+The original `fund` and `sw2-stake` take their token from the registry's `LPZapper.asset` and act on
+fixed wallets and amounts. With `V3R_STAKING` set they act on THAT contract with ITS OWN staking token
+(`stakingToken()` read on chain), and the new `v1-stake` stakes into a v1-type `StakingPool` from a
+rehearsal wallet (not only from `PRIVATE_KEY`, as `stake.js` does). Code: `scripts/lib/stake-rehearsal.js`.
+
+| Variable | Meaning |
+|---|---|
+| `V3R_STAKING` | the target staking contract; `sw2-stake` refuses anything but a `WeightedStakingPool`, `v1-stake` anything but a `StakingPool` |
+| `V3R_WHO` | the wallets, comma-separated (`A`, `B`, `C`, `D` of the wallets file). Defaults: `fund` B,C (refuses A, the sender); `sw2-stake` A,B,C; `v1-stake` required |
+| `V3R_AMOUNT` | whole tokens of the staking token (its own decimals), default 10000 |
+| `V3R_DRY_RUN` | `1` / `yes` / `true`: print every transaction that would be sent (`WOULD SEND [who address] what -> contract, token, amount`) and send nothing |
+
+- `fund`: from A, tops each chosen wallet up to `V3R_AMOUNT` of the staking token (nothing when it
+  already holds it or already has a stake in the target), no USDC, and Sepolia ETH only when the
+  wallet holds less than 400,000 gas at the current `maxFeePerGas` (it gets the difference).
+- `sw2-stake`: per chosen wallet, approve exactly `V3R_AMOUNT` when the allowance is short, then
+  `stake(V3R_AMOUNT, 1500, deadline, signature)` with the weight voucher signed by `PRIVATE_KEY` (must
+  be the contract's `signer()`). A wallet that already has a stake there is skipped.
+- `v1-stake`: per chosen wallet, approve exactly `V3R_AMOUNT` when short, then `stake(V3R_AMOUNT)`.
+  A wallet that already has a stake there is skipped.
+- Both stake commands refuse a renounced owner and a closed window (chain time >= `endEpoch`), and a
+  short token balance (a `NOTE` in a dry run). The wallets file (`V3R_WALLETS`) must exist; nothing is
+  generated. Without `V3R_STAKING` the three other variables are refused and `fund` / `sw2-stake` are
+  the original commands. Mainnet (1, 43114) is refused as before.
+
+```bash
+W="$HOME/.config/real-finance/v3-test-wallets-20261116.json"
+V3R_ACTION=fund      V3R_STAKING=0xV2TestPool V3R_WHO=B,C V3R_AMOUNT=10000 V3R_DRY_RUN=1 \
+  V3R_WALLETS="$W" V3R_STATE=/tmp/s.json npx hardhat run scripts/v3-rehearsal.js --network sepolia
+V3R_ACTION=sw2-stake V3R_STAKING=0xV2TestPool V3R_WHO=A,B V3R_AMOUNT=10000 ...
+V3R_ACTION=v1-stake  V3R_STAKING=0xV1TestPool V3R_WHO=C   V3R_AMOUNT=10000 ...
+```
+
 ### Staking v3 on stack #6, second set (2026-11-11)
 
 A second staking v3 set was deployed on Sepolia test stack #6 on 2026-11-11 with

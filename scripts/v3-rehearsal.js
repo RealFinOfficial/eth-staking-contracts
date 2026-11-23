@@ -2,6 +2,7 @@ const fs = require("fs");
 
 const hre = require("hardhat");
 const pools = require("./lib/pools");
+const stakeCommands = require("./lib/stake-rehearsal");
 
 // The staking v3 rehearsal on Sepolia, step by step, for four wallets: A (the deployer), B, C and D
 // (fresh keys kept in a JSON file OUTSIDE the repo). The deployer key (PRIVATE_KEY) signs both
@@ -13,7 +14,7 @@ const pools = require("./lib/pools");
 //                 when missing, D appended by `fund-d` (the file stays mode 0600)
 //   V3R_STATE     path to a JSON file the steps append their results to (addresses and hashes only)
 //   V3R_ACTION    fund | sw2-stake | sw2-unstake | routes | withdraw | rebalance | status |
-//                 fund-d | move-d | rebalance-d
+//                 fund-d | move-d | rebalance-d | v1-stake (targeted form only, below)
 //
 // Every route call carries `deadline == 0` permits (the test tokens have no EIP-2612), so each
 // wallet approves the migrator first. Roles: A compound, B moveToLp (+ rebalance), C claimRestake
@@ -31,6 +32,22 @@ const pools = require("./lib/pools");
 //
 //   V3R_ACTION=fund V3R_WALLETS=/tmp/w.json V3R_STATE=/tmp/s.json \
 //     npx hardhat run scripts/v3-rehearsal.js --network sepolia
+//
+// THE TARGETED STAKE COMMANDS (2026-11-23): with V3R_STAKING set, `fund` and `sw2-stake` act on that
+// ONE test staking contract with ITS OWN staking token (`stakingToken()` on chain, not the registry's
+// LPZapper.asset), and `v1-stake` stakes into a v1-type StakingPool from a rehearsal wallet. The
+// wallets file must exist (nothing is generated). Documented in scripts/lib/stake-rehearsal.js:
+//   V3R_STAKING   the target staking contract (v2.0-type for sw2-stake, v1-type for v1-stake)
+//   V3R_WHO       the wallets, comma-separated (fund default B,C, refuses A; sw2-stake default
+//                 A,B,C; v1-stake required)
+//   V3R_AMOUNT    whole tokens, default 10000 (fund tops each wallet up to it, no USDC; ETH only
+//                 below 400,000 gas at the current max fee)
+//   V3R_DRY_RUN   1 | yes | true: print each transaction (who, contract, token, amount), send nothing
+// Without V3R_STAKING the three settings above are refused, and fund / sw2-stake are the original
+// commands below, unchanged.
+//
+//   V3R_ACTION=v1-stake V3R_STAKING=0xV1Pool V3R_WHO=C V3R_AMOUNT=10000 V3R_DRY_RUN=1 \
+//     V3R_WALLETS=… V3R_STATE=… npx hardhat run scripts/v3-rehearsal.js --network sepolia
 //
 // THE TWO-CHAIN TRANSITION (spec 01 §9.2, 2026-11-20), V3R_ACTION=tr-…, one step per run, every
 // Ethereum step sent by the staker's own wallet (TR_WHO = A | B | C | D), one after another:
@@ -425,12 +442,36 @@ async function runTransition(action, chainId) {
   return transition.actions[action](ctx);
 }
 
+/**
+ * V3R_STAKING set: the targeted fund / sw2-stake / v1-stake (scripts/lib/stake-rehearsal.js), with
+ * this script's `send` (nonce, receipt check, state file). `weightKey` signs the sw2 weight voucher.
+ */
+async function runStakeCommand({ action, chainId, wallets, env, weightKey, stateFile }) {
+  const ctx = { action, chainId, wallets, env, weightKey, stateFile, state: readJson(stateFile, { txs: [] }) };
+  ctx.state.txs = ctx.state.txs || [];
+  ctx.send = (who, label, build) => send(ctx, who, label, build);
+  console.log(`Action ${action}; ${Object.entries(wallets).map(([w, s]) => `${w} ${s.address}`).join(", ")}`);
+  return stakeCommands.actions[action](ctx);
+}
+
 async function main() {
   const chainId = await pools.chainId();
   if (pools.isMainnet(chainId)) throw new Error("v3-rehearsal.js is a Sepolia rehearsal and refuses mainnet");
   const action = process.env.V3R_ACTION;
   if (action && action.startsWith("tr-")) return runTransition(action, chainId);
-  if (!actions[action]) throw new Error(`V3R_ACTION must be one of ${Object.keys(actions).join(", ")}`);
+  if (stakeCommands.isTargeted(action, process.env)) {
+    const walletsFile = process.env.V3R_WALLETS;
+    const stateFile = process.env.V3R_STATE;
+    if (!walletsFile || !stateFile) throw new Error("Set V3R_WALLETS and V3R_STATE (files outside the repo)");
+    const keys = readJson(walletsFile, null);
+    if (!keys) throw new Error(`${walletsFile} does not exist (the targeted commands generate no wallets)`);
+    const wallets = { A: await pools.getSigner() };
+    for (const w of ["B", "C", "D"]) if (keys[w]) wallets[w] = new E.Wallet(keys[w].privateKey, E.provider);
+    return runStakeCommand({ action, chainId, wallets, env: process.env, weightKey: process.env.PRIVATE_KEY, stateFile });
+  }
+  if (!actions[action]) {
+    throw new Error(`V3R_ACTION must be one of ${Object.keys(actions).join(", ")}, v1-stake (with V3R_STAKING), tr-…`);
+  }
   const walletsFile = process.env.V3R_WALLETS;
   const stateFile = process.env.V3R_STATE;
   if (!walletsFile || !stateFile) throw new Error("Set V3R_WALLETS and V3R_STATE (files outside the repo)");
@@ -488,7 +529,7 @@ async function main() {
   await actions[action](ctx);
 }
 
-module.exports = { runTransition };
+module.exports = { runTransition, runStakeCommand, actions };
 
 if (require.main === module) {
   main().catch((error) => {

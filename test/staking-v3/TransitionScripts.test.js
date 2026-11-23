@@ -5,6 +5,9 @@
 //     on ONE in-process chain: the "Sepolia" side is a burn stand-in over MockRealToken, a mock
 //     TokenMessengerV2 and an unstake() source; the "Fuji" side is helpers/transitionWorld.js with the
 //     payout stand-in and a mock MessageTransmitterV2.
+//   - scripts/lib/stake-rehearsal.js      the targeted fund / sw2-stake / v1-stake of scripts/v3-rehearsal.js,
+//     against a local WeightedStakingPool and StakingPool whose staking token is NOT the registry's
+//     LPZapper.asset (a decoy token stands in for it); and the original fund / sw2-stake unchanged.
 
 const fs = require("fs");
 const os = require("os");
@@ -316,6 +319,204 @@ describe("Transition scripts", function () {
 
       const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
       expect(saved.transition.B.burn.id).to.equal(b.burn.id);
+    });
+  });
+
+  describe("the targeted stake commands (v3-rehearsal.js fund, sw2-stake, v1-stake)", function () {
+    const TOKENS = (n) => BigInt(n) * 10n ** 18n;
+    const DAY = 86400;
+
+    async function stakeWorld() {
+      const [deployer] = await ethers.getSigners();
+      const [A, B, C] = [0, 1, 2].map(() => ethers.Wallet.createRandom().connect(ethers.provider));
+      await deployer.sendTransaction({ to: A.address, value: ethers.parseEther("10") });
+      await deployer.sendTransaction({ to: C.address, value: ethers.parseEther("1") });
+      const ERC = await ethers.getContractFactory("MockERC20");
+      const decoy = await ERC.deploy("registry LPZapper.asset", "tREAL", TOKENS(1_000_000)); // the old test token
+      const asset = await ERC.deploy("bridge test asset", "ASSET", TOKENS(1_000_000)); // the contracts' own token
+      const usdc = await (await ethers.getContractFactory("MockERC20Decimals")).deploy("USDC", "USDC", 10n ** 12n, 6);
+      for (const t of [decoy, asset]) await t.transfer(A.address, TOKENS(100_000));
+      await usdc.transfer(A.address, 10n ** 10n);
+      const now = (await ethers.provider.getBlock("latest")).timestamp;
+      const W = await ethers.getContractFactory("WeightedStakingPool");
+      const v2 = await W.deploy(asset.target, usdc.target, now, now + DAY, A.address);
+      const v2Decoy = await W.deploy(decoy.target, usdc.target, now, now + DAY, A.address);
+      const v1 = await (await ethers.getContractFactory("StakingPool")).deploy(asset.target, usdc.target, now, now + DAY);
+      return { A, B, C, decoy, asset, usdc, v2, v2Decoy, v1, wallets: { A, B, C } };
+    }
+
+    function rehearsal() {
+      return require("../../scripts/v3-rehearsal");
+    }
+
+    function run(w, action, env) {
+      return rehearsal().runStakeCommand({
+        action,
+        chainId: 31337,
+        wallets: w.wallets,
+        env,
+        weightKey: w.A.privateKey,
+        stateFile: path.join(scratch, "state.json"),
+      });
+    }
+
+    async function balances(w, token) {
+      const out = {};
+      for (const [who, s] of Object.entries(w.wallets)) out[who] = await token.balanceOf(s.address);
+      return out;
+    }
+
+    it("chooses the targeted form only with V3R_STAKING and never ignores the new settings", function () {
+      const { isTargeted } = require("../../scripts/lib/stake-rehearsal");
+      expect(isTargeted("fund", {})).to.equal(false);
+      expect(isTargeted("sw2-stake", {})).to.equal(false);
+      expect(isTargeted("fund", { V3R_STAKING: "0x01" })).to.equal(true);
+      expect(isTargeted("v1-stake", { V3R_STAKING: "0x01" })).to.equal(true);
+      expect(() => isTargeted("v1-stake", {})).to.throw(/needs V3R_STAKING/);
+      expect(() => isTargeted("fund", { V3R_WHO: "B" })).to.throw(/V3R_WHO need V3R_STAKING/);
+      expect(() => isTargeted("sw2-stake", { V3R_DRY_RUN: "1" })).to.throw(/V3R_DRY_RUN need V3R_STAKING/);
+      expect(() => isTargeted("sw2-unstake", { V3R_STAKING: "0x01" })).to.throw(/apply only to/);
+    });
+
+    it("fund sends exactly the amount of the contract's own staking token to exactly the chosen wallets", async function () {
+      const w = await stakeWorld();
+      const decoyBefore = await balances(w, w.decoy);
+      const ethB0 = await ethers.provider.getBalance(w.B.address);
+      const ethC0 = await ethers.provider.getBalance(w.C.address);
+
+      await run(w, "fund", { V3R_STAKING: w.v2.target, V3R_WHO: "B,C", V3R_AMOUNT: "10000" });
+
+      const after = await balances(w, w.asset);
+      expect(after.B).to.equal(TOKENS(10_000));
+      expect(after.C).to.equal(TOKENS(10_000));
+      expect(after.A).to.equal(TOKENS(80_000));
+      expect(await balances(w, w.decoy)).to.deep.equal(decoyBefore, "the registry's token is never touched");
+      expect(await w.usdc.balanceOf(w.B.address)).to.equal(0n, "no USDC");
+      expect(ethB0).to.equal(0n);
+      expect(await ethers.provider.getBalance(w.B.address)).to.be.gt(0n, "B had no ETH, it got its gas");
+      expect(await ethers.provider.getBalance(w.C.address)).to.equal(ethC0, "C had enough ETH, none sent");
+
+      // a second run tops up nothing
+      await run(w, "fund", { V3R_STAKING: w.v2.target, V3R_WHO: "B,C", V3R_AMOUNT: "10000" });
+      expect((await balances(w, w.asset)).A).to.equal(TOKENS(80_000));
+
+      // only the chosen wallet
+      const w2 = await stakeWorld();
+      await run(w2, "fund", { V3R_STAKING: w2.v1.target, V3R_WHO: "C", V3R_AMOUNT: "250" });
+      const only = await balances(w2, w2.asset);
+      expect(only.C).to.equal(TOKENS(250));
+      expect(only.B).to.equal(0n);
+      await expect(run(w2, "fund", { V3R_STAKING: w2.v1.target, V3R_WHO: "A" })).to.be.rejectedWith(/cannot name A/);
+    });
+
+    it("sw2-stake stakes exactly the chosen wallets with the weight signature and leaves the others untouched", async function () {
+      const w = await stakeWorld();
+      await run(w, "fund", { V3R_STAKING: w.v2.target, V3R_WHO: "B,C" });
+      const res = await run(w, "sw2-stake", { V3R_STAKING: w.v2.target, V3R_WHO: "A,B", V3R_AMOUNT: "10000" });
+
+      for (const s of [w.A, w.B]) {
+        const st = await w.v2.stakes(s.address);
+        expect(st.amount).to.equal(TOKENS(10_000));
+        expect(st.weight).to.equal(1500n);
+        expect(await w.v2.nonces(s.address)).to.equal(1n);
+        expect(await w.asset.allowance(s.address, w.v2.target)).to.equal(0n, "exactly the amount was approved");
+      }
+      expect((await w.v2.stakes(w.C.address)).amount).to.equal(0n);
+      expect(await w.asset.balanceOf(w.C.address)).to.equal(TOKENS(10_000), "C untouched");
+      expect(await w.v2.totalStaked()).to.equal(TOKENS(20_000));
+      expect(res.staked).to.deep.equal({ A: TOKENS(10_000).toString(), B: TOKENS(10_000).toString() });
+      expect(await w.decoy.balanceOf(w.A.address)).to.equal(TOKENS(100_000));
+
+      // a re-run skips the wallets that already staked
+      await run(w, "sw2-stake", { V3R_STAKING: w.v2.target, V3R_WHO: "A,B" });
+      expect(await w.v2.totalStaked()).to.equal(TOKENS(20_000));
+      // the wrong contract type is refused
+      await expect(run(w, "sw2-stake", { V3R_STAKING: w.v1.target, V3R_WHO: "B" })).to.be.rejectedWith(/needs a WeightedStakingPool/);
+    });
+
+    it("v1-stake stakes into the v1-type StakingPool from the chosen wallet, and refuses a closed window", async function () {
+      const w = await stakeWorld();
+      await run(w, "fund", { V3R_STAKING: w.v1.target, V3R_WHO: "C" });
+      await run(w, "v1-stake", { V3R_STAKING: w.v1.target, V3R_WHO: "C", V3R_AMOUNT: "10000" });
+
+      expect((await w.v1.stakes(w.C.address)).amount).to.equal(TOKENS(10_000));
+      expect((await w.v1.stakes(w.A.address)).amount).to.equal(0n);
+      expect((await w.v1.stakes(w.B.address)).amount).to.equal(0n);
+      expect(await w.v1.totalStaked()).to.equal(TOKENS(10_000));
+      expect(await w.asset.balanceOf(w.C.address)).to.equal(0n);
+
+      await expect(run(w, "v1-stake", { V3R_STAKING: w.v2.target, V3R_WHO: "C" })).to.be.rejectedWith(/needs a StakingPool/);
+      await expect(run(w, "v1-stake", { V3R_STAKING: w.v1.target })).to.be.rejectedWith(/needs V3R_WHO/);
+      await expect(run(w, "v1-stake", { V3R_STAKING: w.v1.target, V3R_WHO: "B" })).to.be.rejectedWith(/B holds 0.0 ASSET/);
+      await ethers.provider.send("evm_increaseTime", [DAY + 1]);
+      await ethers.provider.send("evm_mine", []);
+      await expect(run(w, "v1-stake", { V3R_STAKING: w.v1.target, V3R_WHO: "B" })).to.be.rejectedWith(/window closed/);
+    });
+
+    it("a dry run prints who, to which contract, which token and how much, and sends nothing", async function () {
+      const w = await stakeWorld();
+      const nonceA = await ethers.provider.getTransactionCount(w.A.address);
+      const f = await run(w, "fund", { V3R_STAKING: w.v2.target, V3R_WHO: "B,C", V3R_DRY_RUN: "1" });
+      const transfers = f.planned.filter((p) => p.what.startsWith("transfer"));
+      expect(transfers.map((p) => [p.who, p.to, p.token, p.amount])).to.deep.equal([
+        ["A", w.asset.target, w.asset.target, TOKENS(10_000).toString()],
+        ["A", w.asset.target, w.asset.target, TOKENS(10_000).toString()],
+      ]);
+      expect(f.planned.filter((p) => p.what === "ETH to B")).to.have.length(1);
+      expect(f.planned.filter((p) => p.what === "ETH to C")).to.have.length(0);
+
+      const s = await run(w, "sw2-stake", { V3R_STAKING: w.v2.target, V3R_WHO: "A,B", V3R_DRY_RUN: "yes" });
+      expect(s.planned.filter((p) => p.what.startsWith("stake")).map((p) => [p.who, p.to, p.token, p.amount])).to.deep.equal([
+        ["A", w.v2.target, w.asset.target, TOKENS(10_000).toString()],
+        ["B", w.v2.target, w.asset.target, TOKENS(10_000).toString()],
+      ]);
+      const v = await run(w, "v1-stake", { V3R_STAKING: w.v1.target, V3R_WHO: "C", V3R_DRY_RUN: "true" });
+      expect(v.planned.map((p) => [p.who, p.what, p.to])).to.deep.equal([
+        ["C", "approve", w.asset.target],
+        ["C", "stake", w.v1.target],
+      ]);
+
+      expect(await ethers.provider.getTransactionCount(w.A.address)).to.equal(nonceA, "A sent nothing");
+      expect(await ethers.provider.getBalance(w.B.address)).to.equal(0n);
+      expect((await balances(w, w.asset)).A).to.equal(TOKENS(100_000));
+      expect(await w.v2.totalStaked()).to.equal(0n);
+      expect(await w.v1.totalStaked()).to.equal(0n);
+      expect(fs.existsSync(path.join(scratch, "state.json"))).to.equal(false, "no state written");
+    });
+
+    it("without the new settings, fund and sw2-stake behave as before (registry token, fixed amounts, A B C)", async function () {
+      const w = await stakeWorld();
+      const stateFile = path.join(scratch, "old.json");
+      const ctx = {
+        action: "fund",
+        chainId: 31337,
+        wallets: w.wallets,
+        stateFile,
+        state: { txs: [] },
+        asset: w.decoy,
+        usdc: w.usdc,
+        sw2: w.v2Decoy,
+      };
+      const { actions } = rehearsal();
+      await actions.fund(ctx);
+      expect(await w.decoy.balanceOf(w.B.address)).to.equal(TOKENS(20_000));
+      expect(await w.decoy.balanceOf(w.C.address)).to.equal(TOKENS(20_000));
+      expect(await w.usdc.balanceOf(w.B.address)).to.equal(2_000n * 10n ** 6n);
+      expect(await w.usdc.balanceOf(w.C.address)).to.equal(2_000n * 10n ** 6n);
+      expect(await ethers.provider.getBalance(w.B.address)).to.equal(ethers.parseEther("0.05"));
+      expect(await w.asset.balanceOf(w.B.address)).to.equal(0n);
+
+      const previous = process.env.PRIVATE_KEY;
+      process.env.PRIVATE_KEY = w.A.privateKey;
+      try {
+        ctx.action = "sw2-stake";
+        await actions["sw2-stake"](ctx);
+      } finally {
+        if (previous === undefined) delete process.env.PRIVATE_KEY;
+        else process.env.PRIVATE_KEY = previous;
+      }
+      for (const s of [w.A, w.B, w.C]) expect((await w.v2Decoy.stakes(s.address)).amount).to.equal(TOKENS(10_000));
+      expect(await w.v2.totalStaked()).to.equal(0n);
     });
   });
 });
