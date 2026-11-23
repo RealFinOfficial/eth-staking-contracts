@@ -49,6 +49,10 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-23 (the operator that is itself the holder) ──
+//    TransitionReceiver lines 112 (108 hit) unchanged, branches 31 -> 32 (28): the new operator check
+//    inside the closed-switch arm of `release` is hit; the outer `else` arm of that `if` (line 257) is
+//    now reported 0 by `--ir-minimum` although its body runs, so the hit count stays 28.
 // ── Pinned floors, re-measured 2026-11-23 (the holder release switch) ──
 //    TransitionReceiver lines 103 -> 112 (108 hit), branches 28 -> 31 (28): `setHolderRelease`, the
 //    `holderReleaseOpen` view and the `HolderReleaseClosed` arm of `release`; every new line and arm
@@ -369,7 +373,7 @@ export const PER_FILE_FLOORS = {
   },
   "contracts/staking-v3/TransitionReceiver.sol": {
     lines: {found: 112, minHit: 108},
-    branches: {found: 31, minHit: 28},
+    branches: {found: 32, minHit: 28},
   },
 };
 
