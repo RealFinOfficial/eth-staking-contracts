@@ -159,6 +159,7 @@ launch deploy runs with `LP_APEBOND_ENABLED=1` and the production campaign —
 | Script | Purpose |
 |---|---|
 | `create-sepolia-pool.js` | Create the ASSET-USDC Uniswap V3 pool, or report the existing one. Refuses to run on mainnet |
+| `seed-pool-liquidity.js` | The pool's FIRST liquidity on a test network: ONE `mint` from the deployer of `LP_SEED_USDC` USDC and `LP_SEED_ASSET` `$ASSET` (whole tokens) on the band from `LP_SEED_DOWN_PCT` % below to `LP_SEED_UP_PCT` % above the current price (USDC per `$ASSET`), ticks aligned outward to the spacing, in either token order. Pool and tokens from the `UniswapV3Pool` registry entry (`LP_POOL`, `LP_NPM`, `LP_ASSET` / `LP_USDC` override), minimums 99 %, approvals exact and back to zero after the mint. Records `seedTokenId`, the ticks and the amounts taken on the entry and refuses a second mint while the deployer holds that position. `LP_SEED_DRY_RUN=1` prints the ticks and the expected amounts only. Refuses chains 1 and 43114. Fuji: `LP_SEED_USDC=50 LP_SEED_ASSET=250 LP_SEED_DOWN_PCT=50 LP_SEED_UP_PCT=100 npx hardhat run scripts/seed-pool-liquidity.js --network avalanche-fuji` |
 | `deploy-lp-staking.js` | Deploy the whole stack: the `LPTimelock` first, then the five proxies, each born owned by that timelock with its final roles and links. Before spending any gas it asks the Uniswap V3 **factory** whether `LP_POOL` really is the canonical pool for `(token0, token1, fee)` and refuses to deploy against anything else — the pool triple check only proves the contract CLAIMS those tokens |
 | `lp-fund-rewards.js` | Fund the distributor: the operator mints `$OVTR` into it through `RewardsDistributor.mintRewardToken` (the distributor proxy is the Overture minter) and transfers `$ASSET` into it. `LP_FUND_OVTR_AMOUNT` / `LP_FUND_ASSET_AMOUNT` in whole tokens. Sends when the signer is the operator / holds the `$ASSET`; prints the Safe transaction otherwise. On a stack not yet activated (the signer is still the token's minter) it falls back to the direct `TokenOverture.mint` and prints `path: FALLBACK` |
 | `lp-mint-reward.js` | Operator front end for `RewardsDistributor.mintRewardToken(token, to, amount)`: mint a mintable reward token to ONE wallet outside the claim flow — a user's wallet, or `MINT_TO=distributor` to pre-fund claims. `MINT_TOKEN` (kind, symbol or address), `MINT_TO`, `MINT_AMOUNT` in whole tokens. Simulates the call from the operator first; sends when the signer is the operator, prints the Safe transaction otherwise. See "Minting a reward token to a wallet" below |
@@ -1058,7 +1059,7 @@ vault operator's, sent directly; the migrator's `setSwapLimitBps` too.
 
 The migrator's three delivery entries run in `StakingMigratorDeliveries`, a module the migrator
 implementation creates in its constructor and reaches with `delegatecall` (the migrator with the
-entries inline is 28,184 bytes, above the 24,576-byte limit; split: 24,256 + 15,779). Its only
+entries inline is 28,184 bytes, above the 24,576-byte limit; split: 24,256 + 15,829). Its only
 `delegatecall` is allowed by the `@custom:oz-upgrades-unsafe-allow delegatecall` annotation;
 `validate-upgrade-safety.js` also grades the migrator against every layout the committed manifests
 recorded (offline).

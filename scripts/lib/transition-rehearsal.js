@@ -251,7 +251,7 @@ const actions = {
   async "tr-pay"(ctx) {
     const w = who(ctx);
     const rec = record(ctx, w);
-    if (!rec.burn) throw new Error(`No burn recorded for ${w}; run tr-burn first (same TR_STATE file)`);
+    if (!rec.burn) throw new Error(`No burn recorded for ${w}; run tr-burn first (same V3R_STATE file)`);
     const part = BigInt(ctx.env.TR_PART || 0);
     if (part === 0n) throw new Error("Set TR_PART (wei of $ASSET for this part)");
     const payout = await E.getContractAt("PayoutStandIn", readAddress(ctx.env, "TR_PAYOUT_STANDIN", ctx.registry.PayoutStandIn));
