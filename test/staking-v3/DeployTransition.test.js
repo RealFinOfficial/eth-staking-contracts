@@ -9,7 +9,7 @@ const os = require("os");
 const path = require("path");
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { deployWorld } = require("./helpers/transitionWorld");
+const { deployWorld, deployProxy } = require("./helpers/transitionWorld");
 
 const TRACKED_REGISTRY = path.join(__dirname, "..", "..", "deployments.json");
 
@@ -141,6 +141,56 @@ describe("deploy-staking-v3.js: the transition receiver", function () {
     await expect(script.timelockOps({ addresses, lpVault: config.lpVault, timelock: w.owner.address })).to.be.rejectedWith(
       /is linked to the receiver/
     );
+  });
+
+  it("a rerun refuses a recorded receiver whose migrator is not this run's migrator", async function () {
+    const registry = path.join(scratch, "deployments.json");
+    const first = await script.deployStakingV3({ config, deployer: w.owner });
+    // The migrator entry is removed, so the rerun deploys a NEW migrator, while the receiver entry,
+    // bound for ever to the OLD migrator by its immutable migrator(), is still recorded.
+    const json = JSON.parse(fs.readFileSync(registry, "utf8"));
+    delete json["31337"].StakingMigrator;
+    fs.writeFileSync(registry, JSON.stringify(json, null, 2));
+    await expect(script.deployStakingV3({ config, deployer: w.owner })).to.be.rejectedWith(
+      new RegExp(`TransitionReceiver ${first.addresses.receiver}.*migrator ${first.addresses.migrator}`)
+    );
+  });
+
+  it("a migrator unlinked with setTransitionReceiver(0) is relinked with setTransitionReceiver", async function () {
+    // w.migrator ran initializeTransition (reinitializer 2) and is owned by w.owner (the timelock here).
+    await (await w.migrator.connect(w.owner).setTransitionReceiver(ethers.ZeroAddress)).wait();
+    const addresses = {
+      pool: await w.poolV3.getAddress(),
+      bonusVault: await w.bonusVault.getAddress(),
+      migrator: await w.migrator.getAddress(),
+      receiver: await w.receiver.getAddress(),
+    };
+    const ops = await script.timelockOps({ addresses, lpVault: config.lpVault, timelock: w.owner.address });
+    const link = ops.filter((o) => o.target === addresses.migrator);
+    expect(link.map((o) => o.fn)).to.deep.equal(["setTransitionReceiver"]);
+    expect(link[0].args).to.deep.equal([addresses.receiver]);
+    // The op really runs: the owner sends it and the migrator is linked again.
+    await (await w.migrator.connect(w.owner).setTransitionReceiver(addresses.receiver)).wait();
+    expect(await w.migrator.transitionReceiver()).to.equal(addresses.receiver);
+  });
+
+  it("a migrator that never ran initializeTransition is linked with initializeTransition", async function () {
+    const fresh = await deployProxy(
+      "StakingMigrator",
+      [config.lpVault, config.usdc, config.asset],
+      [w.owner.address, await w.poolV3.getAddress(), await w.bonusVault.getAddress(), w.signer.address, 300, 953, 1800],
+      w.owner
+    );
+    const addresses = {
+      pool: await w.poolV3.getAddress(),
+      bonusVault: await w.bonusVault.getAddress(),
+      migrator: await fresh.getAddress(),
+      receiver: await w.receiver.getAddress(),
+    };
+    const ops = await script.timelockOps({ addresses, lpVault: config.lpVault, timelock: w.owner.address });
+    const link = ops.filter((o) => o.target === addresses.migrator);
+    expect(link.map((o) => o.fn)).to.deep.equal(["initializeTransition"]);
+    expect(link[0].args).to.deep.equal([addresses.receiver]);
   });
 
   it("reads V3_TRANSITION_DELIVERER and V3_MIGRATOR_IMPLEMENTATION, zero deliverer by default", function () {

@@ -31,7 +31,9 @@ const lpTimelock = require("./lp-timelock");
 //      side of the transition; `deliverer` is the service key (V3_TRANSITION_DELIVERER, zero = none)
 //   5. the DIRECT wiring, sent by the deployer while it owns the proxies (skipped when already on
 //      chain): `pool.setBonusVault(bonusVault)`; `migrator.initializeTransition(receiver)` when the
-//      deployer still owns a migrator that carries it and has no receiver yet; then
+//      deployer still owns a migrator that carries it and has no receiver yet
+//      (`setTransitionReceiver(receiver)` instead when the reinitializer already ran and the
+//      receiver was set back to zero); then
 //      `transferOwnership(timelock)` on all four — a NOMINATION (Ownable2Step), the deployer stays
 //      owner until the timelock accepts
 //   6. the TIMELOCK batch (owner tier, one operation, in this order), written to a file
@@ -43,6 +45,10 @@ const lpTimelock = require("./lp-timelock");
 //        StakingMigrator.upgradeToAndCall(V3_MIGRATOR_IMPLEMENTATION, initializeTransition(receiver))
 //                       only on a LIVE migrator the timelock already owns that predates the
 //                       transition (no transitionReceiver()); the one operation of spec 01 §9.10
+//        StakingMigrator.initializeTransition(receiver)   instead, on a timelock-owned migrator that
+//                       carries the transition but was never linked (initialized version 1), or
+//        StakingMigrator.setTransitionReceiver(receiver)  on one whose receiver was set back to zero
+//                       after initializeTransition ran (version 2: the reinitializer is spent)
 //        WeightedStakingPoolV3.setMigrator(migrator)   the routes open only here, after the timelock
 //        V3BonusVault.setMigrator(migrator)            owns all three contracts
 //        LPStakingVault.upgradeToAndCall(V3_VAULT_IMPLEMENTATION, initializeV2())   only when the
@@ -60,7 +66,9 @@ const lpTimelock = require("./lp-timelock");
 // `V3BonusVault`, `StakingMigrator`, `TransitionReceiver`) as each one exists, so a failed run loses no address. A run
 // RESUMES: every kind already recorded for the chain (with code at its address) is reused and
 // printed as "recorded" instead of being deployed again, and every wiring step and batch call is
-// skipped when its effect is already on chain. To deploy afresh, remove the three entries first.
+// skipped when its effect is already on chain. To deploy afresh, remove the four entries first.
+// A recorded `TransitionReceiver` is reused only when its immutable `migrator()` is the migrator of
+// this run; a receiver bound to another migrator stops the run (remove its entry to deploy a new one).
 //
 // ──────────────────────── environment ────────────────────────
 //
@@ -100,7 +108,18 @@ const MIGRATOR_TRANSITION_ABI = [
   "function transitionReceiver() view returns (address)",
   "function initializeTransition(address receiver_)",
 ];
-const RECEIVER_ABI = ["function HOLDER_INIT_CODE_HASH() view returns (bytes32)"];
+const RECEIVER_ABI = [
+  "function HOLDER_INIT_CODE_HASH() view returns (bytes32)",
+  "function migrator() view returns (address)",
+];
+
+/**
+ * OpenZeppelin `Initializable`'s ERC-7201 slot (`openzeppelin.storage.Initializable`): its low
+ * 8 bytes are `_initialized`, the version of the last initializer that ran on the proxy.
+ */
+const INITIALIZABLE_SLOT = "0xf0c57e16840df040f15088dc2f81fe391c3923bec73e23a9662efc9c229c6a00";
+/** The `reinitializer` version of `StakingMigrator.initializeTransition`. */
+const TRANSITION_INITIALIZER_VERSION = 2n;
 
 /** The vault's defaults (`BONUS_HOOK_GAS` / `BONUS_LISTENER_GAS`), written by `initializeV2`. */
 const DEFAULT_BONUS_HOOK_GAS = 400000;
@@ -202,6 +221,18 @@ async function migratorReceiver(migratorAddress) {
   }
 }
 
+/**
+ * Whether `initializeTransition` (reinitializer 2) already ran on the migrator proxy. A zero
+ * `transitionReceiver()` is both the state of a migrator never linked (version 1: link it with
+ * `initializeTransition`) and the state after `setTransitionReceiver(0)` (version 2: the
+ * reinitializer is spent, relink it with `setTransitionReceiver`).
+ */
+async function transitionInitialized(migratorAddress) {
+  const word = await hre.ethers.provider.getStorage(migratorAddress, INITIALIZABLE_SLOT);
+  const version = BigInt(word) & 0xffffffffffffffffn;
+  return version >= TRANSITION_INITIALIZER_VERSION;
+}
+
 /** Whether the live vault already carries `bonusListener()` (the staking v3 vault revision). */
 async function vaultHasListener(vaultAddress) {
   const vault = new hre.ethers.Contract(vaultAddress, VAULT_ABI, hre.ethers.provider);
@@ -252,8 +283,22 @@ async function deployContracts({ chainId, deployer, config }) {
   const migrator =
     (await recordedProxy(chainId, MIGRATOR_KIND)) ||
     (await deployMigrator({ chainId, deployer, config, pool, bonusVault }));
-  const receiver =
-    (await recordedProxy(chainId, RECEIVER_KIND)) || (await deployReceiver({ chainId, deployer, config, migrator }));
+  const recordedReceiver = await recordedProxy(chainId, RECEIVER_KIND);
+  if (recordedReceiver) {
+    // The receiver's migrator() is an immutable of its implementation: a receiver recorded for
+    // another migrator would hand every delivery to that one.
+    const bound = hre.ethers.getAddress(
+      await new hre.ethers.Contract(recordedReceiver.address, RECEIVER_ABI, hre.ethers.provider).migrator()
+    );
+    if (!sameAddress(bound, migrator.address)) {
+      throw new Error(
+        `The recorded TransitionReceiver ${recordedReceiver.address} is bound to the migrator ${bound}, not to ` +
+          `this run's migrator ${migrator.address} (its migrator() is immutable). Remove the TransitionReceiver ` +
+          "entry from deployments.json to deploy a receiver for this migrator."
+      );
+    }
+  }
+  const receiver = recordedReceiver || (await deployReceiver({ chainId, deployer, config, migrator }));
   return { pool, bonusVault, migrator, receiver };
 }
 
@@ -382,9 +427,15 @@ async function wireDirect({ deployer, addresses, timelock }) {
   // migrator the timelock owns gets it inside the batch's upgrade instead (timelockOps).
   const linked = await migratorReceiver(addresses.migrator);
   if (linked !== null && linked === hre.ethers.ZeroAddress && sameAddress(await migrator.owner(), deployer.address)) {
-    await pools.send("migrator.initializeTransition(receiver)", deployer, (o) =>
-      migrator.initializeTransition(addresses.receiver, o)
-    );
+    if (await transitionInitialized(addresses.migrator)) {
+      await pools.send("migrator.setTransitionReceiver(receiver)", deployer, (o) =>
+        migrator.setTransitionReceiver(addresses.receiver, o)
+      );
+    } else {
+      await pools.send("migrator.initializeTransition(receiver)", deployer, (o) =>
+        migrator.initializeTransition(addresses.receiver, o)
+      );
+    }
   }
   for (const [label, contract] of [
     [POOL_KIND, pool],
@@ -447,9 +498,11 @@ async function timelockOps({
         args: [migratorImplementation, data],
       });
     } else if (linked === hre.ethers.ZeroAddress) {
-      // A migrator that carries the transition but was never linked, now owned by the timelock: the
-      // reinitializer was not used, so the owner can still run it (as part of the batch).
-      ops.push({ target: addresses.migrator, kind: MIGRATOR_KIND, fn: "initializeTransition", args: [addresses.receiver] });
+      // A zero receiver on a migrator that carries the transition, now owned by the timelock. Never
+      // linked (initialized version 1): the reinitializer is unused, so the batch runs it. Unlinked
+      // with setTransitionReceiver(0) (version 2): the reinitializer is spent, so the batch relinks.
+      const fn = (await transitionInitialized(addresses.migrator)) ? "setTransitionReceiver" : "initializeTransition";
+      ops.push({ target: addresses.migrator, kind: MIGRATOR_KIND, fn, args: [addresses.receiver] });
     } else if (!sameAddress(linked, addresses.receiver)) {
       throw new Error(
         `The StakingMigrator ${addresses.migrator} is linked to the receiver ${linked}, not ${addresses.receiver}; ` +
@@ -619,6 +672,7 @@ module.exports = {
   deployContracts,
   deployReceiver,
   migratorReceiver,
+  transitionInitialized,
   wireDirect,
   timelockOps,
   deployStakingV3,
