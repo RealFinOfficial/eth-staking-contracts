@@ -176,10 +176,69 @@
       "pendingOwner": "0x0000000000000000000000000000000000000000"
     },
     "PayoutStandIn": {
+      "address": "0xDd75a26adAd289c666F9D6bD1f99B94Ff42ABE97",
+      "deployTx": "0xccedebb9fba2a4854ecde4aa4cbc8747ac61d6c62bbe090b88eefbf197e457a3",
+      "block": 61528557,
+      "token": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "PayoutStandInRetired": {
       "address": "0x6c87F03Bd8fbD22f4361a0031382D1DE60127C8d",
       "deployTx": "0x3302350d7e3a9879d804688b028e9d49a1caf4875c36f56707061a66c44260e3",
       "block": 61512387,
       "token": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0xDd75a26adAd289c666F9D6bD1f99B94Ff42ABE97"
+    },
+    "WeightedStakingPoolV3": {
+      "address": "0x070d7ED4086d96Ff168FDE392eC4CEF656002ECA",
+      "deployTx": "0x451f2a8c1e071d8d79a544fd80de9b4636edce843c838032e90cba65e989ce17",
+      "block": 61528570,
+      "implementation": "0x5a81f70BF83669a84Cc02988c72c523Fa8D576D5",
+      "implementationTx": "0x3685617676ec376e0e2c58d47a252db3961b39d4a63b56eb81fc350e1788239e",
+      "stakingToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "activationEpoch": 1795536696,
+      "endEpoch": 1803312696,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "V3BonusVault": {
+      "address": "0xF063B53278051f01bc0f65FB0155b9A41b45Cd6F",
+      "deployTx": "0x256e5a7dc3cf44682485000332517538917223f803b83b2683df451a3b81544e",
+      "block": 61528578,
+      "implementation": "0x4e763129Ec2a757FB64B9388870050be5F71481e",
+      "implementationTx": "0xebb2b6d543f03e380f5dff0d98289f5ab51cb1297354efcdfd5bea478411a3bf",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "pool": "0x070d7ED4086d96Ff168FDE392eC4CEF656002ECA",
+      "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "StakingMigrator": {
+      "address": "0x2576b84b49303a47e28fAabBC0cd38e153A5ce8b",
+      "deployTx": "0x91efd24341db3795e7d1b2856e86ff107d4f19512c8aedc98217fe14e743e672",
+      "block": 61528584,
+      "implementation": "0x7dfb98bCA89860B95a2d583568d0Ac9967A0feeE",
+      "implementationTx": "0x2befd0989323870846d23e9f68ce0b11a65eff656ba58d7f62f15552c74bc8d0",
+      "lpVault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "usdc": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "stakingPool": "0x070d7ED4086d96Ff168FDE392eC4CEF656002ECA",
+      "bonusVault": "0xF063B53278051f01bc0f65FB0155b9A41b45Cd6F",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "valuationWindow": 1800,
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "TransitionReceiver": {
+      "address": "0x5d4C030c18A8872ED8395Fe477F5692d44967492",
+      "deployTx": "0xc856c46f1845a2d3216a607193fbfb432f6135370208955840ff907ca2eef4b6",
+      "block": 61528589,
+      "implementation": "0x75D379BBEa2E81db8795a09DB99F50CdbbdEf5e2",
+      "implementationTx": "0x7fcf0230c34300fc87b776f6f83e102003c2155a5a849206c3332af820bec3d5",
+      "migrator": "0x2576b84b49303a47e28fAabBC0cd38e153A5ce8b",
+      "deliverer": "0x0000000000000000000000000000000000000000",
+      "holderInitCodeHash": "0xc9fdfcb43183a49244ffe584d9e69edfb144922f0930ecd33fd099814b33579b",
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     }
   },
@@ -637,13 +696,15 @@
       "upgradeTx": "0xf24de609be6ee60207e974dc4c49f105b6c9d7a2c026bb55f43dd05ec7c4b141"
     },
     "BurnStandIn": {
-      "address": "0x1598D972D8C553f3D521BeB88382cE2DCf4E0a7c",
-      "deployTx": "0x5ab2ba522116b3f7de7326598e9467d6608e8d551b439907abd3399fa93c26a6",
-      "block": 12194994,
+      "address": "0x960A08C00295480e7B00025c2Cfa6F228fd3D943",
+      "deployTx": "0x22b56e8826b4d9a329c4802be88329d3d1b37c3119e027dd74565b3cc76f05c0",
+      "block": 12197084,
       "token": "0x0A5BCe3bc08608C9B4A4d88bA216fe203DA74861",
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "accessSigner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "closeAt": 1803204300
+      "closeAt": 1803230400,
+      "opened": true,
+      "requireSignature": true
     },
     "StakingPool": {
       "address": "0xb5b68Be5492358ccAeCcd1Ca178282Ea727c0cAe",
@@ -651,6 +712,16 @@
       "block": 12196765,
       "activationEpoch": 1795450344,
       "endEpoch": 1795536744
+    },
+    "BurnStandInRetired": {
+      "address": "0x1598D972D8C553f3D521BeB88382cE2DCf4E0a7c",
+      "deployTx": "0x5ab2ba522116b3f7de7326598e9467d6608e8d551b439907abd3399fa93c26a6",
+      "block": 12194994,
+      "token": "0x0A5BCe3bc08608C9B4A4d88bA216fe203DA74861",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "accessSigner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "closeAt": 1803204300,
+      "retiredInFavourOf": "0x960A08C00295480e7B00025c2Cfa6F228fd3D943"
     }
   }
 }
