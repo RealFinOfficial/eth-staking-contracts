@@ -15,11 +15,6 @@
         "internalType": "address",
         "name": "accessSigner_",
         "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "closeAt_",
-        "type": "uint256"
       }
     ],
     "stateMutability": "nonpayable",
@@ -42,15 +37,15 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "AlreadyOpened",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
         "name": "amount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "minimum",
         "type": "uint256"
       }
     ],
@@ -61,11 +56,32 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "closeAt",
+        "name": "current",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "given",
         "type": "uint256"
       }
     ],
-    "name": "Closed",
+    "name": "CloseAtNotLater",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "destination",
+        "type": "address"
+      }
+    ],
+    "name": "DestinationBlocked",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EnforcedPause",
     "type": "error"
   },
   {
@@ -79,8 +95,14 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "MigrationPaused",
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "closeAt",
+        "type": "uint256"
+      }
+    ],
+    "name": "MigrationClosed",
     "type": "error"
   },
   {
@@ -223,7 +245,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "account",
+        "name": "from",
         "type": "address"
       },
       {
@@ -251,6 +273,25 @@
         "internalType": "address",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "destination",
+        "type": "address"
+      }
+    ],
+    "name": "blockedDestination",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
       }
     ],
     "stateMutability": "view",
@@ -310,6 +351,19 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "newCloseAt",
+        "type": "uint256"
+      }
+    ],
+    "name": "extendCloseAt",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -459,6 +513,13 @@
   },
   {
     "inputs": [],
+    "name": "open",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "opened",
     "outputs": [
       {
@@ -532,25 +593,17 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "closeAt_",
-        "type": "uint256"
-      }
-    ],
-    "name": "setCloseAt",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
+        "internalType": "address",
+        "name": "destination",
+        "type": "address"
+      },
       {
         "internalType": "bool",
-        "name": "opened_",
+        "name": "blocked",
         "type": "bool"
       }
     ],
-    "name": "setOpened",
+    "name": "setBlockedDestination",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

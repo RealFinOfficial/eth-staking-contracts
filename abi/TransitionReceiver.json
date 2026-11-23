@@ -60,6 +60,11 @@
   },
   {
     "inputs": [],
+    "name": "HolderReleaseClosed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "InvalidInitialization",
     "type": "error"
   },
@@ -388,6 +393,19 @@
     "inputs": [
       {
         "indexed": false,
+        "internalType": "bool",
+        "name": "open",
+        "type": "bool"
+      }
+    ],
+    "name": "HolderReleaseSet",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
         "internalType": "uint64",
         "name": "version",
         "type": "uint64"
@@ -703,6 +721,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "holderReleaseOpen",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -895,6 +926,19 @@
       }
     ],
     "name": "setDeliverer",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "open",
+        "type": "bool"
+      }
+    ],
+    "name": "setHolderRelease",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

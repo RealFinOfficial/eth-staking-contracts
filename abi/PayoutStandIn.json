@@ -102,6 +102,11 @@
   },
   {
     "inputs": [],
+    "name": "ZeroBurnAmount",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "ZeroDestination",
     "type": "error"
   },
