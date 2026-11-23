@@ -15,9 +15,10 @@ interface IBurnableToken {
 /**
  * @title BurnStandIn
  * @notice TEST STAND-IN, NEVER DEPLOYED ON A MAINNET. It copies the burn interface of the
- *         bridge owner's burn contract on Ethereum (his answer of 2026-11-20, section 2) so the
- *         transition can be rehearsed on Sepolia before his own test instance exists. Only the
- *         interface and the listed reverts are copied; the owner setters are test-only.
+ *         bridge owner's burn contract on Ethereum (his answer of 2026-11-20, section 2, with his
+ *         changes of 2026-11-23) so the transition can be rehearsed on Sepolia before his own test
+ *         instance exists. Only the interface, the access signature, the opening rules and the
+ *         reverts in their order are copied; the owner setters are test-only.
  *
  *  THE BURN. `from` is always the caller. The tokens are taken from the caller with the token's
  *  `burnFrom`, after an `approve` ({migrate}) or with an EIP-2612 permit ({migrateWithPermit}:
@@ -27,36 +28,51 @@ interface IBurnableToken {
  *  destination, amount))`, where `seq` counts every burn from 0, so two equal burns have
  *  different ids.
  *
- *  A permit that was already submitted by someone else (its nonce spent) does not fail the call
- *  when the allowance it granted still covers `amount`: the permit is tried, and on failure the
- *  burn goes on against the existing allowance (`burnFrom` reverts when it is short).
+ *  The permit is tried and a failure is ignored: the burn goes on against the existing allowance
+ *  (`burnFrom` reverts when it is short). So a permit already submitted by someone else does not
+ *  fail the call while its allowance still covers `amount`.
  *
- *  THE REVERTS, in this order: before {opened} ({NotOpened}), after {closeAt} ({Closed}; the
- *  second `closeAt` itself is still open), while {paused} ({MigrationPaused}), `amount <
- *  MIN_AMOUNT` ({AmountBelowMinimum}), a zero `destination` ({ZeroDestination}), and the access
- *  signature: the two short variants revert {AccessSignatureRequired} while {requireSignature}
- *  is on.
+ *  OPENING. `closeAt` is 0 until the owner's {open} (once), which sets {opened} and `closeAt =
+ *  block.timestamp + 90 days`. {extendCloseAt} moves `closeAt` only later, also after it passed
+ *  (that opens the burn again). {opened} stays true after the end. A burn passes while
+ *  `opened && !paused && block.timestamp <= closeAt` (the second `closeAt` itself still passes).
  *
- *  THE ACCESS SIGNATURE. The bridge owner did not publish his digest, and the site only passes
- *  the bytes it receives on, so this stand-in defines its own. It covers only the caller and a
- *  deadline, as an EIP-712 typed message signed by {accessSigner}:
+ *  BLOCKED DESTINATIONS. {blockedDestination} lists receivers a burn may not name; the constructor
+ *  puts the token and this contract on it, the owner adds and removes addresses.
  *
- *      domain  EIP712Domain(name "BurnStandIn", version "1", chainId, verifyingContract = this)
- *      type    MigrationAccess(address account,uint256 deadline)
- *      digest  keccak256("\x19\x01" || domainSeparator ||
- *                        keccak256(abi.encode(MIGRATION_ACCESS_TYPEHASH, account, deadline)))
+ *  THE ACCESS SIGNATURE (the bridge owner's format of 2026-11-23), signed by {accessSigner}:
  *
- *  with `account` = the caller. {accessDigest} returns it. A deadline in the past
- *  (`block.timestamp > deadline`) reverts {AccessSignatureExpired}; a signature that does not
- *  recover to {accessSigner} reverts {InvalidAccessSignature}. The two long variants check the
- *  signature whenever they are called, also while {requireSignature} is off.
+ *      domain  EIP712Domain(name "ASSET Migration", version "1", chainId, verifyingContract = this)
+ *      type    MigrationAccess(address from,uint256 deadline)     from = the caller
+ *      bytes   65, r || s || v, low s, v = 27 or 28; valid while block.timestamp <= deadline
+ *
+ *  {accessDigest} returns the digest. While {requireSignature} is on, the two short variants
+ *  revert and the two long ones check the signature. While it is off, the two long variants
+ *  ignore `deadline` and `signature` completely (an expired deadline and garbage bytes pass).
+ *
+ *  THE CHECKS, in this order; the first failing one gives the error:
+ *    1 the requirement is on and the variant has no signature   {AccessSignatureRequired}
+ *    2 the requirement is on and the deadline passed            {AccessSignatureExpired}
+ *    3 the requirement is on and the signature is not valid      {InvalidAccessSignature}
+ *    4 paused                                                    {EnforcedPause}
+ *    5 before {open}                                             {NotOpened}
+ *    6 after `closeAt`                                           {MigrationClosed}
+ *    7 a zero receiver                                           {ZeroDestination}
+ *    8 a blocked receiver                                        {DestinationBlocked}
+ *    9 `amount < MIN_AMOUNT`                                     {AmountBelowMinimum}
+ *   10 no allowance or balance                                   the token's own error
+ *
+ *  No OpenZeppelin `Pausable`: its `Paused` / `Unpaused` events are not in the bridge's ABI.
  */
 contract BurnStandIn is Ownable, EIP712 {
     /// @notice The smallest burn, `amount >= MIN_AMOUNT`.
     uint256 public constant MIN_AMOUNT = 1e18;
 
+    /// @dev How long the burn stays open after {open} (`closeAt = open time + OPEN_DURATION`).
+    uint256 private constant OPEN_DURATION = 90 days;
+
     /// @notice The EIP-712 type of the access signature.
-    bytes32 public constant MIGRATION_ACCESS_TYPEHASH = keccak256("MigrationAccess(address account,uint256 deadline)");
+    bytes32 public constant MIGRATION_ACCESS_TYPEHASH = keccak256("MigrationAccess(address from,uint256 deadline)");
 
     /// @notice The token burned (the test $ASSET: `burnFrom` and EIP-2612 `permit`).
     IERC20 public immutable token;
@@ -65,49 +81,54 @@ contract BurnStandIn is Ownable, EIP712 {
     bool public paused;
     /// @notice True while the access signature is required.
     bool public requireSignature;
-    /// @notice False until the owner opens the burn.
+    /// @notice False until the owner's {open}; stays true after the end.
     bool public opened;
-    /// @notice The last second a burn is accepted (unix time).
+    /// @notice The last second a burn is accepted (unix time); 0 before {open}.
     uint256 public closeAt;
     /// @notice The key whose EIP-712 signature grants access ({accessDigest}).
     address public accessSigner;
     /// @notice The `seq` of the next burn; equal to the number of burns so far.
     uint256 public nextSeq;
+    /// @notice True for a receiver a burn may not name.
+    mapping(address destination => bool) public blockedDestination;
 
     event Migrated(bytes32 indexed id, uint256 seq, address indexed from, address indexed destination, uint256 amount);
 
     error ZeroAddress();
-    error NotOpened();
-    error Closed(uint256 closeAt);
-    error MigrationPaused();
-    error AmountBelowMinimum(uint256 amount, uint256 minimum);
-    error ZeroDestination();
     error AccessSignatureRequired();
     error AccessSignatureExpired(uint256 deadline);
     error InvalidAccessSignature();
+    error EnforcedPause();
+    error NotOpened();
+    error MigrationClosed(uint256 closeAt);
+    error ZeroDestination();
+    error DestinationBlocked(address destination);
+    error AmountBelowMinimum(uint256 amount);
+    error AlreadyOpened();
+    error CloseAtNotLater(uint256 current, uint256 given);
 
     /**
      * @param token_ The burned token.
      * @param owner_ The test operator who may use the setters.
      * @param accessSigner_ The access signature key.
-     * @param closeAt_ The last second a burn is accepted.
      */
-    constructor(address token_, address owner_, address accessSigner_, uint256 closeAt_)
+    constructor(address token_, address owner_, address accessSigner_)
         Ownable(owner_)
-        EIP712("BurnStandIn", "1")
+        EIP712("ASSET Migration", "1")
     {
         if (token_ == address(0)) revert ZeroAddress();
         token = IERC20(token_);
         accessSigner = accessSigner_;
-        closeAt = closeAt_;
+        blockedDestination[token_] = true;
+        blockedDestination[address(this)] = true;
     }
 
     // ──────────────────────── The burn ─────────────────────────
 
     /// @notice Burns `amount` of the caller's tokens (after an `approve`) for `destination`.
     function migrate(uint256 amount, address destination) external {
-        _checkOpen(amount, destination);
         if (requireSignature) revert AccessSignatureRequired();
+        _checkOpen(amount, destination);
         _burn(amount, destination);
     }
 
@@ -120,20 +141,22 @@ contract BurnStandIn is Ownable, EIP712 {
         bytes32 r,
         bytes32 s
     ) external {
-        _checkOpen(amount, destination);
         if (requireSignature) revert AccessSignatureRequired();
+        _checkOpen(amount, destination);
         _permit(amount, permitDeadline, v, r, s);
         _burn(amount, destination);
     }
 
-    /// @notice {migrate} with the access signature for (the caller, `deadline`).
+    /// @notice {migrate} with the access signature for (the caller, `deadline`); both are ignored
+    ///         while {requireSignature} is off.
     function migrate(uint256 amount, address destination, uint256 deadline, bytes calldata signature) external {
+        if (requireSignature) _checkAccess(deadline, signature);
         _checkOpen(amount, destination);
-        _checkAccess(deadline, signature);
         _burn(amount, destination);
     }
 
-    /// @notice {migrateWithPermit} with the access signature for (the caller, `deadline`).
+    /// @notice {migrateWithPermit} with the access signature for (the caller, `deadline`); both are
+    ///         ignored while {requireSignature} is off.
     function migrateWithPermit(
         uint256 amount,
         address destination,
@@ -144,26 +167,34 @@ contract BurnStandIn is Ownable, EIP712 {
         uint256 deadline,
         bytes calldata signature
     ) external {
+        if (requireSignature) _checkAccess(deadline, signature);
         _checkOpen(amount, destination);
-        _checkAccess(deadline, signature);
         _permit(amount, permitDeadline, v, r, s);
         _burn(amount, destination);
     }
 
-    /// @notice The EIP-712 digest {accessSigner} signs to let `account` burn until `deadline`.
-    function accessDigest(address account, uint256 deadline) public view returns (bytes32) {
-        return _hashTypedDataV4(keccak256(abi.encode(MIGRATION_ACCESS_TYPEHASH, account, deadline)));
+    /// @notice The EIP-712 digest {accessSigner} signs to let `from` burn until `deadline`.
+    function accessDigest(address from, uint256 deadline) public view returns (bytes32) {
+        return _hashTypedDataV4(keccak256(abi.encode(MIGRATION_ACCESS_TYPEHASH, from, deadline)));
+    }
+
+    // ──────────────────────── Opening ──────────────────────────
+
+    /// @notice Opens the burn, once: `closeAt = block.timestamp + OPEN_DURATION`.
+    function open() external onlyOwner {
+        if (opened) revert AlreadyOpened();
+        opened = true;
+        closeAt = block.timestamp + OPEN_DURATION;
+    }
+
+    /// @notice Moves `closeAt` later, also after it passed (that opens the burn again).
+    function extendCloseAt(uint256 newCloseAt) external onlyOwner {
+        if (!opened) revert NotOpened();
+        if (newCloseAt <= closeAt) revert CloseAtNotLater(closeAt, newCloseAt);
+        closeAt = newCloseAt;
     }
 
     // ──────────────────────── Test-only setters ────────────────
-
-    function setOpened(bool opened_) external onlyOwner {
-        opened = opened_;
-    }
-
-    function setCloseAt(uint256 closeAt_) external onlyOwner {
-        closeAt = closeAt_;
-    }
 
     function setPaused(bool paused_) external onlyOwner {
         paused = paused_;
@@ -177,24 +208,31 @@ contract BurnStandIn is Ownable, EIP712 {
         accessSigner = accessSigner_;
     }
 
-    // ──────────────────────── Internal ─────────────────────────
-
-    function _checkOpen(uint256 amount, address destination) private view {
-        if (!opened) revert NotOpened();
-        if (block.timestamp > closeAt) revert Closed(closeAt);
-        if (paused) revert MigrationPaused();
-        if (amount < MIN_AMOUNT) revert AmountBelowMinimum(amount, MIN_AMOUNT);
-        if (destination == address(0)) revert ZeroDestination();
+    function setBlockedDestination(address destination, bool blocked) external onlyOwner {
+        blockedDestination[destination] = blocked;
     }
 
+    // ──────────────────────── Internal ─────────────────────────
+
+    /// @dev Checks 2 and 3 of the list (1 is in the short variants).
     function _checkAccess(uint256 deadline, bytes calldata signature) private view {
         if (block.timestamp > deadline) revert AccessSignatureExpired(deadline);
-        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(accessDigest(msg.sender, deadline), signature);
+        (address recovered, ECDSA.RecoverError err,) =
+            ECDSA.tryRecoverCalldata(accessDigest(msg.sender, deadline), signature);
         if (err != ECDSA.RecoverError.NoError || recovered != accessSigner) revert InvalidAccessSignature();
     }
 
-    /// @dev The permit is tried; a spent one is fine when its allowance still covers `amount`
-    ///      (`burnFrom` reverts otherwise).
+    /// @dev Checks 4 to 9 of the list.
+    function _checkOpen(uint256 amount, address destination) private view {
+        if (paused) revert EnforcedPause();
+        if (!opened) revert NotOpened();
+        if (block.timestamp > closeAt) revert MigrationClosed(closeAt);
+        if (destination == address(0)) revert ZeroDestination();
+        if (blockedDestination[destination]) revert DestinationBlocked(destination);
+        if (amount < MIN_AMOUNT) revert AmountBelowMinimum(amount);
+    }
+
+    /// @dev The permit is tried; a failed one is ignored (`burnFrom` reverts when the allowance is short).
     function _permit(uint256 amount, uint256 permitDeadline, uint8 v, bytes32 r, bytes32 s) private {
         try IERC20Permit(address(token)).permit(msg.sender, address(this), amount, permitDeadline, v, r, s) {} catch {}
     }
