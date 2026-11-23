@@ -26,7 +26,8 @@ import "./interfaces/ITransition.sol";
  *      delivery voucher signed by the migrator's separate voucher key; what the voucher does not
  *      allow stays at the address;
  *    - {release} (the holder or the LP vault's operator) sends the whole balance of both tokens to
- *      the holder's own address, never anywhere else. Never pausable.
+ *      the holder's own address, never anywhere else, each token as its own leg so a token that
+ *      refuses the transfer cannot lock the other. Never pausable.
  *  The first {deliver} or {release} for a holder and route places a {TransitionHolder} at the
  *  address with CREATE2; that contract can only hand its tokens to this proxy.
  *
@@ -135,6 +136,8 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     error NothingToDeliver(address holder, uint8 route);
     error NothingToRelease(address holder, uint8 route);
     error HolderPlacementFailed(address expected, address placed);
+    error ReleaseFailed(address holder, uint8 route);
+    error OnlySelf();
     error RenounceDisabled();
 
     // ──────────────────────── Constructor ──────────────────────
@@ -231,11 +234,17 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
     /**
      * @notice Sends the whole $ASSET and USDC balance of the holder's receiving address of `route` to
      *         `holder`, never to another address. The holder or the LP vault's operator. Never paused.
+     * @dev Each token is its own leg ({releaseLeg}, called on this contract inside `try`): a leg that
+     *      reverts (the holder on USDC's blacklist, USDC paused) is rolled back whole, its token
+     *      stays at the receiving address and its amount is reported as 0 in {Released}; the other
+     *      leg still pays. {NothingToRelease} when both balances are zero, {ReleaseFailed} when a
+     *      balance exists and every attempted leg reverted. The operator is read only when the
+     *      caller is not the holder.
      */
     function release(address holder, uint8 route) external nonReentrant {
-        address operator_ = ITransitionLpVault(lpVault).operator();
-        if (msg.sender != holder && msg.sender != operator_) {
-            revert NotHolderOrOperator(msg.sender, holder, operator_);
+        if (msg.sender != holder) {
+            address operator_ = ITransitionLpVault(lpVault).operator();
+            if (msg.sender != operator_) revert NotHolderOrOperator(msg.sender, holder, operator_);
         }
         address receiving = _place(holder, route);
 
@@ -243,14 +252,31 @@ contract TransitionReceiver is Initializable, UUPSUpgradeable, Ownable2StepUpgra
         uint256 usdcAmount = IERC20(usdc).balanceOf(receiving);
         if (assetAmount == 0 && usdcAmount == 0) revert NothingToRelease(holder, route);
         if (assetAmount > 0) {
-            ITransitionHolder(receiving).pull(asset, assetAmount);
-            IERC20(asset).safeTransfer(holder, assetAmount);
+            try this.releaseLeg(receiving, asset, holder, assetAmount) {} catch {
+                assetAmount = 0;
+            }
         }
         if (usdcAmount > 0) {
-            ITransitionHolder(receiving).pull(usdc, usdcAmount);
-            IERC20(usdc).safeTransfer(holder, usdcAmount);
+            try this.releaseLeg(receiving, usdc, holder, usdcAmount) {} catch {
+                usdcAmount = 0;
+            }
         }
+        if (assetAmount == 0 && usdcAmount == 0) revert ReleaseFailed(holder, route);
         emit Released(holder, route, receiving, msg.sender, assetAmount, usdcAmount);
+    }
+
+    /**
+     * @notice One token leg of {release}: pulls `amount` of `token` from the holding contract at
+     *         `receiving` and sends it to `to`. Open ONLY to this contract itself ({OnlySelf}), which
+     *         calls it from {release} inside `try`, so a leg that reverts is rolled back whole and
+     *         cannot lock the other token.
+     * @dev No reentrancy guard of its own: it is reachable only through {release}, which holds the
+     *      guard, and a second guard would refuse this self call.
+     */
+    function releaseLeg(address receiving, address token, address to, uint256 amount) external {
+        if (msg.sender != address(this)) revert OnlySelf();
+        ITransitionHolder(receiving).pull(token, amount);
+        IERC20(token).safeTransfer(to, amount);
     }
 
     // ──────────────────────── Admin ────────────────────────────

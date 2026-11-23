@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 
 import {TransitionHarness} from "../utils/TransitionHarness.sol";
-import {OperatorOnlyVault, ScriptedMigrator} from "../utils/attackers/TransitionAttackers.sol";
+import {BlocklistERC20, OperatorOnlyVault, ScriptedMigrator} from "../utils/attackers/TransitionAttackers.sol";
 
 import {LPProxy} from "../../../contracts/lp-staking/deploy/LPProxy.sol";
 import {MockERC20Permit} from "../../../contracts/lp-staking/mocks/MockERC20Permit.sol";
@@ -647,12 +647,89 @@ contract TransitionReceiverIsolatedTest is Test {
         vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
         r.deliver(holder, 3, _l(), _v(3, 1000, 0));
 
-        // The payout of a release lands on the holder and fires the hook.
+        // The payout of a release lands on the holder and fires the hook. The re-entry reverts, which
+        // rolls the whole $ASSET leg back; with no other leg the release fails.
         hook.setRecipientHook(address(r), address(0), "");
         hook.setRecipientHook(holder, address(r), abi.encodeCall(TransitionReceiver.release, (holder, 3)));
         vm.prank(holder);
-        vm.expectRevert(ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector);
+        vm.expectRevert(abi.encodeWithSelector(TransitionReceiver.ReleaseFailed.selector, holder, uint8(3)));
         r.release(holder, 3);
         assertEq(hook.balanceOf(at_), 100, "nothing left the receiving address");
+    }
+
+    // ──────────────────────── release: independent legs ────────
+
+    /// @dev A receiver whose USDC (and, with `blockAsset`, also $ASSET) is a {BlocklistERC20}.
+    function _blocklistWorld(bool blockableAsset)
+        internal
+        returns (TransitionReceiver r, BlocklistERC20 bAsset, BlocklistERC20 bUsdc, address at_)
+    {
+        bUsdc = new BlocklistERC20("USD Coin", "USDC", 1e30);
+        bAsset = new BlocklistERC20("Asset", "ASSET", 1e30);
+        address assetAddr = blockableAsset ? address(bAsset) : address(assetToken);
+        ScriptedMigrator m = new ScriptedMigrator(assetAddr, address(bUsdc), address(vault));
+        r = _receiverFor(address(m));
+        at_ = r.receivingAddressOf(holder, 1);
+        if (blockableAsset) bAsset.transfer(at_, 100);
+        else assetToken.transfer(at_, 100);
+        bUsdc.transfer(at_, 50);
+    }
+
+    function test_Release_ABlockedUsdcLegLeavesTheUsdcAndStillPaysTheAsset() public {
+        (TransitionReceiver r,, BlocklistERC20 bUsdc, address at_) = _blocklistWorld(false);
+        bUsdc.setBlocked(holder, true);
+
+        vm.expectEmit(address(r));
+        emit TransitionReceiver.Released(holder, 1, at_, holder, 100, 0);
+        vm.prank(holder);
+        r.release(holder, 1);
+        assertEq(assetToken.balanceOf(holder), 100, "the $ASSET reached the holder");
+        assertEq(assetToken.balanceOf(at_), 0);
+        assertEq(bUsdc.balanceOf(at_), 50, "the USDC stays at the receiving address");
+        assertEq(bUsdc.balanceOf(address(r)), 0, "the failed leg was rolled back whole");
+
+        // The block is lifted: a second release sends the USDC.
+        bUsdc.setBlocked(holder, false);
+        vm.expectEmit(address(r));
+        emit TransitionReceiver.Released(holder, 1, at_, holder, 0, 50);
+        vm.prank(holder);
+        r.release(holder, 1);
+        assertEq(bUsdc.balanceOf(holder), 50);
+        assertEq(bUsdc.balanceOf(at_), 0);
+    }
+
+    function test_Release_EveryAttemptedLegBlockedRevertsReleaseFailed() public {
+        (TransitionReceiver r, BlocklistERC20 bAsset, BlocklistERC20 bUsdc, address at_) = _blocklistWorld(true);
+        bAsset.setBlocked(holder, true);
+        bUsdc.setBlocked(holder, true);
+        vm.prank(holder);
+        vm.expectRevert(abi.encodeWithSelector(TransitionReceiver.ReleaseFailed.selector, holder, uint8(1)));
+        r.release(holder, 1);
+        assertEq(bAsset.balanceOf(at_), 100);
+        assertEq(bUsdc.balanceOf(at_), 50);
+    }
+
+    function test_Release_ReleaseLegIsOpenOnlyToTheReceiverItself() public {
+        address at_ = receiver.receivingAddressOf(holder, 3);
+        assetToken.transfer(at_, 100);
+        vm.prank(holder);
+        receiver.release(holder, 3); // places the holding contract; empties it
+        assetToken.transfer(at_, 100);
+        address[3] memory callers = [holder, operator, deliverer];
+        for (uint256 i = 0; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(TransitionReceiver.OnlySelf.selector);
+            receiver.releaseLeg(at_, address(assetToken), callers[i], 100);
+        }
+        assertEq(assetToken.balanceOf(at_), 100, "nothing moved");
+    }
+
+    /// @dev Review finding 7: the holder's own release never reads the LP vault's operator.
+    function test_Release_TheHolderNeverReadsTheOperator() public {
+        _fund(3, 100, 0);
+        vm.expectCall(address(vault), abi.encodeWithSignature("operator()"), 0);
+        vm.prank(holder);
+        receiver.release(holder, 3);
+        assertEq(assetToken.balanceOf(holder), 100);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity 0.8.38;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ITransitionMigrator} from "../../../../contracts/staking-v3/interfaces/ITransition.sol";
 
 /// @notice An LP vault stub that only answers `operator()`.
@@ -118,5 +119,29 @@ contract ScriptedMigrator {
             reenterRevert = ret;
         }
         r.staked = a;
+    }
+}
+
+/**
+ * @title BlocklistERC20
+ * @notice A USDC-like token whose transfers TO a blocked address revert (USDC's blacklist); used
+ *         to show that one token leg of a release cannot lock the other.
+ */
+contract BlocklistERC20 is ERC20 {
+    mapping(address => bool) public blocked;
+
+    error Blocked(address account);
+
+    constructor(string memory name_, string memory symbol_, uint256 supply) ERC20(name_, symbol_) {
+        _mint(msg.sender, supply);
+    }
+
+    function setBlocked(address account, bool on) external {
+        blocked[account] = on;
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (blocked[to]) revert Blocked(to);
+        super._update(from, to, value);
     }
 }
