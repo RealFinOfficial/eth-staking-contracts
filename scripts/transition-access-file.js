@@ -87,6 +87,22 @@ async function buildAccessFile({ chainId, standIn, wallet, wallets, deadline }) 
   return entries;
 }
 
+/**
+ * Throws unless `out` lies outside the repository. Both sides are resolved with `fs.realpathSync`
+ * (the file's folder, as the file may not exist yet), so a symbolic link into the repository is
+ * caught, and compared with `path.relative`, so a sibling folder whose name merely starts like the
+ * repository's is not mistaken for it.
+ */
+function assertOutsideRepository(out, repoRoot = path.resolve(__dirname, "..")) {
+  const resolved = path.resolve(out);
+  const target = path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
+  const rel = path.relative(fs.realpathSync(repoRoot), target);
+  const outside = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+  if (!outside) {
+    throw new Error("ACCESS_OUT must be outside the repository");
+  }
+}
+
 async function main() {
   const env = process.env;
   const reachable = env.ACCESS_CHAIN_ID === undefined;
@@ -98,7 +114,7 @@ async function main() {
   if (!deadline || !/^[0-9]+$/.test(deadline)) throw new Error("Set ACCESS_DEADLINE (unix seconds)");
   if (!env.ACCESS_OUT) throw new Error("Set ACCESS_OUT (a path outside the repo)");
   const out = path.resolve(env.ACCESS_OUT);
-  if (out.startsWith(path.resolve(__dirname, ".."))) throw new Error("ACCESS_OUT must be outside the repository");
+  assertOutsideRepository(out);
 
   const wallet = readSignerKey(env);
   const wallets = parseWallets(env.ACCESS_WALLETS);
@@ -121,7 +137,7 @@ async function main() {
   console.log(`Wrote ${entries.length} access signatures (signer ${wallet.address}, deadline ${deadline}) to ${out}`);
 }
 
-module.exports = { ACCESS_TYPES, accessDomain, parseWallets, readSignerKey, buildAccessFile };
+module.exports = { ACCESS_TYPES, accessDomain, parseWallets, readSignerKey, buildAccessFile, assertOutsideRepository };
 
 if (require.main === module) {
   main().catch((error) => {

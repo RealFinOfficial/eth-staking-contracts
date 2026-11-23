@@ -97,6 +97,70 @@ describe("Transition scripts", function () {
     });
   });
 
+  describe("deploy-bridge-standins.js: the record comes first", function () {
+    it("records the burn stand-in even when the optional setOpened(true) fails", async function () {
+      const [deployer, accessSigner, otherOwner] = await ethers.getSigners();
+      const token = await (await ethers.getContractFactory("MockRealToken")).deploy(deployer.address, P);
+      const registryFile = path.join(scratch, "deployments.json");
+      const s = withRegistry(registryFile, "../../scripts/deploy-bridge-standins");
+      const now = (await ethers.provider.getBlock("latest")).timestamp;
+      // The stand-in is owned by another account, so the deployer's setOpened(true) reverts.
+      const config = s.readConfig(
+        31337,
+        {
+          STANDIN: "burn",
+          STANDIN_TOKEN: await token.getAddress(),
+          STANDIN_OWNER: otherOwner.address,
+          STANDIN_ACCESS_SIGNER: accessSigner.address,
+          STANDIN_CLOSE_AT: String(now + 86400),
+          STANDIN_OPEN: "yes",
+        },
+        deployer.address
+      );
+      await expect(s.deployStandIn({ config, deployer })).to.be.rejected;
+      const recorded = JSON.parse(fs.readFileSync(registryFile, "utf8"))["31337"];
+      expect(recorded.BurnStandIn.address).to.match(/^0x[0-9a-fA-F]{40}$/);
+      expect(recorded.BurnStandIn.owner).to.equal(otherOwner.address);
+      const burn = await ethers.getContractAt("BurnStandIn", recorded.BurnStandIn.address);
+      expect(await burn.opened()).to.equal(false);
+    });
+  });
+
+  describe("grow-oracle.js: the target", function () {
+    it("refuses a target below window + 1", function () {
+      const g = require("../../scripts/grow-oracle");
+      expect(() => g.checkTarget(1800, 1800)).to.throw(/LP_ORACLE_TARGET \(1800\) must be at least LP_ORACLE_WINDOW \+ 1 \(1801\)/);
+      expect(() => g.checkTarget(300, 300)).to.throw(/at least LP_ORACLE_WINDOW \+ 1 \(301\)/);
+      expect(() => g.checkTarget(1801, 1800)).to.not.throw();
+      expect(() => g.checkTarget(411, 300)).to.not.throw();
+    });
+  });
+
+  describe("transition-access-file.js: outside the repository", function () {
+    const repo = fs.realpathSync(path.join(__dirname, "..", ".."));
+
+    it("refuses a path inside the repository, also through a symbolic link", function () {
+      const access = require("../../scripts/transition-access-file");
+      expect(() => access.assertOutsideRepository(path.join(repo, "access.json"))).to.throw(/outside the repository/);
+      expect(() => access.assertOutsideRepository(path.join(repo, "abi", "access.json"))).to.throw(/outside the repository/);
+      const link = path.join(scratch, "into-repo");
+      fs.symlinkSync(repo, link);
+      expect(() => access.assertOutsideRepository(path.join(link, "access.json"))).to.throw(/outside the repository/);
+    });
+
+    it("accepts a sibling folder whose name only starts like the repository's", function () {
+      const access = require("../../scripts/transition-access-file");
+      const sibling = `${repo}-access-${process.pid}`;
+      fs.mkdirSync(sibling);
+      try {
+        expect(() => access.assertOutsideRepository(path.join(sibling, "access.json"))).to.not.throw();
+        expect(() => access.assertOutsideRepository(path.join(scratch, "access.json"))).to.not.throw();
+      } finally {
+        fs.rmSync(sibling, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("transition-access-file.js", function () {
     it("writes signatures the burn stand-in accepts for exactly the named wallet", async function () {
       const access = require("../../scripts/transition-access-file");

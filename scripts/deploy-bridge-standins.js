@@ -88,13 +88,12 @@ async function deployStandIn({ config, deployer }) {
     config.which === "burn" ? [config.token, config.owner, config.accessSigner, config.closeAt] : [config.token, config.owner];
   const { contract, address, tx, receipt } = await deployContract(config.kind, args, deployer);
   const extra = { deployTx: tx.hash, block: receipt.blockNumber, token: config.token, owner: config.owner };
-  if (config.which === "burn") {
-    Object.assign(extra, { accessSigner: config.accessSigner, closeAt: config.closeAt });
-    if (config.open) {
-      await pools.send("BurnStandIn.setOpened(true)", deployer, (o) => contract.connect(deployer).setOpened(true, o));
-    }
-  }
+  if (config.which === "burn") Object.assign(extra, { accessSigner: config.accessSigner, closeAt: config.closeAt });
+  // Recorded before the optional opening, so a failed setOpened never loses the address.
   pools.recordDeployment(chainId, config.kind, address, extra);
+  if (config.which === "burn" && config.open) {
+    await pools.send("BurnStandIn.setOpened(true)", deployer, (o) => contract.connect(deployer).setOpened(true, o));
+  }
   return address;
 }
 

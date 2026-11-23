@@ -41,7 +41,8 @@ const uniswapByChain = require("./lib/uniswap");
 // ──────────────────────── environment ────────────────────────
 //
 //   LP_POOL               the pool (default: the UniswapV3Pool entry in deployments.json)
-//   LP_ORACLE_TARGET      the observation count to reach (1801 = 1800 + 1)
+//   LP_ORACLE_TARGET      the observation count to reach (1801 = 1800 + 1); refused below
+//                         LP_ORACLE_WINDOW + 1 (spec 01 §9.8)
 //   LP_ORACLE_GROW_STEP   the most slots one growth transaction adds (150, about 10 million gas)
 //   LP_ORACLE_WINDOW      the window to report observe() for (1800)
 //   LP_ORACLE_DRY_RUN     1 = print the plan, send nothing
@@ -91,6 +92,17 @@ function readInt(name, fallback, { min, max } = {}) {
   if (min !== undefined && value < BigInt(min)) throw new Error(`${name} must be >= ${min} — got ${raw}`);
   if (max !== undefined && value > BigInt(max)) throw new Error(`${name} must be <= ${max} — got ${raw}`);
   return typeof fallback === "bigint" ? value : Number(value);
+}
+
+/** Spec 01 §9.8: the target must serve the window, at least `window + 1` slots (one second per slot). */
+function checkTarget(target, window) {
+  const needed = Math.ceil(window / MIN_SECONDS_PER_SLOT) + 1;
+  if (target < needed) {
+    throw new Error(
+      `LP_ORACLE_TARGET (${target}) must be at least LP_ORACLE_WINDOW + 1 (${needed}): a smaller oracle ` +
+        `cannot serve a ${window}-second window`
+    );
+  }
 }
 
 function floorToSpacing(tick, spacing) {
@@ -148,6 +160,7 @@ async function main() {
   const network = hre.network.name;
   const target = readInt("LP_ORACLE_TARGET", DEFAULT_TARGET, { min: 2, max: 65535 });
   const window = readInt("LP_ORACLE_WINDOW", DEFAULT_WINDOW, { min: 1, max: 2 ** 32 - 1 });
+  checkTarget(target, window);
   const dryRun = process.env.LP_ORACLE_DRY_RUN === "1";
   const halfWidth = readInt("LP_ORACLE_SEED_HALF_WIDTH", DEFAULT_SEED_HALF_WIDTH, { min: 1, max: 1000 });
   const growStep = readInt("LP_ORACLE_GROW_STEP", DEFAULT_GROW_STEP, { min: 1, max: 65535 });
@@ -312,7 +325,11 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  console.error(error.message || error);
-  process.exitCode = 1;
-});
+module.exports = { checkTarget };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message || error);
+    process.exitCode = 1;
+  });
+}
