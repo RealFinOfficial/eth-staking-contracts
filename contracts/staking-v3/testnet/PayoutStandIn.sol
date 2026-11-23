@@ -15,10 +15,17 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  *  {pay} transfers `amount` of the {token} this contract holds to `destination` (the token emits
  *  `Transfer` from here to `destination` in the same transaction) and emits {Paid} with
  *  `paidTotal` = everything paid for this `id` so far. A burn is paid in full when
- *  `paidTotal == burnAmount`. It reverts when `paidTotal` would pass `burnAmount`
- *  ({ExceedsBurnAmount}), when `burnAmount` differs from the value an earlier payment of the same
- *  `id` named ({BurnAmountMismatch}), on a zero `destination` ({ZeroDestination}) and on a zero
- *  `amount` ({ZeroAmount}).
+ *  `paidTotal == burnAmount`.
+ *
+ *  A WHOLLY HELD BURN (the bridge owner's change of 2026-11-23): `amount == 0` is allowed only as
+ *  the FIRST {Paid} of an id. It emits `Paid(id, destination, 0, 0, burnAmount)`, records
+ *  `burnAmount` and transfers nothing (no `Transfer`). Every later payment of the id has
+ *  `amount > 0` (a top-up after an appeal).
+ *
+ *  It reverts when `paidTotal` would pass `burnAmount` ({ExceedsBurnAmount}), when `burnAmount`
+ *  differs from the value an earlier payment of the same `id` named ({BurnAmountMismatch}), on a
+ *  zero `destination` ({ZeroDestination}), on a zero `burnAmount` ({ZeroBurnAmount}) and on a zero
+ *  `amount` that is not the id's first payment ({ZeroAmount}).
  */
 contract PayoutStandIn is Ownable {
     using SafeERC20 for IERC20;
@@ -36,6 +43,7 @@ contract PayoutStandIn is Ownable {
     error ZeroAddress();
     error ZeroDestination();
     error ZeroAmount();
+    error ZeroBurnAmount();
     error ExceedsBurnAmount(bytes32 id, uint256 paidTotal, uint256 burnAmount);
     error BurnAmountMismatch(bytes32 id, uint256 recorded, uint256 given);
 
@@ -48,20 +56,21 @@ contract PayoutStandIn is Ownable {
      * @notice Pays one part of the burn `id`.
      * @param id The burn id from `Migrated`.
      * @param destination The receiver the burn named.
-     * @param amount What this payment sends.
+     * @param amount What this payment sends; 0 only as the id's first payment (a wholly held burn).
      * @param burnAmount The burned amount.
      */
     function pay(bytes32 id, address destination, uint256 amount, uint256 burnAmount) external onlyOwner {
         if (destination == address(0)) revert ZeroDestination();
-        if (amount == 0) revert ZeroAmount();
+        if (burnAmount == 0) revert ZeroBurnAmount();
         uint256 recorded = burnAmountOf[id];
+        if (amount == 0 && recorded != 0) revert ZeroAmount(); // a zero only as the first payment
         if (recorded != 0 && recorded != burnAmount) revert BurnAmountMismatch(id, recorded, burnAmount);
         uint256 total = paidTotal[id] + amount;
         if (total > burnAmount) revert ExceedsBurnAmount(id, total, burnAmount);
 
         burnAmountOf[id] = burnAmount;
         paidTotal[id] = total;
-        token.safeTransfer(destination, amount);
+        if (amount > 0) token.safeTransfer(destination, amount);
         emit Paid(id, destination, amount, total, burnAmount);
     }
 }

@@ -672,7 +672,8 @@ contract BurnStandInTest is StandInBase {
     }
 }
 
-/// @notice The payout stand-in: `Paid` with the running total, never above the burned amount.
+/// @notice The payout stand-in: `Paid` with the running total, never above the burned amount, and a
+///         first `Paid` of zero for a wholly held burn.
 contract PayoutStandInTest is StandInBase {
     PayoutStandIn internal payout;
     address internal dest;
@@ -702,6 +703,34 @@ contract PayoutStandInTest is StandInBase {
         assertEq(payout.burnAmountOf(ID), 10e18);
     }
 
+    function test_Pay_AWhollyHeldBurnIsAFirstZeroWithoutATransferThenATopUp() public {
+        vm.recordLogs();
+        vm.expectEmit(address(payout));
+        emit PayoutStandIn.Paid(ID, dest, 0, 0, 10e18);
+        payout.pay(ID, dest, 0, 10e18);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; ++i) {
+            assertTrue(logs[i].emitter != address(token), "no Transfer for a zero Paid");
+        }
+        assertEq(token.balanceOf(dest), 0);
+        assertEq(payout.paidTotal(ID), 0);
+        assertEq(payout.burnAmountOf(ID), 10e18, "the burn amount is recorded");
+
+        vm.expectRevert(abi.encodeWithSelector(PayoutStandIn.ZeroAmount.selector));
+        payout.pay(ID, dest, 0, 10e18); // a second zero for the same id
+
+        vm.expectEmit(address(payout));
+        emit PayoutStandIn.Paid(ID, dest, 10e18, 10e18, 10e18);
+        payout.pay(ID, dest, 10e18, 10e18); // after an appeal
+        assertEq(token.balanceOf(dest), 10e18);
+    }
+
+    function test_Pay_AZeroAfterAPaymentIsRefused() public {
+        payout.pay(ID, dest, 4e18, 10e18);
+        vm.expectRevert(abi.encodeWithSelector(PayoutStandIn.ZeroAmount.selector));
+        payout.pay(ID, dest, 0, 10e18);
+    }
+
     function test_Pay_RevertsWhenPaidTotalWouldPassTheBurnAmount() public {
         payout.pay(ID, dest, 4e18, 10e18);
         vm.expectRevert(abi.encodeWithSelector(PayoutStandIn.ExceedsBurnAmount.selector, ID, 4e18 + 7e18, 10e18));
@@ -715,13 +744,20 @@ contract PayoutStandInTest is StandInBase {
         payout.pay(ID, dest, 4e18, 10e18);
         vm.expectRevert(abi.encodeWithSelector(PayoutStandIn.BurnAmountMismatch.selector, ID, 10e18, 11e18));
         payout.pay(ID, dest, 1e18, 11e18);
+
+        bytes32 held = keccak256("held");
+        payout.pay(held, dest, 0, 10e18);
+        vm.expectRevert(abi.encodeWithSelector(PayoutStandIn.BurnAmountMismatch.selector, held, 10e18, 9e18));
+        payout.pay(held, dest, 1e18, 9e18);
     }
 
-    function test_Pay_RevertsOnAZeroDestinationOrAZeroAmount() public {
+    function test_Pay_RevertsOnAZeroDestinationOrAZeroBurnAmount() public {
         vm.expectRevert(PayoutStandIn.ZeroDestination.selector);
         payout.pay(ID, address(0), 1e18, 10e18);
-        vm.expectRevert(PayoutStandIn.ZeroAmount.selector);
-        payout.pay(ID, dest, 0, 10e18);
+        vm.expectRevert(PayoutStandIn.ZeroBurnAmount.selector);
+        payout.pay(ID, dest, 0, 0);
+        vm.expectRevert(PayoutStandIn.ZeroBurnAmount.selector);
+        payout.pay(ID, dest, 1e18, 0);
     }
 
     function test_Pay_OwnerOnly() public {
@@ -742,4 +778,3 @@ contract PayoutStandInTest is StandInBase {
         new PayoutStandIn(address(0), address(this));
     }
 }
-
