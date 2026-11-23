@@ -16,7 +16,12 @@
       "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
       "fee": 3000,
       "oracleWarmupTokenId": "57",
-      "observationCardinality": 1801
+      "observationCardinality": 1801,
+      "seedTokenId": "58",
+      "seedTickLower": 285480,
+      "seedTickUpper": 299400,
+      "seedUsdc": "50000000",
+      "seedAsset": "248754411681092834239"
     },
     "TimelockController": {
       "address": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
