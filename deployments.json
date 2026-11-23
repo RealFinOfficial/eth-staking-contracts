@@ -415,13 +415,13 @@
       "retiredInFavourOf": "0xf2F678AC5260BB297682D54DcD945BCB78901E20"
     },
     "WeightedStakingPoolTest": {
-      "address": "0xf9cdefBBC271E58AfB0dcb1bf92Bb768e7a1a1eE",
-      "deployTx": "0xcd80a95d41a33704aba869effe1d1e259e5e06fa640f08aa78134fb36295c3fd",
-      "block": 12146761,
-      "stakingToken": "0x8e65d19BE4bA1CC61005B4c70f21cd179512e33f",
-      "rewardToken": "0x9E0F2263c0Cb67Ee08B8c8A42be8770870b05215",
-      "activationEpoch": 1794825192,
-      "endEpoch": 1794911592,
+      "address": "0x480dF5e7962dCcE029c810313f4a5c66c5555C49",
+      "deployTx": "0x1b1ccf08c424286e4569b9a3f720d3d60bbed1ee84b4c68bf7a7389903738275",
+      "block": 12196761,
+      "stakingToken": "0x0A5BCe3bc08608C9B4A4d88bA216fe203DA74861",
+      "rewardToken": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+      "activationEpoch": 1795450296,
+      "endEpoch": 1795536696,
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     },
     "WeightedStakingPoolV3Retired": {
@@ -644,6 +644,13 @@
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "accessSigner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "closeAt": 1803204300
+    },
+    "StakingPool": {
+      "address": "0xb5b68Be5492358ccAeCcd1Ca178282Ea727c0cAe",
+      "deployTx": "0x97a5d80053374267cc1ba0986fd227453cc51679db454f41839cb004968ef50d",
+      "block": 12196765,
+      "activationEpoch": 1795450344,
+      "endEpoch": 1795536744
     }
   }
 }
