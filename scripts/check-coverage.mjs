@@ -49,6 +49,12 @@ import {pathToFileURL} from "node:url";
 // `stable`. Bump the pin and this string together, never one alone.
 export const PINNED_BASIS = "forge-1.7-ir-minimum";
 
+// ── Pinned floors, re-measured 2026-11-23 (the review fixes of the transition) ──
+//    StakingMigratorDeliveries lines 116 -> 117 (111 hit), branches 39 -> 40 (38): the first route-2
+//    delivery's `UsdcBelowVoucher` check, both arms hit. TransitionReceiver lines 98 -> 103 (99 hit),
+//    branches 21 -> 28 (25): `release` pays each token through `releaseLeg` inside `try` and reads
+//    the operator only for a caller other than the holder; every new line and arm is hit, the unhit
+//    items are the same `--ir-minimum` artefacts and the `HolderPlacementFailed` arm as before.
 // ── Pinned floors, re-measured 2026-11-20 (the transition, spec 01 §9) ──
 //    StakingMigrator lines 242 -> 179 (172 hit), branches 41 -> 27 (27): its storage, events,
 //    errors, previews and shared helpers moved to StakingMigratorBase.sol, and its three delivery
@@ -354,12 +360,12 @@ export const PER_FILE_FLOORS = {
     branches: {found: 16, minHit: 16},
   },
   "contracts/staking-v3/StakingMigratorDeliveries.sol": {
-    lines: {found: 116, minHit: 111},
-    branches: {found: 39, minHit: 38},
+    lines: {found: 117, minHit: 111},
+    branches: {found: 40, minHit: 38},
   },
   "contracts/staking-v3/TransitionReceiver.sol": {
-    lines: {found: 98, minHit: 94},
-    branches: {found: 21, minHit: 18},
+    lines: {found: 103, minHit: 99},
+    branches: {found: 28, minHit: 25},
   },
 };
 
