@@ -9,6 +9,175 @@
       "endEpoch": 1794330000
     }
   },
+  "43113": {
+    "UniswapV3Pool": {
+      "address": "0x916Bd544c2ad693A907B933Db46e40031De69Bfa",
+      "token0": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "fee": 3000,
+      "oracleWarmupTokenId": "57",
+      "observationCardinality": 1801
+    },
+    "TimelockController": {
+      "address": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "deployTx": "0x84bd4207772f69efab31a76d8bce42e1ac1c64ea80f3e082b0440d5dbc92f637",
+      "block": 61512063,
+      "minDelay": 300,
+      "proposers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "executors": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "cancellers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "admin": "0x0000000000000000000000000000000000000000"
+    },
+    "TokenOverture": {
+      "address": "0x6bBf27d75247cd73c321Dd86d20ccBb7271487AA",
+      "deployTx": "0x8344284bd48326a71badde236553883b90cfc56447ab00364d7e374a667962e9",
+      "block": 61512067,
+      "implementation": "0x9066389bea7B1D0a954D0411440bAd1A3f8048b7",
+      "implementationTx": "0xe3341547d685d36da9bd6c652ab7efa0ad6ffe16b7739b5deac2352676545c12",
+      "name": "Overture",
+      "symbol": "OVTR",
+      "decimals": 18,
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "minter": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d"
+    },
+    "RewardsDistributor": {
+      "address": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
+      "deployTx": "0xa9b7348f3e646c2ec6c52ac5d440d63a83ca3c6b4f4ef1c41d41a19e30be4121",
+      "block": 61512074,
+      "implementation": "0x0487603c28A2830cf21Bc0624b231A4E8a91D69b",
+      "implementationTx": "0x38bf681ba3d9b87291b8dfcc54a2494644893b6c61e905dcd6a211a2be576c26",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "rewardTokens": [
+        {
+          "address": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+          "symbol": "ASSET",
+          "decimals": 18,
+          "conditional": true,
+          "claimsEnabled": false
+        },
+        {
+          "address": "0x6bBf27d75247cd73c321Dd86d20ccBb7271487AA",
+          "symbol": "OVTR",
+          "decimals": 18,
+          "conditional": false,
+          "claimsEnabled": true
+        }
+      ]
+    },
+    "LPEpochRegistry": {
+      "address": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
+      "deployTx": "0x72bc3d83e98c0950672f0f2bb62a31b00b4247fa5e22a072983931f739665a6f",
+      "block": 61512081,
+      "implementation": "0x2c74230c7c1c6bBA4ff67250f4b0781a62732AeF",
+      "implementationTx": "0xf16d1e82fe85d31c2d12afca247b6a5341111dd65c3007f58dcdab72bb6cf084",
+      "distributor": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "interval": 900,
+      "scheduleMargin": 1800
+    },
+    "LPStakingVault": {
+      "address": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "deployTx": "0x73f3fd1e1af500c28db16ff6e4d1f28df20ca1f87d41d9ea08ab3d9201cb6715",
+      "block": 61512088,
+      "implementation": "0xd425748F81334aDbA95F19Bb37293e02992F6C88",
+      "implementationTx": "0xc21ae6b35b179e92164f05ef2a387f0516d3c4caee1a90e82337d08728d66e79",
+      "pool": "0x916Bd544c2ad693A907B933Db46e40031De69Bfa",
+      "token0": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "fee": 3000,
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "bonusHookGas": 400000,
+      "bonusListenerGas": 1000000,
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "zapper": "0xfd5bb1Ff720ea273A6E553a0493855e30b404D0f",
+      "bonusEscrow": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31"
+    },
+    "LPZapper": {
+      "address": "0xfd5bb1Ff720ea273A6E553a0493855e30b404D0f",
+      "deployTx": "0xc221700a25101f4537b3d812c79883da6da57be3cf8abb3e9548059d8fec1fc6",
+      "block": 61512096,
+      "implementation": "0x3eb8cbdA7C41d152af0A532127C9518474E52dDB",
+      "implementationTx": "0xca55055ea65a387231e2e4f7e7fe3332648bca5498120e88a88b8bf1bd6dc565",
+      "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "usdc": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "BonusEscrow": {
+      "address": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31",
+      "deployTx": "0xda8351d4df6c4d5cee0d0c4e40e127936f0a49c75e712c5e420777b1673317e5",
+      "block": 61512103,
+      "implementation": "0x42646ca79A18E635b15e666FCE72feE3e539C917",
+      "implementationTx": "0x3eb56b7feb3e705ed7e53a7a77fa89137698f0ee51c57974cd16e84c566279d7",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "adapter": "0x6E0e58D6360CEe944D9541968640D18899920485"
+    },
+    "ApeBondPositionAdapter": {
+      "address": "0x6E0e58D6360CEe944D9541968640D18899920485",
+      "deployTx": "0x071324363ef6102c2d24d2214f1f2464ef40d124bef1c194eebea2cef615ac31",
+      "block": 61512107,
+      "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
+      "escrow": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31",
+      "positionManager": "0xD7144710B6152526FB33699B166B5917a73f67FE",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "token0": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "minCliffSeconds": "300",
+      "valuationWindow": 1800,
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "soulZapCallers": [
+        "0x093bc28510660775D046d035188f9f35a60f1CE8"
+      ],
+      "campaigns": [
+        {
+          "id": "0x9af97d342078fdd0b86846428df53919de5f74534659ec4e944b6d39a709aecc",
+          "label": "apebond-fuji-1",
+          "enabled": true,
+          "downTicks": 6932,
+          "upTicks": 6932,
+          "toleranceTicks": 500,
+          "downPct": "50.00",
+          "upPct": "100.00",
+          "bonusCliffSeconds": "300",
+          "bonusBps": 1000,
+          "minBonusAmount": "1000000000000000000",
+          "callers": [
+            "0x093bc28510660775D046d035188f9f35a60f1CE8"
+          ]
+        }
+      ],
+      "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
+      "pendingOwner": "0x0000000000000000000000000000000000000000"
+    },
+    "PayoutStandIn": {
+      "address": "0x6c87F03Bd8fbD22f4361a0031382D1DE60127C8d",
+      "deployTx": "0x3302350d7e3a9879d804688b028e9d49a1caf4875c36f56707061a66c44260e3",
+      "block": 61512387,
+      "token": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    }
+  },
   "11155111": {
     "UniswapV3Pool": {
       "address": "0xc0b066A42D1D58Fe675447895A14b5fB1f619E60",
@@ -461,6 +630,15 @@
       "previousImplementation": "0x9EbdCD53AA954a8a880D05e17657Fbcaa1007A1A",
       "implementationBlock": 12155283,
       "upgradeTx": "0xf24de609be6ee60207e974dc4c49f105b6c9d7a2c026bb55f43dd05ec7c4b141"
+    },
+    "BurnStandIn": {
+      "address": "0x1598D972D8C553f3D521BeB88382cE2DCf4E0a7c",
+      "deployTx": "0x5ab2ba522116b3f7de7326598e9467d6608e8d551b439907abd3399fa93c26a6",
+      "block": 12194994,
+      "token": "0x0A5BCe3bc08608C9B4A4d88bA216fe203DA74861",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "accessSigner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "closeAt": 1803204300
     }
   }
 }
