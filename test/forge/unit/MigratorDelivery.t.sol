@@ -701,7 +701,8 @@ contract MigratorDeliveryTest is TransitionHarness {
     function test_Lp_LaterUsdcIsNeverTaken() public {
         _payUsdc(alice, R2, R);
         _payAsset(alice, R2, P);
-        _deliver(alice, R2, _dv(alice, R2, 2 * P, 2 * R));
+        // The first delivery carries exactly its voucher's USDC; the eligible reward leaves room.
+        _deliver(alice, R2, _dvAt(alice, R2, 2 * P, 2 * R, 2 * P, R, block.timestamp - 1));
         _payUsdc(alice, R2, 50e6);
         _payAsset(alice, R2, 1e18);
         _deliver(alice, R2, _dv(alice, R2, 2 * P, 2 * R));
@@ -716,6 +717,36 @@ contract MigratorDeliveryTest is TransitionHarness {
         vm.expectRevert(StakingMigratorBase.ZeroAmount.selector);
         migrator.moveToLpFor(alice, 0, 0, l, vu);
         vm.stopPrank();
+    }
+
+    /// @dev Review finding 1: a stranger's stray USDC at the route-2 address must not become the one
+    ///      position's USDC. The first delivery carries the whole USDC the voucher signs.
+    function test_Lp_AStrayUsdcUnitCannotMakeTheOnePositionEmpty() public {
+        _payAsset(alice, R2, P);
+        _payUsdc(alice, R2, 1); // a stranger's single unit, before Circle's USDC
+        ITransitionMigrator.DeliveryVoucher memory v = _dv(alice, R2, P, R);
+        ITransitionMigrator.DeliveryLimits memory l = _limits();
+        vm.prank(deliverer);
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.UsdcBelowVoucher.selector, R, uint256(1)));
+        receiver.deliver(alice, R2, l, v);
+        assertEq(usdcToken.balanceOf(_at(alice, R2)), 1, "the stray unit waits");
+
+        // Circle's USDC arrives: the delivery takes exactly the voucher's amount, the stray unit stays.
+        _payUsdc(alice, R2, R);
+        ITransitionMigrator.DeliveryResult memory r = _deliver(alice, R2, v);
+        assertGt(r.lpTokenId, 0);
+        (,,,, uint256 rd,) = migrator.deliveryOf(alice);
+        assertEq(rd, R, "exactly the voucher's USDC");
+        assertEq(usdcToken.balanceOf(_at(alice, R2)), 1, "the stray unit stays at the address");
+    }
+
+    function test_Lp_AFirstDeliveryBelowTheVoucherUsdcRevertsAtTheEntry() public {
+        _fundReceiver(P, R);
+        ITransitionMigrator.DeliveryVoucher memory v = _dv(alice, R2, P, R);
+        ITransitionMigrator.DeliveryLimits memory l = _limits();
+        vm.prank(address(receiver));
+        vm.expectRevert(abi.encodeWithSelector(StakingMigratorBase.UsdcBelowVoucher.selector, R, R - 1));
+        migrator.moveToLpFor(alice, P, R - 1, l, v);
     }
 
     function _neededFromRevert(address holder, uint256 arrived) internal returns (uint256 needed) {

@@ -71,7 +71,9 @@ interface ITransitionMigrator {
         DeliveryVoucher calldata v
     ) external returns (DeliveryResult memory);
 
-    /// @notice Route 2: one LP position on the first delivery, Testnet Staking for the rest.
+    /// @notice Route 2: one LP position on the first delivery, Testnet Staking for the rest. The
+    ///         first delivery must carry exactly the voucher's `usdcLimit` of USDC
+    ///         (`UsdcBelowVoucher` below it); later deliveries carry no USDC.
     function moveToLpFor(
         address holder,
         uint256 assetAmount,

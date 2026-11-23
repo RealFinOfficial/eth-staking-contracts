@@ -78,8 +78,11 @@ contract StakingMigratorDeliveries is StakingMigratorBase {
      *         from the whole USDC and the matching $ASSET, stakes it in the LP vault for `holder`,
      *         stakes the other $ASSET in v3 and refunds the USDC dust to `holder`; every later
      *         delivery stakes $ASSET in v3 only. The {transitionReceiver} only.
-     * @dev First delivery: both amounts above zero, the compound pause, the TWAP guard, and at least
-     *      the matching $ASSET of the whole USDC at the pool's current price
+     * @dev First delivery: both amounts above zero, the USDC exactly the voucher's `usdcLimit` (less
+     *      reverts {UsdcBelowVoucher}, more reverts {RewardExceedsEligible}; route 2 takes USDC only
+     *      once, so a stray unit of USDC that reached the receiving address before the holder's own
+     *      USDC can never become the position's whole USDC), the compound pause, the TWAP guard, and
+     *      at least the matching $ASSET of the whole USDC at the pool's current price
      *      ({MatchingAssetNotArrived} otherwise). Later: no USDC ({UsdcNotAccepted}), $ASSET above
      *      zero, no pause check and no call to the Uniswap v3 pool.
      */
@@ -95,6 +98,7 @@ contract StakingMigratorDeliveries is StakingMigratorBase {
         if (first) {
             if (usdcAmount == 0) revert UsdcNotArrived();
             if (assetAmount == 0) revert AssetNotArrived();
+            if (usdcAmount < v.usdcLimit) revert UsdcBelowVoucher(v.usdcLimit, usdcAmount);
             if (_migratorStorage().compoundPaused) revert CompoundIsPaused();
             _checkTwapDeviation();
             uint256 needed = _matchingAsset(usdcAmount);

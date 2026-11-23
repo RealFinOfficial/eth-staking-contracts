@@ -327,8 +327,9 @@ contract StakingMigrator is UUPSUpgradeable, Ownable2StepUpgradeable, StakingMig
         _delegateToDeliveries();
     }
 
-    /// @notice Route 2 for a transition holder: ONE LP position on the first delivery, v3 for every
-    ///         later part. The {transitionReceiver} only. The body is
+    /// @notice Route 2 for a transition holder: ONE LP position on the first delivery, which must
+    ///         carry exactly the voucher's `usdcLimit` of USDC ({UsdcBelowVoucher} below it), v3 for
+    ///         every later part. The {transitionReceiver} only. The body is
     ///         {StakingMigratorDeliveries-moveToLpFor}.
     function moveToLpFor(
         address,

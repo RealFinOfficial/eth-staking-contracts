@@ -222,6 +222,7 @@ abstract contract StakingMigratorBase is Initializable, EIP712Upgradeable, Reent
     error AssetNotArrived();
     error UsdcNotAccepted();
     error MatchingAssetNotArrived(uint256 needed, uint256 arrived);
+    error UsdcBelowVoucher(uint256 required, uint256 delivered);
     error InvalidSwapLimit(uint16 bps, uint16 maxBps);
 
     // ──────────────────────── Constructor ──────────────────────
