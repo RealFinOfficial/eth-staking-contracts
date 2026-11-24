@@ -23,7 +23,7 @@
       "seedUsdc": "50000000",
       "seedAsset": "248754411681092834239"
     },
-    "TimelockController": {
+    "TimelockControllerRetired": {
       "address": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
       "deployTx": "0x84bd4207772f69efab31a76d8bce42e1ac1c64ea80f3e082b0440d5dbc92f637",
       "block": 61512063,
@@ -37,9 +37,10 @@
       "cancellers": [
         "0x5576bD37419dadAab305cca998E16BcD73318A35"
       ],
-      "admin": "0x0000000000000000000000000000000000000000"
+      "admin": "0x0000000000000000000000000000000000000000",
+      "retiredInFavourOf": "0x565F97182931915FEF6bD55E11eCB76681C73fC6"
     },
-    "TokenOverture": {
+    "TokenOvertureRetired": {
       "address": "0x6bBf27d75247cd73c321Dd86d20ccBb7271487AA",
       "deployTx": "0x8344284bd48326a71badde236553883b90cfc56447ab00364d7e374a667962e9",
       "block": 61512067,
@@ -49,9 +50,10 @@
       "symbol": "OVTR",
       "decimals": 18,
       "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
-      "minter": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d"
+      "minter": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
+      "retiredInFavourOf": "0x705201a78F3FF6d83B84eF17793bcABa89AD9a27"
     },
-    "RewardsDistributor": {
+    "RewardsDistributorRetired": {
       "address": "0x31Aab92781c9dBAb2a0B7a00B739dA072d6D7b3d",
       "deployTx": "0xa9b7348f3e646c2ec6c52ac5d440d63a83ca3c6b4f4ef1c41d41a19e30be4121",
       "block": 61512074,
@@ -77,9 +79,10 @@
           "conditional": false,
           "claimsEnabled": true
         }
-      ]
+      ],
+      "retiredInFavourOf": "0xa9232A53CEBF50C7E7512f62C372e5315E4eBeA6"
     },
-    "LPEpochRegistry": {
+    "LPEpochRegistryRetired": {
       "address": "0x2Fe57Aa5947103CEAf5f64517E48E916c3Cbf502",
       "deployTx": "0x72bc3d83e98c0950672f0f2bb62a31b00b4247fa5e22a072983931f739665a6f",
       "block": 61512081,
@@ -89,9 +92,10 @@
       "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "interval": 900,
-      "scheduleMargin": 1800
+      "scheduleMargin": 1800,
+      "retiredInFavourOf": "0x30B1CA28db9b555F824a42a9BDD8Cfdaf9480398"
     },
-    "LPStakingVault": {
+    "LPStakingVaultRetired": {
       "address": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
       "deployTx": "0x73f3fd1e1af500c28db16ff6e4d1f28df20ca1f87d41d9ea08ab3d9201cb6715",
       "block": 61512088,
@@ -109,9 +113,10 @@
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "zapper": "0xfd5bb1Ff720ea273A6E553a0493855e30b404D0f",
-      "bonusEscrow": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31"
+      "bonusEscrow": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31",
+      "retiredInFavourOf": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9"
     },
-    "LPZapper": {
+    "LPZapperRetired": {
       "address": "0xfd5bb1Ff720ea273A6E553a0493855e30b404D0f",
       "deployTx": "0xc221700a25101f4537b3d812c79883da6da57be3cf8abb3e9548059d8fec1fc6",
       "block": 61512096,
@@ -123,9 +128,10 @@
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
       "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
-      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0xC2D065b49A09fa464eb237B7748E33a0AC4c4bbc"
     },
-    "BonusEscrow": {
+    "BonusEscrowRetired": {
       "address": "0xc322982E5e609277aa2B14258f0Cd91ed4DaEF31",
       "deployTx": "0xda8351d4df6c4d5cee0d0c4e40e127936f0a49c75e712c5e420777b1673317e5",
       "block": 61512103,
@@ -134,9 +140,10 @@
       "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
       "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
       "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
-      "adapter": "0x6E0e58D6360CEe944D9541968640D18899920485"
+      "adapter": "0x6E0e58D6360CEe944D9541968640D18899920485",
+      "retiredInFavourOf": "0x9826fcc9D3d448dCE15246d39c446DeeD86E15e9"
     },
-    "ApeBondPositionAdapter": {
+    "ApeBondPositionAdapterRetired": {
       "address": "0x6E0e58D6360CEe944D9541968640D18899920485",
       "deployTx": "0x071324363ef6102c2d24d2214f1f2464ef40d124bef1c194eebea2cef615ac31",
       "block": 61512107,
@@ -173,7 +180,8 @@
         }
       ],
       "owner": "0x30fA7ffd41E6255Eafe8a34Fb5faD56B40d59799",
-      "pendingOwner": "0x0000000000000000000000000000000000000000"
+      "pendingOwner": "0x0000000000000000000000000000000000000000",
+      "retiredInFavourOf": "0xF6a7b8aE9dC09A3e7b29251aE8CF50D749d312E3"
     },
     "PayoutStandIn": {
       "address": "0xDd75a26adAd289c666F9D6bD1f99B94Ff42ABE97",
@@ -190,7 +198,7 @@
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
       "retiredInFavourOf": "0xDd75a26adAd289c666F9D6bD1f99B94Ff42ABE97"
     },
-    "WeightedStakingPoolV3": {
+    "WeightedStakingPoolV3Retired": {
       "address": "0x070d7ED4086d96Ff168FDE392eC4CEF656002ECA",
       "deployTx": "0x451f2a8c1e071d8d79a544fd80de9b4636edce843c838032e90cba65e989ce17",
       "block": 61528570,
@@ -200,9 +208,10 @@
       "activationEpoch": 1795536696,
       "endEpoch": 1803312696,
       "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0x1C3b7E0DdDB41aBcf7C31bE1b2f9cd387b9e478e"
     },
-    "V3BonusVault": {
+    "V3BonusVaultRetired": {
       "address": "0xF063B53278051f01bc0f65FB0155b9A41b45Cd6F",
       "deployTx": "0x256e5a7dc3cf44682485000332517538917223f803b83b2683df451a3b81544e",
       "block": 61528578,
@@ -211,9 +220,10 @@
       "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
       "pool": "0x070d7ED4086d96Ff168FDE392eC4CEF656002ECA",
       "vault": "0xF519C76cF6218340FaCfe4bc5168A10E1B72a06e",
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0xD078F45c222454f0a25Dc3A2aa578b95f4DDA21D"
     },
-    "StakingMigrator": {
+    "StakingMigratorRetired": {
       "address": "0x2576b84b49303a47e28fAabBC0cd38e153A5ce8b",
       "deployTx": "0x91efd24341db3795e7d1b2856e86ff107d4f19512c8aedc98217fe14e743e672",
       "block": 61528584,
@@ -228,15 +238,220 @@
       "twapWindow": 300,
       "maxTwapDeviationTicks": 953,
       "valuationWindow": 1800,
-      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0x925C996aBD6a0264f0f5e594bcC7C4b227Aa50c9"
     },
-    "TransitionReceiver": {
+    "TransitionReceiverRetired": {
       "address": "0x5d4C030c18A8872ED8395Fe477F5692d44967492",
       "deployTx": "0xc856c46f1845a2d3216a607193fbfb432f6135370208955840ff907ca2eef4b6",
       "block": 61528589,
       "implementation": "0x75D379BBEa2E81db8795a09DB99F50CdbbdEf5e2",
       "implementationTx": "0x7fcf0230c34300fc87b776f6f83e102003c2155a5a849206c3332af820bec3d5",
       "migrator": "0x2576b84b49303a47e28fAabBC0cd38e153A5ce8b",
+      "deliverer": "0xFe7437EF027299e4d458628DE94F1C6aFA91536A",
+      "holderInitCodeHash": "0xc9fdfcb43183a49244ffe584d9e69edfb144922f0930ecd33fd099814b33579b",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0xBD6815831617F18F33CC8Bbc582D198A383Bce1f"
+    },
+    "TimelockController": {
+      "address": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "deployTx": "0x1931bca5d8ceb57548196b13d3e635bce291ef6f52e6bbf525f58d98ec271473",
+      "block": 61573115,
+      "minDelay": 300,
+      "proposers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "executors": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "cancellers": [
+        "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      ],
+      "admin": "0x0000000000000000000000000000000000000000"
+    },
+    "TokenOverture": {
+      "address": "0x705201a78F3FF6d83B84eF17793bcABa89AD9a27",
+      "deployTx": "0x7a36338df16a0444490d15691807aba50b59aaf2fb065f443a8174a3651ee06d",
+      "block": 61573121,
+      "implementation": "0x85b82deFCcf55A326ce77E558149C7BA5aB29226",
+      "implementationTx": "0xac7438468cb08749d74cf534832303a697b9a4f674693b739cc3a7b68843f066",
+      "name": "Overture",
+      "symbol": "OVTR",
+      "decimals": 18,
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "minter": "0xa9232A53CEBF50C7E7512f62C372e5315E4eBeA6"
+    },
+    "RewardsDistributor": {
+      "address": "0xa9232A53CEBF50C7E7512f62C372e5315E4eBeA6",
+      "deployTx": "0x4e924e9f67287dae10903cbd7678d76d5b0d5736c02ac8c633058f8e6d470bc4",
+      "block": 61573127,
+      "implementation": "0xE47913Ff9d63C814AcDd9E86d62140c497347C4a",
+      "implementationTx": "0x4759a307aefee67b6ba60ba81e541ae67b15d16676db5d950ff6865a67d600af",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "rewardTokens": [
+        {
+          "address": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+          "symbol": "ASSET",
+          "decimals": 18,
+          "conditional": true,
+          "claimsEnabled": false
+        },
+        {
+          "address": "0x705201a78F3FF6d83B84eF17793bcABa89AD9a27",
+          "symbol": "OVTR",
+          "decimals": 18,
+          "conditional": false,
+          "claimsEnabled": true
+        }
+      ]
+    },
+    "LPEpochRegistry": {
+      "address": "0x30B1CA28db9b555F824a42a9BDD8Cfdaf9480398",
+      "deployTx": "0x61bd06bdf0721e01d0e08d6e7bc336772e68f04bbfaad7397dedc6611d282ec4",
+      "block": 61573134,
+      "implementation": "0xd1d3c1f031e5027420CEDcdD41e676cdba1426B7",
+      "implementationTx": "0x140e794d24ed3974f0c73a805496884e6fc90713515485c933ae0c8b1a1a63e9",
+      "distributor": "0xa9232A53CEBF50C7E7512f62C372e5315E4eBeA6",
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "interval": 900,
+      "scheduleMargin": 1800
+    },
+    "LPStakingVault": {
+      "address": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "deployTx": "0xb06f4530fc045b249f37662e990128fb0569ec48933798a1bbbf0694982dbe14",
+      "block": 61573138,
+      "implementation": "0x8746257a10b716eeD6dD3cF65F8e3570198d4F16",
+      "implementationTx": "0x201984fd9c47eb4ca3232ac488b3e53a68b3ee194a3e51fe6f52981ee70bdc85",
+      "pool": "0x916Bd544c2ad693A907B933Db46e40031De69Bfa",
+      "token0": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "fee": 3000,
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "bonusHookGas": 400000,
+      "bonusListenerGas": 1000000,
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "zapper": "0xC2D065b49A09fa464eb237B7748E33a0AC4c4bbc",
+      "bonusEscrow": "0x9826fcc9D3d448dCE15246d39c446DeeD86E15e9"
+    },
+    "LPZapper": {
+      "address": "0xC2D065b49A09fa464eb237B7748E33a0AC4c4bbc",
+      "deployTx": "0x5fbde0a673f03d5f2489a62d55d527f3a0e8a2f21f5b4766b642c0b540c12cc5",
+      "block": 61573145,
+      "implementation": "0x8A7304eCc438243BbA47Fe74F23205310Ac81B42",
+      "implementationTx": "0x8a08cbc98af1b9e07b5ba1b02dfdbe14837b5f19d338701d0f9e5343ad5d1a52",
+      "vault": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "usdc": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "operator": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "BonusEscrow": {
+      "address": "0x9826fcc9D3d448dCE15246d39c446DeeD86E15e9",
+      "deployTx": "0x28ccda2e06599f64878807a42e98a1dcb3b91e1060b02b37d3fb7fdc7ebacb91",
+      "block": 61573152,
+      "implementation": "0xfA2f061d826FD55Bdc69A07d848288295a92dDD9",
+      "implementationTx": "0x102a05b5be019f3f9d3a2a3c53ceb605243a9dddfbbab390ec46ed2728f33379",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "vault": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "adapter": "0xF6a7b8aE9dC09A3e7b29251aE8CF50D749d312E3"
+    },
+    "ApeBondPositionAdapter": {
+      "address": "0xF6a7b8aE9dC09A3e7b29251aE8CF50D749d312E3",
+      "deployTx": "0x16afbe8da5c6acec1521d7b245f1cd2ef560980610b913884989461f6f093411",
+      "block": 61573155,
+      "vault": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "escrow": "0x9826fcc9D3d448dCE15246d39c446DeeD86E15e9",
+      "positionManager": "0xD7144710B6152526FB33699B166B5917a73f67FE",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "token0": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "token1": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "fee": 3000,
+      "tickSpacing": 60,
+      "minCliffSeconds": "300",
+      "valuationWindow": 1800,
+      "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
+      "soulZapCallers": [
+        "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e"
+      ],
+      "campaigns": [
+        {
+          "id": "0x9af97d342078fdd0b86846428df53919de5f74534659ec4e944b6d39a709aecc",
+          "label": "apebond-fuji-1",
+          "enabled": true,
+          "downTicks": 6932,
+          "upTicks": 6932,
+          "toleranceTicks": 500,
+          "downPct": "50.00",
+          "upPct": "100.00",
+          "bonusCliffSeconds": "300",
+          "bonusBps": 1000,
+          "minBonusAmount": "1000000000000000000",
+          "callers": [
+            "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e"
+          ]
+        }
+      ],
+      "owner": "0x565F97182931915FEF6bD55E11eCB76681C73fC6",
+      "pendingOwner": "0x0000000000000000000000000000000000000000"
+    },
+    "WeightedStakingPoolV3": {
+      "address": "0x1C3b7E0DdDB41aBcf7C31bE1b2f9cd387b9e478e",
+      "deployTx": "0x21280801acc8463602c38998789d577af859c3e6fd769f93dc9d8838284055c1",
+      "block": 61573390,
+      "implementation": "0x036a97B10Cf56D7E2f92Ba44E87d668e23BCf3AD",
+      "implementationTx": "0x0d68b5798e8f6ea795dd1f459bd50f0b91c9485724d6aaeef490e864b0efdb3f",
+      "stakingToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "activationEpoch": 1795534200,
+      "endEpoch": 1803310200,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "V3BonusVault": {
+      "address": "0xD078F45c222454f0a25Dc3A2aa578b95f4DDA21D",
+      "deployTx": "0x155c2585d9fee08166933ab32fec10c3fa6e893fad7e12c158f2939a3b559ed5",
+      "block": 61573395,
+      "implementation": "0x4fc15441Dd9e5e01fFf436B80D24E7677CAa1a67",
+      "implementationTx": "0x323ec9bf289603720459a793bfc5b2309a7deff6867c87b3fd183066ad55e407",
+      "bonusToken": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "pool": "0x1C3b7E0DdDB41aBcf7C31bE1b2f9cd387b9e478e",
+      "vault": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "StakingMigrator": {
+      "address": "0x925C996aBD6a0264f0f5e594bcC7C4b227Aa50c9",
+      "deployTx": "0x333cf48bf3cd5cb25256b98ce85239df5b2c2dd349b25cd161148545345c3ea6",
+      "block": 61573402,
+      "implementation": "0x9d0DB2ff0C97B25695B93e29c44C329D79E02ff3",
+      "implementationTx": "0x878ed35cbeb7f5b5f676b11f57353279df56a5d42d891fb62ec434e29529a573",
+      "lpVault": "0x483f02dB7760FF8F1478B4aa91eb22Cc47736bC9",
+      "usdc": "0x5425890298aed601595a70AB815c96711a31Bc65",
+      "asset": "0x8972F308997a18152283a4b65e8FE026d8cB7724",
+      "stakingPool": "0x1C3b7E0DdDB41aBcf7C31bE1b2f9cd387b9e478e",
+      "bonusVault": "0xD078F45c222454f0a25Dc3A2aa578b95f4DDA21D",
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "twapWindow": 300,
+      "maxTwapDeviationTicks": 953,
+      "valuationWindow": 1800,
+      "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "TransitionReceiver": {
+      "address": "0xBD6815831617F18F33CC8Bbc582D198A383Bce1f",
+      "deployTx": "0xc5b15e118be84b37339f43e31cc79d8f82897e939815e5bd5e2c3bceea0efea8",
+      "block": 61573404,
+      "implementation": "0x54350C2563752C2FDa6DD93c86fCe61EC194AdA0",
+      "implementationTx": "0x7fdd64ce42c829446284dc19b5116879827c67a98c4e1998c48a3a8bc796b312",
+      "migrator": "0x925C996aBD6a0264f0f5e594bcC7C4b227Aa50c9",
       "deliverer": "0xFe7437EF027299e4d458628DE94F1C6aFA91536A",
       "holderInitCodeHash": "0xc9fdfcb43183a49244ffe584d9e69edfb144922f0930ecd33fd099814b33579b",
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
