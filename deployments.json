@@ -237,7 +237,7 @@
       "implementation": "0x75D379BBEa2E81db8795a09DB99F50CdbbdEf5e2",
       "implementationTx": "0x7fcf0230c34300fc87b776f6f83e102003c2155a5a849206c3332af820bec3d5",
       "migrator": "0x2576b84b49303a47e28fAabBC0cd38e153A5ce8b",
-      "deliverer": "0x0000000000000000000000000000000000000000",
+      "deliverer": "0xFe7437EF027299e4d458628DE94F1C6aFA91536A",
       "holderInitCodeHash": "0xc9fdfcb43183a49244ffe584d9e69edfb144922f0930ecd33fd099814b33579b",
       "owner": "0x5576bD37419dadAab305cca998E16BcD73318A35"
     }
