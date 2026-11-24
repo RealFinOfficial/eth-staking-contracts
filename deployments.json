@@ -474,6 +474,16 @@
       "retiredInFavourOf": "0xf2F678AC5260BB297682D54DcD945BCB78901E20"
     },
     "WeightedStakingPoolTest": {
+      "address": "0x335825002054431a7237e4b11fc84c8cb72F1407",
+      "deployTx": "0xd1b1c541c68520409d3e5968c8c739818326fb19c9ad1c2349435e2385f614b7",
+      "block": 12203168,
+      "stakingToken": "0x0A5BCe3bc08608C9B4A4d88bA216fe203DA74861",
+      "rewardToken": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+      "activationEpoch": 1795530492,
+      "endEpoch": 1795534092,
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+    },
+    "WeightedStakingPoolTestRetired": {
       "address": "0x480dF5e7962dCcE029c810313f4a5c66c5555C49",
       "deployTx": "0x1b1ccf08c424286e4569b9a3f720d3d60bbed1ee84b4c68bf7a7389903738275",
       "block": 12196761,
@@ -481,7 +491,8 @@
       "rewardToken": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
       "activationEpoch": 1795450296,
       "endEpoch": 1795536696,
-      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35"
+      "signer": "0x5576bD37419dadAab305cca998E16BcD73318A35",
+      "retiredInFavourOf": "0x335825002054431a7237e4b11fc84c8cb72F1407"
     },
     "WeightedStakingPoolV3Retired": {
       "address": "0xB8F5aE06567E657F781eC7EB049E5c62646bfcb9",
@@ -707,11 +718,19 @@
       "requireSignature": true
     },
     "StakingPool": {
+      "address": "0x5AA543Cfeb1E1999973c1439589d4065F00EB29E",
+      "deployTx": "0x3be16322fbec84d717344ac50f469c8664ad5359f7ac9d4e168aca44d7772349",
+      "block": 12202874,
+      "activationEpoch": 1795526863,
+      "endEpoch": 1795530463
+    },
+    "StakingPoolRetired": {
       "address": "0xb5b68Be5492358ccAeCcd1Ca178282Ea727c0cAe",
       "deployTx": "0x97a5d80053374267cc1ba0986fd227453cc51679db454f41839cb004968ef50d",
       "block": 12196765,
       "activationEpoch": 1795450344,
-      "endEpoch": 1795536744
+      "endEpoch": 1795536744,
+      "retiredInFavourOf": "0x5AA543Cfeb1E1999973c1439589d4065F00EB29E"
     },
     "BurnStandInRetired": {
       "address": "0x1598D972D8C553f3D521BeB88382cE2DCf4E0a7c",
