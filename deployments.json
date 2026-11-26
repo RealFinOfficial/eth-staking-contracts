@@ -382,7 +382,8 @@
       "valuationWindow": 1800,
       "guardian": "0x2b9818c80E82363f5Cf21aD5DEEf1948D5F9bBEA",
       "soulZapCallers": [
-        "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e"
+        "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e",
+        "0xD18469Ef8E5630263dC36AAe7CE502700cBa06d4"
       ],
       "campaigns": [
         {
@@ -398,7 +399,8 @@
           "bonusBps": 1000,
           "minBonusAmount": "1000000000000000000",
           "callers": [
-            "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e"
+            "0x8752BfDA71fdC1F985758A6CEb4464E4Fc70D00e",
+            "0xD18469Ef8E5630263dC36AAe7CE502700cBa06d4"
           ]
         }
       ],
